@@ -6,6 +6,7 @@
 #include <cstring>
 #include <string>
 #include <algorithm>
+#include <filesystem>
 #include "vec3.hpp"
 
 class BMPWriter {
@@ -33,6 +34,18 @@ private:
         uint32_t importantColors = 0;
     };
     #pragma pack(pop)
+
+    // Helper function to create directory if it doesn't exist
+    static bool createDirectoryIfNeeded(const std::string& filename) {
+        std::filesystem::path filePath(filename);
+        std::filesystem::path directory = filePath.parent_path();
+        
+        // If there's a directory component and it doesn't exist, create it
+        if (!directory.empty() && !std::filesystem::exists(directory)) {
+            return std::filesystem::create_directories(directory);
+        }
+        return true;
+    }
 
 public:
     // Save a 2D vector of Vec3 (RGB) colors as BMP
@@ -75,6 +88,11 @@ public:
     // Save from 1D vector of uint8_t pixels (BGR order: pixels[i]=b, pixels[i+1]=g, pixels[i+2]=r)
     static bool saveBMP(const std::string& filename, const std::vector<uint8_t>& pixels, int width, int height) {
         if (pixels.size() != width * height * 3) {
+            return false;
+        }
+        
+        // Create directory if needed
+        if (!createDirectoryIfNeeded(filename)) {
             return false;
         }
         
@@ -121,6 +139,11 @@ public:
     
 private:
     static bool saveBMP(const std::string& filename, const std::vector<std::vector<Vec3>>& pixels, int width, int height) {
+        // Create directory if needed
+        if (!createDirectoryIfNeeded(filename)) {
+            return false;
+        }
+        
         BMPHeader header;
         BMPInfoHeader infoHeader;
         

@@ -41,76 +41,41 @@ int main(int argc, char* argv[]) {
     Grid2 grid;
     
     // Define our target colors at specific positions
-    Vec4 red = hexToVec4("ff0000");      // Top-left corner
-    Vec4 green = hexToVec4("00ff00");    // Center
-    Vec4 blue = hexToVec4("0000ff");     // Bottom-right corner
-    Vec4 white = hexToVec4("ffffff");    // Top-right corner
-    Vec4 black = hexToVec4("000000");    // Bottom-left corner
+    Vec4 white = hexToVec4("ffffff");    // Top-left corner (1,1)
+    Vec4 red = hexToVec4("ff0000");      // Top-right corner (1,-1)
+    Vec4 green = hexToVec4("00ff00");    // Center (0,0)
+    Vec4 blue = hexToVec4("0000ff");     // Bottom-left corner (-1,-1)
+    Vec4 black = hexToVec4("000000");    // Bottom-right corner (-1,1)
     
     // Create gradient points
     for (int y = 0; y < POINTS_PER_DIM; ++y) {
         for (int x = 0; x < POINTS_PER_DIM; ++x) {
-            // Normalize coordinates to [0, 1]
-            float nx = static_cast<float>(x) / (POINTS_PER_DIM - 1);
-            float ny = static_cast<float>(y) / (POINTS_PER_DIM - 1);
+            // Normalize coordinates to [-1, 1]
+            float nx = (static_cast<float>(x) / (POINTS_PER_DIM - 1)) * 2.0f - 1.0f;
+            float ny = (static_cast<float>(y) / (POINTS_PER_DIM - 1)) * 2.0f - 1.0f;
             
-            // Create position in [-1, 1] range
-            Vec2 pos(nx * 2.0f - 1.0f, ny * 2.0f - 1.0f);
+            // Create position
+            Vec2 pos(nx, ny);
             
-            // Calculate interpolated color based on position
-            Vec4 color;
+            // Calculate weights for each corner based on distance
+            // We'll use bilinear interpolation
             
-            if (nx + ny <= 1.0f) {
-                // Lower triangle: interpolate between red, green, and black
-                if (nx <= 0.5f && ny <= 0.5f) {
-                    // Bottom-left quadrant: red to black to green
-                    float t1 = nx * 2.0f; // Horizontal interpolation
-                    float t2 = ny * 2.0f; // Vertical interpolation
-                    
-                    if (t1 + t2 <= 1.0f) {
-                        // Interpolate between red and black
-                        color = red * (1.0f - t1 - t2) + black * (t1 + t2);
-                    } else {
-                        // Interpolate between black and green
-                        color = black * (2.0f - t1 - t2) + green * (t1 + t2 - 1.0f);
-                    }
-                } else {
-                    // Use bilinear interpolation for other areas
-                    Vec4 topLeft = red;
-                    Vec4 topRight = white;
-                    Vec4 bottomLeft = black;
-                    Vec4 bottomRight = green;
-                    
-                    Vec4 top = topLeft * (1.0f - nx) + topRight * nx;
-                    Vec4 bottom = bottomLeft * (1.0f - nx) + bottomRight * nx;
-                    color = bottom * (1.0f - ny) + top * ny;
-                }
-            } else {
-                // Upper triangle: interpolate between green, blue, and white
-                if (nx >= 0.5f && ny >= 0.5f) {
-                    // Top-right quadrant: green to white to blue
-                    float t1 = (nx - 0.5f) * 2.0f; // Horizontal interpolation
-                    float t2 = (ny - 0.5f) * 2.0f; // Vertical interpolation
-                    
-                    if (t1 + t2 <= 1.0f) {
-                        // Interpolate between green and white
-                        color = green * (1.0f - t1 - t2) + white * (t1 + t2);
-                    } else {
-                        // Interpolate between white and blue
-                        color = white * (2.0f - t1 - t2) + blue * (t1 + t2 - 1.0f);
-                    }
-                } else {
-                    // Use bilinear interpolation for other areas
-                    Vec4 topLeft = red;
-                    Vec4 topRight = white;
-                    Vec4 bottomLeft = black;
-                    Vec4 bottomRight = blue;
-                    
-                    Vec4 top = topLeft * (1.0f - nx) + topRight * nx;
-                    Vec4 bottom = bottomLeft * (1.0f - nx) + bottomRight * nx;
-                    color = bottom * (1.0f - ny) + top * ny;
-                }
-            }
+            // Convert to [0,1] range for interpolation
+            float u = (nx + 1.0f) / 2.0f;  // maps -1..1 to 0..1
+            float v = (ny + 1.0f) / 2.0f;  // maps -1..1 to 0..1
+            
+            // For a more natural gradient, we'll interpolate between the four corners
+            // and blend with the center color based on distance from center
+            
+            // Bilinear interpolation between corners
+            Vec4 top = white * (1.0f - u) + red * u;
+            Vec4 bottom = blue * (1.0f - u) + black * u;
+            Vec4 cornerColor = top * (1.0f - v) + bottom * v;
+            
+            // Calculate distance from center (0,0)
+            float distFromCenter = std::sqrt(nx * nx + ny * ny) / std::sqrt(2.0f); // normalize to [0,1]
+            
+            Vec4 color = green * (1.0f - distFromCenter) + cornerColor * distFromCenter;
             
             grid.addPoint(pos, color);
         }
@@ -122,11 +87,12 @@ int main(int argc, char* argv[]) {
     // Save as BMP
     if (BMPWriter::saveBMP("output/gradient.bmp", imageData, WIDTH, HEIGHT)) {
         std::cout << "Gradient image saved as 'gradient.bmp'" << std::endl;
-        std::cout << "Colors: " << std::endl;
-        std::cout << "  Top-left: ff0000 (red)" << std::endl;
+        std::cout << "Color positions: " << std::endl;
+        std::cout << "  Top-left: ffffff (white)" << std::endl;
+        std::cout << "  Top-right: ff0000 (red)" << std::endl;
         std::cout << "  Center: 00ff00 (green)" << std::endl;
-        std::cout << "  Bottom-right: 0000ff (blue)" << std::endl;
-        std::cout << "  Gradient between ffffff and 000000 throughout" << std::endl;
+        std::cout << "  Bottom-left: 0000ff (blue)" << std::endl;
+        std::cout << "  Bottom-right: 000000 (black)" << std::endl;
     } else {
         std::cerr << "Failed to save gradient image" << std::endl;
         return 1;
