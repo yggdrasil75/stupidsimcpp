@@ -1,0 +1,375 @@
+#ifndef SIMPLE_HTTPSERVER_HPP
+#define SIMPLE_HTTPSERVER_HPP
+
+#include <iostream>
+#include <string>
+#include <vector>
+#include <thread>
+#include <chrono>
+#include <cstring>
+#include <sstream>
+#include <fstream>
+
+#ifdef _WIN32
+    #include <winsock2.h>
+    #include <ws2tcpip.h>
+    #pragma comment(lib, "ws2_32.lib")
+#else
+    #include <sys/socket.h>
+    #include <netinet/in.h>
+    #include <unistd.h>
+    #include <arpa/inet.h>
+#endif
+
+#include "grid2.hpp"
+#include "bmpwriter.hpp"
+
+class SimpleHTTPServer {
+private:
+    int serverSocket;
+    int port;
+    bool running;
+    
+    // Function to convert hex color string to Vec4
+    Vec4 hexToVec4(const std::string& hex) {
+        if (hex.length() != 6) {
+            return Vec4(0, 0, 0, 1); // Default to black if invalid
+        }
+        
+        int r, g, b;
+        sscanf(hex.c_str(), "%02x%02x%02x", &r, &g, &b);
+        
+        return Vec4(r / 255.0f, g / 255.0f, b / 255.0f, 1.0f);
+    }
+    
+    // Generate gradient image
+    bool generateGradientImage(const std::string& filename, int width = 512, int height = 512) {
+        const int POINTS_PER_DIM = 256;
+        
+        Grid2 grid;
+        
+        // Define our target colors at specific positions
+        Vec4 white = hexToVec4("ffffff");    // Top-left corner (1,1)
+        Vec4 red = hexToVec4("ff0000");      // Top-right corner (1,-1)
+        Vec4 green = hexToVec4("00ff00");    // Center (0,0)
+        Vec4 blue = hexToVec4("0000ff");     // Bottom-left corner (-1,-1)
+        Vec4 black = hexToVec4("000000");    // Bottom-right corner (-1,1)
+        
+        // Create gradient points
+        for (int y = 0; y < POINTS_PER_DIM; ++y) {
+            for (int x = 0; x < POINTS_PER_DIM; ++x) {
+                // Normalize coordinates to [-1, 1]
+                float nx = (static_cast<float>(x) / (POINTS_PER_DIM - 1)) * 2.0f - 1.0f;
+                float ny = (static_cast<float>(y) / (POINTS_PER_DIM - 1)) * 2.0f - 1.0f;
+                
+                // Create position
+                Vec2 pos(nx, ny);
+                
+                // Convert to [0,1] range for interpolation
+                float u = (nx + 1.0f) / 2.0f;
+                float v = (ny + 1.0f) / 2.0f;
+                
+                // Bilinear interpolation between corners
+                Vec4 top = white * (1.0f - u) + red * u;
+                Vec4 bottom = blue * (1.0f - u) + black * u;
+                Vec4 cornerColor = top * (1.0f - v) + bottom * v;
+                
+                // Calculate distance from center (0,0)
+                float distFromCenter = std::sqrt(nx * nx + ny * ny) / std::sqrt(2.0f);
+                
+                Vec4 color = green * (1.0f - distFromCenter) + cornerColor * distFromCenter;
+                
+                grid.addPoint(pos, color);
+            }
+        }
+        
+        // Render to RGB image
+        std::vector<uint8_t> imageData = grid.renderToRGB(width, height);
+        
+        // Save as BMP
+        return BMPWriter::saveBMP(filename, imageData, width, height);
+    }
+    
+    // Read file content
+    std::string readFile(const std::string& filename) {
+        std::ifstream file(filename, std::ios::binary);
+        if (!file) {
+            return "";
+        }
+        
+        std::ostringstream ss;
+        ss << file.rdbuf();
+        return ss.str();
+    }
+    
+    // Send HTTP response
+    void sendResponse(int clientSocket, const std::string& content, const std::string& contentType = "text/html", int statusCode = 200) {
+        std::string statusText = "OK";
+        if (statusCode == 404) statusText = "Not Found";
+        if (statusCode == 500) statusText = "Internal Server Error";
+        
+        std::ostringstream response;
+        response << "HTTP/1.1 " << statusCode << " " << statusText << "\r\n";
+        response << "Content-Type: " << contentType << "\r\n";
+        response << "Content-Length: " << content.length() << "\r\n";
+        response << "Connection: close\r\n";
+        response << "\r\n";
+        response << content;
+        
+        std::string responseStr = response.str();
+        send(clientSocket, responseStr.c_str(), responseStr.length(), 0);
+    }
+
+public:
+    SimpleHTTPServer(int port = 8080) : port(port), serverSocket(-1), running(false) {}
+    
+    ~SimpleHTTPServer() {
+        stop();
+    }
+    
+    bool start() {
+#ifdef _WIN32
+        WSADATA wsaData;
+        if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+            std::cerr << "WSAStartup failed" << std::endl;
+            return false;
+        }
+#endif
+        
+        serverSocket = socket(AF_INET, SOCK_STREAM, 0);
+        if (serverSocket < 0) {
+            std::cerr << "Socket creation failed" << std::endl;
+            return false;
+        }
+        
+        int opt = 1;
+#ifdef _WIN32
+        if (setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR, (char*)&opt, sizeof(opt)) < 0) {
+#else
+        if (setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+#endif
+            std::cerr << "Setsockopt failed" << std::endl;
+            return false;
+        }
+        
+        sockaddr_in serverAddr;
+        serverAddr.sin_family = AF_INET;
+        serverAddr.sin_addr.s_addr = INADDR_ANY;
+        serverAddr.sin_port = htons(port);
+        
+        if (bind(serverSocket, (sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
+            std::cerr << "Bind failed on port " << port << std::endl;
+            return false;
+        }
+        
+        if (listen(serverSocket, 10) < 0) {
+            std::cerr << "Listen failed" << std::endl;
+            return false;
+        }
+        
+        running = true;
+        std::cout << "Server started on port " << port << std::endl;
+        return true;
+    }
+    
+    void stop() {
+        running = false;
+        if (serverSocket >= 0) {
+#ifdef _WIN32
+            closesocket(serverSocket);
+            WSACleanup();
+#else
+            close(serverSocket);
+#endif
+            serverSocket = -1;
+        }
+    }
+    
+    void handleRequests() {
+        while (running) {
+            sockaddr_in clientAddr;
+#ifdef _WIN32
+            int clientAddrLen = sizeof(clientAddr);
+#else
+            socklen_t clientAddrLen = sizeof(clientAddr);
+#endif
+            int clientSocket = accept(serverSocket, (sockaddr*)&clientAddr, &clientAddrLen);
+            
+            if (clientSocket < 0) {
+                if (running) {
+                    std::cerr << "Accept failed" << std::endl;
+                }
+                continue;
+            }
+            
+            char buffer[4096] = {0};
+            int bytesReceived = recv(clientSocket, buffer, sizeof(buffer), 0);
+            
+            if (bytesReceived > 0) {
+                std::string request(buffer);
+                std::cout << "Received request: " << request.substr(0, request.find('\n')) << std::endl;
+                
+                // Handle different routes
+                if (request.find("GET / ") != std::string::npos || request.find("GET /index.html") != std::string::npos) {
+                    sendResponse(clientSocket, getHTML());
+                } else if (request.find("GET /gradient.bmp") != std::string::npos) {
+                    // Generate and serve the gradient image
+                    if (generateGradientImage("output/gradient.bmp")) {
+                        std::string imageContent = readFile("output/gradient.bmp");
+                        if (!imageContent.empty()) {
+                            sendResponse(clientSocket, imageContent, "image/bmp");
+                        } else {
+                            sendResponse(clientSocket, "Error generating image", "text/plain", 500);
+                        }
+                    } else {
+                        sendResponse(clientSocket, "Error generating image", "text/plain", 500);
+                    }
+                } else if (request.find("GET /generate") != std::string::npos) {
+                    // API endpoint to generate new gradient
+                    std::string filename = "output/dynamic_gradient.bmp";
+                    if (generateGradientImage(filename)) {
+                        sendResponse(clientSocket, "{\"status\":\"success\",\"file\":\"" + filename + "\"}", "application/json");
+                    } else {
+                        sendResponse(clientSocket, "{\"status\":\"error\"}", "application/json", 500);
+                    }
+                } else {
+                    sendResponse(clientSocket, "404 Not Found", "text/plain", 404);
+                }
+            }
+            
+#ifdef _WIN32
+            closesocket(clientSocket);
+#else
+            close(clientSocket);
+#endif
+            
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    }
+    
+    std::string getHTML() {
+        return R"(
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Dynamic Gradient Generator</title>
+    <style>
+        body {
+            font-family: 'Arial', sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            text-align: center;
+            min-height: 100vh;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: rgba(255, 255, 255, 0.1);
+            padding: 30px;
+            border-radius: 15px;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        }
+        h1 {
+            margin-bottom: 20px;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+        }
+        .image-container {
+            margin: 20px 0;
+            padding: 20px;
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 10px;
+        }
+        img {
+            max-width: 100%;
+            height: auto;
+            border-radius: 8px;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+        }
+        .controls {
+            margin: 20px 0;
+        }
+        button {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 5px;
+            transition: background 0.3s;
+        }
+        button:hover {
+            background: #45a049;
+        }
+        .info {
+            margin-top: 20px;
+            padding: 15px;
+            background: rgba(255, 255, 255, 0.15);
+            border-radius: 8px;
+            text-align: left;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Dynamic Gradient Generator</h1>
+        <p>Real-time gradient generation using C++ HTTP Server</p>
+        
+        <div class="controls">
+            <button onclick="refreshImage()\">Refresh Gradient</button>
+            <button onclick="generateNew()\">Generate New</button>
+        </div>
+        
+        <div class="image-container">
+            <img id="gradientImage" src="gradient.bmp" alt="Dynamic Gradient">
+        </div>
+        
+        <div class="info">
+            <h3>Color Positions:</h3>
+            <ul>
+                <li>Top-left: FFFFFF (White)</li>
+                <li>Top-right: FF0000 (Red)</li>
+                <li>Center: 00FF00 (Green)</li>
+                <li>Bottom-left: 0000FF (Blue)</li>
+                <li>Bottom-right: 000000 (Black)</li>
+            </ul>
+        </div>
+    </div>
+
+    <script>
+        function refreshImage() {
+            const img = document.getElementById('gradientImage');
+            const timestamp = new Date().getTime();
+            img.src = 'gradient.bmp?' + timestamp;
+        }
+        
+        function generateNew() {
+            fetch('/generate')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        refreshImage();
+                    } else {
+                        alert('Error generating new gradient');
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    alert('Error generating new gradient');
+                });
+        }
+        
+        // Auto-refresh every 30 seconds
+        setInterval(refreshImage, 30000);
+    </script>
+</body>
+</html>
+)";
+    }
+};
+
+#endif
