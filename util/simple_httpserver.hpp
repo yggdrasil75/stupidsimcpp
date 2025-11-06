@@ -23,6 +23,7 @@
 
 #include "grid2.hpp"
 #include "bmpwriter.hpp"
+#include "jxlwriter.hpp"
 
 class SimpleHTTPServer {
 private:
@@ -87,7 +88,8 @@ private:
         std::vector<uint8_t> imageData = grid.renderToRGB(width, height);
         
         // Save as BMP
-        return BMPWriter::saveBMP(filename, imageData, width, height);
+        return JXLWriter::saveJXL(filename, imageData, width, height);
+        // return BMPWriter::saveBMP(filename, imageData, width, height);
     }
     
     // Read file content
@@ -212,12 +214,12 @@ public:
                 // Handle different routes
                 if (request.find("GET / ") != std::string::npos || request.find("GET /index.html") != std::string::npos) {
                     sendResponse(clientSocket, getHTML());
-                } else if (request.find("GET /gradient.bmp") != std::string::npos) {
+                } else if (request.find("GET /gradient.jxl") != std::string::npos) {
                     // Generate and serve the gradient image
-                    if (generateGradientImage("output/gradient.bmp")) {
-                        std::string imageContent = readFile("output/gradient.bmp");
+                    if (generateGradientImage("output/gradient.jxl")) {
+                        std::string imageContent = readFile("output/gradient.jxl");
                         if (!imageContent.empty()) {
-                            sendResponse(clientSocket, imageContent, "image/bmp");
+                            sendResponse(clientSocket, imageContent, "image/jxl");
                         } else {
                             sendResponse(clientSocket, "Error generating image", "text/plain", 500);
                         }
@@ -226,7 +228,7 @@ public:
                     }
                 } else if (request.find("GET /generate") != std::string::npos) {
                     // API endpoint to generate new gradient
-                    std::string filename = "output/dynamic_gradient.bmp";
+                    std::string filename = "output/dynamic_gradient.jxl";
                     if (generateGradientImage(filename)) {
                         sendResponse(clientSocket, "{\"status\":\"success\",\"file\":\"" + filename + "\"}", "application/json");
                     } else {
@@ -316,27 +318,9 @@ public:
 </head>
 <body>
     <div class="container">
-        <h1>Dynamic Gradient Generator</h1>
-        <p>Real-time gradient generation using C++ HTTP Server</p>
-        
-        <div class="controls">
-            <button onclick="refreshImage()\">Refresh Gradient</button>
-            <button onclick="generateNew()\">Generate New</button>
-        </div>
         
         <div class="image-container">
-            <img id="gradientImage" src="gradient.bmp" alt="Dynamic Gradient">
-        </div>
-        
-        <div class="info">
-            <h3>Color Positions:</h3>
-            <ul>
-                <li>Top-left: FFFFFF (White)</li>
-                <li>Top-right: FF0000 (Red)</li>
-                <li>Center: 00FF00 (Green)</li>
-                <li>Bottom-left: 0000FF (Blue)</li>
-                <li>Bottom-right: 000000 (Black)</li>
-            </ul>
+            <img id="gradientImage" src="gradient.jxl" alt="Dynamic Gradient">
         </div>
     </div>
 
@@ -344,7 +328,7 @@ public:
         function refreshImage() {
             const img = document.getElementById('gradientImage');
             const timestamp = new Date().getTime();
-            img.src = 'gradient.bmp?' + timestamp;
+            img.src = 'gradient.jxl?' + timestamp;
         }
         
         function generateNew() {

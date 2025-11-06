@@ -8,7 +8,9 @@
 #include <algorithm>
 #include <filesystem>
 #include "vec3.hpp"
+// #include "../jxl/encode.h"
 #include <jxl/encode.h>
+// #include "../jxl/thread_parallel_runner.h"
 #include <jxl/thread_parallel_runner.h>
 
 class JXLWriter {
@@ -134,17 +136,17 @@ public:
         }
         
         // Configure basic encoder settings
-        JxlEncoderOptions* options = JxlEncoderOptionsCreate(enc, nullptr);
+        JxlEncoderFrameSettings* options = JxlEncoderFrameSettingsCreate(enc, nullptr);
         
         // Set quality/distance (distance = 0 is lossless, higher = more lossy)
         float distance = (100.0f - quality) / 10.0f;  // Convert quality to distance
         if (quality >= 100.0f) {
-            JxlEncoderOptionsSetLossless(options, JXL_TRUE);
+            JxlEncoderSetFrameLossless(options, JXL_TRUE);
         } else {
-            JxlEncoderOptionsSetDistance(options, distance);
+            JxlEncoderSetFrameDistance(options, distance);
         }
         
-        JxlEncoderOptionsSetEffort(options, effort);
+        JxlEncoderFrameSettingsSetOption(options, JXL_ENC_FRAME_SETTING_EFFORT, effort);
         
         // Set up basic image info
         JxlBasicInfo basic_info;
