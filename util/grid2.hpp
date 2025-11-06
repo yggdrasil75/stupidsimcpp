@@ -1,8 +1,8 @@
 #ifndef GRID2_HPP
 #define GRID2_HPP
 
-#include "Vec2.hpp"
-#include "Vec4.hpp"
+#include "vec2.hpp"
+#include "vec4.hpp"
 #include <vector>
 #include <cstdint>
 #include <algorithm>
