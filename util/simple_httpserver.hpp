@@ -30,6 +30,7 @@ private:
     int serverSocket;
     int port;
     bool running;
+    std::string webRoot;
     
     // Function to convert hex color string to Vec4
     Vec4 hexToVec4(const std::string& hex) {
@@ -87,9 +88,8 @@ private:
         // Render to RGB image
         std::vector<uint8_t> imageData = grid.renderToRGB(width, height);
         
-        // Save as BMP
+        // Save as JXL
         return JXLWriter::saveJXL(filename, imageData, width, height);
-        // return BMPWriter::saveBMP(filename, imageData, width, height);
     }
     
     // Read file content
@@ -102,6 +102,18 @@ private:
         std::ostringstream ss;
         ss << file.rdbuf();
         return ss.str();
+    }
+    
+    // Get content type based on file extension
+    std::string getContentType(const std::string& filename) {
+        if (filename.find(".html") != std::string::npos) return "text/html";
+        if (filename.find(".css") != std::string::npos) return "text/css";
+        if (filename.find(".js") != std::string::npos) return "application/javascript";
+        if (filename.find(".jxl") != std::string::npos) return "image/jxl";
+        if (filename.find(".png") != std::string::npos) return "image/png";
+        if (filename.find(".jpg") != std::string::npos || filename.find(".jpeg") != std::string::npos) return "image/jpeg";
+        if (filename.find(".json") != std::string::npos) return "application/json";
+        return "text/plain";
     }
     
     // Send HTTP response
@@ -121,9 +133,22 @@ private:
         std::string responseStr = response.str();
         send(clientSocket, responseStr.c_str(), responseStr.length(), 0);
     }
+    
+    // Serve static file
+    void serveStaticFile(int clientSocket, const std::string& filepath) {
+        std::string fullPath = webRoot + "/" + filepath;
+        std::string content = readFile(fullPath);
+        
+        if (!content.empty()) {
+            sendResponse(clientSocket, content, getContentType(filepath));
+        } else {
+            sendResponse(clientSocket, "404 Not Found: " + filepath, "text/plain", 404);
+        }
+    }
 
 public:
-    SimpleHTTPServer(int port = 8080) : port(port), serverSocket(-1), running(false) {}
+    SimpleHTTPServer(int port = 8080, const std::string& webRoot = "web") 
+        : port(port), serverSocket(-1), running(false), webRoot(webRoot) {}
     
     ~SimpleHTTPServer() {
         stop();
@@ -171,6 +196,7 @@ public:
         
         running = true;
         std::cout << "Server started on port " << port << std::endl;
+        std::cout << "Web root: " << webRoot << std::endl;
         return true;
     }
     
@@ -213,7 +239,11 @@ public:
                 
                 // Handle different routes
                 if (request.find("GET / ") != std::string::npos || request.find("GET /index.html") != std::string::npos) {
-                    sendResponse(clientSocket, getHTML());
+                    serveStaticFile(clientSocket, "index.html");
+                } else if (request.find("GET /style.css") != std::string::npos) {
+                    serveStaticFile(clientSocket, "style.css");
+                } else if (request.find("GET /script.js") != std::string::npos) {
+                    serveStaticFile(clientSocket, "script.js");
                 } else if (request.find("GET /gradient.jxl") != std::string::npos) {
                     // Generate and serve the gradient image
                     if (generateGradientImage("output/gradient.jxl")) {
@@ -247,112 +277,6 @@ public:
             
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
-    }
-    
-    std::string getHTML() {
-        return R"(
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Dynamic Gradient Generator</title>
-    <style>
-        body {
-            font-family: 'Arial', sans-serif;
-            margin: 0;
-            padding: 20px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            text-align: center;
-            min-height: 100vh;
-        }
-        .container {
-            max-width: 800px;
-            margin: 0 auto;
-            background: rgba(255, 255, 255, 0.1);
-            padding: 30px;
-            border-radius: 15px;
-            backdrop-filter: blur(10px);
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-        }
-        h1 {
-            margin-bottom: 20px;
-            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
-        }
-        .image-container {
-            margin: 20px 0;
-            padding: 20px;
-            background: rgba(255, 255, 255, 0.2);
-            border-radius: 10px;
-        }
-        img {
-            max-width: 100%;
-            height: auto;
-            border-radius: 8px;
-            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
-        }
-        .controls {
-            margin: 20px 0;
-        }
-        button {
-            background: #4CAF50;
-            color: white;
-            border: none;
-            padding: 12px 24px;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 16px;
-            margin: 5px;
-            transition: background 0.3s;
-        }
-        button:hover {
-            background: #45a049;
-        }
-        .info {
-            margin-top: 20px;
-            padding: 15px;
-            background: rgba(255, 255, 255, 0.15);
-            border-radius: 8px;
-            text-align: left;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        
-        <div class="image-container">
-            <img id="gradientImage" src="gradient.jxl" alt="Dynamic Gradient">
-        </div>
-    </div>
-
-    <script>
-        function refreshImage() {
-            const img = document.getElementById('gradientImage');
-            const timestamp = new Date().getTime();
-            img.src = 'gradient.jxl?' + timestamp;
-        }
-        
-        function generateNew() {
-            fetch('/generate')
-                .then(response => response.json())
-                .then(data => {
-                    if (data.status === 'success') {
-                        refreshImage();
-                    } else {
-                        alert('Error generating new gradient');
-                    }
-                })
-                .catch(error => {
-                    console.error('Error:', error);
-                    alert('Error generating new gradient');
-                });
-        }
-        
-        // Auto-refresh every 30 seconds
-        setInterval(refreshImage, 30000);
-    </script>
-</body>
-</html>
-)";
     }
 };
 
