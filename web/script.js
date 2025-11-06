@@ -5,7 +5,8 @@ function refreshImage() {
     img.classList.add('loading');
     
     const timestamp = new Date().getTime();
-    img.src = 'gradient.jxl?' + timestamp;
+    //img.src = 'gradient.jxl?' + timestamp;
+    img.src = './output/gradient.jxl';
     
     img.onload = function() {
         img.classList.remove('loading');
