@@ -21,76 +21,12 @@
     #include <arpa/inet.h>
 #endif
 
-#include "grid2.hpp"
-#include "bmpwriter.hpp"
-#include "jxlwriter.hpp"
-
 class SimpleHTTPServer {
 private:
     int serverSocket;
     int port;
     bool running;
     std::string webRoot;
-    
-    // Function to convert hex color string to Vec4
-    Vec4 hexToVec4(const std::string& hex) {
-        if (hex.length() != 6) {
-            return Vec4(0, 0, 0, 1); // Default to black if invalid
-        }
-        
-        int r, g, b;
-        sscanf(hex.c_str(), "%02x%02x%02x", &r, &g, &b);
-        
-        return Vec4(r / 255.0f, g / 255.0f, b / 255.0f, 1.0f);
-    }
-    
-    // Generate gradient image
-    bool generateGradientImage(const std::string& filename, int width = 512, int height = 512) {
-        const int POINTS_PER_DIM = 256;
-        
-        Grid2 grid;
-        
-        // Define our target colors at specific positions
-        Vec4 white = hexToVec4("ffffff");    // Top-left corner (1,1)
-        Vec4 red = hexToVec4("ff0000");      // Top-right corner (1,-1)
-        Vec4 green = hexToVec4("00ff00");    // Center (0,0)
-        Vec4 blue = hexToVec4("0000ff");     // Bottom-left corner (-1,-1)
-        Vec4 black = hexToVec4("000000");    // Bottom-right corner (-1,1)
-        
-        // Create gradient points
-        for (int y = 0; y < POINTS_PER_DIM; ++y) {
-            for (int x = 0; x < POINTS_PER_DIM; ++x) {
-                // Normalize coordinates to [-1, 1]
-                float nx = (static_cast<float>(x) / (POINTS_PER_DIM - 1)) * 2.0f - 1.0f;
-                float ny = (static_cast<float>(y) / (POINTS_PER_DIM - 1)) * 2.0f - 1.0f;
-                
-                // Create position
-                Vec2 pos(nx, ny);
-                
-                // Convert to [0,1] range for interpolation
-                float u = (nx + 1.0f) / 2.0f;
-                float v = (ny + 1.0f) / 2.0f;
-                
-                // Bilinear interpolation between corners
-                Vec4 top = white * (1.0f - u) + red * u;
-                Vec4 bottom = blue * (1.0f - u) + black * u;
-                Vec4 cornerColor = top * (1.0f - v) + bottom * v;
-                
-                // Calculate distance from center (0,0)
-                float distFromCenter = std::sqrt(nx * nx + ny * ny) / std::sqrt(2.0f);
-                
-                Vec4 color = green * (1.0f - distFromCenter) + cornerColor * distFromCenter;
-                
-                grid.addPoint(pos, color);
-            }
-        }
-        
-        // Render to RGB image
-        std::vector<uint8_t> imageData = grid.renderToRGB(width, height);
-        
-        // Save as JXL
-        return JXLWriter::saveJXL(filename, imageData, width, height);
-    }
     
     // Read file content
     std::string readFile(const std::string& filename) {
@@ -113,6 +49,7 @@ private:
         if (filename.find(".png") != std::string::npos) return "image/png";
         if (filename.find(".jpg") != std::string::npos || filename.find(".jpeg") != std::string::npos) return "image/jpeg";
         if (filename.find(".json") != std::string::npos) return "application/json";
+        if (filename.find(".ico") != std::string::npos) return "image/x-icon";
         return "text/plain";
     }
     
@@ -134,16 +71,30 @@ private:
         send(clientSocket, responseStr.c_str(), responseStr.length(), 0);
     }
     
-    // Serve static file
-    void serveStaticFile(int clientSocket, const std::string& filepath) {
-        std::string fullPath = webRoot + "/" + filepath;
-        std::string content = readFile(fullPath);
+    // Extract file path from HTTP request
+    std::string getFilePath(const std::string& request) {
+        // Find the start of the path after "GET "
+        size_t start = request.find("GET ") + 4;
+        if (start == std::string::npos) return "";
         
-        if (!content.empty()) {
-            sendResponse(clientSocket, content, getContentType(filepath));
-        } else {
-            sendResponse(clientSocket, "404 Not Found: " + filepath, "text/plain", 404);
+        // Find the end of the path (space or ?)
+        size_t end = request.find(" ", start);
+        if (end == std::string::npos) end = request.find("?", start);
+        if (end == std::string::npos) return "";
+        
+        std::string path = request.substr(start, end - start);
+        
+        // Default to index.html for root path
+        if (path == "/") {
+            return "index.html";
         }
+        
+        // Remove leading slash
+        if (path.length() > 0 && path[0] == '/') {
+            path = path.substr(1);
+        }
+        
+        return path;
     }
 
 public:
@@ -235,37 +186,21 @@ public:
             
             if (bytesReceived > 0) {
                 std::string request(buffer);
-                std::cout << "Received request: " << request.substr(0, request.find('\n')) << std::endl;
+                std::string filePath = getFilePath(request);
                 
-                // Handle different routes
-                if (request.find("GET / ") != std::string::npos || request.find("GET /index.html") != std::string::npos) {
-                    serveStaticFile(clientSocket, "index.html");
-                } else if (request.find("GET /style.css") != std::string::npos) {
-                    serveStaticFile(clientSocket, "style.css");
-                } else if (request.find("GET /script.js") != std::string::npos) {
-                    serveStaticFile(clientSocket, "script.js");
-                } else if (request.find("GET /gradient.jxl") != std::string::npos) {
-                    // Generate and serve the gradient image
-                    if (generateGradientImage("output/gradient.jxl")) {
-                        std::string imageContent = readFile("output/gradient.jxl");
-                        if (!imageContent.empty()) {
-                            sendResponse(clientSocket, imageContent, "image/jxl");
-                        } else {
-                            sendResponse(clientSocket, "Error generating image", "text/plain", 500);
-                        }
+                if (!filePath.empty()) {
+                    std::cout << "Serving: " << filePath << std::endl;
+                    
+                    std::string fullPath = webRoot + "/" + filePath;
+                    std::string content = readFile(fullPath);
+                    
+                    if (!content.empty()) {
+                        sendResponse(clientSocket, content, getContentType(filePath));
                     } else {
-                        sendResponse(clientSocket, "Error generating image", "text/plain", 500);
-                    }
-                } else if (request.find("GET /generate") != std::string::npos) {
-                    // API endpoint to generate new gradient
-                    std::string filename = "output/dynamic_gradient.jxl";
-                    if (generateGradientImage(filename)) {
-                        sendResponse(clientSocket, "{\"status\":\"success\",\"file\":\"" + filename + "\"}", "application/json");
-                    } else {
-                        sendResponse(clientSocket, "{\"status\":\"error\"}", "application/json", 500);
+                        sendResponse(clientSocket, "404 Not Found: " + filePath, "text/plain", 404);
                     }
                 } else {
-                    sendResponse(clientSocket, "404 Not Found", "text/plain", 404);
+                    sendResponse(clientSocket, "400 Bad Request", "text/plain", 400);
                 }
             }
             
