@@ -9,6 +9,9 @@
 #include <cstring>
 #include <sstream>
 #include <fstream>
+#include <functional>
+#include <unordered_map>
+#include "timing_decorator.hpp"
 
 #ifdef _WIN32
     #include <winsock2.h>
@@ -27,6 +30,10 @@ private:
     int port;
     bool running;
     std::string webRoot;
+    
+    // Route handler type
+    using RouteHandler = std::function<std::pair<int, std::string>(const std::string&, const std::string&)>;
+    std::unordered_map<std::string, RouteHandler> routes;
     
     // Read file content
     std::string readFile(const std::string& filename) {
@@ -55,14 +62,17 @@ private:
     
     // Send HTTP response
     void sendResponse(int clientSocket, const std::string& content, const std::string& contentType = "text/html", int statusCode = 200) {
+        TIME_FUNCTION;
         std::string statusText = "OK";
         if (statusCode == 404) statusText = "Not Found";
         if (statusCode == 500) statusText = "Internal Server Error";
+        if (statusCode == 405) statusText = "Method Not Allowed";
         
         std::ostringstream response;
         response << "HTTP/1.1 " << statusCode << " " << statusText << "\r\n";
         response << "Content-Type: " << contentType << "\r\n";
         response << "Content-Length: " << content.length() << "\r\n";
+        response << "Access-Control-Allow-Origin: *\r\n";
         response << "Connection: close\r\n";
         response << "\r\n";
         response << content;
@@ -71,18 +81,23 @@ private:
         send(clientSocket, responseStr.c_str(), responseStr.length(), 0);
     }
     
+    // Extract method and path from HTTP request
+    std::pair<std::string, std::string> parseRequest(const std::string& request) {
+        TIME_FUNCTION;
+        std::istringstream iss(request);
+        std::string method, path;
+        iss >> method >> path;
+        return {method, path};
+    }
+    
     // Extract file path from HTTP request
     std::string getFilePath(const std::string& request) {
-        // Find the start of the path after "GET "
-        size_t start = request.find("GET ") + 4;
-        if (start == std::string::npos) return "";
+        auto [method, path] = parseRequest(request);
         
-        // Find the end of the path (space or ?)
-        size_t end = request.find(" ", start);
-        if (end == std::string::npos) end = request.find("?", start);
-        if (end == std::string::npos) return "";
-        
-        std::string path = request.substr(start, end - start);
+        // Only handle GET requests for files
+        if (method != "GET") {
+            return "";
+        }
         
         // Default to index.html for root path
         if (path == "/") {
@@ -96,6 +111,31 @@ private:
         
         return path;
     }
+    
+    // Check if path is a registered route
+    bool isRoute(const std::string& path) {
+        return routes.find(path) != routes.end();
+    }
+    
+    // Handle route request
+    void handleRoute(int clientSocket, const std::string& request) {
+        TIME_FUNCTION;
+        auto [method, path] = parseRequest(request);
+        
+        // Extract request body if present
+        std::string body;
+        size_t bodyPos = request.find("\r\n\r\n");
+        if (bodyPos != std::string::npos) {
+            body = request.substr(bodyPos + 4);
+        }
+        
+        if (routes.find(path) != routes.end()) {
+            auto [statusCode, response] = routes[path](method, body);
+            sendResponse(clientSocket, response, "application/json", statusCode);
+        } else {
+            sendResponse(clientSocket, "404 Not Found", "text/plain", 404);
+        }
+    }
 
 public:
     SimpleHTTPServer(int port = 8080, const std::string& webRoot = "web") 
@@ -103,6 +143,11 @@ public:
     
     ~SimpleHTTPServer() {
         stop();
+    }
+    
+    // Add a route handler
+    void addRoute(const std::string& path, RouteHandler handler) {
+        routes[path] = handler;
     }
     
     bool start() {
@@ -186,21 +231,29 @@ public:
             
             if (bytesReceived > 0) {
                 std::string request(buffer);
-                std::string filePath = getFilePath(request);
+                auto [method, path] = parseRequest(request);
                 
-                if (!filePath.empty()) {
-                    std::cout << "Serving: " << filePath << std::endl;
-                    
-                    std::string fullPath = webRoot + "/" + filePath;
-                    std::string content = readFile(fullPath);
-                    
-                    if (!content.empty()) {
-                        sendResponse(clientSocket, content, getContentType(filePath));
-                    } else {
-                        sendResponse(clientSocket, "404 Not Found: " + filePath, "text/plain", 404);
-                    }
+                // Check if this is a registered route
+                if (isRoute(path)) {
+                    handleRoute(clientSocket, request);
                 } else {
-                    sendResponse(clientSocket, "400 Bad Request", "text/plain", 400);
+                    // Handle file serving for GET requests
+                    std::string filePath = getFilePath(request);
+                    
+                    if (!filePath.empty()) {
+                        std::cout << "Serving: " << filePath << std::endl;
+                        
+                        std::string fullPath = webRoot + "/" + filePath;
+                        std::string content = readFile(fullPath);
+                        
+                        if (!content.empty()) {
+                            sendResponse(clientSocket, content, getContentType(filePath));
+                        } else {
+                            sendResponse(clientSocket, "404 Not Found: " + filePath, "text/plain", 404);
+                        }
+                    } else {
+                        sendResponse(clientSocket, "400 Bad Request", "text/plain", 400);
+                    }
                 }
             }
             

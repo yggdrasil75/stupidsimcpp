@@ -8,9 +8,8 @@
 #include <algorithm>
 #include <filesystem>
 #include "vec3.hpp"
-// #include "../jxl/encode.h"
+#include "timing_decorator.hpp"
 #include <jxl/encode.h>
-// #include "../jxl/thread_parallel_runner.h"
 #include <jxl/thread_parallel_runner.h>
 
 class JXLWriter {
@@ -64,10 +63,8 @@ private:
 public:
     // Save a 2D vector of Vec3 (RGB) colors as JXL
     // Vec3 components: x = red, y = green, z = blue (values in range [0,1])
-    static bool saveJXL(const std::string& filename, 
-                       const std::vector<std::vector<Vec3>>& pixels,
-                       float quality = 90.0f,  // Quality setting (0-100)
-                       int effort = 7) {       // Encoding effort (3-9, higher = slower but better compression)
+    static bool saveJXL(const std::string& filename, const std::vector<std::vector<Vec3>>& pixels,
+                       float quality = 90.0f, int effort = 7) {
         if (pixels.empty() || pixels[0].empty()) {
             return false;
         }
@@ -85,12 +82,8 @@ public:
         return saveJXL(filename, pixels, width, height, quality, effort);
     }
     
-    // Alternative interface with width/height and flat vector (row-major order)
-    static bool saveJXL(const std::string& filename, 
-                       const std::vector<Vec3>& pixels, 
-                       int width, int height,
-                       float quality = 90.0f,
-                       int effort = 7) {
+    static bool saveJXL(const std::string& filename, const std::vector<Vec3>& pixels, 
+                       int width, int height, float quality = 90.0f, int effort = 7) {
         if (pixels.size() != width * height) {
             return false;
         }
@@ -107,11 +100,9 @@ public:
     }
     
     // Save from 1D vector of uint8_t pixels (RGB order: pixels[i]=r, pixels[i+1]=g, pixels[i+2]=b)
-    static bool saveJXL(const std::string& filename, 
-                       const std::vector<uint8_t>& pixels, 
-                       int width, int height,
-                       float quality = 90.0f,
-                       int effort = 7) {
+    static bool saveJXL(const std::string& filename, const std::vector<uint8_t>& pixels, 
+                       int width, int height, float quality = 90.0f, int effort = 7) {
+        TIME_FUNCTION;
         if (pixels.size() != width * height * 3) {
             return false;
         }
@@ -223,20 +214,14 @@ public:
     }
     
 private:
-    static bool saveJXL(const std::string& filename, 
-                       const std::vector<std::vector<Vec3>>& pixels, 
-                       int width, int height,
-                       float quality,
-                       int effort) {
-        // Create directory if needed
+    static bool saveJXL(const std::string& filename, const std::vector<std::vector<Vec3>>& pixels, 
+                       int width, int height, float quality, int effort) {
         if (!createDirectoryIfNeeded(filename)) {
             return false;
         }
         
-        // Convert Vec3 pixels to interleaved RGB
         std::vector<uint8_t> rgbData = convertToRGB(pixels, width, height);
         
-        // Use the existing uint8_t version
         return saveJXL(filename, rgbData, width, height, quality, effort);
     }
 };

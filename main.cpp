@@ -8,6 +8,8 @@
 
 // Function to convert hex color string to Vec4
 Vec4 hexToVec4(const std::string& hex) {
+    TIME_FUNCTION;
+    
     if (hex.length() != 6) {
         return Vec4(0, 0, 0, 1); // Default to black if invalid
     }
@@ -20,7 +22,8 @@ Vec4 hexToVec4(const std::string& hex) {
 
 // Generate gradient image
 bool generateGradientImage(const std::string& filename, int width = 512, int height = 512) {
-    #TIME_FUNCTION;
+    TIME_FUNCTION;
+    
     const int POINTS_PER_DIM = 256;
     
     Grid2 grid;
@@ -67,6 +70,39 @@ bool generateGradientImage(const std::string& filename, int width = 512, int hei
     return JXLWriter::saveJXL(filename, imageData, width, height);
 }
 
+// Add this function to get timing stats as JSON
+std::string getTimingStatsJSON() {
+    
+    auto stats = FunctionTimer::getStats();
+    std::stringstream json;
+    
+    json << "[";
+    bool first = true;
+    
+    for (const auto& [func_name, data] : stats) {
+        if (!first) json << ",";
+        first = false;
+        
+        auto percentiles = FunctionTimer::calculatePercentiles(data.timings);
+        
+        json << "{"
+             << "\"function\":\"" << func_name << "\","
+             << "\"call_count\":" << data.call_count << ","
+             << "\"total_time\":" << std::fixed << std::setprecision(6) << data.total_time << ","
+             << "\"avg_time\":" << std::fixed << std::setprecision(6) << data.avg_time() << ","
+             << "\"min_time\":" << std::fixed << std::setprecision(6) << percentiles.min << ","
+             << "\"max_time\":" << std::fixed << std::setprecision(6) << percentiles.max << ","
+             << "\"median_time\":" << std::fixed << std::setprecision(6) << percentiles.median << ","
+             << "\"p90_time\":" << std::fixed << std::setprecision(6) << percentiles.p90 << ","
+             << "\"p95_time\":" << std::fixed << std::setprecision(6) << percentiles.p95 << ","
+             << "\"p99_time\":" << std::fixed << std::setprecision(6) << percentiles.p99
+             << "}";
+    }
+    
+    json << "]";
+    return json.str();
+}
+
 int main(int argc, char* argv[]) {
     // Check command line arguments
     int port = 8080;
@@ -94,7 +130,7 @@ int main(int argc, char* argv[]) {
     
     // Generate gradient image before starting server
     std::cout << "Generating gradient image..." << std::endl;
-    if (generateGradientImage(webRoot + "/gradient.jxl")) {
+    if (generateGradientImage(webRoot + "/output/gradient.jxl")) {
         std::cout << "Gradient image generated successfully" << std::endl;
     } else {
         std::cerr << "Failed to generate gradient image" << std::endl;
@@ -103,6 +139,23 @@ int main(int argc, char* argv[]) {
     
     SimpleHTTPServer server(port, webRoot);
     
+    // Add timing stats endpoint
+    server.addRoute("/api/timing-stats", [](const std::string& method, const std::string& body) {
+        if (method == "GET") {
+            return std::make_pair(200, getTimingStatsJSON());
+        }
+        //return std::make_pair(405, "{\"error\":\"Method Not Allowed\"}");
+    });
+    
+    // Add clear stats endpoint
+    server.addRoute("/api/clear-stats", [](const std::string& method, const std::string& body) {
+        if (method == "POST") {
+            FunctionTimer::clearStats();
+            return std::make_pair(200, "{\"status\":\"success\"}");
+        }
+        return std::make_pair(405, "{\"error\":\"Method Not Allowed\"}");
+    });
+    
     if (!server.start()) {
         std::cerr << "Failed to start server on port " << port << std::endl;
         return 1;
@@ -110,6 +163,7 @@ int main(int argc, char* argv[]) {
     
     std::cout << "Server running on http://localhost:" << port << std::endl;
     std::cout << "Web root: " << webRoot << std::endl;
+    std::cout << "Timing stats available at /api/timing-stats" << std::endl;
     std::cout << "Press Ctrl+C to stop the server" << std::endl;
     
     server.handleRequests();

@@ -11,12 +11,26 @@
         <div class="controls">
             <button onclick="refreshImage()">Refresh Image</button>
             <button onclick="toggleAutoRefresh()" id="autoRefreshBtn">Start Auto-Refresh (30s)</button>
+            <button onclick="showStats()" id="statsBtn">Show Performance Stats</button>
+            <button onclick="clearStats()" id="clearStatsBtn">Clear Stats</button>
         </div>
         
         <div class="image-container">
-            <img id="gradientImage" src="gradient.jxl" alt="Dynamic Gradient">
+            <img id="gradientImage" src="/output/gradient.jxl" alt="Dynamic Gradient">
         </div>
         
+        <div id="statsPanel" class="stats-panel" style="display: none;">
+            <div class="stats-header">
+                <h3>Performance Statistics</h3>
+                <button onclick="hideStats()" class="close-btn">&times;</button>
+            </div>
+            <div id="statsContent" class="stats-content">
+                <!-- Stats will be loaded here -->
+            </div>
+        </div>
+        
+        <div id="status" class="status"></div>
+    </div>
 
     <script src="script.js"></script>
 </body>

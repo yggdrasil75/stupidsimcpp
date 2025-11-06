@@ -47,10 +47,10 @@ public:
     // Clear all statistics
     static void clearStats();
 
+    static PercentileStats calculatePercentiles(const std::vector<double>& timings);
 private:
     static std::unordered_map<std::string, TimingStats> stats_;
     
-    static PercentileStats calculatePercentiles(const std::vector<double>& timings);
 };
 
 // Macro to easily time functions - similar to Python decorator
