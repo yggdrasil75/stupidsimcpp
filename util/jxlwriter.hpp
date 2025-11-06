@@ -103,6 +103,7 @@ public:
     static bool saveJXL(const std::string& filename, const std::vector<uint8_t>& pixels, 
                        int width, int height, float quality = 90.0f, int effort = 7) {
         TIME_FUNCTION;
+        effort = 1; //forced 1 to test speed
         if (pixels.size() != width * height * 3) {
             return false;
         }
@@ -130,7 +131,7 @@ public:
         JxlEncoderFrameSettings* options = JxlEncoderFrameSettingsCreate(enc, nullptr);
         
         // Set quality/distance (distance = 0 is lossless, higher = more lossy)
-        float distance = (100.0f - quality) / 10.0f;  // Convert quality to distance
+        float distance = (100.0f - quality) / 5.0f;
         if (quality >= 100.0f) {
             JxlEncoderSetFrameLossless(options, JXL_TRUE);
         } else {
@@ -147,6 +148,7 @@ public:
         basic_info.bits_per_sample = 8;
         basic_info.exponent_bits_per_sample = 0;
         basic_info.uses_original_profile = JXL_FALSE;
+        //basic_info.uses_original_profile = JXL_TRUE;
         
         if (JxlEncoderSetBasicInfo(enc, &basic_info) != JXL_ENC_SUCCESS) {
             JxlThreadParallelRunnerDestroy(runner);
@@ -180,7 +182,9 @@ public:
         
         // Compress to buffer
         std::vector<uint8_t> compressed;
-        compressed.resize(4096);  // Start with 4KB
+        // compressed.resize(4096);  // Start with 4KB
+        size_t initial_size = width * height / 4;
+        compressed.resize(initial_size);
         uint8_t* next_out = compressed.data();
         size_t avail_out = compressed.size();
         JxlEncoderStatus process_result = JXL_ENC_NEED_MORE_OUTPUT;
