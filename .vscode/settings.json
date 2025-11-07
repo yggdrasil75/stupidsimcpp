@@ -69,5 +69,11 @@
         "xtr1common": "cpp",
         "xtree": "cpp",
         "xutility": "cpp"
+    },
+    "files.exclude": {
+        "**/*.rpyc": true,
+        "**/*.rpa": true,
+        "**/*.rpymc": true,
+        "**/cache/": true
     }
 }
