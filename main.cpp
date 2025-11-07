@@ -72,13 +72,13 @@ bool generateGradientImage(const std::string& filename, int width = 512, int hei
 }
 
 // Generate terrain simulation image
-bool generateTerrainImage(const std::string& filename, int width = 512, int height = 512) {
+bool generateTerrainImage(const std::string& filename, int width = 512, int height = 512, uint32_t seed = 42, float scale = 4.0f, int octaves = 4,
+        float persistence = 0.5f, float lacunarity = 2.0f, float waterlevel = 0.3f, float elevation = 1.0f) {
     TIME_FUNCTION;
     
-    static Sim2 sim(width, height);
-    
+    Sim2 sim(width, height, seed, scale, octaves, persistence, lacunarity, waterlevel, elevation);
+    sim.generateTerrain();
     // Randomize seed for variety
-    sim.randomizeSeed();
     
     // Render to RGB image
     std::vector<uint8_t> imageData = sim.renderToRGB(width, height);
@@ -171,6 +171,70 @@ int main(int argc, char* argv[]) {
     
     SimpleHTTPServer server(port, webRoot);
     
+    // Add parameter setting endpoint
+    server.addRoute("/api/set-parameters", [webRoot](const std::string& method, const std::string& body) {
+        if (method == "POST") {
+            try {
+                // Parse JSON parameters
+                // Simple JSON parsing - in a real application you'd use a proper JSON library
+                float scale = 4.0f;
+                int octaves = 4;
+                float persistence = 0.5f;
+                float lacunarity = 2.0f;
+                float elevation = 1.0f;
+                float waterLevel = 0.3f;
+                uint32_t seed = 42;
+                
+                // Extract parameters from JSON (simplified parsing)
+                if (body.find("\"scale\"") != std::string::npos) {
+                    size_t pos = body.find("\"scale\":") + 8;
+                    scale = std::stof(body.substr(pos));
+                }
+                if (body.find("\"octaves\"") != std::string::npos) {
+                    size_t pos = body.find("\"octaves\":") + 10;
+                    octaves = std::stoi(body.substr(pos));
+                }
+                if (body.find("\"persistence\"") != std::string::npos) {
+                    size_t pos = body.find("\"persistence\":") + 14;
+                    persistence = std::stof(body.substr(pos));
+                }
+                if (body.find("\"lacunarity\"") != std::string::npos) {
+                    size_t pos = body.find("\"lacunarity\":") + 13;
+                    lacunarity = std::stof(body.substr(pos));
+                }
+                if (body.find("\"elevation\"") != std::string::npos) {
+                    size_t pos = body.find("\"elevation\":") + 12;
+                    elevation = std::stof(body.substr(pos));
+                }
+                if (body.find("\"waterLevel\"") != std::string::npos) {
+                    size_t pos = body.find("\"waterLevel\":") + 13;
+                    waterLevel = std::stof(body.substr(pos));
+                }
+                if (body.find("\"seed\"") != std::string::npos) {
+                    size_t pos = body.find("\"seed\":") + 7;
+                    seed = std::stoul(body.substr(pos));
+                }
+                
+                // Create NEW instance each time (remove 'static')
+                Sim2 sim(512, 512, seed, scale, octaves, persistence, lacunarity, waterLevel, elevation);
+                
+                // Regenerate and save
+                std::vector<uint8_t> imageData = sim.renderToRGB(512, 512);
+                bool success = generateTerrainImage(webRoot + "/output/display.jxl", 512, 512, seed, scale, octaves, persistence, lacunarity, waterLevel, elevation);
+                //bool success = JXLWriter::saveJXL(webRoot + "/output/display.jxl", imageData, 512, 512);
+                
+                if (success) {
+                    return std::make_pair(200, std::basic_string("{\"status\":\"success\"}"));
+                } else {
+                    return std::make_pair(500, std::basic_string("{\"error\":\"Failed to generate terrain\"}"));
+                }
+            } catch (const std::exception& e) {
+                return std::make_pair(400, std::basic_string("{\"error\":\"Invalid parameters\"}"));
+            }
+        }
+        return std::make_pair(405, std::basic_string("{\"error\":\"Method Not Allowed\"}"));
+    });
+
     // Add timing stats endpoint
     server.addRoute("/api/timing-stats", [](const std::string& method, const std::string& body) {
         if (method == "GET") {

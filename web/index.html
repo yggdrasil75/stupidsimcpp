@@ -16,6 +16,53 @@
             <button onclick="switchMode()" id="switchModeBtn" style="display: none;">Switch Mode</button>
             <button onclick="showStats()" id="statsBtn">Show Performance Stats</button>
             <button onclick="clearStats()" id="clearStatsBtn">Clear Stats</button>
+            <button onclick="toggleParameters()" id="paramsBtn">Show Parameters</button>
+        </div>
+        
+        <!-- Parameter Control Panel -->
+        <div id="parameterPanel" class="parameter-panel" style="display: none;">
+            <h3>Terrain Parameters</h3>
+            <div class="param-grid">
+                <div class="param-group">
+                    <label for="scale">Scale:</label>
+                    <input type="range" id="scale" min="0.1" max="20" step="0.1" value="4.0">
+                    <span id="scaleValue">4.0</span>
+                </div>
+                <div class="param-group">
+                    <label for="octaves">Octaves:</label>
+                    <input type="range" id="octaves" min="1" max="8" step="1" value="4">
+                    <span id="octavesValue">4</span>
+                </div>
+                <div class="param-group">
+                    <label for="persistence">Persistence:</label>
+                    <input type="range" id="persistence" min="0" max="1" step="0.05" value="0.5">
+                    <span id="persistenceValue">0.5</span>
+                </div>
+                <div class="param-group">
+                    <label for="lacunarity">Lacunarity:</label>
+                    <input type="range" id="lacunarity" min="1" max="4" step="0.1" value="2.0">
+                    <span id="lacunarityValue">2.0</span>
+                </div>
+                <div class="param-group">
+                    <label for="elevation">Elevation Multiplier:</label>
+                    <input type="range" id="elevation" min="0.1" max="3" step="0.1" value="1.0">
+                    <span id="elevationValue">1.0</span>
+                </div>
+                <div class="param-group">
+                    <label for="waterLevel">Water Level:</label>
+                    <input type="range" id="waterLevel" min="0" max="1" step="0.05" value="0.3">
+                    <span id="waterLevelValue">0.3</span>
+                </div>
+                <div class="param-group">
+                    <label for="seed">Seed:</label>
+                    <input type="number" id="seed" value="42" min="0" max="999999">
+                    <button onclick="randomizeSeed()">Random</button>
+                </div>
+            </div>
+            <div class="param-actions">
+                <button onclick="applyParameters()">Apply Parameters</button>
+                <button onclick="resetParameters()">Reset to Default</button>
+            </div>
         </div>
         
         <div class="image-container">

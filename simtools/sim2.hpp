@@ -32,14 +32,15 @@ private:
     Vec4 waterColor;
     
 public:
-    Sim2(int width = 512, int height = 512, uint32_t seed = 42) 
-        : gridWidth(width), gridHeight(height), scale(4.0f), octaves(4), 
-          persistence(0.5f), lacunarity(2.0f), seed(seed), offset(0, 0),
-          elevationMultiplier(1.0f), waterLevel(0.3f),
+    Sim2(int width = 512, int height = 512, uint32_t seed = 42, float scale = 4.0f, int octaves = 4,
+        float persistence = 0.5f, float lacunarity = 2.0f, float waterlevel = 0.3f, float elevation = 1.0f) 
+        : gridWidth(width), gridHeight(height), scale(scale), octaves(octaves), 
+          persistence(persistence), lacunarity(lacunarity), seed(seed), offset(0, 0),
+          elevationMultiplier(elevation), waterLevel(waterlevel),
           landColor(0.2f, 0.8f, 0.2f, 1.0f),  // Green
           waterColor(0.2f, 0.3f, 0.8f, 1.0f)  // Blue
     {
-        noiseGenerator = std::make_unique<Noise2>(seed,Noise2::WORLEY,Noise2::PRECOMPUTED);
+        noiseGenerator = std::make_unique<Noise2>(seed,Noise2::PERLIN,Noise2::PRECOMPUTED);
         generateTerrain();
     }
     

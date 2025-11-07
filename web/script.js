@@ -216,3 +216,108 @@ document.addEventListener('DOMContentLoaded', function() {
             refreshImage();
         });
 });
+
+function toggleParameters() {
+    const panel = document.getElementById('parameterPanel');
+    const btn = document.getElementById('paramsBtn');
+    
+    if (panel.style.display === 'none') {
+        panel.style.display = 'block';
+        btn.textContent = 'Hide Parameters';
+        loadCurrentParameters();
+    } else {
+        panel.style.display = 'none';
+        btn.textContent = 'Show Parameters';
+    }
+}
+
+function loadCurrentParameters() {
+    // This would ideally fetch current parameters from the server
+    // For now, we'll just initialize the sliders with their current values
+    setupSlider('scale', 'scaleValue', 4.0);
+    setupSlider('octaves', 'octavesValue', 4);
+    setupSlider('persistence', 'persistenceValue', 0.5);
+    setupSlider('lacunarity', 'lacunarityValue', 2.0);
+    setupSlider('elevation', 'elevationValue', 1.0);
+    setupSlider('waterLevel', 'waterLevelValue', 0.3);
+}
+
+function setupSlider(sliderId, valueId, defaultValue) {
+    const slider = document.getElementById(sliderId);
+    const value = document.getElementById(valueId);
+    
+    slider.value = defaultValue;
+    value.textContent = defaultValue;
+    
+    slider.addEventListener('input', function() {
+        value.textContent = this.value;
+    });
+}
+
+function applyParameters() {
+    const params = {
+        scale: parseFloat(document.getElementById('scale').value),
+        octaves: parseInt(document.getElementById('octaves').value),
+        persistence: parseFloat(document.getElementById('persistence').value),
+        lacunarity: parseFloat(document.getElementById('lacunarity').value),
+        elevation: parseFloat(document.getElementById('elevation').value),
+        waterLevel: parseFloat(document.getElementById('waterLevel').value),
+        seed: parseInt(document.getElementById('seed').value)
+    };
+    
+    console.log("Sending parameters:", params);  // Debug log
+    
+    fetch('/api/set-parameters', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(params)
+    })
+    .then(response => response.json())
+    .then(data => {
+        console.log("Server response:", data);  // Debug log
+        if (data.status === 'success') {
+            updateStatus('Parameters applied successfully');
+            if (currentMode === 'terrain') {
+                refreshTerrain();
+            }
+        } else {
+            updateStatus('Error applying parameters', 'error');
+        }
+    })
+    .catch(error => {
+        console.error('Error applying parameters:', error);
+        updateStatus('Error applying parameters', 'error');
+    });
+}
+
+function resetParameters() {
+    document.getElementById('scale').value = 4.0;
+    document.getElementById('scaleValue').textContent = '4.0';
+    
+    document.getElementById('octaves').value = 4;
+    document.getElementById('octavesValue').textContent = '4';
+    
+    document.getElementById('persistence').value = 0.5;
+    document.getElementById('persistenceValue').textContent = '0.5';
+    
+    document.getElementById('lacunarity').value = 2.0;
+    document.getElementById('lacunarityValue').textContent = '2.0';
+    
+    document.getElementById('elevation').value = 1.0;
+    document.getElementById('elevationValue').textContent = '1.0';
+    
+    document.getElementById('waterLevel').value = 0.3;
+    document.getElementById('waterLevelValue').textContent = '0.3';
+    
+    document.getElementById('seed').value = 42;
+    
+    updateStatus('Parameters reset to defaults');
+}
+
+function randomizeSeed() {
+    const newSeed = Math.floor(Math.random() * 1000000);
+    document.getElementById('seed').value = newSeed;
+    updateStatus('Random seed generated: ' + newSeed);
+}

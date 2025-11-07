@@ -34,40 +34,6 @@ public:
         PRECOMPUTED
     };
 
-private:
-    std::mt19937 rng;
-    std::uniform_real_distribution<float> dist;
-    
-    // Precomputed gradient directions for 8 directions
-    static constexpr std::array<Grad, 8> grads = {
-        Grad{1.0f, 0.0f}, 
-        Grad{0.707f, 0.707f}, 
-        Grad{0.0f, 1.0f}, 
-        Grad{-0.707f, 0.707f},
-        Grad{-1.0f, 0.0f}, 
-        Grad{-0.707f, -0.707f}, 
-        Grad{0.0f, -1.0f}, 
-        Grad{0.707f, -0.707f}
-    };
-
-    NoiseType currentType;
-    GradientType gradType;
-    uint32_t currentSeed;
-    
-    // Permutation table for Simplex noise
-    std::array<int, 512> perm;
-    
-    // For Worley noise
-    std::vector<Vec2> featurePoints;
-    
-    // For Gabor noise
-    float gaborFrequency;
-    float gaborBandwidth;
-    
-    // For wavelet noise
-    std::vector<float> waveletCoefficients;
-    
-public:
     Noise2(uint32_t seed = 0, NoiseType type = PERLIN, GradientType gradType = PRECOMPUTED) : 
             rng(seed), dist(0.0f, 1.0f), currentType(type), gradType(gradType),
             currentSeed(seed), gaborFrequency(4.0f), gaborBandwidth(0.5f) 
@@ -384,12 +350,8 @@ public:
     }
     
     // Generate terrain-like noise (useful for heightmaps)
-    Grid2 generateTerrainNoise(int width, int height,
-                              float scale = 1.0f,
-                              int octaves = 4,
-                              float persistence = 0.5f,
-                              uint32_t seed = 0,
-                              const Vec2& offset = Vec2(0, 0)) {
+    Grid2 generateTerrainNoise(int width, int height, float scale = 1.0f, int octaves = 4,
+                              float persistence = 0.5f, uint32_t seed = 0, const Vec2& offset = Vec2(0, 0)) {
         if (seed != 0) setSeed(seed);
         
         Grid2 grid(width * height);
@@ -453,6 +415,38 @@ public:
     }
 
 private:
+    std::mt19937 rng;
+    std::uniform_real_distribution<float> dist;
+    
+    // Precomputed gradient directions for 8 directions
+    static constexpr std::array<Grad, 8> grads = {
+        Grad{1.0f, 0.0f}, 
+        Grad{0.707f, 0.707f}, 
+        Grad{0.0f, 1.0f}, 
+        Grad{-0.707f, 0.707f},
+        Grad{-1.0f, 0.0f}, 
+        Grad{-0.707f, -0.707f}, 
+        Grad{0.0f, -1.0f}, 
+        Grad{0.707f, -0.707f}
+    };
+
+    NoiseType currentType;
+    GradientType gradType;
+    uint32_t currentSeed;
+    
+    // Permutation table for Simplex noise
+    std::array<int, 512> perm;
+    
+    // For Worley noise
+    std::vector<Vec2> featurePoints;
+    
+    // For Gabor noise
+    float gaborFrequency;
+    float gaborBandwidth;
+    
+    // For wavelet noise
+    std::vector<float> waveletCoefficients;
+    
     // Initialize permutation table for Simplex noise
     void initializePermutationTable(uint32_t seed) {
         std::mt19937 localRng(seed);
