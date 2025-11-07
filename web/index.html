@@ -1,22 +1,25 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Dynamic Gradient Generator</title>
+    <title>Generator</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
     <div class="container">
-        <h1>Dynamic Gradient Generator</h1>
+        <h1>Generator</h1>
+        
+        <div id="modeDisplay" class="mode-display">Current Mode: Loading...</div>
         
         <div class="controls">
-            <button onclick="refreshImage()">Refresh Image</button>
-            <button onclick="toggleAutoRefresh()" id="autoRefreshBtn">Start Auto-Refresh (30s)</button>
+            <button onclick="currentMode === 'terrain' ? refreshTerrain() : refreshImage()" id="refreshBtn">Refresh Image</button>
+            <button onclick="toggleAutoRefresh()" id="autoRefreshBtn">Start Auto-Refresh (5s)</button>
+            <button onclick="switchMode()" id="switchModeBtn" style="display: none;">Switch Mode</button>
             <button onclick="showStats()" id="statsBtn">Show Performance Stats</button>
             <button onclick="clearStats()" id="clearStatsBtn">Clear Stats</button>
         </div>
         
         <div class="image-container">
-            <img id="gradientImage" src="./output/gradient.jxl" alt="Dynamic Gradient">
+            <img id="displayImage" src="./output/display.jxl" alt="Dynamic Image">
         </div>
         
         <div id="statsPanel" class="stats-panel" style="display: none;">

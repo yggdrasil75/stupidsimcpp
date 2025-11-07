@@ -1,22 +1,62 @@
 let autoRefreshInterval = null;
+let currentMode = 'gradient';
 
 function refreshImage() {
-    const img = document.getElementById('gradientImage');
-    img.classList.add('loading');
+    const img = document.getElementById('displayImage');
     
-    const timestamp = new Date().getTime();
-    //img.src = 'gradient.jxl?' + timestamp;
-    img.src = './output/gradient.jxl';
+    // Check if server has finished encoding
+    fetch('/api/image-ready')
+        .then(response => response.json())
+        .then(data => {
+            if (data.ready) {
+                performSmoothImageSwap();
+            } else {
+                // Try again in 1 second
+                setTimeout(refreshImage, 1000);
+            }
+        })
+        .catch(error => {
+            console.error('Error checking image status:', error);
+            updateStatus('Error checking image status', 'error');
+        });
+}
+
+function performSmoothImageSwap() {
+    const img = document.getElementById('displayImage');
+    const newImage = new Image();
     
-    img.onload = function() {
-        img.classList.remove('loading');
-        updateStatus('Image refreshed at ' + new Date().toLocaleTimeString());
+    newImage.onload = function() {
+        // Crossfade transition
+        img.style.opacity = '0';
+        setTimeout(() => {
+            img.src = './output/display.jxl';
+            img.style.opacity = '1';
+            updateStatus('Image refreshed at ' + new Date().toLocaleTimeString());
+        }, 300);
     };
     
-    img.onerror = function() {
-        img.classList.remove('loading');
+    newImage.onerror = function() {
         updateStatus('Error loading image', 'error');
     };
+    
+    // Load with cache busting only when we know it's ready
+    newImage.src = './output/display.jxl?' + new Date().getTime();
+}
+
+function refreshTerrain() {
+    fetch('/api/refresh-terrain', { method: 'POST' })
+        .then(response => response.json())
+        .then(data => {
+            if (data.status === 'success') {
+                refreshImage();
+            } else {
+                updateStatus('Error refreshing terrain', 'error');
+            }
+        })
+        .catch(error => {
+            console.error('Error refreshing terrain:', error);
+            updateStatus('Error refreshing terrain', 'error');
+        });
 }
 
 function toggleAutoRefresh() {
@@ -25,14 +65,64 @@ function toggleAutoRefresh() {
     if (autoRefreshInterval) {
         clearInterval(autoRefreshInterval);
         autoRefreshInterval = null;
-        button.textContent = 'Start Auto-Refresh (30s)';
+        button.textContent = 'Start Auto-Refresh';
         button.classList.remove('danger');
         updateStatus('Auto-refresh stopped');
     } else {
-        autoRefreshInterval = setInterval(refreshImage, 30000);
+        // Faster refresh for terrain (5 seconds)
+        autoRefreshInterval = setInterval(currentMode === 'terrain' ? refreshTerrain : refreshImage, 100);
         button.textContent = 'Stop Auto-Refresh';
         button.classList.add('danger');
-        updateStatus('Auto-refresh started (30s interval)');
+        updateStatus('Auto-refresh started');
+    }
+}
+
+function switchMode() {
+    fetch('/api/switch-mode', { method: 'POST' })
+        .then(response => response.json())
+        .then(data => {
+            if (data.status === 'success') {
+                currentMode = data.mode;
+                updateModeDisplay();
+                refreshImage();
+                updateStatus('Switched to ' + data.mode + ' mode');
+                
+                // Restart auto-refresh if active
+                if (autoRefreshInterval) {
+                    clearInterval(autoRefreshInterval);
+                    autoRefreshInterval = setInterval(currentMode === 'terrain' ? refreshTerrain : refreshImage, 5000);
+                }
+            } else {
+                updateStatus('Error switching mode', 'error');
+            }
+        })
+        .catch(error => {
+            console.error('Error switching mode:', error);
+            updateStatus('Error switching mode', 'error');
+        });
+}
+
+function updateModeDisplay() {
+    const modeDisplay = document.getElementById('modeDisplay');
+    const switchBtn = document.getElementById('switchModeBtn');
+    const refreshBtn = document.getElementById('refreshBtn');
+    
+    if (modeDisplay) {
+        modeDisplay.textContent = 'Current Mode: ' + currentMode;
+    }
+    
+    if (switchBtn) {
+        switchBtn.textContent = 'Switch to ' + (currentMode === 'gradient' ? 'Terrain' : 'Gradient');
+    }
+    
+    if (refreshBtn) {
+        if (currentMode === 'terrain') {
+            refreshBtn.textContent = 'Refresh Terrain';
+            refreshBtn.onclick = refreshTerrain;
+        } else {
+            refreshBtn.textContent = 'Refresh Image';
+            refreshBtn.onclick = refreshImage;
+        }
     }
 }
 
@@ -108,7 +198,21 @@ function updateStatus(message, type = 'info') {
     }, 5000);
 }
 
-// Auto-refresh when page loads
+// Initialize on page load
 document.addEventListener('DOMContentLoaded', function() {
-    refreshImage();
+    // Check if we're in all mode and get current mode
+    fetch('/api/current-mode')
+        .then(response => response.json())
+        .then(data => {
+            if (data.mode) {
+                currentMode = data.mode;
+                updateModeDisplay();
+            }
+            refreshImage();
+        })
+        .catch(error => {
+            // If endpoint doesn't exist, we're not in all mode
+            console.log('Not in all mode, using default');
+            refreshImage();
+        });
 });

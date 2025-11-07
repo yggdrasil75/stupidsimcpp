@@ -5,6 +5,7 @@
 #include "util/bmpwriter.hpp"
 #include "util/jxlwriter.hpp"
 #include "util/timing_decorator.hpp"
+#include "simtools/sim2.hpp"
 
 // Function to convert hex color string to Vec4
 Vec4 hexToVec4(const std::string& hex) {
@@ -70,6 +71,22 @@ bool generateGradientImage(const std::string& filename, int width = 512, int hei
     return JXLWriter::saveJXL(filename, imageData, width, height);
 }
 
+// Generate terrain simulation image
+bool generateTerrainImage(const std::string& filename, int width = 512, int height = 512) {
+    TIME_FUNCTION;
+    
+    static Sim2 sim(width, height);
+    
+    // Randomize seed for variety
+    sim.randomizeSeed();
+    
+    // Render to RGB image
+    std::vector<uint8_t> imageData = sim.renderToRGB(width, height);
+    
+    // Save as JXL
+    return JXLWriter::saveJXL(filename, imageData, width, height);
+}
+
 // Add this function to get timing stats as JSON
 std::string getTimingStatsJSON() {
     
@@ -107,6 +124,7 @@ int main(int argc, char* argv[]) {
     // Check command line arguments
     int port = 8080;
     std::string webRoot = "web";
+    std::string mode = "gradient"; // Default mode
     
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -118,22 +136,36 @@ int main(int argc, char* argv[]) {
             if (i + 1 < argc) {
                 webRoot = argv[++i];
             }
+        } else if (arg == "-2d") {
+            mode = "terrain";
+        } else if (arg == "-all") {
+            mode = "all";
         } else if (arg == "--help" || arg == "-h") {
             std::cout << "Usage: " << argv[0] << " [options]" << std::endl;
             std::cout << "Options:" << std::endl;
             std::cout << "  -p, --port PORT    Set server port (default: 8080)" << std::endl;
             std::cout << "  -w, --webroot DIR  Set web root directory (default: web)" << std::endl;
+            std::cout << "  -2d                Display 2D terrain simulation" << std::endl;
+            std::cout << "  -all               Allow switching between gradient and terrain" << std::endl;
             std::cout << "  -h, --help         Show this help message" << std::endl;
             return 0;
         }
     }
     
-    // Generate gradient image before starting server
-    std::cout << "Generating gradient image..." << std::endl;
-    if (generateGradientImage(webRoot + "/output/gradient.jxl")) {
-        std::cout << "Gradient image generated successfully" << std::endl;
+    // Generate initial image based on mode
+    std::cout << "Generating " << mode << " image..." << std::endl;
+    bool success = false;
+    
+    if (mode == "terrain") {
+        success = generateTerrainImage(webRoot + "/output/display.jxl");
     } else {
-        std::cerr << "Failed to generate gradient image" << std::endl;
+        success = generateGradientImage(webRoot + "/output/display.jxl");
+    }
+    
+    if (success) {
+        std::cout << mode << " image generated successfully" << std::endl;
+    } else {
+        std::cerr << "Failed to generate " << mode << " image" << std::endl;
         return 1;
     }
     
@@ -144,17 +176,66 @@ int main(int argc, char* argv[]) {
         if (method == "GET") {
             return std::make_pair(200, getTimingStatsJSON());
         }
-        //return std::make_pair(405, "{\"error\":\"Method Not Allowed\"}");
+        return std::make_pair(405, std::basic_string("{\"error\":\"Method Not Allowed\"}"));
     });
     
     // Add clear stats endpoint
     server.addRoute("/api/clear-stats", [](const std::string& method, const std::string& body) {
         if (method == "POST") {
             FunctionTimer::clearStats();
-            return std::make_pair(200, "{\"status\":\"success\"}");
+            return std::make_pair(200, std::basic_string("{\"status\":\"success\"}"));
         }
-        return std::make_pair(405, "{\"error\":\"Method Not Allowed\"}");
+        return std::make_pair(405, std::basic_string("{\"error\":\"Method Not Allowed\"}"));
     });
+    
+    // Add mode switching endpoint for -all mode
+    if (mode == "all") {
+        server.addRoute("/api/switch-mode", [webRoot](const std::string& method, const std::string& body) {
+            if (method == "POST") {
+                static bool currentModeGradient = true;
+                
+                bool success = false;
+                if (currentModeGradient) {
+                    success = generateTerrainImage(webRoot + "/output/display.jxl");
+                } else {
+                    success = generateGradientImage(webRoot + "/output/display.jxl");
+                }
+                
+                if (success) {
+                    currentModeGradient = !currentModeGradient;
+                    std::string newMode = currentModeGradient ? "gradient" : "terrain";
+                    return std::make_pair(200, std::basic_string("{\"status\":\"success\", \"mode\":\"" + newMode + "\"}"));
+                } else {
+                    return std::make_pair(500, std::basic_string("{\"error\":\"Failed to generate image\"}"));
+                }
+            }
+            return std::make_pair(405, std::basic_string("{\"error\":\"Method Not Allowed\"}"));
+        });
+        
+        server.addRoute("/api/current-mode", [](const std::string& method, const std::string& body) {
+            if (method == "GET") {
+                static bool currentModeGradient = true;
+                std::string mode = currentModeGradient ? "gradient" : "terrain";
+                return std::make_pair(200, std::basic_string("{\"mode\":\"" + mode + "\"}"));
+            }
+            return std::make_pair(405, std::basic_string("{\"error\":\"Method Not Allowed\"}"));
+        });
+    }
+    
+    // Add refresh endpoint for terrain mode (fast regeneration)
+    if (mode == "terrain" || mode == "all") {
+        server.addRoute("/api/refresh-terrain", [webRoot](const std::string& method, const std::string& body) {
+            if (method == "POST") {
+                bool success = generateTerrainImage(webRoot + "/output/display.jxl");
+                if (success) {
+                    return std::make_pair(200, std::basic_string("{\"status\":\"success\"}"));
+                } else {
+                    return std::make_pair(500, std::basic_string("{\"error\":\"Failed to generate terrain\"}"));
+                }
+            }
+            return std::make_pair(405, std::basic_string("{\"error\":\"Method Not Allowed\"}"));
+        });
+    }
     
     if (!server.start()) {
         std::cerr << "Failed to start server on port " << port << std::endl;
@@ -163,7 +244,17 @@ int main(int argc, char* argv[]) {
     
     std::cout << "Server running on http://localhost:" << port << std::endl;
     std::cout << "Web root: " << webRoot << std::endl;
+    std::cout << "Mode: " << mode << std::endl;
     std::cout << "Timing stats available at /api/timing-stats" << std::endl;
+    
+    if (mode == "all") {
+        std::cout << "Mode switching available at /api/switch-mode" << std::endl;
+    }
+    
+    if (mode == "terrain") {
+        std::cout << "Fast terrain refresh available at /api/refresh-terrain" << std::endl;
+    }
+    
     std::cout << "Press Ctrl+C to stop the server" << std::endl;
     
     server.handleRequests();
