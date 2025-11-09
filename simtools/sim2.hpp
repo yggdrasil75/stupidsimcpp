@@ -1,265 +1,336 @@
 #ifndef SIM2_HPP
 #define SIM2_HPP
 
-#include "../util/noise2.hpp"
-#include "../util/grid2.hpp"
+#include "../util/grid/grid2.hpp"
 #include "../util/vec2.hpp"
-#include "../util/vec4.hpp"
-#include "../util/timing_decorator.hpp"
+#include <vector>
 #include <memory>
-#include <string>
 #include <unordered_map>
 
-class Sim2 {
-private:
-    std::unique_ptr<Noise2> noiseGenerator;
-    Grid2 terrainGrid;
-    int gridWidth;
-    int gridHeight;
-    
-    // Terrain generation parameters
-    float scale;
-    int octaves;
-    float persistence;
-    float lacunarity;
-    uint32_t seed;
-    Vec2 offset;
-    
-    // Terrain modification parameters
-    float elevationMultiplier;
-    float waterLevel;
-    Vec4 landColor;
-    Vec4 waterColor;
+class PhysicsObject {
+protected:
+    Vec2 position;
+    Vec2 velocity;
+    Vec2 acceleration;
+    float mass;
+    bool isStatic;
+    std::shared_ptr<Grid2> shape;
     
 public:
-    Sim2(int width = 512, int height = 512, uint32_t seed = 42, float scale = 4.0f, int octaves = 4,
-        float persistence = 0.5f, float lacunarity = 2.0f, float waterlevel = 0.3f, float elevation = 1.0f) 
-        : gridWidth(width), gridHeight(height), scale(scale), octaves(octaves), 
-          persistence(persistence), lacunarity(lacunarity), seed(seed), offset(0, 0),
-          elevationMultiplier(elevation), waterLevel(waterlevel),
-          landColor(0.2f, 0.8f, 0.2f, 1.0f),  // Green
-          waterColor(0.2f, 0.3f, 0.8f, 1.0f)  // Blue
-    {
-        noiseGenerator = std::make_unique<Noise2>(seed,Noise2::PERLIN,Noise2::PRECOMPUTED);
-        generateTerrain();
-    }
+    PhysicsObject(const Vec2& pos, float mass = 1.0f, bool isStatic = false)
+        : position(pos), velocity(0, 0), acceleration(0, 0), mass(mass), isStatic(isStatic) {}
     
-    // Generate initial terrain
-    void generateTerrain() {
-        TIME_FUNCTION;
-        terrainGrid = noiseGenerator->generateTerrainNoise(
-            gridWidth, gridHeight, scale, octaves, persistence, seed, offset);
+    virtual ~PhysicsObject() = default;
+    
+    virtual void update(float dt) {
+        if (isStatic) return;
         
-        applyTerrainColors();
+        // Update velocity and position using basic physics
+        velocity += acceleration * dt;
+        position += velocity * dt;
+        acceleration = Vec2(0, 0); // Reset acceleration for next frame
     }
     
-    // Regenerate terrain with current parameters
-    void regenerate() {
-        generateTerrain();
-    }
-    
-    // Basic parameter modifications
-    void setScale(float newScale) {
-        scale = std::max(0.1f, newScale);
-        generateTerrain();
-    }
-    
-    void setOctaves(int newOctaves) {
-        octaves = std::max(1, newOctaves);
-        generateTerrain();
-    }
-    
-    void setPersistence(float newPersistence) {
-        persistence = std::clamp(newPersistence, 0.0f, 1.0f);
-        generateTerrain();
-    }
-    
-    void setLacunarity(float newLacunarity) {
-        lacunarity = std::max(1.0f, newLacunarity);
-        generateTerrain();
-    }
-    
-    void setSeed(uint32_t newSeed) {
-        seed = newSeed;
-        noiseGenerator->setSeed(seed);
-        generateTerrain();
-    }
-    
-    void setOffset(const Vec2& newOffset) {
-        offset = newOffset;
-        generateTerrain();
-    }
-    
-    void setElevationMultiplier(float multiplier) {
-        elevationMultiplier = std::max(0.0f, multiplier);
-        applyElevationModification();
-    }
-    
-    void setWaterLevel(float level) {
-        waterLevel = std::clamp(level, 0.0f, 1.0f);
-        applyTerrainColors();
-    }
-    
-    void setLandColor(const Vec4& color) {
-        landColor = color;
-        applyTerrainColors();
-    }
-    
-    void setWaterColor(const Vec4& color) {
-        waterColor = color;
-        applyTerrainColors();
-    }
-    
-    // Get current parameters
-    float getScale() const { return scale; }
-    int getOctaves() const { return octaves; }
-    float getPersistence() const { return persistence; }
-    float getLacunarity() const { return lacunarity; }
-    uint32_t getSeed() const { return seed; }
-    Vec2 getOffset() const { return offset; }
-    float getElevationMultiplier() const { return elevationMultiplier; }
-    float getWaterLevel() const { return waterLevel; }
-    Vec4 getLandColor() const { return landColor; }
-    Vec4 getWaterColor() const { return waterColor; }
-    
-    // Get the terrain grid
-    const Grid2& getTerrainGrid() const {
-        return terrainGrid;
-    }
-    
-    // Get terrain dimensions
-    int getWidth() const { return gridWidth; }
-    int getHeight() const { return gridHeight; }
-    
-    // Get elevation at specific coordinates
-    float getElevation(int x, int y) const {
-        if (x < 0 || x >= gridWidth || y < 0 || y >= gridHeight) {
-            return 0.0f;
+    virtual void applyForce(const Vec2& force) {
+        if (!isStatic) {
+            acceleration += force / mass;
         }
-        return terrainGrid.colors[y * gridWidth + x].x; // Elevation stored in red channel
     }
     
-    // Render to RGB image
-    std::vector<uint8_t> renderToRGB(int width, int height, 
-                                    const Vec4& backgroundColor = Vec4(0, 0, 0, 1)) const {
-        return terrainGrid.renderToRGB(width, height, backgroundColor);
-    }
+    // Getters
+    const Vec2& getPosition() const { return position; }
+    const Vec2& getVelocity() const { return velocity; }
+    float getMass() const { return mass; }
+    bool getIsStatic() const { return isStatic; }
+    std::shared_ptr<Grid2> getShape() const { return shape; }
     
-    // Render to RGBA image
-    std::vector<uint8_t> renderToRGBA(int width, int height, 
-                                     const Vec4& backgroundColor = Vec4(0, 0, 0, 1)) const {
-        return terrainGrid.renderToRGBA(width, height, backgroundColor);
-    }
+    // Setters
+    void setPosition(const Vec2& pos) { position = pos; }
+    void setVelocity(const Vec2& vel) { velocity = vel; }
+    void setMass(float m) { mass = m; }
+    void setShape(std::shared_ptr<Grid2> newShape) { shape = newShape; }
     
-    // Export terrain data as heightmap (grayscale)
-    Grid2 exportHeightmap() const {
-        Grid2 heightmap(gridWidth * gridHeight);
+    // Check if this object contains a world position
+    virtual bool contains(const Vec2& worldPos) const {
+        if (!shape) return false;
         
-        for (int y = 0; y < gridHeight; y++) {
-            for (int x = 0; x < gridWidth; x++) {
-                int index = y * gridWidth + x;
-                float elevation = terrainGrid.colors[index].x;
-                heightmap.positions[index] = Vec2(x, y);
-                heightmap.colors[index] = Vec4(elevation, elevation, elevation, 1.0f);
-            }
+        Vec2 localPos = worldPos - position;
+        return shape->isOccupied(localPos.round());
+    }
+    
+    // Get all occupied positions in world coordinates
+    virtual std::vector<Vec2> getWorldPositions() const {
+        std::vector<Vec2> worldPositions;
+        if (!shape) return worldPositions;
+        
+        const auto& localPositions = shape->getPositions();
+        for (const auto& localPos : localPositions) {
+            worldPositions.push_back(position + localPos);
         }
+        return worldPositions;
+    }
+};
+
+class FallingObject : public PhysicsObject {
+private:
+    Vec2 gravityForce;
+    
+public:
+    FallingObject(const Vec2& pos, float mass = 1.0f, const Vec2& gravity = Vec2(0, -9.8f))
+        : PhysicsObject(pos, mass, false), gravityForce(gravity * mass) {}
+    
+    void update(float dt) override {
+        if (!isStatic) {
+            // Apply gravity
+            applyForce(gravityForce);
+        }
+        PhysicsObject::update(dt);
+    }
+    
+    void setGravity(const Vec2& gravity) {
+        gravityForce = gravity * mass;
+    }
+    
+    const Vec2 getGravity() const {
+        return gravityForce / mass;
+    }
+};
+
+class SolidObject : public PhysicsObject {
+public:
+    SolidObject(const Vec2& pos, float mass = 1.0f)
+        : PhysicsObject(pos, mass, true) {} // Solids are static by default
+    
+    // Solids don't move, so override update to do nothing
+    void update(float dt) override {
+        // Solids don't move
+    }
+    
+    void applyForce(const Vec2& force) override {
+        // Solids don't respond to forces
+    }
+};
+
+class Sim2 : public Grid2 {
+private:
+    std::vector<std::shared_ptr<PhysicsObject>> objects;
+    Vec2 globalGravity;
+    float elasticity; // Bounciness factor (0.0 to 1.0)
+    float friction;   // Surface friction (0.0 to 1.0)
+    Vec2 worldBoundsMin, worldBoundsMax;
+    bool useWorldBounds;
+    
+public:
+    Sim2(int width, int height, const Vec2& gravity = Vec2(0, -9.8f))
+        : Grid2(width, height), globalGravity(gravity), elasticity(0.7f), 
+          friction(0.1f), useWorldBounds(false) {}
+    
+    // Add objects to simulation
+    void addObject(std::shared_ptr<PhysicsObject> object) {
+        objects.push_back(object);
+    }
+    
+    // Create a falling ball
+    std::shared_ptr<FallingObject> createBall(const Vec2& position, float radius, 
+                                            const Vec4& color = Vec4(1.0f, 0.5f, 0.0f, 1.0f), 
+                                            float mass = 1.0f) {
+        auto ball = std::make_shared<FallingObject>(position, mass, globalGravity);
+        auto shape = std::make_shared<Grid2>(static_cast<int>(radius * 2 + 2));
+        shape->fillCircle(Vec2(radius, radius), radius, color);
+        ball->setShape(shape);
+        objects.push_back(ball);
+        return ball;
+    }
+    
+    // Create a solid ground
+    std::shared_ptr<SolidObject> createGround(const Vec2& position, int width, 
+                                            const Vec4& color = Vec4(0.0f, 1.0f, 0.0f, 1.0f)) {
+        auto ground = std::make_shared<SolidObject>(position);
+        auto shape = std::make_shared<Grid2>(width, 1);
+        for (int x = 0; x < width; ++x) {
+            shape->addPixel(x, 0, color);
+        }
+        ground->setShape(shape);
+        objects.push_back(ground);
+        return ground;
+    }
+    
+    // Create a solid wall
+    std::shared_ptr<SolidObject> createWall(const Vec2& position, int height,
+                                          const Vec4& color = Vec4(0.3f, 0.3f, 0.7f, 1.0f)) {
+        auto wall = std::make_shared<SolidObject>(position);
+        auto shape = std::make_shared<Grid2>(1, height);
+        for (int y = 0; y < height; ++y) {
+            shape->addPixel(0, y, color);
+        }
+        wall->setShape(shape);
+        objects.push_back(wall);
+        return wall;
+    }
+    
+    // Update the simulation
+    void update(float dt) {
+        // Clear the main grid
+        clear();
         
-        return heightmap;
-    }
-    
-    // Generate random seed and regenerate
-    void randomizeSeed() {
-        std::random_device rd;
-        setSeed(rd());
-    }
-    
-    // Reset all parameters to default
-    void reset() {
-        scale = 4.0f;
-        octaves = 4;
-        persistence = 0.5f;
-        lacunarity = 2.0f;
-        elevationMultiplier = 1.0f;
-        waterLevel = 0.3f;
-        landColor = Vec4(0.2f, 0.8f, 0.2f, 1.0f);
-        waterColor = Vec4(0.2f, 0.3f, 0.8f, 1.0f);
-        generateTerrain();
-    }
-    
-    // Get terrain statistics
-    struct TerrainStats {
-        float minElevation;
-        float maxElevation;
-        float averageElevation;
-        float landPercentage;
-        int landArea;
-        int waterArea;
-    };
-    
-    TerrainStats getTerrainStats() const {
-        TerrainStats stats = {1.0f, 0.0f, 0.0f, 0.0f, 0, 0};
-        float totalElevation = 0.0f;
-        
-        for (const auto& color : terrainGrid.colors) {
-            float elevation = color.x;
-            stats.minElevation = std::min(stats.minElevation, elevation);
-            stats.maxElevation = std::max(stats.maxElevation, elevation);
-            totalElevation += elevation;
-            
-            if (elevation > waterLevel) {
-                stats.landArea++;
-            } else {
-                stats.waterArea++;
-            }
+        // Update all objects
+        for (auto& obj : objects) {
+            obj->update(dt);
         }
         
-        stats.averageElevation = totalElevation / terrainGrid.colors.size();
-        stats.landPercentage = static_cast<float>(stats.landArea) / 
-                              (stats.landArea + stats.waterArea) * 100.0f;
+        // Handle collisions
+        handleCollisions();
         
-        return stats;
+        // Handle world bounds
+        if (useWorldBounds) {
+            handleWorldBounds();
+        }
+        
+        // Render all objects to the main grid
+        renderObjects();
+    }
+    
+    // Set world bounds for containment
+    void setWorldBounds(const Vec2& min, const Vec2& max) {
+        worldBoundsMin = min;
+        worldBoundsMax = max;
+        useWorldBounds = true;
+    }
+    
+    // Simulation parameters
+    void setElasticity(float e) { elasticity = std::clamp(e, 0.0f, 1.0f); }
+    void setFriction(float f) { friction = std::clamp(f, 0.0f, 1.0f); }
+    void setGlobalGravity(const Vec2& gravity) { globalGravity = gravity; }
+    
+    float getElasticity() const { return elasticity; }
+    float getFriction() const { return friction; }
+    const Vec2& getGlobalGravity() const { return globalGravity; }
+    
+    // Get all objects
+    const std::vector<std::shared_ptr<PhysicsObject>>& getObjects() const {
+        return objects;
+    }
+    
+    // Clear all objects
+    void clearObjects() {
+        objects.clear();
+        clear();
     }
 
 private:
-    void applyTerrainColors() {
-        for (int y = 0; y < gridHeight; y++) {
-            for (int x = 0; x < gridWidth; x++) {
-                int index = y * gridWidth + x;
-                float elevation = terrainGrid.colors[index].x;
+    void handleCollisions() {
+        // Simple collision detection between falling objects and solids
+        for (size_t i = 0; i < objects.size(); ++i) {
+            auto obj1 = objects[i];
+            if (obj1->getIsStatic()) continue; // Skip static objects for collision detection
+            
+            for (size_t j = 0; j < objects.size(); ++j) {
+                if (i == j) continue;
                 
-                // Apply water level and color based on elevation
-                if (elevation <= waterLevel) {
-                    // Water - optionally add depth variation
-                    float depth = (waterLevel - elevation) / waterLevel;
-                    Vec4 water = waterColor * (0.7f + 0.3f * depth);
-                    water.w = 1.0f; // Ensure full alpha
-                    terrainGrid.colors[index] = water;
-                } else {
-                    // Land - optionally add elevation-based color variation
-                    float height = (elevation - waterLevel) / (1.0f - waterLevel);
-                    Vec4 land = landColor * (0.8f + 0.2f * height);
-                    land.w = 1.0f; // Ensure full alpha
-                    terrainGrid.colors[index] = land;
+                auto obj2 = objects[j];
+                if (!obj2->getIsStatic()) continue; // Only check against static objects for now
+                
+                checkAndResolveCollision(obj1, obj2);
+            }
+        }
+    }
+    
+    void checkAndResolveCollision(std::shared_ptr<PhysicsObject> dynamicObj, 
+                                 std::shared_ptr<PhysicsObject> staticObj) {
+        if (!dynamicObj->getShape() || !staticObj->getShape()) return;
+        
+        // Get all world positions of the dynamic object
+        auto dynamicPositions = dynamicObj->getWorldPositions();
+        
+        for (const auto& dynPos : dynamicPositions) {
+            // Check if this position collides with the static object
+            if (staticObj->contains(dynPos)) {
+                // Simple collision response - bounce
+                Vec2 velocity = dynamicObj->getVelocity();
+                
+                // Determine collision normal (simplified - always bounce up)
+                Vec2 normal(0, 1);
+                
+                // Reflect velocity with elasticity
+                Vec2 reflectedVel = velocity.reflect(normal) * elasticity;
+                
+                // Apply friction
+                reflectedVel.x *= (1.0f - friction);
+                
+                dynamicObj->setVelocity(reflectedVel);
+                
+                // Move object out of collision
+                Vec2 newPos = dynamicObj->getPosition();
+                newPos.y += 1.0f; // Move up by 1 pixel
+                dynamicObj->setPosition(newPos);
+                
+                break; // Only handle first collision
+            }
+        }
+    }
+    
+    void handleWorldBounds() {
+        for (auto& obj : objects) {
+            if (obj->getIsStatic()) continue;
+            
+            Vec2 pos = obj->getPosition();
+            Vec2 vel = obj->getVelocity();
+            bool collided = false;
+            
+            // Check bounds and bounce
+            if (pos.x < worldBoundsMin.x) {
+                pos.x = worldBoundsMin.x;
+                vel.x = -vel.x * elasticity;
+                collided = true;
+            } else if (pos.x > worldBoundsMax.x) {
+                pos.x = worldBoundsMax.x;
+                vel.x = -vel.x * elasticity;
+                collided = true;
+            }
+            
+            if (pos.y < worldBoundsMin.y) {
+                pos.y = worldBoundsMin.y;
+                vel.y = -vel.y * elasticity;
+                collided = true;
+            } else if (pos.y > worldBoundsMax.y) {
+                pos.y = worldBoundsMax.y;
+                vel.y = -vel.y * elasticity;
+                collided = true;
+            }
+            
+            if (collided) {
+                obj->setPosition(pos);
+                obj->setVelocity(vel);
+            }
+        }
+    }
+    
+    void renderObjects() {
+        // Render all objects to the main grid
+        for (const auto& obj : objects) {
+            if (!obj->getShape()) continue;
+            
+            const auto& shape = obj->getShape();
+            const Vec2& objPos = obj->getPosition();
+            
+            // Copy all pixels from object's shape to main grid at object's position
+            const auto& positions = shape->getPositions();
+            const auto& colors = shape->getColors();
+            const auto& sizes = shape->getSizes();
+            
+            for (size_t i = 0; i < positions.size(); ++i) {
+                Vec2 worldPos = objPos + positions[i];
+                Vec2 gridPos = worldPos.round();
+                
+                // Only add if within grid bounds
+                if (gridPos.x >= 0 && gridPos.x < width && 
+                    gridPos.y >= 0 && gridPos.y < height) {
+                    if (!isOccupied(gridPos)) {
+                        addPixel(gridPos, colors[i], sizes[i]);
+                    }
                 }
             }
         }
-    }
-    
-    void applyElevationModification() {
-        for (int y = 0; y < gridHeight; y++) {
-            for (int x = 0; x < gridWidth; x++) {
-                int index = y * gridWidth + x;
-                float originalElevation = terrainGrid.colors[index].x;
-                
-                // Apply elevation multiplier with clamping
-                float newElevation = std::clamp(originalElevation * elevationMultiplier, 0.0f, 1.0f);
-                terrainGrid.colors[index].x = newElevation;
-                terrainGrid.colors[index].y = newElevation; // Keep grayscale for heightmap
-                terrainGrid.colors[index].z = newElevation;
-            }
-        }
-        
-        applyTerrainColors();
     }
 };
 
