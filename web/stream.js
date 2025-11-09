@@ -9,6 +9,9 @@ const ctx = canvas.getContext('2d');
 const fpsCounter = document.getElementById('fpsCounter');
 const frameCounter = document.getElementById('frameCounter');
 
+// Image data buffer for direct pixel manipulation
+let imageData = ctx.createImageData(canvas.width, canvas.height);
+
 function toggleStream() {
     const button = document.getElementById('streamBtn');
     
@@ -31,7 +34,7 @@ function startStream() {
     lastFrameTime = performance.now();
     
     // Start the stream loop
-    streamInterval = setInterval(fetchFrame, 1000 / 30); // Start with 30 FPS
+    streamInterval = setInterval(fetchFrame, 1000 / 30);
 }
 
 function stopStream() {
@@ -53,19 +56,34 @@ async function fetchFrame() {
     if (!isStreaming) return;
     
     try {
-        const response = await fetch('/api/live-stream');
-        const data = await response.json();
-        
-        if (data.frame_available) {
-            // In a real implementation, you'd decode the frame data and draw it
-            // For now, we'll simulate by generating a pattern based on time
-            drawSimulatedFrame();
-            updateFrameCounter();
+        const response = await fetch('/api/frame');
+        if (response.ok) {
+            const arrayBuffer = await response.arrayBuffer();
+            const rgbData = new Uint8Array(arrayBuffer);
+            
+            if (rgbData.length === 512 * 512 * 3) {
+                drawRGBFrame(rgbData);
+                updateFrameCounter();
+            }
         }
     } catch (error) {
         console.error('Error fetching frame:', error);
         updateStatus('Error fetching frame', 'error');
     }
+}
+
+function drawRGBFrame(rgbData) {
+    const data = imageData.data;
+    
+    // Convert RGB to RGBA
+    for (let i = 0, j = 0; i < data.length; i += 4, j += 3) {
+        data[i] = rgbData[j];     // R
+        data[i + 1] = rgbData[j + 1]; // G
+        data[i + 2] = rgbData[j + 2]; // B
+        data[i + 3] = 255;        // A
+    }
+    
+    ctx.putImageData(imageData, 0, 0);
 }
 
 function updateFrameCounter() {
