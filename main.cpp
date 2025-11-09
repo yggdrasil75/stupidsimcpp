@@ -1,11 +1,21 @@
 #include <iostream>
 #include <string>
+#include <vector>
+#include <memory>
+#include <atomic>
+#include <thread>
+#include <chrono>
 #include "util/simple_httpserver.hpp"
 #include "util/grid2.hpp"
 #include "util/bmpwriter.hpp"
 #include "util/jxlwriter.hpp"
 #include "util/timing_decorator.hpp"
 #include "simtools/sim2.hpp"
+
+std::vector<uint8_t> currentFrame;
+std::atomic<bool> frameReady{false};
+std::atomic<bool> streaming{false};
+std::mutex frameMutex;
 
 // Function to convert hex color string to Vec4
 Vec4 hexToVec4(const std::string& hex) {
@@ -21,8 +31,8 @@ Vec4 hexToVec4(const std::string& hex) {
     return Vec4(r / 255.0f, g / 255.0f, b / 255.0f, 1.0f);
 }
 
-// Generate gradient image
-bool generateGradientImage(const std::string& filename, int width = 512, int height = 512) {
+// Generate gradient frame data
+std::vector<uint8_t> generateGradientFrame(int width = 512, int height = 512) {
     TIME_FUNCTION;
     
     const int POINTS_PER_DIM = 256;
@@ -65,26 +75,39 @@ bool generateGradientImage(const std::string& filename, int width = 512, int hei
     }
     
     // Render to RGB image
-    std::vector<uint8_t> imageData = grid.renderToRGB(width, height);
-    
-    // Save as JXL
-    return JXLWriter::saveJXL(filename, imageData, width, height);
+    return grid.renderToRGB(width, height);
 }
 
-// Generate terrain simulation image
-bool generateTerrainImage(const std::string& filename, int width = 512, int height = 512, uint32_t seed = 42, float scale = 4.0f, int octaves = 4,
-        float persistence = 0.5f, float lacunarity = 2.0f, float waterlevel = 0.3f, float elevation = 1.0f) {
-    TIME_FUNCTION;
+// Streaming thread function
+void streamingThread(const std::string& mode) {
+    uint32_t frameCount = 0;
+    auto lastFrameTime = std::chrono::steady_clock::now();
     
-    Sim2 sim(width, height, seed, scale, octaves, persistence, lacunarity, waterlevel, elevation);
-    sim.generateTerrain();
-    // Randomize seed for variety
-    
-    // Render to RGB image
-    std::vector<uint8_t> imageData = sim.renderToRGB(width, height);
-    
-    // Save as JXL
-    return JXLWriter::saveJXL(filename, imageData, width, height);
+    while (streaming) {
+        auto startTime = std::chrono::steady_clock::now();
+        
+        std::vector<uint8_t> newFrame;
+        
+        newFrame = generateGradientFrame(512, 512);
+        {
+            std::lock_guard<std::mutex> lock(frameMutex);
+            currentFrame = std::move(newFrame);
+            frameReady = true;
+        }
+        
+        frameCount++;
+        
+        // Limit frame rate to ~30 FPS
+        auto endTime = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
+        auto targetFrameTime = std::chrono::milliseconds(33); // ~30 FPS
+        
+        if (elapsed < targetFrameTime) {
+            std::this_thread::sleep_for(targetFrameTime - elapsed);
+        }
+        
+        lastFrameTime = endTime;
+    }
 }
 
 // Add this function to get timing stats as JSON
@@ -136,8 +159,6 @@ int main(int argc, char* argv[]) {
             if (i + 1 < argc) {
                 webRoot = argv[++i];
             }
-        } else if (arg == "-2d") {
-            mode = "terrain";
         } else if (arg == "-all") {
             mode = "all";
         } else if (arg == "--help" || arg == "-h") {
@@ -145,92 +166,60 @@ int main(int argc, char* argv[]) {
             std::cout << "Options:" << std::endl;
             std::cout << "  -p, --port PORT    Set server port (default: 8080)" << std::endl;
             std::cout << "  -w, --webroot DIR  Set web root directory (default: web)" << std::endl;
-            std::cout << "  -2d                Display 2D terrain simulation" << std::endl;
             std::cout << "  -all               Allow switching between gradient and terrain" << std::endl;
             std::cout << "  -h, --help         Show this help message" << std::endl;
             return 0;
         }
     }
     
-    // Generate initial image based on mode
-    std::cout << "Generating " << mode << " image..." << std::endl;
-    bool success = false;
+    // Generate initial frame
+    std::cout << "Starting " << mode << " streaming..." << std::endl;
     
-    if (mode == "terrain") {
-        success = generateTerrainImage(webRoot + "/output/display.jxl");
-    } else {
-        success = generateGradientImage(webRoot + "/output/display.jxl");
-    }
-    
-    if (success) {
-        std::cout << mode << " image generated successfully" << std::endl;
-    } else {
-        std::cerr << "Failed to generate " << mode << " image" << std::endl;
-        return 1;
-    }
+    // Start streaming thread
+    streaming = true;
+    std::thread streamThread(streamingThread, mode);
     
     SimpleHTTPServer server(port, webRoot);
     
-    // Add parameter setting endpoint
-    server.addRoute("/api/set-parameters", [webRoot](const std::string& method, const std::string& body) {
-        if (method == "POST") {
-            try {
-                // Parse JSON parameters
-                // Simple JSON parsing - in a real application you'd use a proper JSON library
-                float scale = 4.0f;
-                int octaves = 4;
-                float persistence = 0.5f;
-                float lacunarity = 2.0f;
-                float elevation = 1.0f;
-                float waterLevel = 0.3f;
-                uint32_t seed = 42;
-                
-                // Extract parameters from JSON (simplified parsing)
-                if (body.find("\"scale\"") != std::string::npos) {
-                    size_t pos = body.find("\"scale\":") + 8;
-                    scale = std::stof(body.substr(pos));
-                }
-                if (body.find("\"octaves\"") != std::string::npos) {
-                    size_t pos = body.find("\"octaves\":") + 10;
-                    octaves = std::stoi(body.substr(pos));
-                }
-                if (body.find("\"persistence\"") != std::string::npos) {
-                    size_t pos = body.find("\"persistence\":") + 14;
-                    persistence = std::stof(body.substr(pos));
-                }
-                if (body.find("\"lacunarity\"") != std::string::npos) {
-                    size_t pos = body.find("\"lacunarity\":") + 13;
-                    lacunarity = std::stof(body.substr(pos));
-                }
-                if (body.find("\"elevation\"") != std::string::npos) {
-                    size_t pos = body.find("\"elevation\":") + 12;
-                    elevation = std::stof(body.substr(pos));
-                }
-                if (body.find("\"waterLevel\"") != std::string::npos) {
-                    size_t pos = body.find("\"waterLevel\":") + 13;
-                    waterLevel = std::stof(body.substr(pos));
-                }
-                if (body.find("\"seed\"") != std::string::npos) {
-                    size_t pos = body.find("\"seed\":") + 7;
-                    seed = std::stoul(body.substr(pos));
-                }
-                
-                // Create NEW instance each time (remove 'static')
-                Sim2 sim(512, 512, seed, scale, octaves, persistence, lacunarity, waterLevel, elevation);
-                
-                // Regenerate and save
-                std::vector<uint8_t> imageData = sim.renderToRGB(512, 512);
-                bool success = generateTerrainImage(webRoot + "/output/display.jxl", 512, 512, seed, scale, octaves, persistence, lacunarity, waterLevel, elevation);
-                //bool success = JXLWriter::saveJXL(webRoot + "/output/display.jxl", imageData, 512, 512);
-                
-                if (success) {
-                    return std::make_pair(200, std::basic_string("{\"status\":\"success\"}"));
-                } else {
-                    return std::make_pair(500, std::basic_string("{\"error\":\"Failed to generate terrain\"}"));
-                }
-            } catch (const std::exception& e) {
-                return std::make_pair(400, std::basic_string("{\"error\":\"Invalid parameters\"}"));
+    // Add live stream endpoint
+    server.addRoute("/api/live-stream", [](const std::string& method, const std::string& body) {
+        if (method == "GET") {
+            int maxWait = 100;
+            while (!frameReady && maxWait-- > 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
+            
+            if (!frameReady) {
+                return std::make_pair(503, std::basic_string("{\"error\":\"No frame available\"}"));
+            }
+            
+            std::vector<uint8_t> frameCopy;
+            {
+                std::lock_guard<std::mutex> lock(frameMutex);
+                frameCopy = currentFrame;
+            }
+            
+            // Convert to base64 for JSON response
+            std::string base64Data = "data:image/jpeg;base64,"; 
+            // TODO
+            
+            std::stringstream json;
+            json << "{\"frame_available\":true,\"width\":512,\"height\":512,\"data_size\":" << frameCopy.size() << "}";
+            
+            return std::make_pair(200, json.str());
+        }
+        return std::make_pair(405, std::basic_string("{\"error\":\"Method Not Allowed\"}"));
+    });
+    
+    server.addRoute("/stream.mjpg", [](const std::string& method, const std::string& body) {
+        if (method == "GET") {
+            // TODO
+            std::string response = "HTTP/1.1 200 OK\r\n";
+            response += "Content-Type: multipart/x-mixed-replace; boundary=frame\r\n";
+            response += "Connection: close\r\n";
+            response += "\r\n";
+            
+            return std::make_pair(200, response);
         }
         return std::make_pair(405, std::basic_string("{\"error\":\"Method Not Allowed\"}"));
     });
@@ -243,59 +232,19 @@ int main(int argc, char* argv[]) {
         return std::make_pair(405, std::basic_string("{\"error\":\"Method Not Allowed\"}"));
     });
     
-    // Add clear stats endpoint
-    server.addRoute("/api/clear-stats", [](const std::string& method, const std::string& body) {
-        if (method == "POST") {
-            FunctionTimer::clearStats();
-            return std::make_pair(200, std::basic_string("{\"status\":\"success\"}"));
-        }
-        return std::make_pair(405, std::basic_string("{\"error\":\"Method Not Allowed\"}"));
-    });
-    
     // Add mode switching endpoint for -all mode
     if (mode == "all") {
-        server.addRoute("/api/switch-mode", [webRoot](const std::string& method, const std::string& body) {
+        server.addRoute("/api/switch-mode", [](const std::string& method, const std::string& body) {
             if (method == "POST") {
-                static bool currentModeGradient = true;
-                
-                bool success = false;
-                if (currentModeGradient) {
-                    success = generateTerrainImage(webRoot + "/output/display.jxl");
-                } else {
-                    success = generateGradientImage(webRoot + "/output/display.jxl");
-                }
-                
-                if (success) {
-                    currentModeGradient = !currentModeGradient;
-                    std::string newMode = currentModeGradient ? "gradient" : "terrain";
-                    return std::make_pair(200, std::basic_string("{\"status\":\"success\", \"mode\":\"" + newMode + "\"}"));
-                } else {
-                    return std::make_pair(500, std::basic_string("{\"error\":\"Failed to generate image\"}"));
-                }
+                //TODO
+                return std::make_pair(200, std::basic_string("{\"status\":\"success\", \"mode\":\"switched\"}"));
             }
             return std::make_pair(405, std::basic_string("{\"error\":\"Method Not Allowed\"}"));
         });
         
         server.addRoute("/api/current-mode", [](const std::string& method, const std::string& body) {
             if (method == "GET") {
-                static bool currentModeGradient = true;
-                std::string mode = currentModeGradient ? "gradient" : "terrain";
-                return std::make_pair(200, std::basic_string("{\"mode\":\"" + mode + "\"}"));
-            }
-            return std::make_pair(405, std::basic_string("{\"error\":\"Method Not Allowed\"}"));
-        });
-    }
-    
-    // Add refresh endpoint for terrain mode (fast regeneration)
-    if (mode == "terrain" || mode == "all") {
-        server.addRoute("/api/refresh-terrain", [webRoot](const std::string& method, const std::string& body) {
-            if (method == "POST") {
-                bool success = generateTerrainImage(webRoot + "/output/display.jxl");
-                if (success) {
-                    return std::make_pair(200, std::basic_string("{\"status\":\"success\"}"));
-                } else {
-                    return std::make_pair(500, std::basic_string("{\"error\":\"Failed to generate terrain\"}"));
-                }
+                return std::make_pair(200, std::basic_string("{\"mode\":\"live\"}"));
             }
             return std::make_pair(405, std::basic_string("{\"error\":\"Method Not Allowed\"}"));
         });
@@ -303,25 +252,30 @@ int main(int argc, char* argv[]) {
     
     if (!server.start()) {
         std::cerr << "Failed to start server on port " << port << std::endl;
+        streaming = false;
+        if (streamThread.joinable()) streamThread.join();
         return 1;
     }
     
     std::cout << "Server running on http://localhost:" << port << std::endl;
     std::cout << "Web root: " << webRoot << std::endl;
     std::cout << "Mode: " << mode << std::endl;
+    std::cout << "Live stream available at /api/live-stream" << std::endl;
     std::cout << "Timing stats available at /api/timing-stats" << std::endl;
     
     if (mode == "all") {
         std::cout << "Mode switching available at /api/switch-mode" << std::endl;
     }
     
-    if (mode == "terrain") {
-        std::cout << "Fast terrain refresh available at /api/refresh-terrain" << std::endl;
-    }
-    
     std::cout << "Press Ctrl+C to stop the server" << std::endl;
     
     server.handleRequests();
+    
+    // Cleanup
+    streaming = false;
+    if (streamThread.joinable()) {
+        streamThread.join();
+    }
     
     return 0;
 }

@@ -170,3 +170,38 @@ button.danger:hover {
     }
     
 }
+
+.stream-container {
+    position: relative;
+    margin: 20px 0;
+    padding: 20px;
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 10px;
+    display: inline-block;
+}
+
+#streamCanvas {
+    border-radius: 8px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+    background: #000;
+}
+
+.stream-info {
+    position: absolute;
+    top: 30px;
+    right: 30px;
+    background: rgba(0, 0, 0, 0.7);
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.stream-info span {
+    color: #fff;
+    font-family: monospace;
+}
+
+/* DO NOT ADD STATS CSS*/
