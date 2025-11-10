@@ -322,6 +322,9 @@ private:
                 Vec2 worldPos = objPos + positions[i];
                 Vec2 gridPos = worldPos.round();
                 
+                // Flip Y coordinate to make (0,0) bottom-left
+                gridPos.y = height - 1 - gridPos.y;
+                
                 // Only add if within grid bounds
                 if (gridPos.x >= 0 && gridPos.x < width && 
                     gridPos.y >= 0 && gridPos.y < height) {
