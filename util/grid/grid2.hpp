@@ -204,8 +204,8 @@ public:
         getBoundingBox(minCorner, maxCorner);
         
         // Calculate grid dimensions (adding 1 to include both ends)
-        width = static_cast<int>(std::ceil(maxCorner.x - minCorner.x)) + 1;
-        height = static_cast<int>(std::ceil(maxCorner.y - minCorner.y)) + 1;
+        width = static_cast<int>(std::ceil(maxCorner.x - minCorner.x)) ;
+        height = static_cast<int>(std::ceil(maxCorner.y - minCorner.y)) ;
         
         // Initialize with black (0,0,0)
         rgbData.resize(width * height * 3, 0);

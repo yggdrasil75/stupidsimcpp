@@ -2,6 +2,7 @@
 #include <vector>
 #include <random>
 #include <algorithm>
+#include <cmath>
 #include "../util/grid/grid2.hpp"
 #include "../util/output/aviwriter.hpp"
 
@@ -36,7 +37,7 @@ int main() {
     std::uniform_real_distribution<> colorDist(0.2f, 0.8f);
     
     // Generate multiple seed points for more interesting patterns
-    const int numSeeds = 8;
+    const int numSeeds = 1;
     std::vector<Vec2> seedPoints;
     std::vector<Vec4> seedColors;
     
@@ -98,25 +99,40 @@ int main() {
         std::vector<int> rgbData;
         grid.getGridAsRGB(frameWidth, frameHeight, rgbData);
         
-        // Convert to BGR format for AVI (OpenCV uses BGR)
+        // Debug output to check frame dimensions
+        std::cout << "Frame " << frame << ": " << frameWidth << "x" << frameHeight 
+                  << ", RGB data size: " << rgbData.size() << std::endl;
+        
+        // Convert to BGR format for AVI and ensure proper 8-bit values
         std::vector<uint8_t> bgrFrame(frameWidth * frameHeight * 3);
         #pragma omp parallel for
         for (int i = 0; i < frameWidth * frameHeight; ++i) {
-            bgrFrame[i * 3] = rgbData[i * 3 + 2];
-            bgrFrame[i * 3 + 1] = rgbData[i * 3 + 1];
-            bgrFrame[i * 3 + 2] = rgbData[i * 3];
+            // Ensure values are in 0-255 range and convert RGB to BGR
+            int r = std::clamp(rgbData[i * 3], 0, 255);
+            int g = std::clamp(rgbData[i * 3 + 1], 0, 255);
+            int b = std::clamp(rgbData[i * 3 + 2], 0, 255);
+            
+            bgrFrame[i * 3] = static_cast<uint8_t>(b);     // B
+            bgrFrame[i * 3 + 1] = static_cast<uint8_t>(g); // G
+            bgrFrame[i * 3 + 2] = static_cast<uint8_t>(r); // R
         }
-        // for (int i = 0; i < frameWidth * frameHeight; ++i) {
-        //     bgrFrame[i * 3] = static_cast<uint8_t>(rgbData[i * 3 + 2]);     // B
-        //     bgrFrame[i * 3 + 1] = static_cast<uint8_t>(rgbData[i * 3 + 1]); // G
-        //     bgrFrame[i * 3 + 2] = static_cast<uint8_t>(rgbData[i * 3]);     // R
-        // }
+        
+        // Verify frame size matches expected
+        if (bgrFrame.size() != width * height * 3) {
+            std::cerr << "ERROR: Frame size mismatch! Expected: " << width * height * 3 
+                      << ", Got: " << bgrFrame.size() << std::endl;
+            return 1;
+        }
         
         frames.push_back(bgrFrame);
     }
     
     // Save as AVI
     std::string filename = "output/chromatic_transformation.avi";
+    std::cout << "Attempting to save AVI file: " << filename << std::endl;
+    std::cout << "Frames to save: " << frames.size() << std::endl;
+    std::cout << "Frame dimensions: " << width << "x" << height << std::endl;
+    
     bool success = AVIWriter::saveAVI(filename, frames, width, height, 30.0f);
     
     if (success) {
@@ -134,6 +150,16 @@ int main() {
         }
     } else {
         std::cerr << "Failed to save AVI file!" << std::endl;
+        
+        // Additional debugging information
+        std::cerr << "Debug info:" << std::endl;
+        std::cerr << "  - Frames count: " << frames.size() << std::endl;
+        if (!frames.empty()) {
+            std::cerr << "  - First frame size: " << frames[0].size() << std::endl;
+            std::cerr << "  - Expected frame size: " << width * height * 3 << std::endl;
+        }
+        std::cerr << "  - Width: " << width << ", Height: " << height << std::endl;
+        
         return 1;
     }
     
