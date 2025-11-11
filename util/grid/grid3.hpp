@@ -1,385 +1,427 @@
 #ifndef GRID3_HPP
 #define GRID3_HPP
 
-#include "../vec3.hpp"
-#include "../vec4.hpp"
+#include "vec3.hpp"
+#include "vec4.hpp"
 #include <vector>
 #include <unordered_map>
 #include <string>
 #include <algorithm>
-#include <functional>
+#include <map>
+#include <unordered_set>
 
 class Grid3 {
+private:
+    // size_t is index
+    // Vec3 is x,y,z position of the sparse voxel
+    std::multimap<size_t, Vec3> positions;
+    // Vec4 is rgba color at the position
+    std::multimap<size_t, Vec4> colors;
+    // size is a floating size to assign to a voxel to allow larger or smaller assignments
+    std::multimap<size_t, float> sizes;
+    size_t next_id;
+    
+    std::unordered_map<size_t, std::tuple<int, int, int>> cellIndices; // object ID -> grid cell
+    std::unordered_map<std::tuple<int, int, int>, std::unordered_set<size_t>> spatialGrid; // cell -> object IDs
+    float cellSize;
+    
 public:
-    // Constructors
-    Grid3() : width(0), height(0), depth(0) {}
-    Grid3(int size) : width(size), height(size), depth(size) {
-        positions.reserve(size * size * size);
-        colors.reserve(size * size * size);
-        sizes.reserve(size * size * size);
-    }
-    Grid3(int width, int height, int depth) : width(width), height(height), depth(depth) {
-        positions.reserve(width * height * depth);
-        colors.reserve(width * height * depth);
-        sizes.reserve(width * height * depth);
-    }
+    Grid3() : next_id(0), cellSize(1.0f) {}
+    Grid3(float cellSize) : next_id(0), cellSize(cellSize) {}
     
-    // Add a voxel at specific position
-    int addVoxel(const Vec3& position, const Vec4& color, float size = 1.0f) {
-        int index = positions.size();
-        positions.push_back(position);
-        colors.push_back(color);
-        sizes.push_back(size);
-        positionToIndex[position] = index;
-        return index;
+    size_t addObject(const Vec3& position, const Vec4& color, float size = 1.0f) {
+        size_t id = next_id++;
+        positions.insert({id, position});
+        colors.insert({id, color});
+        sizes.insert({id, size});
+        auto cell = worldToGrid(position);
+        spatialGrid[cell].insert(id);
+        cellIndices[id] = cell;
+        return id;
     }
-    
-    // Add a voxel with integer coordinates
-    int addVoxel(int x, int y, int z, const Vec4& color, float size = 1.0f) {
-        return addVoxel(Vec3(static_cast<float>(x), static_cast<float>(y), static_cast<float>(z)), color, size);
+
+    // Gets
+    Vec3 getPosition(size_t id) const {
+        auto it = positions.find(id);
+        if (it != positions.end()) return it->second;
+        return Vec3();
     }
-    
-    // Check if position is occupied
-    bool isOccupied(const Vec3& position) const {
-        return positionToIndex.find(position) != positionToIndex.end();
+
+    Vec4 getColor(size_t id) const {
+        auto it = colors.find(id);
+        if (it != colors.end()) return it->second;
+        return Vec4();
     }
-    
-    bool isOccupied(int x, int y, int z) const {
-        return isOccupied(Vec3(static_cast<float>(x), static_cast<float>(y), static_cast<float>(z)));
+
+    float getSize(size_t id) const {
+        auto it = sizes.find(id);
+        if (it != sizes.end()) return it->second;
+        return 1.0f;
     }
-    
-    // Get voxel index at position, returns -1 if not found
-    int getVoxelIndex(const Vec3& position) const {
-        auto it = positionToIndex.find(position);
-        return (it != positionToIndex.end()) ? it->second : -1;
-    }
-    
-    int getVoxelIndex(int x, int y, int z) const {
-        return getVoxelIndex(Vec3(static_cast<float>(x), static_cast<float>(y), static_cast<float>(z)));
-    }
-    
-    // Remove voxel at position
-    bool removeVoxel(const Vec3& position) {
-        int index = getVoxelIndex(position);
-        if (index == -1) return false;
+
+    // Sets
+    void setPosition(size_t id, const Vec3& position) {
+        if (!hasObject(id)) return;
         
-        // Swap with last element and update map
-        if (index != positions.size() - 1) {
-            positions[index] = positions.back();
-            colors[index] = colors.back();
-            sizes[index] = sizes.back();
-            
-            // Update mapping for the moved element
-            positionToIndex[positions[index]] = index;
+        Vec3 oldPos = getPosition(id);
+        positions.erase(id);
+        positions.insert({id, position});
+        updateSpatialIndex(id, oldPos, position);
+    }
+
+    void setColor(size_t id, const Vec4& color) {
+        colors.erase(id);
+        colors.insert({id, color});
+    }
+
+    void setSize(size_t id, float size) {
+        sizes.erase(id);
+        sizes.insert({id, size});
+    }
+    
+    // Batch add/remove operations
+    void addObjects(const std::vector<std::tuple<Vec3, Vec4, float>>& objects) {
+        for (const auto& obj : objects) {
+            addObject(std::get<0>(obj), std::get<1>(obj), std::get<2>(obj));
+        }
+    }
+    
+    void removeObjects(const std::vector<size_t>& ids) {
+        for (size_t id : ids) {
+            removeObject(id);
+        }
+    }
+    
+    // Batch position updates
+    void updatePositions(const std::unordered_map<size_t, Vec3>& newPositions) {
+        // Bulk update spatial grid - collect all changes first
+        std::vector<std::tuple<size_t, Vec3, Vec3>> spatialUpdates;
+        
+        for (const auto& pair : newPositions) {
+            if (hasObject(pair.first)) {
+                Vec3 oldPos = getPosition(pair.first);
+                positions.erase(pair.first);
+                positions.insert({pair.first, pair.second});
+                spatialUpdates.emplace_back(pair.first, oldPos, pair.second);
+            }
         }
         
-        // Remove last element
-        positions.pop_back();
-        colors.pop_back();
-        sizes.pop_back();
-        positionToIndex.erase(position);
+        // Apply all spatial updates at once
+        for (const auto& update : spatialUpdates) {
+            updateSpatialIndex(std::get<0>(update), std::get<1>(update), std::get<2>(update));
+        }
+    }
+    
+    // Other
+    bool hasObject(size_t id) const {
+        return positions.find(id) != positions.end();
+    }
+    
+    void removeObject(size_t id) {
+        // Remove from spatial grid first
+        auto cellIt = cellIndices.find(id);
+        if (cellIt != cellIndices.end()) {
+            auto& cellObjects = spatialGrid[cellIt->second];
+            cellObjects.erase(id);
+            if (cellObjects.empty()) {
+                spatialGrid.erase(cellIt->second);
+            }
+            cellIndices.erase(id);
+        }
         
-        return true;
+        // Remove from data maps
+        positions.erase(id);
+        colors.erase(id);
+        sizes.erase(id);
     }
     
-    bool removeVoxel(int x, int y, int z) {
-        return removeVoxel(Vec3(static_cast<float>(x), static_cast<float>(y), static_cast<float>(z)));
+    std::vector<size_t> getIndicesAt(float x, float y, float z, float radius = 0.0f) const {
+        return getIndicesAt(Vec3(x, y, z), radius);
     }
     
-    // Clear all voxels
-    void clear() {
-        positions.clear();
-        colors.clear();
-        sizes.clear();
-        positionToIndex.clear();
+    std::vector<size_t> getIndicesAt(const Vec3& position, float radius = 0.0f) const {
+        std::vector<size_t> result;
+        
+        if (radius <= 0.0f) {
+            // Exact position match
+            for (const auto& pair : positions) {
+                if (pair.second == position) {
+                    result.push_back(pair.first);
+                }
+            }
+        } else {
+            // Radius-based search
+            float radius_sq = radius * radius;
+            for (const auto& pair : positions) {
+                float dx = pair.second.x - position.x;
+                float dy = pair.second.y - position.y;
+                float dz = pair.second.z - position.z;
+                if (dx * dx + dy * dy + dz * dz <= radius_sq) {
+                    result.push_back(pair.first);
+                }
+            }
+        }
+        
+        return result;
     }
     
-    // Get voxel count
-    size_t getVoxelCount() const {
-        return positions.size();
-    }
-    
-    // Check if grid is empty
-    bool isEmpty() const {
-        return positions.empty();
-    }
-    
-    // Get bounding box of occupied voxels
     void getBoundingBox(Vec3& minCorner, Vec3& maxCorner) const {
         if (positions.empty()) {
-            minCorner = Vec3(0, 0, 0);
-            maxCorner = Vec3(0, 0, 0);
+            minCorner = Vec3(0.0f, 0.0f, 0.0f);
+            maxCorner = Vec3(0.0f, 0.0f, 0.0f);
             return;
         }
         
-        minCorner = positions[0];
-        maxCorner = positions[0];
+        auto it = positions.begin();
+        minCorner = it->second;
+        maxCorner = it->second;
         
-        for (const auto& pos : positions) {
-            minCorner = minCorner.min(pos);
-            maxCorner = maxCorner.max(pos);
+        for (const auto& pair : positions) {
+            const Vec3& pos = pair.second;
+            minCorner.x = std::min(minCorner.x, pos.x);
+            minCorner.y = std::min(minCorner.y, pos.y);
+            minCorner.z = std::min(minCorner.z, pos.z);
+            maxCorner.x = std::max(maxCorner.x, pos.x);
+            maxCorner.y = std::max(maxCorner.y, pos.y);
+            maxCorner.z = std::max(maxCorner.z, pos.z);
         }
     }
     
-    // Fill a rectangular prism region
-    void fillCuboid(const Vec3& start, const Vec3& end, const Vec4& color, float size = 1.0f) {
-        int startX = static_cast<int>(std::min(start.x, end.x));
-        int endX = static_cast<int>(std::max(start.x, end.x));
-        int startY = static_cast<int>(std::min(start.y, end.y));
-        int endY = static_cast<int>(std::max(start.y, end.y));
-        int startZ = static_cast<int>(std::min(start.z, end.z));
-        int endZ = static_cast<int>(std::max(start.z, end.z));
+    // Get 2D slice of the 3D grid (useful for visualization)
+    void getSliceAsRGB(int axis, float slicePos, 
+                      int& width, int& height, std::vector<int>& rgbData) const {
+        Vec3 minCorner, maxCorner;
+        getBoundingBox(minCorner, maxCorner);
         
-        for (int z = startZ; z <= endZ; ++z) {
-            for (int y = startY; y <= endY; ++y) {
-                for (int x = startX; x <= endX; ++x) {
-                    if (!isOccupied(x, y, z)) {
-                        addVoxel(x, y, z, color, size);
-                    }
-                }
-            }
+        // Determine slice dimensions based on axis (0=x, 1=y, 2=z)
+        if (axis == 0) { // X-slice
+            width = static_cast<int>(std::ceil(maxCorner.z - minCorner.z)) + 1;
+            height = static_cast<int>(std::ceil(maxCorner.y - minCorner.y)) + 1;
+        } else if (axis == 1) { // Y-slice
+            width = static_cast<int>(std::ceil(maxCorner.z - minCorner.z)) + 1;
+            height = static_cast<int>(std::ceil(maxCorner.x - minCorner.x)) + 1;
+        } else { // Z-slice
+            width = static_cast<int>(std::ceil(maxCorner.x - minCorner.x)) + 1;
+            height = static_cast<int>(std::ceil(maxCorner.y - minCorner.y)) + 1;
         }
-    }
-    
-    // Create a sphere
-    void fillSphere(const Vec3& center, float radius, const Vec4& color, float size = 1.0f) {
-        int centerX = static_cast<int>(center.x);
-        int centerY = static_cast<int>(center.y);
-        int centerZ = static_cast<int>(center.z);
-        int radiusInt = static_cast<int>(radius);
         
-        for (int z = centerZ - radiusInt; z <= centerZ + radiusInt; ++z) {
-            for (int y = centerY - radiusInt; y <= centerY + radiusInt; ++y) {
-                for (int x = centerX - radiusInt; x <= centerX + radiusInt; ++x) {
-                    float dx = x - center.x;
-                    float dy = y - center.y;
-                    float dz = z - center.z;
-                    if (dx * dx + dy * dy + dz * dz <= radius * radius) {
-                        if (!isOccupied(x, y, z)) {
-                            addVoxel(x, y, z, color, size);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    // Create a hollow sphere (just the surface)
-    void fillHollowSphere(const Vec3& center, float radius, const Vec4& color, float thickness = 1.0f, float size = 1.0f) {
-        int centerX = static_cast<int>(center.x);
-        int centerY = static_cast<int>(center.y);
-        int centerZ = static_cast<int>(center.z);
-        int radiusInt = static_cast<int>(radius);
+        // Initialize with black (0,0,0)
+        rgbData.resize(width * height * 3, 0);
         
-        for (int z = centerZ - radiusInt; z <= centerZ + radiusInt; ++z) {
-            for (int y = centerY - radiusInt; y <= centerY + radiusInt; ++y) {
-                for (int x = centerX - radiusInt; x <= centerX + radiusInt; ++x) {
-                    float dx = x - center.x;
-                    float dy = y - center.y;
-                    float dz = z - center.z;
-                    float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
-                    
-                    if (std::abs(distance - radius) <= thickness) {
-                        if (!isOccupied(x, y, z)) {
-                            addVoxel(x, y, z, color, size);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    // Create a cylinder
-    void fillCylinder(const Vec3& baseCenter, const Vec3& axis, float radius, float height, 
-                     const Vec4& color, float size = 1.0f) {
-        // Simplified cylinder aligned with Y-axis
-        Vec3 normalizedAxis = axis.normalized();
-        
-        for (int h = 0; h < static_cast<int>(height); ++h) {
-            Vec3 center = baseCenter + normalizedAxis * static_cast<float>(h);
+        // Fill the slice with object colors
+        for (const auto& posPair : positions) {
+            size_t id = posPair.first;
+            const Vec3& pos = posPair.second;
             
-            for (int y = -static_cast<int>(radius); y <= static_cast<int>(radius); ++y) {
-                for (int x = -static_cast<int>(radius); x <= static_cast<int>(radius); ++x) {
-                    if (x * x + y * y <= radius * radius) {
-                        Vec3 pos = center + Vec3(x, y, 0);
-                        if (!isOccupied(pos)) {
-                            addVoxel(pos, color, size);
-                        }
-                    }
-                }
+            // Check if position is within slice tolerance
+            float tolerance = 0.5f; // Half voxel tolerance
+            bool inSlice = false;
+            int gridX = 0, gridY = 0;
+            
+            if (axis == 0 && std::abs(pos.x - slicePos) <= tolerance) { // X-slice
+                gridX = static_cast<int>(pos.z - minCorner.z);
+                gridY = static_cast<int>(pos.y - minCorner.y);
+                inSlice = true;
+            } else if (axis == 1 && std::abs(pos.y - slicePos) <= tolerance) { // Y-slice
+                gridX = static_cast<int>(pos.z - minCorner.z);
+                gridY = static_cast<int>(pos.x - minCorner.x);
+                inSlice = true;
+            } else if (axis == 2 && std::abs(pos.z - slicePos) <= tolerance) { // Z-slice
+                gridX = static_cast<int>(pos.x - minCorner.x);
+                gridY = static_cast<int>(pos.y - minCorner.y);
+                inSlice = true;
+            }
+            
+            if (inSlice && gridX >= 0 && gridX < width && gridY >= 0 && gridY < height) {
+                const Vec4& color = getColor(id);
+                int index = (gridY * width + gridX) * 3;
+                
+                // Convert float color [0,1] to int [0,255]
+                rgbData[index] = static_cast<int>(color.r * 255);
+                rgbData[index + 1] = static_cast<int>(color.g * 255);
+                rgbData[index + 2] = static_cast<int>(color.b * 255);
             }
         }
     }
     
-    // Get neighbors of a voxel (6-connected)
-    std::vector<int> getNeighbors6(const Vec3& position) const {
-        std::vector<int> neighbors;
-        Vec3 offsets[] = {
-            Vec3(1, 0, 0), Vec3(-1, 0, 0),
-            Vec3(0, 1, 0), Vec3(0, -1, 0),
-            Vec3(0, 0, 1), Vec3(0, 0, -1)
-        };
-        
-        for (const auto& offset : offsets) {
-            Vec3 neighborPos = position + offset;
-            int index = getVoxelIndex(neighborPos);
-            if (index != -1) {
-                neighbors.push_back(index);
-            }
+    void getRegionAsRGB(float minX, float minY, float minZ, float maxX, float maxY, float maxZ,
+                       int& width, int& height, std::vector<int>& rgbData) const {
+        // For 3D, this creates a 2D projection (XY plane at average Z)
+        if (minX >= maxX || minY >= maxY || minZ >= maxZ) {
+            width = 0;
+            height = 0;
+            rgbData.clear();
+            return;
         }
         
-        return neighbors;
-    }
-    
-    // Get neighbors of a voxel (26-connected)
-    std::vector<int> getNeighbors26(const Vec3& position) const {
-        std::vector<int> neighbors;
+        // Calculate grid dimensions for XY projection
+        width = static_cast<int>(std::ceil(maxX - minX));
+        height = static_cast<int>(std::ceil(maxY - minY));
         
-        for (int dz = -1; dz <= 1; ++dz) {
-            for (int dy = -1; dy <= 1; ++dy) {
-                for (int dx = -1; dx <= 1; ++dx) {
-                    if (dx == 0 && dy == 0 && dz == 0) continue;
+        // Initialize with black (0,0,0)
+        rgbData.resize(width * height * 3, 0);
+        
+        // Fill the grid with object colors in the region (XY projection)
+        for (const auto& posPair : positions) {
+            size_t id = posPair.first;
+            const Vec3& pos = posPair.second;
+            
+            // Check if position is within the region
+            if (pos.x >= minX && pos.x < maxX && 
+                pos.y >= minY && pos.y < maxY &&
+                pos.z >= minZ && pos.z < maxZ) {
+                
+                // Convert world position to grid coordinates (XY projection)
+                int gridX = static_cast<int>(pos.x - minX);
+                int gridY = static_cast<int>(pos.y - minY);
+                
+                if (gridX >= 0 && gridX < width && gridY >= 0 && gridY < height) {
+                    const Vec4& color = getColor(id);
+                    int index = (gridY * width + gridX) * 3;
                     
-                    Vec3 neighborPos = position + Vec3(dx, dy, dz);
-                    int index = getVoxelIndex(neighborPos);
-                    if (index != -1) {
-                        neighbors.push_back(index);
-                    }
-                }
-            }
-        }
-        
-        return neighbors;
-    }
-    
-    // Create a simple teapot model (simplified)
-    void createTeapot(const Vec3& position, float scale, const Vec4& color, float size = 1.0f) {
-        // This is a very simplified teapot representation
-        // In practice, you'd load a proper voxel model
-        
-        // Teapot body (ellipsoid)
-        fillEllipsoid(position + Vec3(0, scale * 0.3f, 0), 
-                     Vec3(scale * 0.4f, scale * 0.3f, scale * 0.4f), color, size);
-        
-        // Teapot lid (smaller ellipsoid on top)
-        fillEllipsoid(position + Vec3(0, scale * 0.6f, 0), 
-                     Vec3(scale * 0.3f, scale * 0.1f, scale * 0.3f), color, size);
-        
-        // Teapot spout (cylinder)
-        fillCylinder(position + Vec3(scale * 0.3f, scale * 0.2f, 0), 
-                    Vec3(1, 0.2f, 0), scale * 0.05f, scale * 0.3f, color, size);
-        
-        // Teapot handle (torus segment)
-        fillTorusSegment(position + Vec3(-scale * 0.3f, scale * 0.3f, 0), 
-                        Vec3(0, 1, 0), scale * 0.1f, scale * 0.2f, color, size);
-    }
-    
-    // Fill an ellipsoid
-    void fillEllipsoid(const Vec3& center, const Vec3& radii, const Vec4& color, float size = 1.0f) {
-        int radiusX = static_cast<int>(radii.x);
-        int radiusY = static_cast<int>(radii.y);
-        int radiusZ = static_cast<int>(radii.z);
-        
-        for (int z = -radiusZ; z <= radiusZ; ++z) {
-            for (int y = -radiusY; y <= radiusY; ++y) {
-                for (int x = -radiusX; x <= radiusX; ++x) {
-                    float normalizedX = static_cast<float>(x) / radii.x;
-                    float normalizedY = static_cast<float>(y) / radii.y;
-                    float normalizedZ = static_cast<float>(z) / radii.z;
-                    
-                    if (normalizedX * normalizedX + normalizedY * normalizedY + normalizedZ * normalizedZ <= 1.0f) {
-                        Vec3 pos = center + Vec3(x, y, z);
-                        if (!isOccupied(pos)) {
-                            addVoxel(pos, color, size);
-                        }
-                    }
+                    // Convert float color [0,1] to int [0,255]
+                    rgbData[index] = static_cast<int>(color.r * 255);
+                    rgbData[index + 1] = static_cast<int>(color.g * 255);
+                    rgbData[index + 2] = static_cast<int>(color.b * 255);
                 }
             }
         }
     }
     
-    // Fill a torus segment
-    void fillTorusSegment(const Vec3& center, const Vec3& axis, float majorRadius, float minorRadius, 
-                         const Vec4& color, float size = 1.0f) {
-        Vec3 normalizedAxis = axis.normalized();
-        
-        // Simplified torus - in practice you'd use proper torus equation
-        for (float angle = 0; angle < 2 * M_PI; angle += 0.2f) {
-            Vec3 circleCenter = center + Vec3(std::cos(angle) * majorRadius, 0, std::sin(angle) * majorRadius);
-            fillSphere(circleCenter, minorRadius, color, size);
-        }
+    void getRegionAsRGB(const Vec3& minCorner, const Vec3& maxCorner,
+                       int& width, int& height, std::vector<int>& rgbData) const {
+        getRegionAsRGB(minCorner.x, minCorner.y, minCorner.z, 
+                      maxCorner.x, maxCorner.y, maxCorner.z,
+                      width, height, rgbData);
     }
-    
-    // Find connected components in 3D
-    std::vector<std::vector<int>> findConnectedComponents() const {
-        std::vector<std::vector<int>> components;
-        std::unordered_map<Vec3, bool, std::hash<Vec3>> visited;
-        
-        for (size_t i = 0; i < positions.size(); ++i) {
-            const Vec3& pos = positions[i];
-            if (visited.find(pos) == visited.end()) {
-                std::vector<int> component;
-                floodFill3D(pos, visited, component);
-                components.push_back(component);
-            }
-        }
-        
-        return components;
-    }
-    
-    // Getters
-    const std::vector<Vec3>& getPositions() const { return positions; }
-    const std::vector<Vec4>& getColors() const { return colors; }
-    const std::vector<float>& getSizes() const { return sizes; }
-    
-    Vec3 getPosition(int index) const { return positions[index]; }
-    Vec4 getColor(int index) const { return colors[index]; }
-    float getSize(int index) const { return sizes[index]; }
-    
-    void setColor(int index, const Vec4& color) { colors[index] = color; }
-    void setSize(int index, float size) { sizes[index] = size; }
-    
-    int getWidth() const { return width; }
-    int getHeight() const { return height; }
-    int getDepth() const { return depth; }
 
-private:
-    std::vector<Vec3> positions;
-    std::vector<Vec4> colors;
-    std::vector<float> sizes;
-    std::unordered_map<Vec3, int, std::hash<Vec3>> positionToIndex;
-    int width, height, depth;
+    // Spatial grid methods for 3D
+    std::tuple<int, int, int> worldToGrid(const Vec3& pos) const {
+        return {
+            static_cast<int>(std::floor(pos.x / cellSize)),
+            static_cast<int>(std::floor(pos.y / cellSize)),
+            static_cast<int>(std::floor(pos.z / cellSize))
+        };
+    }
     
-    void floodFill3D(const Vec3& start, std::unordered_map<Vec3, bool, std::hash<Vec3>>& visited, 
-                     std::vector<int>& component) const {
-        std::vector<Vec3> stack;
-        stack.push_back(start);
+    void updateSpatialIndex(size_t id, const Vec3& oldPos, const Vec3& newPos) {
+        auto oldCell = worldToGrid(oldPos);
+        auto newCell = worldToGrid(newPos);
         
-        while (!stack.empty()) {
-            Vec3 current = stack.back();
-            stack.pop_back();
+        if (oldCell != newCell) {
+            // Remove from old cell
+            auto oldIt = spatialGrid.find(oldCell);
+            if (oldIt != spatialGrid.end()) {
+                oldIt->second.erase(id);
+                if (oldIt->second.empty()) {
+                    spatialGrid.erase(oldIt);
+                }
+            }
             
-            if (visited.find(current) != visited.end()) continue;
-            
-            visited[current] = true;
-            int index = getVoxelIndex(current);
-            if (index != -1) {
-                component.push_back(index);
-                
-                // Add 6-connected neighbors
-                Vec3 neighbors[] = {
-                    current + Vec3(1, 0, 0), current + Vec3(-1, 0, 0),
-                    current + Vec3(0, 1, 0), current + Vec3(0, -1, 0),
-                    current + Vec3(0, 0, 1), current + Vec3(0, 0, -1)
-                };
-                
-                for (const auto& neighbor : neighbors) {
-                    if (isOccupied(neighbor) && visited.find(neighbor) == visited.end()) {
-                        stack.push_back(neighbor);
+            // Add to new cell
+            spatialGrid[newCell].insert(id);
+            cellIndices[id] = newCell;
+        }
+    }
+    
+    std::vector<size_t> getIndicesInRadius(const Vec3& position, float radius) const {
+        std::vector<size_t> result;
+        
+        Vec3 minPos(position.x - radius, position.y - radius, position.z - radius);
+        Vec3 maxPos(position.x + radius, position.y + radius, position.z + radius);
+        
+        auto minCell = worldToGrid(minPos);
+        auto maxCell = worldToGrid(maxPos);
+        
+        float radiusSq = radius * radius;
+        
+        // Only check relevant cells
+        for (int x = std::get<0>(minCell); x <= std::get<0>(maxCell); ++x) {
+            for (int y = std::get<1>(minCell); y <= std::get<1>(maxCell); ++y) {
+                for (int z = std::get<2>(minCell); z <= std::get<2>(maxCell); ++z) {
+                    auto cell = std::make_tuple(x, y, z);
+                    auto it = spatialGrid.find(cell);
+                    if (it != spatialGrid.end()) {
+                        for (size_t id : it->second) {
+                            const Vec3& objPos = getPosition(id);
+                            float dx = objPos.x - position.x;
+                            float dy = objPos.y - position.y;
+                            float dz = objPos.z - position.z;
+                            if (dx * dx + dy * dy + dz * dz <= radiusSq) {
+                                result.push_back(id);
+                            }
+                        }
                     }
                 }
             }
         }
+        
+        return result;
+    }
+    
+    std::vector<size_t> getIndicesInRegion(const Vec3& minCorner, const Vec3& maxCorner) const {
+        std::vector<size_t> result;
+        
+        auto minCell = worldToGrid(minCorner);
+        auto maxCell = worldToGrid(maxCorner);
+        
+        for (int x = std::get<0>(minCell); x <= std::get<0>(maxCell); ++x) {
+            for (int y = std::get<1>(minCell); y <= std::get<1>(maxCell); ++y) {
+                for (int z = std::get<2>(minCell); z <= std::get<2>(maxCell); ++z) {
+                    auto cell = std::make_tuple(x, y, z);
+                    auto it = spatialGrid.find(cell);
+                    if (it != spatialGrid.end()) {
+                        for (size_t id : it->second) {
+                            const Vec3& pos = getPosition(id);
+                            if (pos.x >= minCorner.x && pos.x <= maxCorner.x &&
+                                pos.y >= minCorner.y && pos.y <= maxCorner.y &&
+                                pos.z >= minCorner.z && pos.z <= maxCorner.z) {
+                                result.push_back(id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        return result;
+    }
+
+    size_t getSpatialGridCellCount() const { return spatialGrid.size(); }
+    size_t getSpatialGridObjectCount() const { return cellIndices.size(); }
+    float getCellSize() const { return cellSize; }
+    
+    // 3D-specific utility methods
+    size_t getVoxelCount() const { return positions.size(); }
+    
+    // Get density information (useful for volume rendering)
+    std::vector<float> getDensityGrid(int resX, int resY, int resZ) const {
+        std::vector<float> density(resX * resY * resZ, 0.0f);
+        
+        Vec3 minCorner, maxCorner;
+        getBoundingBox(minCorner, maxCorner);
+        
+        Vec3 gridSize = maxCorner - minCorner;
+        if (gridSize.x <= 0 || gridSize.y <= 0 || gridSize.z <= 0) {
+            return density;
+        }
+        
+        Vec3 voxelSize(gridSize.x / resX, gridSize.y / resY, gridSize.z / resZ);
+        
+        for (const auto& posPair : positions) {
+            const Vec3& pos = posPair.second;
+            
+            // Convert to grid coordinates
+            int gx = static_cast<int>((pos.x - minCorner.x) / gridSize.x * resX);
+            int gy = static_cast<int>((pos.y - minCorner.y) / gridSize.y * resY);
+            int gz = static_cast<int>((pos.z - minCorner.z) / gridSize.z * resZ);
+            
+            if (gx >= 0 && gx < resX && gy >= 0 && gy < resY && gz >= 0 && gz < resZ) {
+                density[gz * resX * resY + gy * resX + gx] += 1.0f;
+            }
+        }
+        
+        return density;
     }
 };
 

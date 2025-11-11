@@ -7,289 +7,352 @@
 #include <unordered_map>
 #include <string>
 #include <algorithm>
+#include <map>
+#include <unordered_set>
 
 class Grid2 {
+private:
+    //size_t is index.
+    //vec2 is x,y position of the sparse value
+    std::multimap<size_t, Vec2> positions;
+    //vec4 is rgba color at the position
+    std::multimap<size_t, Vec4> colors;
+    //size is a floating size to assign to a "pixel" (or voxel for grid3) to allow larger or smaller assignments in this map
+    std::multimap<size_t, float> sizes;
+    //others will be added later
+    size_t next_id;
+    
+    std::unordered_map<size_t, std::pair<int, int>> cellIndices; // object ID -> grid cell
+    std::unordered_map<std::pair<int, int>, std::unordered_set<size_t>> spatialGrid; // cell -> object IDs
+    float cellSize;
+    
 public:
-    int width, height;
+    Grid2() : next_id(0), cellSize(1.0f) {}
+    Grid2(float cellSize = 1.0f) : next_id(0), cellSize(cellSize) {}
     
-    Grid2() : width(0), height(0) {}
-    Grid2(int size) : width(size), height(size) {
-        positions.reserve(size);
-        colors.reserve(size);
-        sizes.reserve(size);
+    size_t addObject(const Vec2& position, const Vec4& color, float size = 1.0f) {
+        size_t id = next_id++;
+        positions.insert({id, position});
+        colors.insert({id, color});
+        sizes.insert({id, size});
+        std::pair<int,int> cell = worldToGrid(position);
+        spatialGrid[cell].insert(id);
+        cellIndices[id] = cell;
+        return id;
     }
-    Grid2(int width, int height) : width(width), height(height) {
-        positions.reserve(width * height);
-        colors.reserve(width * height);
-        sizes.reserve(width * height);
+
+    //gets
+    Vec2 getPosition(size_t id) const {
+        auto it = positions.find(id);
+        if (it != positions.end()) return it->second;
+        return Vec2();
     }
-    
-    // Add a pixel at specific position
-    int addPixel(const Vec2& position, const Vec4& color, float size = 1.0f) {
-        int index = positions.size();
-        positions.push_back(position);
-        colors.push_back(color);
-        sizes.push_back(size);
-        positionToIndex[position] = index;
-        return index;
+
+    Vec4 getColor(size_t id) const {
+        auto it = colors.find(id);
+        if (it != colors.end()) return it->second;
+        return Vec4();
     }
-    
-    // Add a pixel with integer coordinates
-    int addPixel(int x, int y, const Vec4& color, float size = 1.0f) {
-        return addPixel(Vec2(static_cast<float>(x), static_cast<float>(y)), color, size);
+
+    float getSize(size_t id) const {
+        auto it = sizes.find(id);
+        if (it != sizes.end()) return it->second;
+        return 1.0f;
     }
-    
-    // Check if position is occupied
-    bool isOccupied(const Vec2& position) const {
-        return positionToIndex.find(position) != positionToIndex.end();
-    }
-    
-    bool isOccupied(int x, int y) const {
-        return isOccupied(Vec2(static_cast<float>(x), static_cast<float>(y)));
-    }
-    
-    // Get pixel index at position, returns -1 if not found
-    int getPixelIndex(const Vec2& position) const {
-        auto it = positionToIndex.find(position);
-        return (it != positionToIndex.end()) ? it->second : -1;
-    }
-    
-    int getPixelIndex(int x, int y) const {
-        return getPixelIndex(Vec2(static_cast<float>(x), static_cast<float>(y)));
-    }
-    
-    // Remove pixel at position
-    bool removePixel(const Vec2& position) {
-        int index = getPixelIndex(position);
-        if (index == -1) return false;
+
+    //sets
+    void setPosition(size_t id, const Vec2& position) {
+        if (!hasObject(id)) return;
         
-        // Swap with last element and update map
-        if (index != positions.size() - 1) {
-            positions[index] = positions.back();
-            colors[index] = colors.back();
-            sizes[index] = sizes.back();
-            
-            // Update mapping for the moved element
-            positionToIndex[positions[index]] = index;
+        Vec2 oldPos = getPosition(id);
+        positions.erase(id);
+        positions.insert({id, position});
+        updateSpatialIndex(id, oldPos, position);
+    }
+
+    void setColor(size_t id, const Vec4& color) {
+        colors.erase(id);
+        colors.insert({id, color});
+    }
+
+    void setSize(size_t id, float size) {
+        sizes.erase(id);
+        sizes.insert({id, size});
+    }
+    
+    // Batch add/remove operations
+    void addObjects(const std::vector<std::tuple<Vec2, Vec4, float>>& objects) {
+        for (const auto& obj : objects) {
+            addObject(std::get<0>(obj), std::get<1>(obj), std::get<2>(obj));
+        }
+    }
+    
+    void removeObjects(const std::vector<size_t>& ids) {
+        for (size_t id : ids) {
+            removeObject(id);
+        }
+    }
+    
+    // Batch position updates
+    void updatePositions(const std::unordered_map<size_t, Vec2>& newPositions) {
+        // Bulk update spatial grid - collect all changes first
+        std::vector<std::tuple<size_t, Vec2, Vec2>> spatialUpdates;
+        
+        for (const auto& pair : newPositions) {
+            if (hasObject(pair.first)) {
+                Vec2 oldPos = getPosition(pair.first);
+                positions.erase(pair.first);
+                positions.insert({pair.first, pair.second});
+                spatialUpdates.emplace_back(pair.first, oldPos, pair.second);
+            }
         }
         
-        // Remove last element
-        positions.pop_back();
-        colors.pop_back();
-        sizes.pop_back();
-        positionToIndex.erase(position);
+        // Apply all spatial updates at once
+        for (const auto& update : spatialUpdates) {
+            updateSpatialIndex(std::get<0>(update), std::get<1>(update), std::get<2>(update));
+        }
+    }
+    
+    //other
+    bool hasObject(size_t id) const {
+        return positions.find(id) != positions.end();
+    }
+    
+    void removeObject(size_t id) {
+        // Remove from spatial grid first
+        auto cellIt = cellIndices.find(id);
+        if (cellIt != cellIndices.end()) {
+            auto& cellObjects = spatialGrid[cellIt->second];
+            cellObjects.erase(id);
+            if (cellObjects.empty()) {
+                spatialGrid.erase(cellIt->second);
+            }
+            cellIndices.erase(id);
+        }
         
-        return true;
+        // Remove from data maps
+        positions.erase(id);
+        colors.erase(id);
+        sizes.erase(id);
     }
     
-    bool removePixel(int x, int y) {
-        return removePixel(Vec2(static_cast<float>(x), static_cast<float>(y)));
+    std::vector<size_t> getIndicesAt(float x, float y, float radius = 0.0f) const {
+        return getIndicesAt(Vec2(x, y), radius);
     }
     
-    // Clear all pixels
-    void clear() {
-        positions.clear();
-        colors.clear();
-        sizes.clear();
-        positionToIndex.clear();
+    std::vector<size_t> getIndicesAt(const Vec2& position, float radius = 0.0f) const {
+        std::vector<size_t> result;
+        
+        if (radius <= 0.0f) {
+            // Exact position match
+            for (const auto& pair : positions) {
+                if (pair.second == position) {
+                    result.push_back(pair.first);
+                }
+            }
+        } else {
+            // Radius-based search
+            float radius_sq = radius * radius;
+            for (const auto& pair : positions) {
+                float dx = pair.second.x - position.x;
+                float dy = pair.second.y - position.y;
+                if (dx * dx + dy * dy <= radius_sq) {
+                    result.push_back(pair.first);
+                }
+            }
+        }
+        
+        return result;
     }
     
-    // Get pixel count
-    size_t getPixelCount() const {
-        return positions.size();
-    }
-    
-    // Check if grid is empty
-    bool isEmpty() const {
-        return positions.empty();
-    }
-    
-    // Get bounding box of occupied pixels
     void getBoundingBox(Vec2& minCorner, Vec2& maxCorner) const {
         if (positions.empty()) {
-            minCorner = Vec2(0, 0);
-            maxCorner = Vec2(0, 0);
+            minCorner = Vec2(0.0f, 0.0f);
+            maxCorner = Vec2(0.0f, 0.0f);
             return;
         }
         
-        minCorner = positions[0];
-        maxCorner = positions[0];
+        auto it = positions.begin();
+        minCorner = it->second;
+        maxCorner = it->second;
         
-        for (const auto& pos : positions) {
-            minCorner = minCorner.min(pos);
-            maxCorner = maxCorner.max(pos);
+        for (const auto& pair : positions) {
+            const Vec2& pos = pair.second;
+            minCorner.x = std::min(minCorner.x, pos.x);
+            minCorner.y = std::min(minCorner.y, pos.y);
+            maxCorner.x = std::max(maxCorner.x, pos.x);
+            maxCorner.y = std::max(maxCorner.y, pos.y);
         }
     }
     
-    // Fill a rectangular region
-    void fillRectangle(const Vec2& start, const Vec2& end, const Vec4& color, float size = 1.0f) {
-        int startX = static_cast<int>(std::min(start.x, end.x));
-        int endX = static_cast<int>(std::max(start.x, end.x));
-        int startY = static_cast<int>(std::min(start.y, end.y));
-        int endY = static_cast<int>(std::max(start.y, end.y));
+    //to picture
+    void getGridAsRGB(int& width, int& height, std::vector<int>& rgbData) const {
+        Vec2 minCorner, maxCorner;
+        getBoundingBox(minCorner, maxCorner);
         
-        for (int y = startY; y <= endY; ++y) {
-            for (int x = startX; x <= endX; ++x) {
-                if (!isOccupied(x, y)) {
-                    addPixel(x, y, color, size);
-                }
-            }
-        }
-    }
-    
-    // Create a circle pattern
-    void fillCircle(const Vec2& center, float radius, const Vec4& color, float size = 1.0f) {
-        int centerX = static_cast<int>(center.x);
-        int centerY = static_cast<int>(center.y);
-        int radiusInt = static_cast<int>(radius);
+        // Calculate grid dimensions (adding 1 to include both ends)
+        width = static_cast<int>(std::ceil(maxCorner.x - minCorner.x)) + 1;
+        height = static_cast<int>(std::ceil(maxCorner.y - minCorner.y)) + 1;
         
-        for (int y = centerY - radiusInt; y <= centerY + radiusInt; ++y) {
-            for (int x = centerX - radiusInt; x <= centerX + radiusInt; ++x) {
-                float dx = x - center.x;
-                float dy = y - center.y;
-                if (dx * dx + dy * dy <= radius * radius) {
-                    if (!isOccupied(x, y)) {
-                        addPixel(x, y, color, size);
-                    }
-                }
-            }
-        }
-    }
-    
-    // Create a line between two points
-    void drawLine(const Vec2& start, const Vec2& end, const Vec4& color, float size = 1.0f) {
-        // Bresenham's line algorithm
-        int x0 = static_cast<int>(start.x);
-        int y0 = static_cast<int>(start.y);
-        int x1 = static_cast<int>(end.x);
-        int y1 = static_cast<int>(end.y);
+        // Initialize with black (0,0,0)
+        rgbData.resize(width * height * 3, 0);
         
-        int dx = std::abs(x1 - x0);
-        int dy = std::abs(y1 - y0);
-        int sx = (x0 < x1) ? 1 : -1;
-        int sy = (y0 < y1) ? 1 : -1;
-        int err = dx - dy;
-        
-        while (true) {
-            if (!isOccupied(x0, y0)) {
-                addPixel(x0, y0, color, size);
-            }
+        // Fill the grid with object colors
+        for (const auto& posPair : positions) {
+            size_t id = posPair.first;
+            const Vec2& pos = posPair.second;
             
-            if (x0 == x1 && y0 == y1) break;
+            // Convert world position to grid coordinates
+            int gridX = static_cast<int>(pos.x - minCorner.x);
+            int gridY = static_cast<int>(pos.y - minCorner.y);
             
-            int e2 = 2 * err;
-            if (e2 > -dy) {
-                err -= dy;
-                x0 += sx;
-            }
-            if (e2 < dx) {
-                err += dx;
-                y0 += sy;
-            }
-        }
-    }
-    
-    // Get neighbors of a pixel (4-connected)
-    std::vector<int> getNeighbors4(const Vec2& position) const {
-        std::vector<int> neighbors;
-        Vec2 offsets[] = {Vec2(1, 0), Vec2(-1, 0), Vec2(0, 1), Vec2(0, -1)};
-        
-        for (const auto& offset : offsets) {
-            Vec2 neighborPos = position + offset;
-            int index = getPixelIndex(neighborPos);
-            if (index != -1) {
-                neighbors.push_back(index);
-            }
-        }
-        
-        return neighbors;
-    }
-    
-    // Get neighbors of a pixel (8-connected)
-    std::vector<int> getNeighbors8(const Vec2& position) const {
-        std::vector<int> neighbors;
-        
-        for (int dy = -1; dy <= 1; ++dy) {
-            for (int dx = -1; dx <= 1; ++dx) {
-                if (dx == 0 && dy == 0) continue;
+            if (gridX >= 0 && gridX < width && gridY >= 0 && gridY < height) {
+                const Vec4& color = getColor(id);
+                int index = (gridY * width + gridX) * 3;
                 
-                Vec2 neighborPos = position + Vec2(dx, dy);
-                int index = getPixelIndex(neighborPos);
-                if (index != -1) {
-                    neighbors.push_back(index);
+                // Convert float color [0,1] to int [0,255]
+                rgbData[index] = static_cast<int>(color.r * 255);
+                rgbData[index + 1] = static_cast<int>(color.g * 255);
+                rgbData[index + 2] = static_cast<int>(color.b * 255);
+            }
+        }
+    }
+    
+    void getRegionAsRGB(float minX, float minY, float maxX, float maxY, 
+                       int& width, int& height, std::vector<int>& rgbData) const {
+        // Ensure valid region
+        if (minX >= maxX || minY >= maxY) {
+            width = 0;
+            height = 0;
+            rgbData.clear();
+            return;
+        }
+        
+        // Calculate grid dimensions
+        width = static_cast<int>(std::ceil(maxX - minX));
+        height = static_cast<int>(std::ceil(maxY - minY));
+        
+        // Initialize with black (0,0,0)
+        rgbData.resize(width * height * 3, 0);
+        
+        // Fill the grid with object colors in the region
+        for (const auto& posPair : positions) {
+            size_t id = posPair.first;
+            const Vec2& pos = posPair.second;
+            
+            // Check if position is within the region
+            if (pos.x >= minX && pos.x < maxX && pos.y >= minY && pos.y < maxY) {
+                // Convert world position to grid coordinates
+                int gridX = static_cast<int>(pos.x - minX);
+                int gridY = static_cast<int>(pos.y - minY);
+                
+                if (gridX >= 0 && gridX < width && gridY >= 0 && gridY < height) {
+                    const Vec4& color = getColor(id);
+                    int index = (gridY * width + gridX) * 3;
+                    
+                    // Convert float color [0,1] to int [0,255]
+                    rgbData[index] = static_cast<int>(color.r * 255);
+                    rgbData[index + 1] = static_cast<int>(color.g * 255);
+                    rgbData[index + 2] = static_cast<int>(color.b * 255);
                 }
             }
         }
-        
-        return neighbors;
     }
     
-    // Find connected components
-    std::vector<std::vector<int>> findConnectedComponents() const {
-        std::vector<std::vector<int>> components;
-        std::unordered_map<Vec2, bool, std::hash<Vec2>> visited;
-        
-        for (size_t i = 0; i < positions.size(); ++i) {
-            const Vec2& pos = positions[i];
-            if (visited.find(pos) == visited.end()) {
-                std::vector<int> component;
-                floodFill(pos, visited, component);
-                components.push_back(component);
-            }
-        }
-        
-        return components;
+    void getRegionAsRGB(const Vec2& minCorner, const Vec2& maxCorner,
+                       int& width, int& height, std::vector<int>& rgbData) const {
+        getRegionAsRGB(minCorner.x, minCorner.y, maxCorner.x, maxCorner.y, 
+                      width, height, rgbData);
     }
-    
-    // Getters
-    const std::vector<Vec2>& getPositions() const { return positions; }
-    const std::vector<Vec4>& getColors() const { return colors; }
-    const std::vector<float>& getSizes() const { return sizes; }
-    
-    Vec2 getPosition(int index) const { return positions[index]; }
-    Vec4 getColor(int index) const { return colors[index]; }
-    float getSize(int index) const { return sizes[index]; }
-    
-    void setColor(int index, const Vec4& color) { colors[index] = color; }
-    void setSize(int index, float size) { sizes[index] = size; }
-    
-    int getWidth() const { return width; }
-    int getHeight() const { return height; }
 
-private:
-    std::vector<Vec2> positions;
-    std::vector<Vec4> colors;
-    std::vector<float> sizes;
-    std::unordered_map<Vec2, int, std::hash<Vec2>> positionToIndex;
+    //spatial map
+    std::pair<int, int> worldToGrid(const Vec2& pos) const {
+        return {
+            static_cast<int>(std::floor(pos.x / cellSize)),
+            static_cast<int>(std::floor(pos.y / cellSize))
+        };
+    }
     
-    void floodFill(const Vec2& start, std::unordered_map<Vec2, bool, std::hash<Vec2>>& visited, 
-                   std::vector<int>& component) const {
-        std::vector<Vec2> stack;
-        stack.push_back(start);
+    void updateSpatialIndex(size_t id, const Vec2& oldPos, const Vec2& newPos) {
+        auto oldCell = worldToGrid(oldPos);
+        auto newCell = worldToGrid(newPos);
         
-        while (!stack.empty()) {
-            Vec2 current = stack.back();
-            stack.pop_back();
+        if (oldCell != newCell) {
+            // Remove from old cell
+            auto oldIt = spatialGrid.find(oldCell);
+            if (oldIt != spatialGrid.end()) {
+                oldIt->second.erase(id);
+                if (oldIt->second.empty()) {
+                    spatialGrid.erase(oldIt);
+                }
+            }
             
-            if (visited.find(current) != visited.end()) continue;
-            
-            visited[current] = true;
-            int index = getPixelIndex(current);
-            if (index != -1) {
-                component.push_back(index);
-                
-                // Add 4-connected neighbors
-                Vec2 neighbors[] = {current + Vec2(1, 0), current + Vec2(-1, 0), 
-                                   current + Vec2(0, 1), current + Vec2(0, -1)};
-                
-                for (const auto& neighbor : neighbors) {
-                    if (isOccupied(neighbor) && visited.find(neighbor) == visited.end()) {
-                        stack.push_back(neighbor);
+            // Add to new cell
+            spatialGrid[newCell].insert(id);
+            cellIndices[id] = newCell;
+        }
+    }
+    
+    std::vector<size_t> getIndicesInRadius(const Vec2& position, float radius) const {
+        std::vector<size_t> result;
+        
+        Vec2 minPos(position.x - radius, position.y - radius);
+        Vec2 maxPos(position.x + radius, position.y + radius);
+        
+        auto minCell = worldToGrid(minPos);
+        auto maxCell = worldToGrid(maxPos);
+        
+        float radiusSq = radius * radius;
+        
+        // Only check relevant cells
+        for (int x = minCell.first; x <= maxCell.first; ++x) {
+            for (int y = minCell.second; y <= maxCell.second; ++y) {
+                auto cell = std::make_pair(x, y);
+                auto it = spatialGrid.find(cell);
+                if (it != spatialGrid.end()) {
+                    for (size_t id : it->second) {
+                        const Vec2& objPos = getPosition(id);
+                        float dx = objPos.x - position.x;
+                        float dy = objPos.y - position.y;
+                        if (dx * dx + dy * dy <= radiusSq) {
+                            result.push_back(id);
+                        }
                     }
                 }
             }
         }
+        
+        return result;
     }
+    
+    std::vector<size_t> getIndicesInRegion(const Vec2& minCorner, const Vec2& maxCorner) const {
+        std::vector<size_t> result;
+        
+        auto minCell = worldToGrid(minCorner);
+        auto maxCell = worldToGrid(maxCorner);
+        
+        for (int x = minCell.first; x <= maxCell.first; ++x) {
+            for (int y = minCell.second; y <= maxCell.second; ++y) {
+                auto cell = std::make_pair(x, y);
+                auto it = spatialGrid.find(cell);
+                if (it != spatialGrid.end()) {
+                    for (size_t id : it->second) {
+                        const Vec2& pos = getPosition(id);
+                        if (pos.x >= minCorner.x && pos.x <= maxCorner.x &&
+                            pos.y >= minCorner.y && pos.y <= maxCorner.y) {
+                            result.push_back(id);
+                        }
+                    }
+                }
+            }
+        }
+        
+        return result;
+    }
+
+    size_t getSpatialGridCellCount() const { return spatialGrid.size(); }
+    size_t getSpatialGridObjectCount() const { return cellIndices.size(); }
+    float getCellSize() const { return cellSize; }
 };
 
 #endif

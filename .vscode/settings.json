@@ -84,7 +84,8 @@
         "span": "cpp",
         "cinttypes": "cpp",
         "variant": "cpp",
-        "__nullptr": "cpp"
+        "__nullptr": "cpp",
+        "unordered_set": "cpp"
     },
     "files.exclude": {
         "**/*.rpyc": true,
