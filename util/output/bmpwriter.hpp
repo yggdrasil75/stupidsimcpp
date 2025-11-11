@@ -7,7 +7,7 @@
 #include <string>
 #include <algorithm>
 #include <filesystem>
-#include "vec3.hpp"
+#include "../vectorlogic/vec3.hpp"
 
 class BMPWriter {
 private:
