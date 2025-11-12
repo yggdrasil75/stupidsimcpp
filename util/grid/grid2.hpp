@@ -23,18 +23,15 @@ struct PairHash {
 
 class Grid2 {
 private:
-    //size_t is index.
-    //vec2 is x,y position of the sparse value
-    std::multimap<size_t, Vec2> positions;
-    //vec4 is rgba color at the position
-    std::multimap<size_t, Vec4> colors;
-    //size is a floating size to assign to a "pixel" (or voxel for grid3) to allow larger or smaller assignments in this map
-    std::multimap<size_t, float> sizes;
-    //others will be added later
+    // Changed from multimap to unordered_map - each ID can only have one position/color/size
+    std::unordered_map<size_t, Vec2> positions;
+    std::unordered_map<size_t, Vec4> colors;
+    std::unordered_map<size_t, float> sizes;
+    
     size_t next_id;
     
-    std::unordered_map<size_t, std::pair<int, int>> cellIndices; // object ID -> grid cell
-    std::unordered_map<std::pair<int, int>, std::unordered_set<size_t>, PairHash> spatialGrid; // cell -> object IDs
+    std::unordered_map<size_t, std::pair<int, int>> cellIndices;
+    std::unordered_map<std::pair<int, int>, std::unordered_set<size_t>, PairHash> spatialGrid;
     float cellSize;
     
 public:
@@ -43,57 +40,54 @@ public:
     
     size_t addObject(const Vec2& position, const Vec4& color, float size = 1.0f) {
         size_t id = next_id++;
-        positions.insert({id, position});
-        colors.insert({id, color});
-        sizes.insert({id, size});
+        positions[id] = position;  // Direct assignment instead of insert
+        colors[id] = color;
+        sizes[id] = size;
         std::pair<int,int> cell = worldToGrid(position);
         spatialGrid[cell].insert(id);
         cellIndices[id] = cell;
         return id;
     }
 
-    //gets
+    //gets - much simpler now
     Vec2 getPosition(size_t id) const {
-        std::multimap<size_t, Vec2>::const_iterator it = positions.find(id);
+        auto it = positions.find(id);
         if (it != positions.end()) return it->second;
         return Vec2();
     }
 
     Vec4 getColor(size_t id) const {
-        std::multimap<size_t, Vec4>::const_iterator it = colors.find(id);
+        auto it = colors.find(id);
         if (it != colors.end()) return it->second;
         return Vec4();
     }
 
     float getSize(size_t id) const {
-        std::multimap<size_t, float>::const_iterator it = sizes.find(id);
+        auto it = sizes.find(id);
         if (it != sizes.end()) return it->second;
         return 1.0f;
     }
 
-    //sets
+    //sets - simpler too
     void setPosition(size_t id, const Vec2& position) {
         if (!hasObject(id)) return;
         
-        Vec2 oldPos = getPosition(id);
-        positions.erase(id);
-        positions.insert({id, position});
+        Vec2 oldPos = positions[id];  // Direct access
+        positions[id] = position;     // Direct assignment
         updateSpatialIndex(id, oldPos, position);
     }
 
     void setColor(size_t id, const Vec4& color) {
-        colors.erase(id);
-        colors.insert({id, color});
+        colors[id] = color;  // Direct assignment
     }
 
     void setSize(size_t id, float size) {
-        sizes.erase(id);
-        sizes.insert({id, size});
+        sizes[id] = size;  // Direct assignment
     }
     
     // Batch add/remove operations
     void addObjects(const std::vector<std::tuple<Vec2, Vec4, float>>& objects) {
-        for (const std::tuple<Vec2, Vec4, float>& obj : objects) {
+        for (const auto& obj : objects) {
             addObject(std::get<0>(obj), std::get<1>(obj), std::get<2>(obj));
         }
     }
@@ -106,30 +100,27 @@ public:
     
     // Batch position updates
     void updatePositions(const std::unordered_map<size_t, Vec2>& newPositions) {
-        // Bulk update spatial grid - collect all changes first
         std::vector<std::tuple<size_t, Vec2, Vec2>> spatialUpdates;
         
-        for (const std::pair<const size_t, Vec2>& pair : newPositions) {
+        for (const auto& pair : newPositions) {
             if (hasObject(pair.first)) {
-                Vec2 oldPos = getPosition(pair.first);
-                positions.erase(pair.first);
-                positions.insert({pair.first, pair.second});
+                Vec2 oldPos = positions[pair.first];
+                positions[pair.first] = pair.second;
                 spatialUpdates.emplace_back(pair.first, oldPos, pair.second);
             }
         }
         
-        // Apply all spatial updates at once
-        for (const std::tuple<size_t, Vec2, Vec2>& update : spatialUpdates) {
+        for (const auto& update : spatialUpdates) {
             updateSpatialIndex(std::get<0>(update), std::get<1>(update), std::get<2>(update));
         }
     }
     
     std::vector<size_t> getAllObjectIds() const {
         std::vector<size_t> ids;
+        ids.reserve(positions.size());
         for (const auto& pair : positions) {
             ids.push_back(pair.first);
         }
-        // Sort by ID to ensure consistent order
         std::sort(ids.begin(), ids.end());
         return ids;
     }
@@ -161,15 +152,9 @@ public:
             updates[i] = {id, newColor};
         }
         
-        // Batch update colors - much more efficient
+        // Batch update colors - much more efficient with unordered_map
         for (const auto& update : updates) {
-            // Directly update existing entry instead of erase/insert
-            auto it = colors.find(update.first);
-            if (it != colors.end()) {
-                // If multimap doesn't support direct modification, we need to replace
-                // For better performance, consider changing data structure
-                const_cast<Vec4&>(it->second) = update.second;
-            }
+            colors[update.first] = update.second;  // Direct assignment
         }
     }
     
@@ -500,6 +485,17 @@ public:
     size_t getSpatialGridCellCount() const { return spatialGrid.size(); }
     size_t getSpatialGridObjectCount() const { return cellIndices.size(); }
     float getCellSize() const { return cellSize; }
+    
+    // Additional utility methods
+    size_t getObjectCount() const { return positions.size(); }
+    void clear() {
+        positions.clear();
+        colors.clear();
+        sizes.clear();
+        spatialGrid.clear();
+        cellIndices.clear();
+        next_id = 0;
+    }
 };
 
 #endif

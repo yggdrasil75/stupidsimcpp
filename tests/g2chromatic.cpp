@@ -15,6 +15,9 @@ struct AnimationConfig {
     int numSeeds = 1;
 };
 
+const float PI4 = M_PI / 4.0f;
+const float PI43 = PI4 * 3.0f;
+
 bool initializeGrid(Grid2& grid, const AnimationConfig& config) {
     TIME_FUNCTION;
     std::cout << "Initializing grayscale grid..." << std::endl;
@@ -52,20 +55,6 @@ std::pair<std::vector<Vec2>, std::vector<Vec4>> generateSeedPoints(const Animati
     return {seedPoints, seedColors};
 }
 
-void applyDirectionalColorInfluence(Vec4& color, const Vec4& seedColor, float influence, 
-                                   float progress, float angle) {
-    //TIME_FUNCTION;
-    if (std::abs(angle) < M_PI / 4.0f) { // Right - affect alpha
-        color.a = std::fmod(color.a + seedColor.a * influence * progress, 1.0f);
-    } else if (std::abs(angle) > 3.0f * M_PI / 4.0f) { // Left - affect blue
-        color.b = std::fmod(color.b + seedColor.b * influence * progress, 1.0f);
-    } else if (angle > 0) { // Below - affect green
-        color.g = std::fmod(color.g + seedColor.g * influence * progress, 1.0f);
-    } else { // Above - affect red
-        color.r = std::fmod(color.r + seedColor.r * influence * progress, 1.0f);
-    }
-}
-
 Vec4 calculateInfluencedColor(const Vec2& position, const Vec4& originalColor, float progress,
                              const std::vector<Vec2>& seedPoints, const std::vector<Vec4>& seedColors,
                              const AnimationConfig& config) {
@@ -73,14 +62,25 @@ Vec4 calculateInfluencedColor(const Vec2& position, const Vec4& originalColor, f
     Vec4 newColor = originalColor;
     
     float maxDistance = std::max(config.width, config.height) * 0.6f;
+
     for (int s = 0; s < config.numSeeds; ++s) {
         float distance = position.distance(seedPoints[s]);
         float influence = std::max(0.0f, 1.0f - (distance / maxDistance));
         
         Vec2 direction = position - seedPoints[s];
         float angle = std::atan2(direction.y, direction.x);
-        
-        applyDirectionalColorInfluence(newColor, seedColors[s], influence, progress, angle);
+        auto SC = seedColors[s];
+        // applyDirectionalColorInfluence(newColor, seedColors[s], influence, progress, angle);
+        float absAngle = std::abs(angle);
+        if (absAngle < PI4) { // Right - affect alpha
+            newColor.a = std::fmod(newColor.a + SC.a * influence * progress, 1.0f);
+        } else if (absAngle > PI43) { // Left - affect blue
+            newColor.b = std::fmod(newColor.b + SC.b * influence * progress, 1.0f);
+        } else if (angle > 0) { // Below - affect green
+            newColor.g = std::fmod(newColor.g + SC.g * influence * progress, 1.0f);
+        } else { // Above - affect red
+            newColor.r = std::fmod(newColor.r + SC.r * influence * progress, 1.0f);
+        }
     }
     
     return newColor.clampColor();
