@@ -3,6 +3,7 @@
 
 #include "../vectorlogic/vec2.hpp"
 #include "../vectorlogic/vec4.hpp"
+#include "../timing_decorator.hpp"
 #include <vector>
 #include <unordered_map>
 #include <string>
@@ -123,6 +124,55 @@ public:
         }
     }
     
+    std::vector<size_t> getAllObjectIds() const {
+        std::vector<size_t> ids;
+        for (const auto& pair : positions) {
+            ids.push_back(pair.first);
+        }
+        // Sort by ID to ensure consistent order
+        std::sort(ids.begin(), ids.end());
+        return ids;
+    }
+
+    void bulkUpdateColors(const std::function<Vec4(size_t id, const Vec2& pos, const Vec4& currentColor)>& colorFunc) {
+        TIME_FUNCTION;
+        
+        // Convert to contiguous storage for better performance
+        std::vector<std::tuple<size_t, Vec2, Vec4>> objectData;
+        objectData.reserve(positions.size());
+        
+        // Single pass to collect all data
+        for (const auto& posPair : positions) {
+            size_t id = posPair.first;
+            auto colorIt = colors.find(id);
+            if (colorIt != colors.end()) {
+                objectData.emplace_back(id, posPair.second, colorIt->second);
+            }
+        }
+        
+        // Parallel color computation
+        std::vector<std::pair<size_t, Vec4>> updates;
+        updates.resize(objectData.size());
+        
+        #pragma omp parallel for
+        for (size_t i = 0; i < objectData.size(); ++i) {
+            const auto& [id, pos, currentColor] = objectData[i];
+            Vec4 newColor = colorFunc(id, pos, currentColor);
+            updates[i] = {id, newColor};
+        }
+        
+        // Batch update colors - much more efficient
+        for (const auto& update : updates) {
+            // Directly update existing entry instead of erase/insert
+            auto it = colors.find(update.first);
+            if (it != colors.end()) {
+                // If multimap doesn't support direct modification, we need to replace
+                // For better performance, consider changing data structure
+                const_cast<Vec4&>(it->second) = update.second;
+            }
+        }
+    }
+    
     //other
     bool hasObject(size_t id) const {
         return positions.find(id) != positions.end();
@@ -151,6 +201,7 @@ public:
     }
     
     std::vector<size_t> getIndicesAt(const Vec2& position, float radius = 0.0f) const {
+        TIME_FUNCTION;
         std::vector<size_t> result;
         
         if (radius <= 0.0f) {
@@ -176,6 +227,7 @@ public:
     }
     
     void getBoundingBox(Vec2& minCorner, Vec2& maxCorner) const {
+        TIME_FUNCTION;
         if (positions.empty()) {
             minCorner = Vec2(0.0f, 0.0f);
             maxCorner = Vec2(0.0f, 0.0f);
@@ -199,55 +251,12 @@ public:
     }
     
     //to picture
-    void getGridAsRGB(int& width, int& height, std::vector<int>& rgbData) const {
-        Vec2 minCorner, maxCorner;
-        getBoundingBox(minCorner, maxCorner);
+    void getGridRegionAsRGB(const Vec2& minCorner, const Vec2& maxCorner,
+                        int& width, int& height, std::vector<int>& rgbData) const {
+        TIME_FUNCTION;
         
-        // Calculate grid dimensions (adding 1 to include both ends)
-        width = static_cast<int>(std::ceil(maxCorner.x - minCorner.x)) ;
-        height = static_cast<int>(std::ceil(maxCorner.y - minCorner.y)) ;
-        
-        // Initialize with black (0,0,0)
-        rgbData.resize(width * height * 3, 0);
-        
-        // Fill the grid with object colors, accounting for sizes
-        for (const auto& posPair : positions) {
-            size_t id = posPair.first;
-            const Vec2& pos = posPair.second;
-            float size = getSize(id);
-            const Vec4& color = getColor(id);
-            
-            // Calculate the bounding box of this object in grid coordinates
-            float halfSize = size * 0.5f;
-            int minGridX = static_cast<int>(std::floor((pos.x - halfSize - minCorner.x)));
-            int minGridY = static_cast<int>(std::floor((pos.y - halfSize - minCorner.y)));
-            int maxGridX = static_cast<int>(std::ceil((pos.x + halfSize - minCorner.x)));
-            int maxGridY = static_cast<int>(std::ceil((pos.y + halfSize - minCorner.y)));
-            
-            // Clamp to grid boundaries
-            minGridX = std::max(0, minGridX);
-            minGridY = std::max(0, minGridY);
-            maxGridX = std::min(width - 1, maxGridX);
-            maxGridY = std::min(height - 1, maxGridY);
-            
-            // Fill all pixels within the object's size
-            for (int y = minGridY; y <= maxGridY; ++y) {
-                for (int x = minGridX; x <= maxGridX; ++x) {
-                    int index = (y * width + x) * 3;
-                    
-                    // Convert float color [0,1] to int [0,255]
-                    rgbData[index] = static_cast<int>(color.r * 255);
-                    rgbData[index + 1] = static_cast<int>(color.g * 255);
-                    rgbData[index + 2] = static_cast<int>(color.b * 255);
-                }
-            }
-        }
-    }
-    
-    void getRegionAsRGB(float minX, float minY, float maxX, float maxY, 
-                       int& width, int& height, std::vector<int>& rgbData) const {
         // Ensure valid region
-        if (minX >= maxX || minY >= maxY) {
+        if (minCorner.x >= maxCorner.x || minCorner.y >= maxCorner.y) {
             width = 0;
             height = 0;
             rgbData.clear();
@@ -255,10 +264,10 @@ public:
         }
         
         // Calculate grid dimensions
-        width = static_cast<int>(std::ceil(maxX - minX));
-        height = static_cast<int>(std::ceil(maxY - minY));
+        width = static_cast<int>(std::ceil(maxCorner.x - minCorner.x));
+        height = static_cast<int>(std::ceil(maxCorner.y - minCorner.y));
         
-        // Initialize with black (0,0,0)
+        // Initialize with black (0,0,0) in BGR format
         rgbData.resize(width * height * 3, 0);
         
         // Fill the grid with object colors in the region, accounting for sizes
@@ -276,12 +285,14 @@ public:
             float objMaxY = pos.y + halfSize;
             
             // Check if object overlaps with the region
-            if (objMaxX >= minX && objMinX <= maxX && objMaxY >= minY && objMinY <= maxY) {
+            if (objMaxX >= minCorner.x && objMinX <= maxCorner.x && 
+                objMaxY >= minCorner.y && objMinY <= maxCorner.y) {
+                
                 // Calculate overlapping region in grid coordinates
-                int minGridX = static_cast<int>(std::floor(std::max(objMinX, minX) - minX));
-                int minGridY = static_cast<int>(std::floor(std::max(objMinY, minY) - minY));
-                int maxGridX = static_cast<int>(std::ceil(std::min(objMaxX, maxX) - minX));
-                int maxGridY = static_cast<int>(std::ceil(std::min(objMaxY, maxY) - minY));
+                int minGridX = static_cast<int>(std::floor(std::max(objMinX, minCorner.x) - minCorner.x));
+                int minGridY = static_cast<int>(std::floor(std::max(objMinY, minCorner.y) - minCorner.y));
+                int maxGridX = static_cast<int>(std::ceil(std::min(objMaxX, maxCorner.x) - minCorner.x));
+                int maxGridY = static_cast<int>(std::ceil(std::min(objMaxY, maxCorner.y) - minCorner.y));
                 
                 // Clamp to grid boundaries
                 minGridX = std::max(0, minGridX);
@@ -289,25 +300,117 @@ public:
                 maxGridX = std::min(width - 1, maxGridX);
                 maxGridY = std::min(height - 1, maxGridY);
                 
-                // Fill all pixels within the object's overlapping region
+                // Fill all pixels within the object's overlapping region in BGR format
                 for (int y = minGridY; y <= maxGridY; ++y) {
                     for (int x = minGridX; x <= maxGridX; ++x) {
                         int index = (y * width + x) * 3;
                         
-                        // Convert float color [0,1] to int [0,255]
-                        rgbData[index] = static_cast<int>(color.r * 255);
-                        rgbData[index + 1] = static_cast<int>(color.g * 255);
-                        rgbData[index + 2] = static_cast<int>(color.b * 255);
+                        // Convert float color [0,1] to int [0,255] in BGR format
+                        rgbData[index + 2] = static_cast<int>(color.b * 255);     // Blue channel
+                        rgbData[index + 1] = static_cast<int>(color.g * 255); // Green channel
+                        rgbData[index] = static_cast<int>(color.r * 255); // Red channel
                     }
                 }
             }
         }
     }
-    
-    void getRegionAsRGB(const Vec2& minCorner, const Vec2& maxCorner,
-                       int& width, int& height, std::vector<int>& rgbData) const {
-        getRegionAsRGB(minCorner.x, minCorner.y, maxCorner.x, maxCorner.y, 
-                      width, height, rgbData);
+
+    void getGridRegionAsRGB(float minX, float minY, float maxX, float maxY,
+                        int& width, int& height, std::vector<int>& rgbData) const {
+        getGridRegionAsRGB(Vec2(minX, minY), Vec2(maxX, maxY), width, height, rgbData);
+    }
+
+    void getGridAsRGB(int& width, int& height, std::vector<int>& rgbData) const {
+        TIME_FUNCTION;
+        
+        // Get the bounding box of all objects
+        Vec2 minCorner, maxCorner;
+        getBoundingBox(minCorner, maxCorner);
+        
+        // Use the main function to get BGR data for the entire region
+        getGridRegionAsRGB(minCorner, maxCorner, width, height, rgbData);
+    }
+
+    void getGridRegionAsBGR(const Vec2& minCorner, const Vec2& maxCorner,
+                        int& width, int& height, std::vector<int>& bgrData) const {
+        TIME_FUNCTION;
+        
+        // Ensure valid region
+        if (minCorner.x >= maxCorner.x || minCorner.y >= maxCorner.y) {
+            width = 0;
+            height = 0;
+            bgrData.clear();
+            return;
+        }
+        
+        // Calculate grid dimensions
+        width = static_cast<int>(std::ceil(maxCorner.x - minCorner.x));
+        height = static_cast<int>(std::ceil(maxCorner.y - minCorner.y));
+        
+        // Initialize with black (0,0,0) in BGR format
+        bgrData.resize(width * height * 3, 0);
+        
+        // Fill the grid with object colors in the region, accounting for sizes
+        for (const auto& posPair : positions) {
+            size_t id = posPair.first;
+            const Vec2& pos = posPair.second;
+            float size = getSize(id);
+            const Vec4& color = getColor(id);
+            
+            // Calculate the bounding box of this object in world coordinates
+            float halfSize = size * 0.5f;
+            float objMinX = pos.x - halfSize;
+            float objMinY = pos.y - halfSize;
+            float objMaxX = pos.x + halfSize;
+            float objMaxY = pos.y + halfSize;
+            
+            // Check if object overlaps with the region
+            if (objMaxX >= minCorner.x && objMinX <= maxCorner.x && 
+                objMaxY >= minCorner.y && objMinY <= maxCorner.y) {
+                
+                // Calculate overlapping region in grid coordinates
+                int minGridX = static_cast<int>(std::floor(std::max(objMinX, minCorner.x) - minCorner.x));
+                int minGridY = static_cast<int>(std::floor(std::max(objMinY, minCorner.y) - minCorner.y));
+                int maxGridX = static_cast<int>(std::ceil(std::min(objMaxX, maxCorner.x) - minCorner.x));
+                int maxGridY = static_cast<int>(std::ceil(std::min(objMaxY, maxCorner.y) - minCorner.y));
+                
+                // Clamp to grid boundaries
+                minGridX = std::max(0, minGridX);
+                minGridY = std::max(0, minGridY);
+                maxGridX = std::min(width - 1, maxGridX);
+                maxGridY = std::min(height - 1, maxGridY);
+                
+                // Fill all pixels within the object's overlapping region in BGR format
+                for (int y = minGridY; y <= maxGridY; ++y) {
+                    for (int x = minGridX; x <= maxGridX; ++x) {
+                        int index = (y * width + x) * 3;
+                        
+                        // Convert float color [0,1] to int [0,255] in BGR format
+                        bgrData[index] = static_cast<int>(color.b * 255);     // Blue channel
+                        bgrData[index + 1] = static_cast<int>(color.g * 255); // Green channel
+                        bgrData[index + 2] = static_cast<int>(color.r * 255); // Red channel
+                    }
+                }
+            }
+        }
+    }
+
+    // Helper function that takes individual coordinates instead of Vec2
+    void getGridRegionAsBGR(float minX, float minY, float maxX, float maxY,
+                        int& width, int& height, std::vector<int>& bgrData) const {
+        getGridRegionAsBGR(Vec2(minX, minY), Vec2(maxX, maxY), width, height, bgrData);
+    }
+
+    // Helper function that gets the entire grid bounds and returns as BGR
+    void getGridAsBGR(int& width, int& height, std::vector<int>& bgrData) const {
+        TIME_FUNCTION;
+        
+        // Get the bounding box of all objects
+        Vec2 minCorner, maxCorner;
+        getBoundingBox(minCorner, maxCorner);
+        
+        // Use the main function to get BGR data for the entire region
+        getGridRegionAsBGR(minCorner, maxCorner, width, height, bgrData);
     }
 
     //spatial map
