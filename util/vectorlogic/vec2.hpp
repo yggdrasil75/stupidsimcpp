@@ -10,6 +10,12 @@ class Vec2 {
     float x, y;
     Vec2() : x(0), y(0) {}
     Vec2(float x, float y) : x(x), y(y) {}
+
+    Vec2& move(const Vec2 newpos) {
+        x = newpos.x;
+        y = newpos.y;
+        return *this;
+    }
     
     Vec2 operator+(const Vec2& other) const {
         return Vec2(x + other.x, y + other.y);
@@ -266,7 +272,6 @@ class Vec2 {
     std::string toString() const {
         return "(" + std::to_string(x) + ", " + std::to_string(y) + ")";
     }
-    
 };
 
 inline std::ostream& operator<<(std::ostream& os, const Vec2& vec) {

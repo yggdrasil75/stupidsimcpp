@@ -25,6 +25,13 @@ public:
     static Vec4 RGB(float r, float g, float b, float a = 1.0f) { return Vec4(r, g, b, a); }
     static Vec4 RGBA(float r, float g, float b, float a) { return Vec4(r, g, b, a); }
     
+    Vec4& recolor(const Vec4 newColor) {
+        r = newColor.r;
+        g = newColor.g;
+        b = newColor.b;
+        a = newColor.a;
+        return *this;
+    }
     
     Vec4 operator+(const Vec4& other) const {
         return Vec4(x + other.x, y + other.y, z + other.z, w + other.w);
