@@ -9,8 +9,8 @@
 #include "../util/timing_decorator.cpp"
 
 struct AnimationConfig {
-    int width = 512;
-    int height = 512;
+    int width = 1024;
+    int height = 1024;
     int totalFrames = 240;
     float fps = 30.0f;
     int numSeeds = 1;
@@ -223,9 +223,7 @@ std::vector<uint8_t> convertFrameToBGR(Grid2& grid, const AnimationConfig& confi
 }
 
 
-std::vector<std::vector<uint8_t>> createAnimationFrames(Grid2& grid, 
-                                                       const SeedDataSoA& seeds,
-                                                       const AnimationConfig& config) {
+std::vector<std::vector<uint8_t>> createAnimationFrames(Grid2& grid, const SeedDataSoA& seeds, const AnimationConfig& config) {
     TIME_FUNCTION;
     std::vector<std::vector<uint8_t>> frames;
     
@@ -241,10 +239,9 @@ std::vector<std::vector<uint8_t>> createAnimationFrames(Grid2& grid,
     
     return frames;
 }
-void printSuccessMessage(const std::string& filename, 
-                        const std::vector<Vec2>& seedPoints,
-                        const std::vector<Vec4>& seedColors,
-                        const AnimationConfig& config) {
+
+void printSuccessMessage(const std::string& filename, const std::vector<Vec2>& seedPoints,
+                            const std::vector<Vec4>& seedColors, const AnimationConfig& config) {
     std::cout << "\nSuccessfully saved chromatic transformation animation to: " << filename << std::endl;
     std::cout << "Video details:" << std::endl;
     std::cout << "  - Dimensions: " << config.width << " x " << config.height << std::endl;

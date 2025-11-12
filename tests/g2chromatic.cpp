@@ -8,9 +8,9 @@
 #include "../util/timing_decorator.cpp"
 
 struct AnimationConfig {
-    int width = 512;
-    int height = 512;
-    int totalFrames = 240;
+    int width = 1024;
+    int height = 1024;
+    int totalFrames = 480;
     float fps = 30.0f;
     int numSeeds = 1;
 };
@@ -99,7 +99,7 @@ std::vector<uint8_t> convertFrameToBGR(Grid2& grid, const AnimationConfig& confi
     TIME_FUNCTION;
     int frameWidth, frameHeight;
     std::vector<int> bgrData;
-    grid.getGridRegionAsBGR(Vec2(0,0),Vec2(512,512), frameWidth, frameHeight, bgrData);
+    grid.getGridRegionAsBGR(Vec2(0,0),Vec2(config.width,config.height), frameWidth, frameHeight, bgrData);
     //grid.getGridRegionAsRGB(0.0f,0.0f,512.0f,512.0f,frameWidth,frameHeight,rgbData);
     
     std::vector<uint8_t> bgrFrame(frameWidth * frameHeight * 3);
