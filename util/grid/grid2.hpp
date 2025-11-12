@@ -288,7 +288,6 @@ public:
             if (objMaxX >= minCorner.x && objMinX <= maxCorner.x && 
                 objMaxY >= minCorner.y && objMinY <= maxCorner.y) {
                 
-                // Calculate overlapping region in grid coordinates
                 int minGridX = static_cast<int>(std::floor(std::max(objMinX, minCorner.x) - minCorner.x));
                 int minGridY = static_cast<int>(std::floor(std::max(objMinY, minCorner.y) - minCorner.y));
                 int maxGridX = static_cast<int>(std::ceil(std::min(objMaxX, maxCorner.x) - minCorner.x));
