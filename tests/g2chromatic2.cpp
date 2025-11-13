@@ -11,8 +11,8 @@
 #include "../util/timing_decorator.cpp"
 
 struct AnimationConfig {
-    int width = 128;
-    int height = 128;
+    int width = 256;
+    int height = 256;
     int totalFrames = 480;
     float fps = 30.0f;
     int numSeeds = 8;
@@ -66,33 +66,53 @@ std::vector<std::tuple<size_t, Vec2, Vec4>> pickSeeds(Grid2 grid, AnimationConfi
     return seeds;
 }
 
-void expandPixel(Grid2& grid, AnimationConfig config, std::vector<std::tuple<size_t, Vec2, Vec4>>& seeds, std::unordered_set<size_t>& visited) {
+void expandPixel(Grid2& grid, AnimationConfig config, std::vector<std::tuple<size_t, Vec2, Vec4>>& seeds) {
     TIME_FUNCTION;
     std::vector<std::tuple<size_t, Vec2, Vec4>> newseeds; 
+
+
+    std::unordered_set<size_t> visitedThisFrame; 
+    for (const auto& seed : seeds) {
+        visitedThisFrame.insert(std::get<0>(seed));
+    }
+
+    
     for (const std::tuple<size_t, Vec2, Vec4>& seed : seeds) {
         size_t id = std::get<0>(seed);
         Vec2 seedPOS = std::get<1>(seed);
         Vec4 seedColor = std::get<2>(seed);
         std::vector<size_t> neighbors = grid.getNeighbors(id);
         for (size_t neighbor : neighbors) {
-            if (visited.find(neighbor) != visited.end()) {
-                continue; // Skip already processed neighbors
+            if (visitedThisFrame.count(neighbor)) {
+                continue;
             }
-            visited.insert(neighbor);
+            visitedThisFrame.insert(neighbor);
+
+
             Vec2 neipos = grid.getPositionID(neighbor);
             Vec4 neighborColor = grid.getColor(neighbor);
             float distance = seedPOS.distance(neipos);
-            float angle = seedPOS.angleTo(neipos);
-            Vec4 newcolor = Vec4(neighborColor.r * ((1.1f + angle) * std::sin(seedColor.r)),
-                neighborColor.g * ((1.1f + angle) * std::sin(seedColor.g)),
-                neighborColor.b * ((1.1f + angle) * std::sin(seedColor.b)),
+            float angle = seedPOS.directionTo(neipos);
+
+            float normalizedAngle = (angle + M_PI) / (2.0f * M_PI);
+            float blendFactor = 0.3f + 0.4f * std::sin(normalizedAngle * 2.0f * M_PI);
+            blendFactor = std::clamp(blendFactor, 0.1f, 0.9f);
+            
+            Vec4 newcolor = Vec4(
+                seedColor.r * blendFactor + neighborColor.r * (1.0f - blendFactor),
+                seedColor.g * (1.0f - blendFactor) + neighborColor.g * blendFactor,
+                seedColor.b * (0.5f + 0.5f * std::sin(normalizedAngle * 4.0f * M_PI)),
                 1.0f
             );
+            
+            newcolor = newcolor.clamp(0.0f, 1.0f);
+
             grid.setColor(neighbor, newcolor);
-            newseeds.push_back({neighbor, neipos,newcolor});
+            newseeds.emplace_back(neighbor, neipos, newcolor);
         }
     }
-    seeds = newseeds;
+    seeds.clear();
+    seeds = std::move(newseeds);
 }
 
 bool exportavi(std::vector<std::vector<uint8_t>> frames, AnimationConfig config) {
@@ -134,12 +154,9 @@ int main() {
     std::vector<std::tuple<size_t, Vec2, Vec4>> seeds = pickSeeds(grid,config);
     std::vector<std::vector<uint8_t>> frames;
 
-    //memory aid
-    std::unordered_set<size_t> visited;
-
     for (int i = 0; i < config.totalFrames; ++i){
         std::cout << "Processing frame " << i + 1 << "/" << config.totalFrames << std::endl;
-        expandPixel(grid,config,seeds, visited);
+        expandPixel(grid,config,seeds);
         int width;
         int height;
         std::vector<uint8_t> frame;

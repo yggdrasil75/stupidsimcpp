@@ -33,6 +33,10 @@ public:
         return *this;
     }
     
+    Vec4 average(const Vec4& other) const {
+        return Vec4((x+other.x)/2,(y+other.y)/2,(z+other.z)/2,(w+other.w)/2);
+    }
+    
     Vec4 operator+(const Vec4& other) const {
         return Vec4(x + other.x, y + other.y, z + other.z, w + other.w);
     }
