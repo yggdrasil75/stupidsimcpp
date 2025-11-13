@@ -3,13 +3,106 @@
 #include "../vectorlogic/vec4.hpp"
 #include "../timing_decorator.hpp"
 #include <vector>
+#include <unordered_set>
 #ifndef GRID2_HPP
 #define GRID2_HPP
+
+class reverselookupassistantclasscausecppisdumb {
+private:
+    std::unordered_map<size_t, Vec2> Positions;
+    std::unordered_map<Vec2, size_t, Vec2::Hash> ƨnoiƚiƨoꟼ;
+    size_t next_id;
+public:
+    Vec2 at(size_t id) const {
+        auto it = Positions.at(id);
+        return it;
+    }
+
+    size_t at(const Vec2& pos) const {
+        size_t id = ƨnoiƚiƨoꟼ.at(pos);
+        return id;
+    }
+
+    Vec2 find(size_t id) {
+        return Positions.at(id);
+    }
+
+    size_t set(const Vec2& pos) {
+        size_t id = next_id++;
+        Positions[id] = pos;
+        ƨnoiƚiƨoꟼ[pos] = id;
+        return id;
+    }
+
+    size_t remove(size_t id) {
+        Vec2& pos = Positions[id];
+        Positions.erase(id);
+        ƨnoiƚiƨoꟼ.erase(pos);
+        return id;
+    }
+
+    size_t remove(const Vec2& pos) {
+        size_t id = ƨnoiƚiƨoꟼ[pos];
+        Positions.erase(id);
+        ƨnoiƚiƨoꟼ.erase(pos);
+        return id;
+    }
+
+    void reserve(size_t size) {
+        Positions.reserve(size);
+        ƨnoiƚiƨoꟼ.reserve(size);
+    }
+
+    size_t size() {
+        return Positions.size();
+    }
+
+    size_t getNext_id() {
+        return next_id + 1;
+    }
+    
+    size_t bucket_count() {
+        return Positions.bucket_count();
+    }
+
+    bool empty() {
+        return Positions.empty();
+    }
+    
+    void clear() {
+        Positions.clear();
+        ƨnoiƚiƨoꟼ.clear();
+        next_id = 0;
+    }
+    
+    using iterator = typename std::unordered_map<size_t, Vec2>::iterator;
+    using const_iterator = typename std::unordered_map<size_t, Vec2>::const_iterator;
+
+    iterator begin() { 
+        return Positions.begin(); 
+    }
+    iterator end() { 
+        return Positions.end(); 
+    }
+    const_iterator begin() const { 
+        return Positions.begin(); 
+    }
+    const_iterator end() const { 
+        return Positions.end(); 
+    }
+    const_iterator cbegin() const { 
+        return Positions.cbegin(); 
+    }
+    const_iterator cend() const { 
+        return Positions.cend(); 
+    }
+    
+};
 
 class Grid2 { 
 private:
     //all positions
-    std::unordered_map<size_t, Vec2> Positions;
+    reverselookupassistantclasscausecppisdumb Positions;
     //all colors
     std::unordered_map<size_t, Vec4> Colors;
     //all sizes
@@ -21,36 +114,30 @@ private:
     Vec2 gridMin;
     //grid max
     Vec2 gridMax;
-    //next id
-    size_t next_id;
 
-    //TODO: neighbor map
+    //neighbor map
     std::unordered_map<size_t, std::vector<size_t>> neighborMap;
-    float neighborRadius = 1.0f; // Default neighbor search radius
+    float neighborRadius = 1.0f;
+    
     //TODO: spatial map
+    std::unordered_map<Vec2, size_t> inversetable;
 public:
     //get position from id
     Vec2 getPositionID(size_t id) const {
-        auto it = Positions.find(id);
-        return it != Positions.end() ? it->second : Vec2();
+        Vec2 it = Positions.at(id);
+        return it;
     }
+
     //get id from position (optional radius, picks first found. radius of 0 becomes epsilon if none are found)
     size_t getPositionVec(Vec2 pos, float radius = 0.0f) {
-        float searchRadius = (radius == 0.0f) ? std::numeric_limits<float>::epsilon() : radius;
-
-        float radiusSq = searchRadius*searchRadius;
-        
-        for (const auto& pair : Positions) {
-            if (pair.second.distanceSquared(pos) <= radiusSq) {
-                return pair.first;
-            }
-        }
-        return -1;
+        auto it = Positions.at(pos);
+        return it;
     }
 
     size_t getPositionVec(float x, float y, float radius = 0.0f) { 
         return getPositionVec(Vec2(x,y), radius);
     }
+
     //get all id in region
     std::vector<size_t> getPositionVecRegion(Vec2 pos, float radius = 1.0f) {
         float searchRadius = (radius == 0.0f) ? std::numeric_limits<float>::epsilon() : radius;
@@ -64,19 +151,23 @@ public:
         }
         return posvec;
     }
+    
     //get color from id
     Vec4 getColor(size_t id) {
         return Colors.at(id);
     }
+    
     //get color from position (use get id from position and then get color from id)
     Vec4 getColor(float x, float y) {
         size_t id = getPositionVec(Vec2(x,y),0.0);
         return getColor(id);
     }
+    
     //get size from id
     Vec4 getSize(size_t id) {
         return Colors.at(id);
     }
+    
     //get size from position (use get id from position and then get size from id)
     Vec4 getSize(float x, float y) {
         size_t id = getPositionVec(Vec2(x,y),0.0);
@@ -85,53 +176,63 @@ public:
     
     //add pixel (default color and default size provided)
     size_t addObject(const Vec2& pos, const Vec4& color, float size = 1.0f) {
-        size_t id = next_id++;
-        Positions[id] = pos;
+        size_t id = Positions.set(pos);
         Colors[id] = color;
         Sizes[id] = size;
         return id;
         updateNeighborForID(id);
     }
+    
     //set position by id
     void setPosition(size_t id, const Vec2& position) {
         Positions.at(id).move(position);
         updateNeighborForID(id);
     }
+    
     void setPosition(size_t id, float x, float y) {
         Positions.at(id).move(Vec2(x,y));
         updateNeighborForID(id);
     }
+    
     //set color by id (by pos same as get color)
     void setColor(size_t id, const Vec4 color) {
         Colors.at(id).recolor(color);
     }
+    
     void setColor(size_t id, float r, float g, float b, float a=1.0f) {
         Colors.at(id).recolor(Vec4(r,g,b,a));
     }
+    
     void setColor(float x, float y, const Vec4 color) {
         size_t id = getPositionVec(Vec2(x,y));
         Colors.at(id).recolor(color);
     }
+    
     void setColor(float x, float y, float r, float g, float b, float a=1.0f) {
         size_t id = getPositionVec(Vec2(x,y));
         Colors.at(id).recolor(Vec4(r,g,b,a));
     }
+    
     void setColor(const Vec2& pos, const Vec4 color) {
         size_t id = getPositionVec(pos);
         Colors.at(id).recolor(color);
     }
+    
     void setColor(const Vec2& pos, float r, float g, float b, float a=1.0f) {
         size_t id = getPositionVec(pos);
         Colors.at(id).recolor(Vec4(r,g,b,a));
     }
+    
     //set size by id (by pos same as get size)
     void setSize(size_t id, float size) {
         Sizes.at(id) = size;
     }
+    
     void setSize(float x, float y, float size) {
         size_t id = getPositionVec(Vec2(x,y));
         Sizes.at(id) = size;
     }
+    
     void setSize(const Vec2& pos, float size) {
         size_t id = getPositionVec(pos);
         Sizes.at(id) = size;
@@ -139,16 +240,17 @@ public:
 
     //remove object (should remove the id, the color, the position, and the size)
     size_t removeID(size_t id) {
-        Positions.erase(id);
+        Positions.remove(id);
         Colors.erase(id);
         Sizes.erase(id);
         unassignedIDs.push_back(id);
         updateNeighborForID(id);
         return id;
     }
+    
     size_t removeID(Vec2 pos) {
         size_t id = getPositionVec(pos);
-        Positions.erase(id);
+        Positions.remove(id);
         Colors.erase(id);
         Sizes.erase(id);
         unassignedIDs.push_back(id);
@@ -160,13 +262,12 @@ public:
     void bulkUpdatePositions(const std::unordered_map<size_t, Vec2>& newPositions) {
         TIME_FUNCTION;
         for (const auto& [id, newPos] : newPositions) {
-            auto it = Positions.find(id);
-            if (it != Positions.end()) {
-                it->second = newPos;
-            }
+            auto it = Positions.at(id);
+            it.move(newPos);
         }
         updateNeighborMap();
     }
+    
     // Bulk update colors
     void bulkUpdateColors(const std::unordered_map<size_t, Vec4>& newColors) {
         TIME_FUNCTION;
@@ -177,6 +278,7 @@ public:
             }
         }
     }
+    
     // Bulk update sizes
     void bulkUpdateSizes(const std::unordered_map<size_t, float>& newSizes) {
         TIME_FUNCTION;
@@ -187,6 +289,11 @@ public:
             }
         }
     }
+
+    void shrinkIfNeeded() {
+        //TODO: cleanup all as needed.
+    }
+    
     //bulk add
     std::vector<size_t> bulkAddObjects(const std::vector<std::tuple<Vec2, Vec4, float>>& objects) {
         TIME_FUNCTION;
@@ -194,25 +301,21 @@ public:
         ids.reserve(objects.size());
         
         // Reserve space in maps to avoid rehashing
-        if (Positions.bucket_count() < Positions.size() + objects.size()) {
-            Positions.reserve(Positions.size() + objects.size());
-            Colors.reserve(Colors.size() + objects.size());
-            Sizes.reserve(Sizes.size() + objects.size());
-        }
+        Positions.reserve(Positions.size() + objects.size());
+        Colors.reserve(Colors.size() + objects.size());
+        Sizes.reserve(Sizes.size() + objects.size());
         
         // Batch insertion
-        #pragma omp parallel for
         for (size_t i = 0; i < objects.size(); ++i) {
-            size_t id = next_id + i;
             const auto& [pos, color, size] = objects[i];
+            size_t id = Positions.set(pos);
             
-            Positions[id] = pos;
             Colors[id] = color;
             Sizes[id] = size;
         }
         
-        // Update next_id atomically
-        next_id += objects.size();
+        shrinkIfNeeded();
+        updateNeighborMap();
         return getAllIDs(); // Or generate ID range
     }
     
@@ -231,19 +334,19 @@ public:
         // Batch insertion
         #pragma omp parallel for
         for (size_t i = 0; i < poses.size(); ++i) {
-            size_t id = next_id + i;
-            
-            Positions[id] = poses[i];
+            size_t id = Positions.set(poses[i]);
             Colors[id] = colors[i];
             Sizes[id] = sizes[i];
         }
         
-        // Update next_id atomically
-        next_id += poses.size();
-        return getAllIDs(); // Or generate ID range
+        shrinkIfNeeded();
+        updateNeighborMap();
+        
+        return getAllIDs();
     }
+
     //get all ids
-    std::vector<size_t> getAllIDs() const {
+    std::vector<size_t> getAllIDs() {
         TIME_FUNCTION;
         std::vector<size_t> ids;
         ids.reserve(Positions.size());
@@ -337,21 +440,22 @@ public:
             }
         }
     }
+    
     //get full as rgb/bgr
-    void getGridAsRGB(int& width, int& height, std::vector<uint8_t>& rgbData) const {
+    void getGridAsRGB(int& width, int& height, std::vector<uint8_t>& rgbData)  {
         Vec2 minCorner, maxCorner;
         getBoundingBox(minCorner, maxCorner);
         getGridRegionAsRGB(minCorner, maxCorner, width, height, rgbData);
     }
 
-    void getGridAsBGR(int& width, int& height, std::vector<uint8_t>& bgrData) const {
+    void getGridAsBGR(int& width, int& height, std::vector<uint8_t>& bgrData)  {
         Vec2 minCorner, maxCorner;
         getBoundingBox(minCorner, maxCorner);
         getGridRegionAsBGR(minCorner, maxCorner, width, height, bgrData);
     }
 
     //get bounding box
-    void getBoundingBox(Vec2& minCorner, Vec2& maxCorner) const {
+    void getBoundingBox(Vec2& minCorner, Vec2& maxCorner) {
         TIME_FUNCTION;
         if (Positions.empty()) {
             minCorner = Vec2(0, 0);
@@ -385,7 +489,6 @@ public:
         Positions.clear();
         Colors.clear();
         Sizes.clear();
-        next_id = 0;
     }
 
     // neighbor map
@@ -407,18 +510,16 @@ public:
         }
     }
     
-    // Update neighbor map for a single object (more efficient)
+    // Update neighbor map for a single object
     void updateNeighborForID(size_t id) {
         TIME_FUNCTION;
-        auto pos_it = Positions.find(id);
-        if (pos_it == Positions.end()) return;
-        
-        Vec2 pos1 = pos_it->second;
+        Vec2 pos_it = Positions.at(id);
+
         std::vector<size_t> neighbors;
         float radiusSq = neighborRadius * neighborRadius;
         
         for (const auto& [id2, pos2] : Positions) {
-            if (id != id2 && pos1.distanceSquared(pos2) <= radiusSq) {
+            if (id != id2 && pos_it.distanceSquared(pos2) <= radiusSq) {
                 neighbors.push_back(id2);
             }
         }

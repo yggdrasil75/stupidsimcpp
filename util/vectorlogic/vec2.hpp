@@ -8,8 +8,10 @@
 class Vec2 {
     public:
     float x, y;
+    size_t index;
     Vec2() : x(0), y(0) {}
     Vec2(float x, float y) : x(x), y(y) {}
+    Vec2(float x, float y, size_t index) : x(x), y(y), index(index) {}
 
     Vec2& move(const Vec2 newpos) {
         x = newpos.x;
@@ -277,12 +279,23 @@ class Vec2 {
     std::string toString() const {
         return "(" + std::to_string(x) + ", " + std::to_string(y) + ")";
     }
+
+    std::ostream& operator<<(std::ostream& os) {
+        os << toString();
+        return os;
+    }
+
+    struct Hash {
+        std::size_t operator()(const Vec2& v) const {
+            return std::hash<float>()(v.x) ^ (std::hash<float>()(v.y) << 1);
+        }
+    };
 };
 
-inline std::ostream& operator<<(std::ostream& os, const Vec2& vec) {
-    os << vec.toString();
-    return os;
-}
+// inline std::ostream& operator<<(std::ostream& os, const Vec2& vec) {
+//     os << vec.toString();
+//     return os;
+// }
 
 namespace std {
     template<>
