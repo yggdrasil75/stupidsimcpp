@@ -260,6 +260,11 @@ class Vec2 {
     float angleTo(const Vec2& other) const {
         return std::acos(this->dot(other) / (this->length() * other.length()));
     }
+
+    float directionTo(const Vec2& other) const {
+        Vec2 direction = other - *this;
+        return direction.angle();
+    }
     
     float& operator[](int index) {
         return (&x)[index];

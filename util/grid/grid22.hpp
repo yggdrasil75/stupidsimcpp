@@ -90,13 +90,16 @@ public:
         Colors[id] = color;
         Sizes[id] = size;
         return id;
+        updateNeighborForID(id);
     }
     //set position by id
     void setPosition(size_t id, const Vec2& position) {
         Positions.at(id).move(position);
+        updateNeighborForID(id);
     }
     void setPosition(size_t id, float x, float y) {
         Positions.at(id).move(Vec2(x,y));
+        updateNeighborForID(id);
     }
     //set color by id (by pos same as get color)
     void setColor(size_t id, const Vec4 color) {
@@ -140,7 +143,7 @@ public:
         Colors.erase(id);
         Sizes.erase(id);
         unassignedIDs.push_back(id);
-        
+        updateNeighborForID(id);
         return id;
     }
     size_t removeID(Vec2 pos) {
@@ -149,7 +152,7 @@ public:
         Colors.erase(id);
         Sizes.erase(id);
         unassignedIDs.push_back(id);
-        
+        updateNeighborForID(id);
         return id;
     }
 
@@ -162,6 +165,7 @@ public:
                 it->second = newPos;
             }
         }
+        updateNeighborMap();
     }
     // Bulk update colors
     void bulkUpdateColors(const std::unordered_map<size_t, Vec4>& newColors) {
