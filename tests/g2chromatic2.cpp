@@ -149,7 +149,7 @@ int main() {
     AnimationConfig config;
     
     Grid2 grid = setup(config);
-    grid.updateNeighborMap();
+    //grid.updateNeighborMap();
     Preview(grid);
     std::vector<std::tuple<size_t, Vec2, Vec4>> seeds = pickSeeds(grid,config);
     std::vector<std::vector<uint8_t>> frames;

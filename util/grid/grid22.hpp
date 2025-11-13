@@ -99,6 +99,17 @@ public:
     
 };
 
+class SpatialCell {
+private:
+    float size;
+    float radius;
+    std::unordered_map<Vec2, std::vector<size_t>, Vec2::Hash> grid;
+public:
+    void insertID(size_t id, Vec2& pos) {
+        
+    }
+};
+
 class Grid2 { 
 private:
     //all positions
