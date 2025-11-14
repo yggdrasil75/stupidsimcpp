@@ -8,6 +8,7 @@
 #include <memory>
 #include <algorithm>
 #include <iostream>
+#include "../timing_decorator.hpp"
 
 class video {
 private:
@@ -21,6 +22,7 @@ private:
     // Compress frame using differential encoding
     std::vector<std::pair<uint8_t, uint32_t>> compress_with_differential(
         const frame& current_frame, const frame* previous_frame = nullptr) const {
+        TIME_FUNCTION;
         
         if (previous_frame == nullptr) {
             // First frame - compress normally
@@ -49,6 +51,7 @@ private:
     // Decompress differential frame
     frame decompress_differential(const std::vector<std::pair<uint8_t, uint32_t>>& compressed_diff,
                                  const frame& previous_frame) const {
+        TIME_FUNCTION;
         
         frame diff_frame;
         diff_frame.decompress_rle(compressed_diff);
@@ -108,6 +111,7 @@ public:
     
     // Add a frame to the video sequence
     void add_frame(const frame& new_frame) {
+        TIME_FUNCTION;
         // Validate frame dimensions and channels
         if (new_frame.width() != width_ || new_frame.height() != height_) {
             throw std::invalid_argument("Frame dimensions must match video dimensions");
@@ -133,6 +137,7 @@ public:
     
     // Get a specific frame
     frame get_frame(size_t index) const {
+        TIME_FUNCTION;
         if (index >= compressed_frames_.size()) {
             throw std::out_of_range("Frame index out of range");
         }
@@ -154,6 +159,7 @@ public:
     
     // Get multiple frames as a sequence
     std::vector<frame> get_frames(size_t start_index, size_t count) const {
+        TIME_FUNCTION;
         if (start_index >= compressed_frames_.size()) {
             throw std::out_of_range("Start index out of range");
         }
@@ -189,6 +195,7 @@ public:
     
     // Replace a frame
     void replace_frame(size_t index, const frame& new_frame) {
+        TIME_FUNCTION;
         if (index >= compressed_frames_.size()) {
             throw std::out_of_range("Frame index out of range");
         }
@@ -226,6 +233,7 @@ public:
     
     // Enable/disable differential encoding
     void set_differential_encoding(bool enabled) {
+        TIME_FUNCTION;
         if (use_differential_encoding_ == enabled) {
             return; // No change needed
         }
@@ -246,11 +254,13 @@ public:
     
     // Get video duration in seconds
     double duration() const noexcept {
+        TIME_FUNCTION;
         return compressed_frames_.size() / fps_;
     }
     
     // Calculate total compressed size in bytes
     size_t total_compressed_size() const noexcept {
+        TIME_FUNCTION;
         size_t total = 0;
         for (const auto& compressed_frame : compressed_frames_) {
             total += compressed_frame.size() * sizeof(std::pair<uint8_t, uint32_t>);
@@ -260,11 +270,13 @@ public:
     
     // Calculate total uncompressed size in bytes
     size_t total_uncompressed_size() const noexcept {
+        TIME_FUNCTION;
         return compressed_frames_.size() * width_ * height_ * channels_.size();
     }
     
     // Calculate overall compression ratio
     double overall_compression_ratio() const noexcept {
+        TIME_FUNCTION;
         if (empty()) {
             return 1.0;
         }
@@ -277,6 +289,7 @@ public:
     
     // Calculate average frame compression ratio
     double average_frame_compression_ratio() const {
+        TIME_FUNCTION;
         if (empty()) {
             return 1.0;
         }
@@ -292,6 +305,7 @@ public:
     
     // Get compression statistics
     struct compression_stats {
+        TIME_FUNCTION;
         size_t total_frames;
         size_t total_compressed_bytes;
         size_t total_uncompressed_bytes;
@@ -301,6 +315,7 @@ public:
     };
     
     compression_stats get_compression_stats() const {
+        TIME_FUNCTION;
         compression_stats stats;
         stats.total_frames = compressed_frames_.size();
         stats.total_compressed_bytes = total_compressed_size();
@@ -313,6 +328,7 @@ public:
     
     // Extract a sub-video
     video subvideo(size_t start_frame, size_t frame_count) const {
+        TIME_FUNCTION;
         if (start_frame >= compressed_frames_.size()) {
             throw std::out_of_range("Start frame out of range");
         }
@@ -329,6 +345,7 @@ public:
     
     // Append another video (must have same dimensions and channels)
     void append_video(const video& other) {
+        TIME_FUNCTION;
         if (other.width_ != width_ || other.height_ != height_ || other.channels_ != channels_) {
             throw std::invalid_argument("Videos must have same dimensions and channels");
         }
@@ -349,6 +366,7 @@ public:
     
     // Save/Load functionality (basic serialization)
     std::vector<uint8_t> serialize() const {
+        TIME_FUNCTION;
         // Simple serialization format:
         // [header][compressed_frame_data...]
         // Header: width(4), height(4), channels_count(1), channels_data(n), fps(8), frame_count(4)
@@ -394,6 +412,7 @@ public:
     
     // Deserialize from byte data
     static video deserialize(const std::vector<uint8_t>& data) {
+        TIME_FUNCTION;
         if (data.size() < 4 + 4 + 1 + 8 + 1 + 4) { // Minimum header size
             throw std::invalid_argument("Invalid video data: too short");
         }

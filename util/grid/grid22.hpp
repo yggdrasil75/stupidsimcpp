@@ -138,6 +138,7 @@ public:
     }
     
     std::vector<size_t> queryRange(const Vec2& center, float radius) const {
+        TIME_FUNCTION;
         std::vector<size_t> results;
         float radiusSq = radius * radius;
         
@@ -198,6 +199,7 @@ public:
 
     //get id from position (optional radius, picks first found. radius of 0 becomes epsilon if none are found)
     size_t getPositionVec(const Vec2& pos, float radius = 0.0f) {
+        TIME_FUNCTION;
         if (radius == 0.0f) {
             // Exact match - use spatial grid to find the cell
             Vec2 gridPos = spatialGrid.worldToGrid(pos);

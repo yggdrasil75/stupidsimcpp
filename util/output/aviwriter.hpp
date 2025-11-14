@@ -114,6 +114,7 @@ private:
 
     // Helper function to convert frame to RGB format
     static std::vector<uint8_t> frameToRGB(const frame& frm) {
+        TIME_FUNCTION;
         if (frm.empty()) {
             return {};
         }
@@ -179,9 +180,8 @@ private:
 
 public:
     // New method for video objects
-    static bool saveAVI(const std::string& filename,
-                       const video& vid,
-                       float fps = 0.0f) {
+    static bool saveAVI(const std::string& filename,const video& vid,float fps = 0.0f) {
+        TIME_FUNCTION;
         if (vid.empty()) {
             return false;
         }
@@ -204,6 +204,7 @@ public:
     static bool saveAVI(const std::string& filename, 
                        const std::vector<std::vector<uint8_t>>& frames, 
                        int width, int height, float fps = 30.0f) {
+        TIME_FUNCTION;
         if (frames.empty() || width <= 0 || height <= 0 || fps <= 0) {
             return false;
         }
@@ -382,6 +383,7 @@ public:
     static bool saveAVI(const std::string& filename,
                        const std::vector<frame>& frames,
                        float fps = 30.0f) {
+        TIME_FUNCTION;
         if (frames.empty() || fps <= 0) {
             return false;
         }
@@ -414,6 +416,7 @@ public:
                                  const std::vector<std::string>& frameFiles,
                                  int width, int height,
                                  float fps = 30.0f) {
+        TIME_FUNCTION;
         std::vector<std::vector<uint8_t>> frames;
         frames.reserve(frameFiles.size());
 
