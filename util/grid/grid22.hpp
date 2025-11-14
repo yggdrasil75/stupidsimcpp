@@ -99,16 +99,36 @@ public:
     
 };
 
-class SpatialCell {
+class SpatialCell2Leaf {
 private:
-    float size;
-    float radius;
-    std::unordered_map<Vec2, std::vector<size_t>, Vec2::Hash> grid;
+    static constexpr float SIZE = 10;
+    Vec2 origin;
+    std::vector<size_t> ids;
+    size_t id; //this leaf nodes id
 public:
+    SpatialCell2Leaf(const Vec2& origin, size_t id) : origin(origin), id(id) {}
     void insertID(size_t id, Vec2& pos) {
-        
+        //if (pos.distance(origin) < size) {
+            ids.push_back(id);
+        //}
     }
+    void safeInsertID(size_t id, Vec2& pos) {
+        if (pos.distance(origin) < SIZE) {
+            ids.push_back(id);
+        }
+    }
+    std::vector<size_t> getIds() {
+        return ids;
+    }
+    const Vec2& getOrigin() const { return origin; }
 };
+
+class SpatialGrid2 {
+private:
+    std::unordered_map<Vec2, SpatialCell2Leaf, Vec2::Hash> cells;
+public:
+
+}
 
 class Grid2 { 
 private:
@@ -131,7 +151,7 @@ private:
     float neighborRadius = 1.0f;
     
     //TODO: spatial map
-    std::unordered_map<Vec2, size_t> inversetable;
+    std::unordered_map<Vec2, std::vector<size_t>, Vec2::Hash> spatialtable;
 public:
     //get position from id
     Vec2 getPositionID(size_t id) const {
