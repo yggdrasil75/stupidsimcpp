@@ -10,6 +10,7 @@
 #include "../util/output/bmpwriter.hpp"
 #include "../util/timing_decorator.cpp"
 #include "../util/output/frame.hpp"
+#include "../util/output/video.hpp"
 
 struct AnimationConfig {
     int width = 1024;
@@ -71,7 +72,6 @@ void expandPixel(Grid2& grid, AnimationConfig config, std::vector<std::tuple<siz
     TIME_FUNCTION;
     std::vector<std::tuple<size_t, Vec2, Vec4>> newseeds; 
 
-
     std::unordered_set<size_t> visitedThisFrame; 
     for (const auto& seed : seeds) {
         visitedThisFrame.insert(std::get<0>(seed));
@@ -88,7 +88,6 @@ void expandPixel(Grid2& grid, AnimationConfig config, std::vector<std::tuple<siz
                 continue;
             }
             visitedThisFrame.insert(neighbor);
-
 
             Vec2 neipos = grid.getPositionID(neighbor);
             Vec4 neighborColor = grid.getColor(neighbor);
@@ -116,63 +115,52 @@ void expandPixel(Grid2& grid, AnimationConfig config, std::vector<std::tuple<siz
     seeds = std::move(newseeds);
 }
 
-bool exportavi(std::vector<std::vector<uint8_t>> frames, AnimationConfig config) {
-    TIME_FUNCTION;
-    std::string filename = "output/chromatic_transformation.avi";
-    
-    std::cout << "Frame count: " << frames.size() << std::endl;
-    std::cout << "Frame size: " << (frames.empty() ? 0 : frames[0].size()) << std::endl;
-    std::cout << "Width: " << config.width << ", Height: " << config.height << std::endl;
-    
-    std::filesystem::path dir = "output";
-    if (!std::filesystem::exists(dir)) {
-        if (!std::filesystem::create_directories(dir)) {
-            std::cout << "Failed to create output directory!" << std::endl;
-            return false;
-        }
-    }
-    
-    bool success = AVIWriter::saveAVI(filename, frames, config.width+1, config.height+1, config.fps);
-    
-    if (success) {
-        // Check if file actually exists
-        if (std::filesystem::exists(filename)) {
-            auto file_size = std::filesystem::file_size(filename);
-        } 
-    } else {
-        std::cout << "Failed to save AVI file!" << std::endl;
-    }
-    
-    return success;
-}
-
 int main() {
     AnimationConfig config;
     
     Grid2 grid = setup(config);
     Preview(grid);
     std::vector<std::tuple<size_t, Vec2, Vec4>> seeds = pickSeeds(grid,config);
-    std::vector<frame> frames; // Change to vector of frame objects
+    
+    // Create video object with BGR channels and configured FPS
+    video vid(config.width+1, config.height+1, {'B', 'G', 'R'}, config.fps, true);
 
     for (int i = 0; i < config.totalFrames; ++i){
         std::cout << "Processing frame " << i + 1 << "/" << config.totalFrames << std::endl;
         expandPixel(grid,config,seeds);
         
         frame outputFrame;
-        grid.getGridAsFrame(outputFrame, {'B', 'G', 'R'}); // Directly get as BGR frame
+        grid.getGridAsFrame(outputFrame, {'B', 'G', 'R'});
         
-        // Alternative: Use the dedicated BGR method
-        // int width, height;
-        // grid.getGridAsBGRFrame(width, height, outputFrame);
+        // Add frame to video (this will compress it using RLE + differential encoding)
+        vid.add_frame(outputFrame);
         
-        frames.push_back(outputFrame);
+        // Optional: Print compression stats every 50 frames
+        // if ((i + 1) % 50 == 0) {
+        //     auto stats = vid.get_compression_stats();
+        //     std::cout << "Frame " << (i + 1) << " - Compression ratio: " << stats.overall_ratio 
+        //               << ", Total compressed: " << stats.total_compressed_bytes << " bytes" << std::endl;
+        // }
     }
     
-    // Use the frame-based AVIWriter overload
-    bool success = AVIWriter::saveAVI("output/chromatic_transformation.avi", frames, config.fps);
+    // Use the video-based AVIWriter overload
+    bool success = AVIWriter::saveAVI("output/chromatic_transformation.avi", vid, config.fps);
     
     if (success) {
-        std::cout << "Successfully saved AVI with " << frames.size() << " frames" << std::endl;
+        // Print final compression statistics
+        auto final_stats = vid.get_compression_stats();
+        std::cout << "Successfully saved AVI with " << vid.frame_count() << " frames" << std::endl;
+        std::cout << "Final compression statistics:" << std::endl;
+        std::cout << "  Total frames: " << final_stats.total_frames << std::endl;
+        std::cout << "  Video duration: " << final_stats.video_duration << " seconds" << std::endl;
+        std::cout << "  Uncompressed size: " << final_stats.total_uncompressed_bytes << " bytes" << std::endl;
+        std::cout << "  Compressed size: " << final_stats.total_compressed_bytes << " bytes" << std::endl;
+        std::cout << "  Overall compression ratio: " << final_stats.overall_ratio << std::endl;
+        std::cout << "  Average frame compression ratio: " << final_stats.average_frame_ratio << std::endl;
+        
+        // Optional: Save compressed video data for later use
+        auto serialized_data = vid.serialize();
+        std::cout << "Serialized video data size: " << serialized_data.size() << " bytes" << std::endl;
     } else {
         std::cout << "Failed to save AVI file!" << std::endl;
     }
