@@ -99,36 +99,71 @@ public:
     
 };
 
-class SpatialCell2Leaf {
+class SpatialGrid {
 private:
-    static constexpr float SIZE = 10;
-    Vec2 origin;
-    std::vector<size_t> ids;
-    size_t id; //this leaf nodes id
+    float cellSize;
+    std::unordered_map<Vec2, std::unordered_set<size_t>, Vec2::Hash> grid;
 public:
-    SpatialCell2Leaf(const Vec2& origin, size_t id) : origin(origin), id(id) {}
-    void insertID(size_t id, Vec2& pos) {
-        //if (pos.distance(origin) < size) {
-            ids.push_back(id);
-        //}
+    SpatialGrid(float cellSize = 2.0f) : cellSize(cellSize) {}
+    
+    Vec2 worldToGrid(const Vec2& worldPos) const {
+        return (worldPos / cellSize).floor();
     }
-    void safeInsertID(size_t id, Vec2& pos) {
-        if (pos.distance(origin) < SIZE) {
-            ids.push_back(id);
+    
+    void insert(size_t id, const Vec2& pos) {
+        Vec2 gridPos = worldToGrid(pos);
+        grid[gridPos].insert(id);
+    }
+    
+    void remove(size_t id, const Vec2& pos) {
+        Vec2 gridPos = worldToGrid(pos);
+        auto cellIt = grid.find(gridPos);
+        if (cellIt != grid.end()) {
+            cellIt->second.erase(id);
+            if (cellIt->second.empty()) {
+                grid.erase(cellIt);
+            }
         }
     }
-    std::vector<size_t> getIds() {
-        return ids;
+    
+    void update(size_t id, const Vec2& oldPos, const Vec2& newPos) {
+        Vec2 oldGridPos = worldToGrid(oldPos);
+        Vec2 newGridPos = worldToGrid(newPos);
+        
+        if (oldGridPos != newGridPos) {
+            remove(id, oldPos);
+            insert(id, newPos);
+        }
     }
-    const Vec2& getOrigin() const { return origin; }
+    
+    std::vector<size_t> queryRange(const Vec2& center, float radius) const {
+        std::vector<size_t> results;
+        float radiusSq = radius * radius;
+        
+        // Calculate grid bounds for the query
+        Vec2 minGrid = worldToGrid(center - Vec2(radius, radius));
+        Vec2 maxGrid = worldToGrid(center + Vec2(radius, radius));
+        
+        // Check all relevant grid cells
+        for (int x = minGrid.x; x <= maxGrid.x; ++x) {
+            for (int y = minGrid.y; y <= maxGrid.y; ++y) {
+                Vec2 gridPos(x, y);
+                auto cellIt = grid.find(gridPos);
+                if (cellIt != grid.end()) {
+                    for (size_t id : cellIt->second) {
+                        results.push_back(id);
+                    }
+                }
+            }
+        }
+        
+        return results;
+    }
+    
+    void clear() {
+        grid.clear();
+    }
 };
-
-class SpatialGrid2 {
-private:
-    std::unordered_map<Vec2, SpatialCell2Leaf, Vec2::Hash> cells;
-public:
-
-}
 
 class Grid2 { 
 private:
@@ -151,7 +186,8 @@ private:
     float neighborRadius = 1.0f;
     
     //TODO: spatial map
-    std::unordered_map<Vec2, std::vector<size_t>, Vec2::Hash> spatialtable;
+    std::unordered_map<Vec2, reverselookupassistantclasscausecppisdumb, Vec2::Hash> spatialTable;
+    float spatSize = 2.0f;
 public:
     //get position from id
     Vec2 getPositionID(size_t id) const {
@@ -167,6 +203,12 @@ public:
 
     size_t getPositionVec(float x, float y, float radius = 0.0f) { 
         return getPositionVec(Vec2(x,y), radius);
+    }
+
+    size_t getIDFromSpatPOS(Vec2 pos) {
+        Vec2 spat2pos = (pos / spatSize).floor();
+        reverselookupassistantclasscausecppisdumb spatids = spatialTable.at(spat2pos);
+        return spatids.at(pos);
     }
 
     //get all id in region
