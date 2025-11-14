@@ -137,7 +137,6 @@ public:
     
     // Get a specific frame
     frame get_frame(size_t index) const {
-        TIME_FUNCTION;
         if (index >= compressed_frames_.size()) {
             throw std::out_of_range("Frame index out of range");
         }
