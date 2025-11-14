@@ -305,7 +305,6 @@ public:
     
     // Get compression statistics
     struct compression_stats {
-        TIME_FUNCTION;
         size_t total_frames;
         size_t total_compressed_bytes;
         size_t total_uncompressed_bytes;
