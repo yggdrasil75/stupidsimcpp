@@ -9,10 +9,11 @@
 #include "../util/output/aviwriter.hpp"
 #include "../util/output/bmpwriter.hpp"
 #include "../util/timing_decorator.cpp"
+#include "../util/output/frame.hpp"
 
 struct AnimationConfig {
-    int width = 256;
-    int height = 256;
+    int width = 1024;
+    int height = 1024;
     int totalFrames = 480;
     float fps = 30.0f;
     int numSeeds = 8;
@@ -149,22 +150,33 @@ int main() {
     AnimationConfig config;
     
     Grid2 grid = setup(config);
-    //grid.updateNeighborMap();
     Preview(grid);
     std::vector<std::tuple<size_t, Vec2, Vec4>> seeds = pickSeeds(grid,config);
-    std::vector<std::vector<uint8_t>> frames;
+    std::vector<frame> frames; // Change to vector of frame objects
 
     for (int i = 0; i < config.totalFrames; ++i){
         std::cout << "Processing frame " << i + 1 << "/" << config.totalFrames << std::endl;
         expandPixel(grid,config,seeds);
-        int width;
-        int height;
-        std::vector<uint8_t> frame;
-        grid.getGridAsBGR(width,height,frame);
-        frames.push_back(frame);
+        
+        frame outputFrame;
+        grid.getGridAsFrame(outputFrame, {'B', 'G', 'R'}); // Directly get as BGR frame
+        
+        // Alternative: Use the dedicated BGR method
+        // int width, height;
+        // grid.getGridAsBGRFrame(width, height, outputFrame);
+        
+        frames.push_back(outputFrame);
     }
     
-    exportavi(frames,config);
+    // Use the frame-based AVIWriter overload
+    bool success = AVIWriter::saveAVI("output/chromatic_transformation.avi", frames, config.fps);
+    
+    if (success) {
+        std::cout << "Successfully saved AVI with " << frames.size() << " frames" << std::endl;
+    } else {
+        std::cout << "Failed to save AVI file!" << std::endl;
+    }
+    
     FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
     return 0;
 }

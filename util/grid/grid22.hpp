@@ -2,6 +2,7 @@
 #include "../vectorlogic/vec2.hpp"
 #include "../vectorlogic/vec4.hpp"
 #include "../timing_decorator.hpp"
+#include "../output/frame.hpp"
 #include <vector>
 #include <unordered_set>
 #ifndef GRID2_HPP
@@ -53,7 +54,7 @@ public:
         ƨnoiƚiƨoꟼ.reserve(size);
     }
 
-    size_t size() {
+    size_t size() const {
         return Positions.size();
     }
 
@@ -102,8 +103,8 @@ public:
 class SpatialGrid {
 private:
     float cellSize;
-    std::unordered_map<Vec2, std::unordered_set<size_t>, Vec2::Hash> grid;
 public:
+    std::unordered_map<Vec2, std::unordered_set<size_t>, Vec2::Hash> grid;
     SpatialGrid(float cellSize = 2.0f) : cellSize(cellSize) {}
     
     Vec2 worldToGrid(const Vec2& worldPos) const {
@@ -186,8 +187,8 @@ private:
     float neighborRadius = 1.0f;
     
     //TODO: spatial map
-    std::unordered_map<Vec2, reverselookupassistantclasscausecppisdumb, Vec2::Hash> spatialTable;
-    float spatSize = 2.0f;
+    SpatialGrid spatialGrid;
+    float spatialCellSize = 2.0f;
 public:
     //get position from id
     Vec2 getPositionID(size_t id) const {
@@ -196,33 +197,51 @@ public:
     }
 
     //get id from position (optional radius, picks first found. radius of 0 becomes epsilon if none are found)
-    size_t getPositionVec(Vec2 pos, float radius = 0.0f) {
-        auto it = Positions.at(pos);
-        return it;
+    size_t getPositionVec(const Vec2& pos, float radius = 0.0f) {
+        if (radius == 0.0f) {
+            // Exact match - use spatial grid to find the cell
+            Vec2 gridPos = spatialGrid.worldToGrid(pos);
+            auto cellIt = spatialGrid.grid.find(gridPos);
+            if (cellIt != spatialGrid.grid.end()) {
+                for (size_t id : cellIt->second) {
+                    if (Positions.at(id) == pos) {
+                        return id;
+                    }
+                }
+            }
+            throw std::out_of_range("Position not found");
+        } else {
+            auto results = getPositionVecRegion(pos, radius);
+            if (!results.empty()) {
+                return results[0]; // Return first found
+            }
+            throw std::out_of_range("No positions found in radius");
+        }
     }
 
     size_t getPositionVec(float x, float y, float radius = 0.0f) { 
         return getPositionVec(Vec2(x,y), radius);
     }
 
-    size_t getIDFromSpatPOS(Vec2 pos) {
-        Vec2 spat2pos = (pos / spatSize).floor();
-        reverselookupassistantclasscausecppisdumb spatids = spatialTable.at(spat2pos);
-        return spatids.at(pos);
-    }
-
     //get all id in region
-    std::vector<size_t> getPositionVecRegion(Vec2 pos, float radius = 1.0f) {
+    std::vector<size_t> getPositionVecRegion(const Vec2& pos, float radius = 1.0f) {
+        TIME_FUNCTION;
         float searchRadius = (radius == 0.0f) ? std::numeric_limits<float>::epsilon() : radius;
-
-        float radiusSq = searchRadius*searchRadius;
-        std::vector<size_t> posvec;
-        for (const auto& pair : Positions) {
-            if (pair.second.distanceSquared(pos) <= radiusSq) {
-                posvec.push_back(pair.first);
+        
+        // Get candidates from spatial grid
+        std::vector<size_t> candidates = spatialGrid.queryRange(pos, searchRadius);
+        
+        // Fine-filter by exact distance
+        std::vector<size_t> results;
+        float radiusSq = searchRadius * searchRadius;
+        
+        for (size_t id : candidates) {
+            if (Positions.at(id).distanceSquared(pos) <= radiusSq) {
+                results.push_back(id);
             }
         }
-        return posvec;
+        
+        return results;
     }
     
     //get color from id
@@ -252,18 +271,27 @@ public:
         size_t id = Positions.set(pos);
         Colors[id] = color;
         Sizes[id] = size;
-        return id;
+        
+        // Add to spatial grid
+        spatialGrid.insert(id, pos);
         updateNeighborForID(id);
+        return id;
     }
     
     //set position by id
-    void setPosition(size_t id, const Vec2& position) {
-        Positions.at(id).move(position);
+    void setPosition(size_t id, const Vec2& newPosition) {
+        Vec2 oldPosition = Positions.at(id);
+        spatialGrid.update(id, oldPosition, newPosition);
+        Positions.at(id).move(newPosition);
         updateNeighborForID(id);
     }
     
     void setPosition(size_t id, float x, float y) {
-        Positions.at(id).move(Vec2(x,y));
+        Vec2 newPos = Vec2(x,y);
+        Vec2 oldPos = Positions.at(id);
+
+        spatialGrid.update(id, oldPos, newPos);
+        Positions.at(id).move(newPos);
         updateNeighborForID(id);
     }
     
@@ -313,10 +341,12 @@ public:
 
     //remove object (should remove the id, the color, the position, and the size)
     size_t removeID(size_t id) {
+        Vec2 oldPosition = Positions.at(id);
         Positions.remove(id);
         Colors.erase(id);
         Sizes.erase(id);
         unassignedIDs.push_back(id);
+        spatialGrid.remove(id, oldPosition);
         updateNeighborForID(id);
         return id;
     }
@@ -327,6 +357,7 @@ public:
         Colors.erase(id);
         Sizes.erase(id);
         unassignedIDs.push_back(id);
+        spatialGrid.remove(id, pos);
         updateNeighborForID(id);
         return id;
     }
@@ -335,8 +366,9 @@ public:
     void bulkUpdatePositions(const std::unordered_map<size_t, Vec2>& newPositions) {
         TIME_FUNCTION;
         for (const auto& [id, newPos] : newPositions) {
-            auto it = Positions.at(id);
-            it.move(newPos);
+            Vec2 oldPosition = Positions.at(id);
+            Positions.at(id).move(newPos);
+            spatialGrid.update(id, oldPosition, newPos);
         }
         updateNeighborMap();
     }
@@ -379,12 +411,14 @@ public:
         Sizes.reserve(Sizes.size() + objects.size());
         
         // Batch insertion
+        #pragma omp parallel for
         for (size_t i = 0; i < objects.size(); ++i) {
             const auto& [pos, color, size] = objects[i];
             size_t id = Positions.set(pos);
             
             Colors[id] = color;
             Sizes[id] = size;
+            spatialGrid.insert(id,pos);
         }
         
         shrinkIfNeeded();
@@ -410,6 +444,7 @@ public:
             size_t id = Positions.set(poses[i]);
             Colors[id] = colors[i];
             Sizes[id] = sizes[i];
+            spatialGrid.insert(id,poses[i]);
         }
         
         shrinkIfNeeded();
@@ -526,6 +561,88 @@ public:
         getBoundingBox(minCorner, maxCorner);
         getGridRegionAsBGR(minCorner, maxCorner, width, height, bgrData);
     }
+    
+    // Get region as frame with customizable channels
+    void getGridRegionAsFrame(const Vec2& minCorner, const Vec2& maxCorner,
+                            int& width, int& height, frame& outputFrame,
+                            const std::vector<char>& channels = {'R', 'G', 'B'}) const {
+        TIME_FUNCTION;
+        // Calculate dimensions
+        width = static_cast<int>(maxCorner.x - minCorner.x);
+        height = static_cast<int>(maxCorner.y - minCorner.y);
+        
+        if (width <= 0 || height <= 0) {
+            width = height = 0;
+            outputFrame.clear();
+            return;
+        }
+        
+        // Initialize frame with specified channels
+        outputFrame.resize(width, height, channels);
+        // For each position in the grid, find the corresponding pixel
+        for (const auto& [id, pos] : Positions) {
+            if (pos.x >= minCorner.x && pos.x < maxCorner.x &&
+                pos.y >= minCorner.y && pos.y < maxCorner.y) {
+                
+                // Calculate pixel coordinates
+                int pixelX = static_cast<int>(pos.x - minCorner.x);
+                int pixelY = static_cast<int>(pos.y - minCorner.y);
+                
+                // Ensure within bounds
+                if (pixelX >= 0 && pixelX < width && pixelY >= 0 && pixelY < height) {
+                    // Get color
+                    const Vec4& color = Colors.at(id);
+                    
+                    // Set pixel data based on requested channels
+                    for (size_t channel_idx = 0; channel_idx < channels.size(); ++channel_idx) {
+                        float value = 0.0f;
+                        switch (channels[channel_idx]) {
+                            case 'R': case 'r': value = color.r; break;
+                            case 'G': case 'g': value = color.g; break;
+                            case 'B': case 'b': value = color.b; break;
+                            case 'A': case 'a': value = color.a; break;
+                            case 'X': case 'x': value = pos.x - minCorner.x; break;  // Normalized X
+                            case 'Y': case 'y': value = pos.y - minCorner.y; break;  // Normalized Y
+                            case 'S': case 's': value = Sizes.at(id); break;         // Size
+                            case 'I': case 'i': value = static_cast<float>(id) / Positions.size(); break; // Normalized ID
+                            default: value = 0.0f; break;
+                        }
+                        outputFrame.at(pixelY, pixelX, channel_idx) = static_cast<uint8_t>(value * 255);
+                    }
+                }
+            }
+        }
+    }
+
+    // Get full grid as frame
+    void getGridAsFrame(frame& outputFrame, const std::vector<char>& channels = {'R', 'G', 'B'}) {
+        int width, height;
+        Vec2 minCorner, maxCorner;
+        getBoundingBox(minCorner, maxCorner);
+        getGridRegionAsFrame(minCorner, maxCorner, width, height, outputFrame, channels);
+    }
+
+    // Get region as frame with common channel configurations
+    void getGridRegionAsRGBFrame(const Vec2& minCorner, const Vec2& maxCorner,
+                                int& width, int& height, frame& outputFrame) {
+        getGridRegionAsFrame(minCorner, maxCorner, width, height, outputFrame, {'R', 'G', 'B'});
+    }
+
+    void getGridRegionAsBGRFrame(const Vec2& minCorner, const Vec2& maxCorner,
+                                int& width, int& height, frame& outputFrame) {
+        getGridRegionAsFrame(minCorner, maxCorner, width, height, outputFrame, {'B', 'G', 'R'});
+    }
+
+    void getGridRegionAsRGBAFrame(const Vec2& minCorner, const Vec2& maxCorner,
+                                int& width, int& height, frame& outputFrame) {
+        getGridRegionAsFrame(minCorner, maxCorner, width, height, outputFrame, {'R', 'G', 'B', 'A'});
+    }
+
+    void getGridRegionAsBGRAFrame(const Vec2& minCorner, const Vec2& maxCorner,
+                                int& width, int& height, frame& outputFrame) {
+        getGridRegionAsFrame(minCorner, maxCorner, width, height, outputFrame, {'B', 'G', 'R', 'A'});
+    }
+
 
     //get bounding box
     void getBoundingBox(Vec2& minCorner, Vec2& maxCorner) {
@@ -562,6 +679,8 @@ public:
         Positions.clear();
         Colors.clear();
         Sizes.clear();
+        spatialGrid.clear();
+        neighborMap.clear();
     }
 
     // neighbor map
@@ -573,9 +692,10 @@ public:
         for (const auto& [id1, pos1] : Positions) {
             std::vector<size_t> neighbors;
             float radiusSq = neighborRadius * neighborRadius;
+            auto candidate_ids = spatialGrid.queryRange(pos1, neighborRadius);
             
-            for (const auto& [id2, pos2] : Positions) {
-                if (id1 != id2 && pos1.distanceSquared(pos2) <= radiusSq) {
+            for (size_t id2 : candidate_ids) {
+                if (id1 != id2 && Positions.at(id1).distanceSquared(Positions.at(id2)) <= radiusSq) {
                     neighbors.push_back(id2);
                 }
             }
