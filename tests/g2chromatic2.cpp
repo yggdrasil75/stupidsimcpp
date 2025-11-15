@@ -11,8 +11,8 @@
 #include "../util/timing_decorator.cpp"
 
 struct AnimationConfig {
-    int width = 256;
-    int height = 256;
+    int width = 1024;
+    int height = 1024;
     int totalFrames = 480;
     float fps = 30.0f;
     int numSeeds = 8;
@@ -115,12 +115,13 @@ void expandPixel(Grid2& grid, AnimationConfig config, std::vector<std::tuple<siz
     seeds = std::move(newseeds);
 }
 
-bool exportavi(std::vector<std::vector<uint8_t>> frames, AnimationConfig config) {
+//bool exportavi(std::vector<std::vector<uint8_t>> frames, AnimationConfig config) {
+bool exportavi(std::vector<frame> frames, AnimationConfig config) {
     TIME_FUNCTION;
     std::string filename = "output/chromatic_transformation.avi";
     
     std::cout << "Frame count: " << frames.size() << std::endl;
-    std::cout << "Frame size: " << (frames.empty() ? 0 : frames[0].size()) << std::endl;
+    //std::cout << "Frame size: " << (frames.empty() ? 0 : frames[0].size()) << std::endl;
     std::cout << "Width: " << config.width << ", Height: " << config.height << std::endl;
     
     std::filesystem::path dir = "output";
@@ -131,7 +132,9 @@ bool exportavi(std::vector<std::vector<uint8_t>> frames, AnimationConfig config)
         }
     }
     
-    bool success = AVIWriter::saveAVI(filename, frames, config.width+1, config.height+1, config.fps);
+    bool success = AVIWriter::saveAVIFromCompressedFrames(filename,frames,frames[0].getWidth()+1,frames[0].getHeight()+1, config.fps);
+
+    //bool success = AVIWriter::saveAVI(filename, frames, config.width+1, config.height+1, config.fps);
     
     if (success) {
         // Check if file actually exists
@@ -152,16 +155,18 @@ int main() {
     //grid.updateNeighborMap();
     Preview(grid);
     std::vector<std::tuple<size_t, Vec2, Vec4>> seeds = pickSeeds(grid,config);
-    std::vector<std::vector<uint8_t>> frames;
+    //std::vector<std::vector<uint8_t>> frames;
+    std::vector<frame> frames;
 
     for (int i = 0; i < config.totalFrames; ++i){
-        std::cout << "Processing frame " << i + 1 << "/" << config.totalFrames << std::endl;
+        std::cout << "Processing bgrframe " << i + 1 << "/" << config.totalFrames << std::endl;
         expandPixel(grid,config,seeds);
         int width;
         int height;
-        std::vector<uint8_t> frame;
-        grid.getGridAsBGR(width,height,frame);
-        frames.push_back(frame);
+        //std::vector<uint8_t> bgrframe;
+        frame bgrframe = grid.getGridAsFrame(frame::colormap::BGR);
+        //grid.getGridAsBGR(width,height,bgrframe);
+        frames.push_back(bgrframe);
     }
     
     exportavi(frames,config);

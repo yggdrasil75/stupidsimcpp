@@ -563,86 +563,155 @@ public:
         getBoundingBox(minCorner, maxCorner);
         getGridRegionAsBGR(minCorner, maxCorner, width, height, bgrData);
     }
+      
     
-    // Get region as frame with customizable channels
-    void getGridRegionAsFrame(const Vec2& minCorner, const Vec2& maxCorner,
-                            int& width, int& height, frame& outputFrame,
-                            const std::vector<char>& channels = {'R', 'G', 'B'}) const {
+    //frame stuff
+    frame getGridRegionAsFrameRGB(const Vec2& minCorner, const Vec2& maxCorner) const {
         TIME_FUNCTION;
-        // Calculate dimensions
-        width = static_cast<int>(maxCorner.x - minCorner.x);
-        height = static_cast<int>(maxCorner.y - minCorner.y);
+        int width, height;
+        std::vector<uint8_t> rgbData;
+        getGridRegionAsRGB(minCorner, maxCorner, width, height, rgbData);
         
-        if (width <= 0 || height <= 0) {
-            width = height = 0;
-            outputFrame.clear();
-            return;
-        }
-        
-        // Initialize frame with specified channels
-        outputFrame.resize(width, height, channels);
-        // For each position in the grid, find the corresponding pixel
-        for (const auto& [id, pos] : Positions) {
-            if (pos.x >= minCorner.x && pos.x < maxCorner.x &&
-                pos.y >= minCorner.y && pos.y < maxCorner.y) {
-                
-                // Calculate pixel coordinates
-                int pixelX = static_cast<int>(pos.x - minCorner.x);
-                int pixelY = static_cast<int>(pos.y - minCorner.y);
-                
-                // Ensure within bounds
-                if (pixelX >= 0 && pixelX < width && pixelY >= 0 && pixelY < height) {
-                    // Get color
-                    const Vec4& color = Colors.at(id);
-                    
-                    // Set pixel data based on requested channels
-                    for (size_t channel_idx = 0; channel_idx < channels.size(); ++channel_idx) {
-                        float value = 0.0f;
-                        switch (channels[channel_idx]) {
-                            case 'R': case 'r': value = color.r; break;
-                            case 'G': case 'g': value = color.g; break;
-                            case 'B': case 'b': value = color.b; break;
-                            case 'A': case 'a': value = color.a; break;
-                            case 'X': case 'x': value = pos.x - minCorner.x; break;  // Normalized X
-                            case 'Y': case 'y': value = pos.y - minCorner.y; break;  // Normalized Y
-                            case 'S': case 's': value = Sizes.at(id); break;         // Size
-                            case 'I': case 'i': value = static_cast<float>(id) / Positions.size(); break; // Normalized ID
-                            default: value = 0.0f; break;
-                        }
-                        outputFrame.at(pixelY, pixelX, channel_idx) = static_cast<uint8_t>(value * 255);
-                    }
-                }
-            }
-        }
+        frame resultFrame(width, height, frame::colormap::RGB);
+        resultFrame.setData(rgbData);
+        return resultFrame;
     }
 
-    // Get full grid as frame
-    void getGridAsFrame(frame& outputFrame, const std::vector<char>& channels = {'R', 'G', 'B'}) {
+    // Get region as frame (BGR format)
+    frame getGridRegionAsFrameBGR(const Vec2& minCorner, const Vec2& maxCorner) const {
+        TIME_FUNCTION;
         int width, height;
+        std::vector<uint8_t> bgrData;
+        getGridRegionAsBGR(minCorner, maxCorner, width, height, bgrData);
+        
+        frame resultFrame(width, height, frame::colormap::BGR);
+        resultFrame.setData(bgrData);
+        return resultFrame;
+    }
+
+    // Get region as frame (RGBA format)
+    frame getGridRegionAsFrameRGBA(const Vec2& minCorner, const Vec2& maxCorner) const {
+        TIME_FUNCTION;
+        int width, height;
+        std::vector<uint8_t> rgbData;
+        getGridRegionAsRGB(minCorner, maxCorner, width, height, rgbData);
+        
+        // Convert RGB to RGBA
+        std::vector<uint8_t> rgbaData;
+        rgbaData.reserve(width * height * 4);
+        
+        for (size_t i = 0; i < rgbData.size(); i += 3) {
+            rgbaData.push_back(rgbData[i]);     // R
+            rgbaData.push_back(rgbData[i + 1]); // G
+            rgbaData.push_back(rgbData[i + 2]); // B
+            rgbaData.push_back(255);            // A (fully opaque)
+        }
+        
+        frame resultFrame(width, height, frame::colormap::RGBA);
+        resultFrame.setData(rgbaData);
+        return resultFrame;
+    }
+
+    // Get region as frame (BGRA format)
+    frame getGridRegionAsFrameBGRA(const Vec2& minCorner, const Vec2& maxCorner) const {
+        TIME_FUNCTION;
+        int width, height;
+        std::vector<uint8_t> bgrData;
+        getGridRegionAsBGR(minCorner, maxCorner, width, height, bgrData);
+        
+        // Convert BGR to BGRA
+        std::vector<uint8_t> bgraData;
+        bgraData.reserve(width * height * 4);
+        
+        for (size_t i = 0; i < bgrData.size(); i += 3) {
+            bgraData.push_back(bgrData[i]);     // B
+            bgraData.push_back(bgrData[i + 1]); // G
+            bgraData.push_back(bgrData[i + 2]); // R
+            bgraData.push_back(255);            // A (fully opaque)
+        }
+        
+        frame resultFrame(width, height, frame::colormap::BGRA);
+        resultFrame.setData(bgraData);
+        return resultFrame;
+    }
+
+    // Get region as frame (Grayscale format)
+    frame getGridRegionAsFrameGrayscale(const Vec2& minCorner, const Vec2& maxCorner) const {
+        TIME_FUNCTION;
+        int width, height;
+        std::vector<uint8_t> rgbData;
+        getGridRegionAsRGB(minCorner, maxCorner, width, height, rgbData);
+        
+        // Convert RGB to grayscale
+        std::vector<uint8_t> grayData;
+        grayData.reserve(width * height);
+        
+        for (size_t i = 0; i < rgbData.size(); i += 3) {
+            uint8_t r = rgbData[i];
+            uint8_t g = rgbData[i + 1];
+            uint8_t b = rgbData[i + 2];
+            // Standard grayscale conversion formula
+            uint8_t gray = static_cast<uint8_t>(0.299 * r + 0.587 * g + 0.114 * b);
+            grayData.push_back(gray);
+        }
+        
+        frame resultFrame(width, height, frame::colormap::B); // B for single channel/grayscale
+        resultFrame.setData(grayData);
+        return resultFrame;
+    }
+
+    // Get entire grid as frame with specified format
+    frame getGridAsFrame(frame::colormap format = frame::colormap::RGB) {
+        TIME_FUNCTION;
         Vec2 minCorner, maxCorner;
         getBoundingBox(minCorner, maxCorner);
-        getGridRegionAsFrame(minCorner, maxCorner, width, height, outputFrame, channels);
+        frame Frame;
+
+        switch (format) {
+            case frame::colormap::RGB:
+                Frame = getGridRegionAsFrameRGB(minCorner, maxCorner);
+            case frame::colormap::BGR:
+                Frame = getGridRegionAsFrameBGR(minCorner, maxCorner);
+            case frame::colormap::RGBA:
+                Frame = getGridRegionAsFrameRGBA(minCorner, maxCorner);
+            case frame::colormap::BGRA:
+                Frame = getGridRegionAsFrameBGRA(minCorner, maxCorner);
+            case frame::colormap::B:
+                Frame = getGridRegionAsFrameGrayscale(minCorner, maxCorner);
+            default:
+                Frame = getGridRegionAsFrameRGB(minCorner, maxCorner);
+        }
+        Frame.compressFrameZigZagRLE();
+        return Frame;
     }
 
-    // Get region as frame with common channel configurations
-    void getGridRegionAsRGBFrame(const Vec2& minCorner, const Vec2& maxCorner,
-                                int& width, int& height, frame& outputFrame) {
-        getGridRegionAsFrame(minCorner, maxCorner, width, height, outputFrame, {'R', 'G', 'B'});
-    }
-
-    void getGridRegionAsBGRFrame(const Vec2& minCorner, const Vec2& maxCorner,
-                                int& width, int& height, frame& outputFrame) {
-        getGridRegionAsFrame(minCorner, maxCorner, width, height, outputFrame, {'B', 'G', 'R'});
-    }
-
-    void getGridRegionAsRGBAFrame(const Vec2& minCorner, const Vec2& maxCorner,
-                                int& width, int& height, frame& outputFrame) {
-        getGridRegionAsFrame(minCorner, maxCorner, width, height, outputFrame, {'R', 'G', 'B', 'A'});
-    }
-
-    void getGridRegionAsBGRAFrame(const Vec2& minCorner, const Vec2& maxCorner,
-                                int& width, int& height, frame& outputFrame) {
-        getGridRegionAsFrame(minCorner, maxCorner, width, height, outputFrame, {'B', 'G', 'R', 'A'});
+    // Get compressed frame with specified compression
+    frame getGridAsCompressedFrame(frame::colormap format = frame::colormap::RGB,
+                                frame::compresstype compression = frame::compresstype::RLE) {
+        TIME_FUNCTION;
+        frame gridFrame = getGridAsFrame(format);
+        
+        if (gridFrame.getData().empty()) {
+            return gridFrame;
+        }
+        
+        switch (compression) {
+            case frame::compresstype::RLE:
+                return gridFrame.compressFrameRLE();
+            case frame::compresstype::ZIGZAG:
+                return gridFrame.compressFrameZigZag();
+            case frame::compresstype::DIFF:
+                return gridFrame.compressFrameDiff();
+            case frame::compresstype::ZIGZAGRLE:
+                return gridFrame.compressFrameZigZagRLE();
+            case frame::compresstype::DIFFRLE:
+                return gridFrame.compressFrameDiffRLE();
+            case frame::compresstype::HUFFMAN:
+                return gridFrame.compressFrameHuffman();
+            case frame::compresstype::RAW:
+            default:
+                return gridFrame;
+        }
     }
 
 
@@ -733,7 +802,7 @@ public:
         neighborRadius = radius;
         updateNeighborMap(); // Recompute all neighbors
     }
-    // spatial map
+    
 };
 
 #endif

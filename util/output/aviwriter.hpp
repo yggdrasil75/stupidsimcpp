@@ -8,8 +8,8 @@
 #include <algorithm>
 #include <filesystem>
 #include <chrono>
+#include <iostream>
 #include "frame.hpp"
-#include "video.hpp"
 
 class AVIWriter {
 private:
@@ -112,94 +112,83 @@ private:
         }
     }
 
-    // Helper function to convert frame to RGB format
-    static std::vector<uint8_t> frameToRGB(const frame& frm) {
-        TIME_FUNCTION;
-        if (frm.empty()) {
-            return {};
-        }
+    static std::vector<uint8_t> prepareFrameData(const frame& frm, uint32_t width, uint32_t height, uint32_t rowSize) {
+        std::vector<uint8_t> paddedFrame(rowSize * height, 0);
         
-        size_t width = frm.width();
-        size_t height = frm.height();
-        std::vector<uint8_t> rgbData(width * height * 3);
-        
-        // Check if frame already has RGB channels
-        bool hasR = frm.has_channel('R') || frm.has_channel('r');
-        bool hasG = frm.has_channel('G') || frm.has_channel('g');
-        bool hasB = frm.has_channel('B') || frm.has_channel('b');
-        
-        if (hasR && hasG && hasB) {
-            // Frame has RGB channels - extract them
-            std::vector<uint8_t> rChannel = frm.has_channel('R') ? 
-                frm.get_channel_data('R') : frm.get_channel_data('r');
-            std::vector<uint8_t> gChannel = frm.has_channel('G') ? 
-                frm.get_channel_data('G') : frm.get_channel_data('g');
-            std::vector<uint8_t> bChannel = frm.has_channel('B') ? 
-                frm.get_channel_data('B') : frm.get_channel_data('b');
-            
-            // Convert to BGR format (required by AVI)
-            for (size_t i = 0; i < width * height; ++i) {
-                rgbData[i * 3 + 0] = bChannel[i]; // Blue
-                rgbData[i * 3 + 1] = gChannel[i]; // Green
-                rgbData[i * 3 + 2] = rChannel[i]; // Red
-            }
-        } else if (frm.channels_count() == 1) {
-            // Grayscale frame - convert to RGB
-            std::vector<uint8_t> grayChannel = frm.get_channel_data(frm.channels()[0]);
-            
-            for (size_t i = 0; i < width * height; ++i) {
-                uint8_t gray = grayChannel[i];
-                rgbData[i * 3 + 0] = gray; // Blue
-                rgbData[i * 3 + 1] = gray; // Green
-                rgbData[i * 3 + 2] = gray; // Red
-            }
-        } else if (frm.channels_count() == 3) {
-            // Assume the 3 channels are RGB (even if not named)
-            // Convert to BGR format
-            for (size_t y = 0; y < height; ++y) {
-                for (size_t x = 0; x < width; ++x) {
-                    rgbData[(y * width + x) * 3 + 0] = frm.at(y, x, size_t(2)); // Blue
-                    rgbData[(y * width + x) * 3 + 1] = frm.at(y, x, size_t(1)); // Green
-                    rgbData[(y * width + x) * 3 + 2] = frm.at(y, x, size_t(0)); // Red
-                }
-            }
+        // Get the frame data (decompress if necessary)
+        std::vector<uint8_t> frameData;
+        if (frm.isCompressed()) {
+            // Create a copy and decompress
+            frame tempFrame = frm;
+            tempFrame.decompress();
+            frameData = tempFrame.getData();
         } else {
-            // Unsupported format - use first channel as grayscale
-            std::vector<uint8_t> firstChannel = frm.get_channel_data(frm.channels()[0]);
+            frameData = frm.getData();
+        }
+        
+        if (frameData.empty()) {
+            return paddedFrame;
+        }
+        
+        // Determine source format and convert to RGB
+        size_t srcChannels = 3; // Default
+        switch (frm.colorFormat) {
+            case frame::colormap::RGBA: srcChannels = 4; break;
+            case frame::colormap::BGR: srcChannels = 3; break;
+            case frame::colormap::BGRA: srcChannels = 4; break;
+            case frame::colormap::B: srcChannels = 1; break;
+            default: srcChannels = 3; break;
+        }
+        
+        uint32_t srcRowSize = width * srcChannels;
+        uint32_t dstRowSize = width * 3; // RGB
+        
+        // Convert and flip vertically for BMP format
+        for (uint32_t y = 0; y < height; ++y) {
+            uint32_t srcY = height - 1 - y; // Flip vertically
+            const uint8_t* srcRow = frameData.data() + (srcY * srcRowSize);
+            uint8_t* dstRow = paddedFrame.data() + (y * rowSize);
             
-            for (size_t i = 0; i < width * height; ++i) {
-                uint8_t gray = firstChannel[i];
-                rgbData[i * 3 + 0] = gray; // Blue
-                rgbData[i * 3 + 1] = gray; // Green
-                rgbData[i * 3 + 2] = gray; // Red
+            // Convert to RGB format
+            switch (frm.colorFormat) {
+                case frame::colormap::RGB:
+                    memcpy(dstRow, srcRow, dstRowSize);
+                    break;
+                case frame::colormap::RGBA:
+                    for (uint32_t x = 0; x < width; ++x) {
+                        dstRow[x * 3] = srcRow[x * 4];     // R
+                        dstRow[x * 3 + 1] = srcRow[x * 4 + 1]; // G
+                        dstRow[x * 3 + 2] = srcRow[x * 4 + 2]; // B
+                    }
+                    break;
+                case frame::colormap::BGR:
+                    for (uint32_t x = 0; x < width; ++x) {
+                        dstRow[x * 3] = srcRow[x * 3 + 2];     // R
+                        dstRow[x * 3 + 1] = srcRow[x * 3 + 1]; // G
+                        dstRow[x * 3 + 2] = srcRow[x * 3];     // B
+                    }
+                    break;
+                case frame::colormap::BGRA:
+                    for (uint32_t x = 0; x < width; ++x) {
+                        dstRow[x * 3] = srcRow[x * 4 + 2];     // R
+                        dstRow[x * 3 + 1] = srcRow[x * 4 + 1]; // G
+                        dstRow[x * 3 + 2] = srcRow[x * 4];     // B
+                    }
+                    break;
+                case frame::colormap::B:
+                    for (uint32_t x = 0; x < width; ++x) {
+                        uint8_t gray = srcRow[x];
+                        dstRow[x * 3] = gray;     // R
+                        dstRow[x * 3 + 1] = gray; // G
+                        dstRow[x * 3 + 2] = gray; // B
+                    }
+                    break;
             }
         }
         
-        return rgbData;
+        return paddedFrame;
     }
-
 public:
-    // New method for video objects
-    static bool saveAVI(const std::string& filename,const video& vid,float fps = 0.0f) {
-        TIME_FUNCTION;
-        if (vid.empty()) {
-            return false;
-        }
-
-        // Use video's FPS if not overridden, otherwise use provided FPS
-        float actualFps = (fps > 0.0f) ? fps : static_cast<float>(vid.fps());
-        
-        if (actualFps <= 0.0f) {
-            return false;
-        }
-
-        // Get all frames from the video
-        std::vector<frame> frames = vid.get_all_frames();
-        
-        // Use the existing frame-based implementation
-        return saveAVI(filename, frames, actualFps);
-    }
-
     // Original method for vector of raw frame data
     static bool saveAVI(const std::string& filename, 
                        const std::vector<std::vector<uint8_t>>& frames, 
@@ -379,38 +368,6 @@ public:
         return true;
     }
 
-    // New overload for frame objects
-    static bool saveAVI(const std::string& filename,
-                       const std::vector<frame>& frames,
-                       float fps = 30.0f) {
-        TIME_FUNCTION;
-        if (frames.empty() || fps <= 0) {
-            return false;
-        }
-
-        // Validate that all frames have the same dimensions
-        int width = static_cast<int>(frames[0].width());
-        int height = static_cast<int>(frames[0].height());
-        
-        for (const auto& frm : frames) {
-            if (frm.width() != static_cast<size_t>(width) || 
-                frm.height() != static_cast<size_t>(height)) {
-                return false;
-            }
-        }
-
-        // Convert frames to RGB format
-        std::vector<std::vector<uint8_t>> rgbFrames;
-        rgbFrames.reserve(frames.size());
-        
-        for (const auto& frm : frames) {
-            rgbFrames.push_back(frameToRGB(frm));
-        }
-
-        // Use the existing implementation
-        return saveAVI(filename, rgbFrames, width, height, fps);
-    }
-
     // Convenience function to save from individual frame files
     static bool saveAVIFromFrames(const std::string& filename,
                                  const std::vector<std::string>& frameFiles,
@@ -452,6 +409,168 @@ public:
 
         return saveAVI(filename, frames, width, height, fps);
     }
+
+    // New method for streaming decompression of frame objects
+    static bool saveAVIFromCompressedFrames(const std::string& filename,
+                                          const std::vector<frame>& frames,
+                                          int width, int height, 
+                                          float fps = 30.0f) {
+        TIME_FUNCTION;
+        if (frames.empty() || width <= 0 || height <= 0 || fps <= 0) {
+            return false;
+        }
+
+        // Create directory if needed
+        if (!createDirectoryIfNeeded(filename)) {
+            return false;
+        }
+
+        std::ofstream file(filename, std::ios::binary);
+        if (!file) {
+            return false;
+        }
+
+        uint32_t frameCount = static_cast<uint32_t>(frames.size());
+        uint32_t microSecPerFrame = static_cast<uint32_t>(1000000.0f / fps);
+        
+        // Calculate padding for each frame (BMP-style row padding)
+        uint32_t rowSize = (width * 3 + 3) & ~3;
+        uint32_t frameSize = rowSize * height;
+
+        // RIFF AVI header
+        RIFFChunk riffHeader;
+        riffHeader.chunkId = 0x46464952; // 'RIFF'
+        riffHeader.format = 0x20495641;  // 'AVI '
+        
+        // We'll come back and write the size at the end
+        uint32_t riffStartPos = static_cast<uint32_t>(file.tellp());
+        file.write(reinterpret_cast<const char*>(&riffHeader), sizeof(riffHeader));
+
+        // hdrl list
+        uint32_t hdrlListStart = static_cast<uint32_t>(file.tellp());
+        writeList(file, 0x6C726468, nullptr, 0); // 'hdrl' - we'll fill size later
+
+        // avih chunk
+        AVIMainHeader mainHeader;
+        mainHeader.microSecPerFrame = microSecPerFrame;
+        mainHeader.maxBytesPerSec = frameSize * static_cast<uint32_t>(fps);
+        mainHeader.paddingGranularity = 0;
+        mainHeader.flags = 0x000010; // HASINDEX flag
+        mainHeader.totalFrames = frameCount;
+        mainHeader.initialFrames = 0;
+        mainHeader.streams = 1;
+        mainHeader.suggestedBufferSize = frameSize;
+        mainHeader.width = width;
+        mainHeader.height = height;
+        mainHeader.reserved[0] = 0;
+        mainHeader.reserved[1] = 0;
+        mainHeader.reserved[2] = 0;
+        mainHeader.reserved[3] = 0;
+        
+        writeChunk(file, 0x68697661, &mainHeader, sizeof(mainHeader)); // 'avih'
+
+        // strl list
+        uint32_t strlListStart = static_cast<uint32_t>(file.tellp());
+        writeList(file, 0x6C727473, nullptr, 0); // 'strl' - we'll fill size later
+
+        // strh chunk
+        AVIStreamHeader streamHeader;
+        streamHeader.type = 0x73646976; // 'vids'
+        streamHeader.handler = 0x00000000; // Uncompressed
+        streamHeader.flags = 0;
+        streamHeader.priority = 0;
+        streamHeader.language = 0;
+        streamHeader.initialFrames = 0;
+        streamHeader.scale = 1;
+        streamHeader.rate = static_cast<uint32_t>(fps);
+        streamHeader.start = 0;
+        streamHeader.length = frameCount;
+        streamHeader.suggestedBufferSize = frameSize;
+        streamHeader.quality = 0xFFFFFFFF; // Default quality
+        streamHeader.sampleSize = 0;
+        streamHeader.rcFrame.left = 0;
+        streamHeader.rcFrame.top = 0;
+        streamHeader.rcFrame.right = width;
+        streamHeader.rcFrame.bottom = height;
+        
+        writeChunk(file, 0x68727473, &streamHeader, sizeof(streamHeader)); // 'strh'
+
+        // strf chunk
+        BITMAPINFOHEADER bitmapInfo;
+        bitmapInfo.size = sizeof(BITMAPINFOHEADER);
+        bitmapInfo.width = width;
+        bitmapInfo.height = height;
+        bitmapInfo.planes = 1;
+        bitmapInfo.bitCount = 24;
+        bitmapInfo.compression = 0; // BI_RGB - uncompressed
+        bitmapInfo.sizeImage = frameSize;
+        bitmapInfo.xPelsPerMeter = 0;
+        bitmapInfo.yPelsPerMeter = 0;
+        bitmapInfo.clrUsed = 0;
+        bitmapInfo.clrImportant = 0;
+        
+        writeChunk(file, 0x66727473, &bitmapInfo, sizeof(bitmapInfo)); // 'strf'
+
+        // Update strl list size
+        uint32_t strlListEnd = static_cast<uint32_t>(file.tellp());
+        file.seekp(strlListStart + 4);
+        uint32_t strlListSize = strlListEnd - strlListStart - 8;
+        file.write(reinterpret_cast<const char*>(&strlListSize), 4);
+        file.seekp(strlListEnd);
+
+        // Update hdrl list size
+        uint32_t hdrlListEnd = static_cast<uint32_t>(file.tellp());
+        file.seekp(hdrlListStart + 4);
+        uint32_t hdrlListSize = hdrlListEnd - hdrlListStart - 8;
+        file.write(reinterpret_cast<const char*>(&hdrlListSize), 4);
+        file.seekp(hdrlListEnd);
+
+        // movi list
+        uint32_t moviListStart = static_cast<uint32_t>(file.tellp());
+        writeList(file, 0x69766F6D, nullptr, 0); // 'movi' - we'll fill size later
+
+        std::vector<AVIIndexEntry> indexEntries;
+        indexEntries.reserve(frameCount);
+
+        // Write frames with streaming decompression
+        for (uint32_t i = 0; i < frameCount; ++i) {
+            uint32_t frameStart = static_cast<uint32_t>(file.tellp()) - moviListStart - 4;
+            
+            // Prepare frame data (decompresses if necessary and converts to RGB)
+            std::vector<uint8_t> paddedFrame = prepareFrameData(frames[i], width, height, rowSize);
+            
+            // Write frame as '00db' chunk
+            writeChunk(file, 0x62643030, paddedFrame.data(), frameSize); // '00db'
+            
+            // Add to index
+            AVIIndexEntry entry;
+            entry.chunkId = 0x62643030; // '00db'
+            entry.flags = 0x00000010;   // AVIIF_KEYFRAME
+            entry.offset = frameStart;
+            entry.size = frameSize;
+            indexEntries.push_back(entry);
+        }
+
+        // Update movi list size
+        uint32_t moviListEnd = static_cast<uint32_t>(file.tellp());
+        file.seekp(moviListStart + 4);
+        uint32_t moviListSize = moviListEnd - moviListStart - 8;
+        file.write(reinterpret_cast<const char*>(&moviListSize), 4);
+        file.seekp(moviListEnd);
+
+        // idx1 chunk - index
+        uint32_t idx1Size = static_cast<uint32_t>(indexEntries.size() * sizeof(AVIIndexEntry));
+        writeChunk(file, 0x31786469, indexEntries.data(), idx1Size); // 'idx1'
+
+        // Update RIFF chunk size
+        uint32_t fileEnd = static_cast<uint32_t>(file.tellp());
+        file.seekp(riffStartPos + 4);
+        uint32_t riffSize = fileEnd - riffStartPos - 8;
+        file.write(reinterpret_cast<const char*>(&riffSize), 4);
+
+        return true;
+    }
+
 };
 
 #endif

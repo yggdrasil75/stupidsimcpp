@@ -86,7 +86,11 @@
         "variant": "cpp",
         "__nullptr": "cpp",
         "unordered_set": "cpp",
-        "queue": "cpp"
+        "queue": "cpp",
+        "__hash_table": "cpp",
+        "__split_buffer": "cpp",
+        "__tree": "cpp",
+        "stack": "cpp"
     },
     "files.exclude": {
         "**/*.rpyc": true,
