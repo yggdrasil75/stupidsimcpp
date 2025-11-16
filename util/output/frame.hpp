@@ -16,7 +16,8 @@
 class frame {
 private:
     std::vector<uint8_t> _data;
-    std::unordered_map<uint8_t, std::vector<uint8_t>> overheadmap;
+    std::vector<uint16_t> _compressedData;
+    std::unordered_map<uint16_t, std::vector<uint8_t>> overheadmap;
     size_t ratio = 1;
     size_t sourceSize = 0;
     size_t width = 0;
@@ -66,10 +67,16 @@ public:
     void setData(const std::vector<uint8_t>& data) {
         _data = data;
         cformat = compresstype::RAW;
+        _compressedData.clear();
+        _compressedData.shrink_to_fit();
     }
 
     const std::vector<uint8_t>& getData() const {
         return _data;
+    }
+
+    const std::vector<uint16_t>& getCompressedData() const {
+        return _compressedData;
     }
 
     // Run-Length Encoding (RLE) compression
@@ -86,25 +93,24 @@ public:
             cformat = compresstype::RLE;
         }
         
-        std::vector<uint8_t> compressedData;
+        std::vector<uint16_t> compressedData;
         compressedData.reserve(_data.size() * 2);
         
         size_t width = 1;
         for (size_t i = 0; i < _data.size(); i++) {
-            if (_data[i] == _data[i+1] && width < 255) {
+            if (i + 1 < _data.size() && _data[i] == _data[i+1] && width < 65535) {
                 width++;
             } else {
                 compressedData.push_back(width);
                 compressedData.push_back(_data[i]);
                 width = 1;
             }
-
         }
         ratio = compressedData.size() / _data.size();
         sourceSize = _data.size();
+        _compressedData = std::move(compressedData);
         _data.clear();
         _data.shrink_to_fit();
-        _data = compressedData;
         return *this;
     }
 
@@ -113,16 +119,18 @@ public:
         std::vector<uint8_t> decompressed;
         decompressed.reserve(sourceSize);
         
-        if (_data.size() % 2 != 0) {
+        if (_compressedData.size() % 2 != 0) {
             throw std::runtime_error("something broke (decompressFrameRLE)");
         }
-        for (size_t i = 0; i < _data.size(); i+=2) {
-            uint8_t width = _data[i];
-            uint8_t value = _data[i+1];
-            decompressed.insert(decompressed.end(),width, value);
+        
+        for (size_t i = 0; i < _compressedData.size(); i += 2) {
+            uint16_t width = _compressedData[i];
+            uint8_t value = static_cast<uint8_t>(_compressedData[i+1]);
+            decompressed.insert(decompressed.end(), width, value);
         }
         
         _data = std::move(decompressed);
+        _compressedData.clear();
         cformat = compresstype::RAW;
         
         return *this;
@@ -132,19 +140,31 @@ public:
         TIME_FUNCTION;
         std::vector<std::vector<uint8_t>> result;
         size_t pos = 0;
-        const size_t chunksize = 255;
+        const size_t chunksize = 65535;
         size_t dsize = _data.size();
         std::vector<uint8_t>::iterator dbegin = _data.begin();
-        uint8_t minlen = 128;
-        while (pos < dsize && result.size() < 254){
+        
+        //try to optimize space usage without losing speed
+        std::vector<std::vector<uint8_t>> matches128plus;
+        std::vector<std::vector<uint8_t>> matches64plus;
+        std::vector<std::vector<uint8_t>> matches32plus;
+        std::vector<std::vector<uint8_t>> matchesAll;
+        
+        while (pos < dsize && matches128plus.size() < 65534) {
             size_t chunk_end = std::min(pos + chunksize, dsize);
-            std::vector<uint8_t> chunk(_data.begin() + pos, dbegin + chunk_end);
-            if (chunk.size() <= 4) { pos = chunk_end; }
-            result.push_back(chunk);
+            std::vector<uint8_t> chunk(dbegin + pos, dbegin + chunk_end);
+            if (chunk.size() <= 4) { 
+                pos = chunk_end;
+                continue;
+            }
+
+            if (result.size() < 65534) {
+                result.push_back(chunk);
+            }
 
             std::vector<uint8_t> ffour;
             ffour.assign(chunk.begin(), chunk.begin() + 4);
-            size_t searchpos = chunk_end;
+            size_t searchpos = chunk_end;            
             while (searchpos + 4 <= dsize) {
                 bool match_found = true;
                 for (int i = 0; i < 4; ++i) {
@@ -153,6 +173,7 @@ public:
                         break;
                     }
                 }
+                
                 if (match_found) {
                     size_t matchlength = 4;
                     size_t chunk_compare_pos = 4;
@@ -164,15 +185,66 @@ public:
                         input_compare_pos++;
                     }
 
-                    std::vector<uint8_t> matchsequence(dbegin + searchpos, dbegin+searchpos+matchlength);
-                    result.push_back(matchsequence);
+                    std::vector<uint8_t> matchsequence(dbegin + searchpos, dbegin + searchpos + matchlength);
+                    
+                    // Categorize matches by length
+                    if (matchlength >= 128) {
+                        if (matches128plus.size() < 65534) {
+                            matches128plus.push_back(matchsequence);
+                        }
+                    } else if (matchlength >= 64) {
+                        if (matches64plus.size() < 65534) {
+                            matches64plus.push_back(matchsequence);
+                        }
+                    } else if (matchlength >= 32) {
+                        if (matches32plus.size() < 65534) {
+                            matches32plus.push_back(matchsequence);
+                        }
+                    } else {
+                        if (matchesAll.size() < 65534) {
+                            matchesAll.push_back(matchsequence);
+                        }
+                    }
+                    
                     searchpos += matchlength;
                 } else {
                     searchpos++;
                 }
             }
+            
             pos = chunk_end;
         }
+        for (const auto& match : matches128plus) {
+            result.push_back(match);
+        }
+        
+        // Then add 64+ matches if we still have space
+        for (const auto& match : matches64plus) {
+            if (result.size() < 65534) {
+                result.push_back(match);
+            } else {
+                break;
+            }
+        }
+        
+        // Then add 32+ matches if we still have space
+        for (const auto& match : matches32plus) {
+            if (result.size() < 65534) {
+                result.push_back(match);
+            } else {
+                break;
+            }
+        }
+        
+        // Finally add all other matches if we still have space
+        for (const auto& match : matchesAll) {
+            if (result.size() < 65534) {
+                result.push_back(match);
+            } else {
+                break;
+            }
+        }
+        
         return result;
     }
 
@@ -193,12 +265,13 @@ public:
         
         std::vector<std::vector<uint8_t>> repeats = getRepeats();
         repeats = sortvecs(repeats);
-        uint8_t nextDict = 1;
+        uint16_t nextDict = 1;
 
-        std::vector<uint8_t> compressed;
+        std::vector<uint16_t> compressed;
         size_t cpos = 0;
+        
         for (const auto& rseq : repeats) {
-            if (!rseq.empty() && rseq.size() > 1 && overheadmap.size() < 255) {
+            if (!rseq.empty() && rseq.size() > 1 && overheadmap.size() < 65535) {
                 overheadmap[nextDict] = rseq;
                 nextDict++;
             }
@@ -206,11 +279,11 @@ public:
 
         while (cpos < _data.size()) {
             bool found_match = false;
-            uint8_t best_dict_index = 0;
+            uint16_t best_dict_index = 0;
             size_t best_match_length = 0;
             
             // Iterate through dictionary in priority order (longest patterns first)
-            for (uint8_t dict_idx = 1; dict_idx <= overheadmap.size(); dict_idx++) {
+            for (uint16_t dict_idx = 1; dict_idx <= overheadmap.size(); dict_idx++) {
                 const auto& dict_seq = overheadmap[dict_idx];
                 
                 // Quick length check - if remaining data is shorter than pattern, skip
@@ -250,12 +323,14 @@ public:
 
         ratio = compressed.size() / _data.size();
         sourceSize = _data.size();
-        uint32_t original_size = static_cast<uint32_t>(_data.size());
-        compressed.insert(compressed.begin(), reinterpret_cast<uint8_t*>(&original_size), 
-                        reinterpret_cast<uint8_t*>(&original_size) + sizeof(original_size));
         
-        _data = std::move(compressed);
+        _compressedData = std::move(compressed);
+        _compressedData.shrink_to_fit();
+        
+        // Clear uncompressed data
+        _data.clear();
         _data.shrink_to_fit();
+        
         cformat = compresstype::LZ78;
 
         return *this;
@@ -267,22 +342,18 @@ public:
             throw std::runtime_error("Data is not LZ78 compressed");
         }
         
-        // Extract original size from beginning of compressed data
-        uint32_t original_size;
-        //std::memcpy(&original_size, _data.data(), sizeof(original_size));
-        
         std::vector<uint8_t> decompressedData;
-        decompressedData.reserve(original_size);
+        decompressedData.reserve(sourceSize);
         
-        size_t cpos = sizeof(uint32_t); // Skip the size header
+        size_t cpos = 0;
         
-        while (cpos < _data.size()) {
-            uint8_t token = _data[cpos++];
+        while (cpos < _compressedData.size()) {
+            uint16_t token = _compressedData[cpos++];
             
             if (token == 0) {
                 // Literal byte
-                if (cpos < _data.size()) {
-                    decompressedData.push_back(_data[cpos++]);
+                if (cpos < _compressedData.size()) {
+                    decompressedData.push_back(static_cast<uint8_t>(_compressedData[cpos++]));
                 }
             } else {
                 // Dictionary reference
@@ -297,6 +368,8 @@ public:
         }
         
         _data = std::move(decompressedData);
+        _compressedData.clear();
+        _compressedData.shrink_to_fit();
         cformat = compresstype::RAW;
         
         return *this;
@@ -358,8 +431,8 @@ public:
     }
 
     double getCompressionRatio() const {
-        if (_data.empty() || sourceSize == 0) return 0.0;
-        return static_cast<double>(sourceSize) / _data.size();
+        if (_compressedData.empty() || sourceSize == 0) return 0.0;
+        return static_cast<double>(sourceSize) / _compressedData.size();
     }
 
     // Get source size (uncompressed size)
@@ -369,7 +442,7 @@ public:
 
     // Get compressed size
     size_t getCompressedSize() const {
-        return _data.size();
+        return _compressedData.size();
     }
 
     // Print compression information
@@ -387,7 +460,8 @@ public:
         std::cout << std::endl;
         
         std::cout << "Source Size: " << getSourceSize() << " bytes" << std::endl;
-        std::cout << "Compressed Size: " << getCompressedSize() << " bytes" << std::endl;
+        std::cout << "Compressed Size: " << getCompressedSize() << " 16-bit words" << std::endl;
+        std::cout << "Compressed Size: " << getCompressedSize() * 2 << " bytes" << std::endl;
         std::cout << "Compression Ratio: " << getCompressionRatio() << ":1" << std::endl;
         
         if (getCompressionRatio() > 1.0) {
@@ -404,7 +478,7 @@ public:
     // Print compression information in a compact format
     void printCompressionStats() const {
         std::cout << "[" << getCompressionTypeString() << "] "
-                  << getSourceSize() << "B -> " << getCompressedSize() << "B "
+                  << getSourceSize() << "B -> " << getCompressedSize() * 2 << "B "
                   << "(ratio: " << getCompressionRatio() << ":1)" << std::endl;
     }
 
@@ -425,12 +499,22 @@ public:
         return cformat;
     }
 
-    const std::unordered_map<uint8_t, std::vector<uint8_t>>& getOverheadMap() const {
+    const std::unordered_map<uint16_t, std::vector<uint8_t>>& getOverheadMap() const {
         return overheadmap;
     }
 
     bool isCompressed() const {
         return cformat != compresstype::RAW;
+    }
+
+    // Check if compressed data is available
+    bool hasCompressedData() const {
+        return !_compressedData.empty();
+    }
+
+    // Check if uncompressed data is available
+    bool hasUncompressedData() const {
+        return !_data.empty();
     }
 };
 

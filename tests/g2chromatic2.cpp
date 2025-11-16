@@ -11,9 +11,9 @@
 #include "../util/timing_decorator.cpp"
 
 struct AnimationConfig {
-    int width = 1024;
-    int height = 1024;
-    int totalFrames = 5;
+    int width = 4096;
+    int height = 4096;
+    int totalFrames = 4800;
     float fps = 30.0f;
     int numSeeds = 8;
 };
@@ -184,15 +184,16 @@ int main() {
     for (int i = 0; i < config.totalFrames; ++i){
         std::cout << "Processing frame " << i + 1 << "/" << config.totalFrames << std::endl;
         expandPixel(grid,config,seeds);
-        frame bgrframe = grid.getGridAsFrame(frame::colormap::BGR);
+        frame bgrframe;
         
         // Print compression info for this frame
         if (i % 10 == 0 ) {
+            bgrframe = grid.getGridAsFrame(frame::colormap::BGR);
             bgrframe.printCompressionStats();
             //(bgrframe, i + 1);
+            frames.push_back(bgrframe);
         }
 
-        frames.push_back(bgrframe);
     }
     
     exportavi(frames,config);

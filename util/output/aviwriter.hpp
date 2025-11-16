@@ -549,6 +549,8 @@ public:
             entry.offset = frameStart;
             entry.size = frameSize;
             indexEntries.push_back(entry);
+            paddedFrame.clear();
+            paddedFrame.shrink_to_fit();
         }
 
         // Update movi list size
