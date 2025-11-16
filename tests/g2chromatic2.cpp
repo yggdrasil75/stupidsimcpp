@@ -13,7 +13,7 @@
 struct AnimationConfig {
     int width = 1024;
     int height = 1024;
-    int totalFrames = 4800;
+    int totalFrames = 5;
     float fps = 30.0f;
     int numSeeds = 8;
 };
@@ -109,6 +109,7 @@ void expandPixel(Grid2& grid, AnimationConfig config, std::vector<std::tuple<siz
         }
     }
     seeds.clear();
+    seeds.shrink_to_fit();
     seeds = std::move(newseeds);
 }
 

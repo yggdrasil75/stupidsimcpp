@@ -479,6 +479,7 @@ public:
         if (width <= 0 || height <= 0) {
             width = height = 0;
             rgbData.clear();
+            rgbData.shrink_to_fit();
             return;
         }
         
@@ -520,6 +521,7 @@ public:
         if (width <= 0 || height <= 0) {
             width = height = 0;
             bgrData.clear();
+            bgrData.shrink_to_fit();
             return;
         }
         
@@ -686,7 +688,8 @@ public:
                 break;
         }
         //Frame.compressFrameDiff();
-        Frame.compressFrameRLE();
+        //Frame.compressFrameRLE();
+        Frame.compressFrameLZ78();
         return Frame;
     }
 
@@ -703,12 +706,8 @@ public:
         switch (compression) {
             case frame::compresstype::RLE:
                 return gridFrame.compressFrameRLE();
-            case frame::compresstype::ZIGZAG:
-                return gridFrame.compressFrameZigZag();
             case frame::compresstype::DIFF:
                 return gridFrame.compressFrameDiff();
-            case frame::compresstype::ZIGZAGRLE:
-                return gridFrame.compressFrameZigZagRLE();
             case frame::compresstype::DIFFRLE:
                 return gridFrame.compressFrameDiffRLE();
             case frame::compresstype::HUFFMAN:
