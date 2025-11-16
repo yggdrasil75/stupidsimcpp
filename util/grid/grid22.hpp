@@ -146,6 +146,7 @@ public:
         Vec2 maxGrid = worldToGrid(center + Vec2(radius, radius));
         
         // Check all relevant grid cells
+        //#pragma omp parallel for
         for (int x = minGrid.x; x <= maxGrid.x; ++x) {
             for (int y = minGrid.y; y <= maxGrid.y; ++y) {
                 Vec2 gridPos(x, y);
@@ -366,6 +367,7 @@ public:
     //bulk update positions
     void bulkUpdatePositions(const std::unordered_map<size_t, Vec2>& newPositions) {
         TIME_FUNCTION;
+        //#pragma omp parallel for
         for (const auto& [id, newPos] : newPositions) {
             Vec2 oldPosition = Positions.at(id);
             Positions.at(id).move(newPos);
@@ -377,6 +379,7 @@ public:
     // Bulk update colors
     void bulkUpdateColors(const std::unordered_map<size_t, Vec4>& newColors) {
         TIME_FUNCTION;
+        //#pragma omp parallel for
         for (const auto& [id, newColor] : newColors) {
             auto it = Colors.find(id);
             if (it != Colors.end()) {
@@ -388,6 +391,7 @@ public:
     // Bulk update sizes
     void bulkUpdateSizes(const std::unordered_map<size_t, float>& newSizes) {
         TIME_FUNCTION;
+        //#pragma omp parallel for
         for (const auto& [id, newSize] : newSizes) {
             auto it = Sizes.find(id);
             if (it != Sizes.end()) {
@@ -412,7 +416,7 @@ public:
         Sizes.reserve(Sizes.size() + objects.size());
         
         // Batch insertion
-        #pragma omp parallel for
+        //#pragma omp parallel for
         for (size_t i = 0; i < objects.size(); ++i) {
             const auto& [pos, color, size] = objects[i];
             size_t id = Positions.set(pos);
@@ -440,7 +444,7 @@ public:
         }
         
         // Batch insertion
-        #pragma omp parallel for
+        //#pragma omp parallel for
         for (size_t i = 0; i < poses.size(); ++i) {
             size_t id = Positions.set(poses[i]);
             Colors[id] = colors[i];
@@ -487,6 +491,7 @@ public:
         rgbData.resize(width * height * 3, 0);
         
         // For each position in the grid, find the corresponding pixel
+        //#pragma omp parallel for
         for (const auto& [id, pos] : Positions) {
             if (pos.x >= minCorner.x && pos.x < maxCorner.x &&
                 pos.y >= minCorner.y && pos.y < maxCorner.y) {
@@ -529,6 +534,7 @@ public:
         bgrData.resize(width * height * 3, 0);
         
         // For each position in the grid, find the corresponding pixel
+        //#pragma omp parallel for
         for (const auto& [id, pos] : Positions) {
             if (pos.x >= minCorner.x && pos.x < maxCorner.x &&
                 pos.y >= minCorner.y && pos.y < maxCorner.y) {
@@ -601,6 +607,7 @@ public:
         std::vector<uint8_t> rgbaData;
         rgbaData.reserve(width * height * 4);
         
+        //#pragma omp parallel for
         for (size_t i = 0; i < rgbData.size(); i += 3) {
             rgbaData.push_back(rgbData[i]);     // R
             rgbaData.push_back(rgbData[i + 1]); // G
@@ -624,6 +631,7 @@ public:
         std::vector<uint8_t> bgraData;
         bgraData.reserve(width * height * 4);
         
+        //#pragma omp parallel for
         for (size_t i = 0; i < bgrData.size(); i += 3) {
             bgraData.push_back(bgrData[i]);     // B
             bgraData.push_back(bgrData[i + 1]); // G
@@ -646,6 +654,7 @@ public:
         std::vector<uint8_t> grayData;
         grayData.reserve(width * height);
         
+        //#pragma omp parallel for
         for (size_t i = 0; i < rgbData.size(); i += 3) {
             uint8_t r = rgbData[i];
             uint8_t g = rgbData[i + 1];
@@ -734,6 +743,7 @@ public:
         maxCorner = it->second;
         
         // Find min and max coordinates
+        //#pragma omp parallel for
         for (const auto& [id, pos] : Positions) {
             minCorner.x = std::min(minCorner.x, pos.x);
             minCorner.y = std::min(minCorner.y, pos.y);
@@ -764,6 +774,7 @@ public:
         neighborMap.clear();
         
         // For each object, find nearby neighbors
+        //#pragma omp parallel for
         for (const auto& [id1, pos1] : Positions) {
             std::vector<size_t> neighbors;
             float radiusSq = neighborRadius * neighborRadius;

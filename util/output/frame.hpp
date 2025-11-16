@@ -12,6 +12,9 @@
 #include <stdexcept>
 #include <string>
 #include <iostream>
+#include <future>
+#include <mutex>
+#include <atomic>
 
 class frame {
 private:
@@ -142,18 +145,36 @@ public:
         size_t pos = 0;
         const size_t chunksize = 65535;
         size_t dsize = _data.size();
-        std::vector<uint8_t>::iterator dbegin = _data.begin();
         
-        //try to optimize space usage without losing speed
-        std::vector<std::vector<uint8_t>> matches128plus;
-        std::vector<std::vector<uint8_t>> matches64plus;
-        std::vector<std::vector<uint8_t>> matches32plus;
-        std::vector<std::vector<uint8_t>> matchesAll;
+        // Thread-safe storage with mutex protection
+        struct ThreadSafeMatches {
+            std::mutex mutex;
+            std::vector<std::vector<uint8_t>> matches128plus;
+            std::vector<std::vector<uint8_t>> matches64plus;
+            std::vector<std::vector<uint8_t>> matches32plus;
+            std::vector<std::vector<uint8_t>> matchesAll;
+            
+            void addMatch(std::vector<uint8_t>&& match, size_t length) {
+                std::lock_guard<std::mutex> lock(mutex);
+                if (length >= 128) {
+                    if (matches128plus.size() < 65534) matches128plus.push_back(std::move(match));
+                } else if (length >= 64) {
+                    if (matches64plus.size() < 65534) matches64plus.push_back(std::move(match));
+                } else if (length >= 32) {
+                    if (matches32plus.size() < 65534) matches32plus.push_back(std::move(match));
+                } else {
+                    if (matchesAll.size() < 65534) matchesAll.push_back(std::move(match));
+                }
+            }
+        };
         
-        while (pos < dsize && matches128plus.size() < 65534) {
+        ThreadSafeMatches threadMatches;
+        
+        while (pos < dsize && result.size() < 65534) {
             size_t chunk_end = std::min(pos + chunksize, dsize);
-            std::vector<uint8_t> chunk(dbegin + pos, dbegin + chunk_end);
-            if (chunk.size() <= 4) { 
+            std::vector<uint8_t> chunk(_data.begin() + pos, _data.begin() + chunk_end);
+            
+            if (chunk.size() <= 4) {
                 pos = chunk_end;
                 continue;
             }
@@ -162,87 +183,85 @@ public:
                 result.push_back(chunk);
             }
 
-            std::vector<uint8_t> ffour;
-            ffour.assign(chunk.begin(), chunk.begin() + 4);
-            size_t searchpos = chunk_end;            
-            while (searchpos + 4 <= dsize) {
-                bool match_found = true;
-                for (int i = 0; i < 4; ++i) {
-                    if (_data[searchpos + i] != ffour[i]) {
-                        match_found = false;
-                        break;
-                    }
-                }
+            std::vector<uint8_t> ffour(chunk.begin(), chunk.begin() + 4);
+            
+            // Split the search space across multiple threads
+            const size_t num_threads = std::thread::hardware_concurrency();
+            const size_t search_range = dsize - chunk_end - 3;
+            const size_t block_size = (search_range + num_threads - 1) / num_threads;
+            
+            std::vector<std::future<void>> futures;
+            
+            for (size_t t = 0; t < num_threads; ++t) {
+                size_t start = chunk_end + t * block_size;
+                size_t end = std::min(start + block_size, dsize - 3);
                 
-                if (match_found) {
-                    size_t matchlength = 4;
-                    size_t chunk_compare_pos = 4;
-                    size_t input_compare_pos = searchpos + 4;
+                if (start >= end) continue;
+                
+                futures.push_back(std::async(std::launch::async, 
+                    [&, start, end, chunk, ffour]() {
+                        size_t searchpos = start;
+                        while (searchpos <= end) {
+                            // Check first 4 bytes
+                            if (_data[searchpos] == ffour[0] &&
+                                _data[searchpos + 1] == ffour[1] &&
+                                _data[searchpos + 2] == ffour[2] &&
+                                _data[searchpos + 3] == ffour[3]) {
+                                
+                                // Found match, calculate length
+                                size_t matchlength = 4;
+                                size_t chunk_compare_pos = 4;
+                                size_t input_compare_pos = searchpos + 4;
 
-                    while (chunk_compare_pos < chunk.size() && input_compare_pos < dsize && _data[input_compare_pos] == chunk[chunk_compare_pos]) {
-                        matchlength++;
-                        chunk_compare_pos++;
-                        input_compare_pos++;
-                    }
+                                while (chunk_compare_pos < chunk.size() && 
+                                    input_compare_pos < dsize && 
+                                    _data[input_compare_pos] == chunk[chunk_compare_pos]) {
+                                    matchlength++;
+                                    chunk_compare_pos++;
+                                    input_compare_pos++;
+                                }
 
-                    std::vector<uint8_t> matchsequence(dbegin + searchpos, dbegin + searchpos + matchlength);
-                    
-                    // Categorize matches by length
-                    if (matchlength >= 128) {
-                        if (matches128plus.size() < 65534) {
-                            matches128plus.push_back(matchsequence);
-                        }
-                    } else if (matchlength >= 64) {
-                        if (matches64plus.size() < 65534) {
-                            matches64plus.push_back(matchsequence);
-                        }
-                    } else if (matchlength >= 32) {
-                        if (matches32plus.size() < 65534) {
-                            matches32plus.push_back(matchsequence);
-                        }
-                    } else {
-                        if (matchesAll.size() < 65534) {
-                            matchesAll.push_back(matchsequence);
+                                std::vector<uint8_t> matchsequence(
+                                    _data.begin() + searchpos, 
+                                    _data.begin() + searchpos + matchlength
+                                );
+                                
+                                threadMatches.addMatch(std::move(matchsequence), matchlength);
+                                searchpos += matchlength;
+                            } else {
+                                searchpos++;
+                            }
                         }
                     }
-                    
-                    searchpos += matchlength;
-                } else {
-                    searchpos++;
-                }
+                ));
+            }
+            
+            // Wait for all threads to complete
+            for (auto& future : futures) {
+                future.get();
             }
             
             pos = chunk_end;
         }
-        for (const auto& match : matches128plus) {
+        
+        // Merge results (same priority order as original)
+        for (const auto& match : threadMatches.matches128plus) {
             result.push_back(match);
         }
         
-        // Then add 64+ matches if we still have space
-        for (const auto& match : matches64plus) {
-            if (result.size() < 65534) {
-                result.push_back(match);
-            } else {
-                break;
-            }
+        for (const auto& match : threadMatches.matches64plus) {
+            if (result.size() < 65534) result.push_back(match);
+            else break;
         }
         
-        // Then add 32+ matches if we still have space
-        for (const auto& match : matches32plus) {
-            if (result.size() < 65534) {
-                result.push_back(match);
-            } else {
-                break;
-            }
+        for (const auto& match : threadMatches.matches32plus) {
+            if (result.size() < 65534) result.push_back(match);
+            else break;
         }
         
-        // Finally add all other matches if we still have space
-        for (const auto& match : matchesAll) {
-            if (result.size() < 65534) {
-                result.push_back(match);
-            } else {
-                break;
-            }
+        for (const auto& match : threadMatches.matchesAll) {
+            if (result.size() < 65534) result.push_back(match);
+            else break;
         }
         
         return result;

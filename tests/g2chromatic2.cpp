@@ -11,9 +11,9 @@
 #include "../util/timing_decorator.cpp"
 
 struct AnimationConfig {
-    int width = 4096;
-    int height = 4096;
-    int totalFrames = 4800;
+    int width = 2048;
+    int height = 2048;
+    int totalFrames = 480;
     float fps = 30.0f;
     int numSeeds = 8;
 };
@@ -75,6 +75,7 @@ void expandPixel(Grid2& grid, AnimationConfig config, std::vector<std::tuple<siz
         visitedThisFrame.insert(std::get<0>(seed));
     }
 
+    //#pragma omp parallel for
     for (const std::tuple<size_t, Vec2, Vec4>& seed : seeds) {
         size_t id = std::get<0>(seed);
         Vec2 seedPOS = std::get<1>(seed);

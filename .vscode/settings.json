@@ -90,7 +90,8 @@
         "__hash_table": "cpp",
         "__split_buffer": "cpp",
         "__tree": "cpp",
-        "stack": "cpp"
+        "stack": "cpp",
+        "future": "cpp"
     },
     "files.exclude": {
         "**/*.rpyc": true,
