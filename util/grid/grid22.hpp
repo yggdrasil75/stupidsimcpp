@@ -138,7 +138,6 @@ public:
     }
     
     std::vector<size_t> queryRange(const Vec2& center, float radius) const {
-        TIME_FUNCTION;
         std::vector<size_t> results;
         float radiusSq = radius * radius;
         
@@ -637,7 +636,6 @@ public:
 
     // Get region as frame (Grayscale format)
     frame getGridRegionAsFrameGrayscale(const Vec2& minCorner, const Vec2& maxCorner) const {
-        TIME_FUNCTION;
         int width, height;
         std::vector<uint8_t> rgbData;
         getGridRegionAsRGB(minCorner, maxCorner, width, height, rgbData);
@@ -669,19 +667,26 @@ public:
 
         switch (format) {
             case frame::colormap::RGB:
-                Frame = getGridRegionAsFrameRGB(minCorner, maxCorner);
+                Frame = std::move(getGridRegionAsFrameRGB(minCorner, maxCorner));
+                break;
             case frame::colormap::BGR:
-                Frame = getGridRegionAsFrameBGR(minCorner, maxCorner);
+                Frame = std::move(getGridRegionAsFrameBGR(minCorner, maxCorner));
+                break;
             case frame::colormap::RGBA:
-                Frame = getGridRegionAsFrameRGBA(minCorner, maxCorner);
+                Frame = std::move(getGridRegionAsFrameRGBA(minCorner, maxCorner));
+                break;
             case frame::colormap::BGRA:
-                Frame = getGridRegionAsFrameBGRA(minCorner, maxCorner);
+                Frame = std::move(getGridRegionAsFrameBGRA(minCorner, maxCorner));
+                break;
             case frame::colormap::B:
-                Frame = getGridRegionAsFrameGrayscale(minCorner, maxCorner);
+                Frame = std::move(getGridRegionAsFrameGrayscale(minCorner, maxCorner));
+                break;
             default:
-                Frame = getGridRegionAsFrameRGB(minCorner, maxCorner);
+                Frame = std::move(getGridRegionAsFrameRGB(minCorner, maxCorner));
+                break;
         }
-        Frame.compressFrameZigZagRLE();
+        //Frame.compressFrameDiff();
+        Frame.compressFrameRLE();
         return Frame;
     }
 

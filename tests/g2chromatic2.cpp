@@ -13,7 +13,7 @@
 struct AnimationConfig {
     int width = 1024;
     int height = 1024;
-    int totalFrames = 480;
+    int totalFrames = 4800;
     float fps = 30.0f;
     int numSeeds = 8;
 };
@@ -70,13 +70,11 @@ void expandPixel(Grid2& grid, AnimationConfig config, std::vector<std::tuple<siz
     TIME_FUNCTION;
     std::vector<std::tuple<size_t, Vec2, Vec4>> newseeds; 
 
-
     std::unordered_set<size_t> visitedThisFrame; 
     for (const auto& seed : seeds) {
         visitedThisFrame.insert(std::get<0>(seed));
     }
 
-    
     for (const std::tuple<size_t, Vec2, Vec4>& seed : seeds) {
         size_t id = std::get<0>(seed);
         Vec2 seedPOS = std::get<1>(seed);
@@ -87,7 +85,6 @@ void expandPixel(Grid2& grid, AnimationConfig config, std::vector<std::tuple<siz
                 continue;
             }
             visitedThisFrame.insert(neighbor);
-
 
             Vec2 neipos = grid.getPositionID(neighbor);
             Vec4 neighborColor = grid.getColor(neighbor);
@@ -121,8 +118,34 @@ bool exportavi(std::vector<frame> frames, AnimationConfig config) {
     std::string filename = "output/chromatic_transformation.avi";
     
     std::cout << "Frame count: " << frames.size() << std::endl;
-    //std::cout << "Frame size: " << (frames.empty() ? 0 : frames[0].size()) << std::endl;
-    std::cout << "Width: " << config.width << ", Height: " << config.height << std::endl;
+    
+    // Log compression statistics for all frames
+    std::cout << "\n=== Frame Compression Statistics ===" << std::endl;
+    size_t totalOriginalSize = 0;
+    size_t totalCompressedSize = 0;
+    int compressedFrameCount = 0;
+    
+    for (int i = 0; i < frames.size(); ++i) {    
+        totalOriginalSize += frames[i].getSourceSize();
+        totalCompressedSize += frames[i].getCompressedSize();
+        compressedFrameCount++;
+    }
+    
+    // Print summary
+    //if (compressedFrameCount > 0) {
+        double overallRatio = static_cast<double>(totalOriginalSize) / totalCompressedSize;
+        double overallSavings = (1.0 - 1.0/overallRatio) * 100.0;
+        
+        std::cout << "\n=== Overall Compression Summary ===" << std::endl;
+        std::cout << "Total frames: " << frames.size() << std::endl;
+        std::cout << "Compressed frames: " << compressedFrameCount << std::endl;
+        std::cout << "Total original size: " << totalOriginalSize << " bytes (" 
+                  << std::fixed << std::setprecision(2) << (totalOriginalSize / (1024.0 * 1024.0)) << " MB)" << std::endl;
+        std::cout << "Total compressed size: " << totalCompressedSize << " bytes (" 
+                  << std::fixed << std::setprecision(2) << (totalCompressedSize / (1024.0 * 1024.0)) << " MB)" << std::endl;
+        std::cout << "Overall compression ratio: " << std::fixed << std::setprecision(2) << overallRatio << ":1" << std::endl;
+        std::cout << "Overall space savings: " << std::fixed << std::setprecision(1) << overallSavings << "%" << std::endl;
+    //}
     
     std::filesystem::path dir = "output";
     if (!std::filesystem::exists(dir)) {
@@ -132,14 +155,15 @@ bool exportavi(std::vector<frame> frames, AnimationConfig config) {
         }
     }
     
-    bool success = AVIWriter::saveAVIFromCompressedFrames(filename,frames,frames[0].getWidth()+1,frames[0].getHeight()+1, config.fps);
-
-    //bool success = AVIWriter::saveAVI(filename, frames, config.width+1, config.height+1, config.fps);
+    bool success = AVIWriter::saveAVIFromCompressedFrames(filename, frames, frames[0].getWidth(), frames[0].getHeight(), config.fps);
     
     if (success) {
         // Check if file actually exists
         if (std::filesystem::exists(filename)) {
             auto file_size = std::filesystem::file_size(filename);
+            std::cout << "\nAVI file created successfully: " << filename 
+                      << " (" << file_size << " bytes, " 
+                      << std::fixed << std::setprecision(2) << (file_size / (1024.0 * 1024.0)) << " MB)" << std::endl;
         } 
     } else {
         std::cout << "Failed to save AVI file!" << std::endl;
@@ -152,20 +176,21 @@ int main() {
     AnimationConfig config;
     
     Grid2 grid = setup(config);
-    //grid.updateNeighborMap();
     Preview(grid);
     std::vector<std::tuple<size_t, Vec2, Vec4>> seeds = pickSeeds(grid,config);
-    //std::vector<std::vector<uint8_t>> frames;
     std::vector<frame> frames;
 
     for (int i = 0; i < config.totalFrames; ++i){
-        std::cout << "Processing bgrframe " << i + 1 << "/" << config.totalFrames << std::endl;
+        std::cout << "Processing frame " << i + 1 << "/" << config.totalFrames << std::endl;
         expandPixel(grid,config,seeds);
-        int width;
-        int height;
-        //std::vector<uint8_t> bgrframe;
         frame bgrframe = grid.getGridAsFrame(frame::colormap::BGR);
-        //grid.getGridAsBGR(width,height,bgrframe);
+        
+        // Print compression info for this frame
+        if (i % 10 == 0 ) {
+            bgrframe.printCompressionStats();
+            //(bgrframe, i + 1);
+        }
+
         frames.push_back(bgrframe);
     }
     
