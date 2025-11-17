@@ -8,10 +8,8 @@
 class Vec2 {
     public:
     float x, y;
-    size_t index;
     Vec2() : x(0), y(0) {}
     Vec2(float x, float y) : x(x), y(y) {}
-    Vec2(float x, float y, size_t index) : x(x), y(y), index(index) {}
 
     Vec2& move(const Vec2 newpos) {
         x = newpos.x;

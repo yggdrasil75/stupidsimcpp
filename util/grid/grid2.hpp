@@ -1,739 +1,824 @@
 #ifndef GRID2_HPP
 #define GRID2_HPP
 
+#include <unordered_map>
 #include "../vectorlogic/vec2.hpp"
 #include "../vectorlogic/vec4.hpp"
 #include "../timing_decorator.hpp"
-#include "spatc16.hpp"
+#include "../output/frame.hpp"
 #include <vector>
-#include <unordered_map>
-#include <string>
-#include <algorithm>
-#include <map>
 #include <unordered_set>
-#include <cmath>
-#include <memory>
 
-struct PairHash {
-    template <typename T1, typename T2>
-    std::size_t operator()(const std::pair<T1, T2>& p) const {
-        auto h1 = std::hash<T1>{}(p.first);
-        auto h2 = std::hash<T2>{}(p.second);
-        return h1 ^ (h2 << 1);
-    }
-};
-
-class Grid2 {
+class reverselookupassistantclasscausecppisdumb {
 private:
-    // Objects that don't fit in any SpatialCell16x16
-    std::unordered_map<size_t, Vec2> loosePositions;
-    std::unordered_map<size_t, Vec4> looseColors;
-    std::unordered_map<size_t, float> looseSizes;
-    
-    // Spatial partitioning using SpatialCell16x16 cells
-    std::unordered_map<std::pair<int, int>, std::unique_ptr<SpatialCell16x16>, PairHash> spatialCells;
-    Vec2 gridMin, gridMax;
-    bool useSpatialPartitioning;
-    
+    std::unordered_map<size_t, Vec2> Positions;
+    std::unordered_map<Vec2, size_t, Vec2::Hash> ƨnoiƚiƨoꟼ;
     size_t next_id;
-    
-    // Convert world position to cell coordinates for SpatialCell16x16 placement
-    std::pair<int, int> worldToCellCoord(const Vec2& worldPos) const {
-        if (!useSpatialPartitioning) return {0, 0};
-        
-        float cellWorldSize = getCellWorldSize();
-        int cellX = static_cast<int>((worldPos.x - gridMin.x) / cellWorldSize);
-        int cellY = static_cast<int>((worldPos.y - gridMin.y) / cellWorldSize);
-        return {cellX, cellY};
-    }
-    
-    // Get the world size of each SpatialCell16x16 cell
-    float getCellWorldSize() const {
-        // SpatialCell16x16 is 16x16 internally, but we need world size
-        return (gridMax.x - gridMin.x) / getGridCellsX();
-    }
-    
-    // Calculate how many SpatialCell16x16 cells fit in X direction
-    int getGridCellsX() const {
-        if (!useSpatialPartitioning) return 1;
-        float worldWidth = gridMax.x - gridMin.x;
-        // Aim for cells that are roughly square in world coordinates
-        float targetCellSize = std::max(16.0f, worldWidth / 16.0f);
-        return std::max(1, static_cast<int>(worldWidth / targetCellSize));
-    }
-    
-    // Calculate how many SpatialCell16x16 cells fit in Y direction  
-    int getGridCellsY() const {
-        if (!useSpatialPartitioning) return 1;
-        float worldHeight = gridMax.y - gridMin.y;
-        float targetCellSize = std::max(16.0f, worldHeight / 16.0f);
-        return std::max(1, static_cast<int>(worldHeight / targetCellSize));
-    }
-    
-    // Get cell bounds from coordinates
-    Vec2 getCellMinCorner(int cellX, int cellY) const {
-        float cellSizeX = (gridMax.x - gridMin.x) / getGridCellsX();
-        float cellSizeY = (gridMax.y - gridMin.y) / getGridCellsY();
-        return Vec2(
-            gridMin.x + cellX * cellSizeX,
-            gridMin.y + cellY * cellSizeY
-        );
-    }
-    
-    Vec2 getCellMaxCorner(int cellX, int cellY) const {
-        float cellSizeX = (gridMax.x - gridMin.x) / getGridCellsX();
-        float cellSizeY = (gridMax.y - gridMin.y) / getGridCellsY();
-        return Vec2(
-            gridMin.x + (cellX + 1) * cellSizeX,
-            gridMin.y + (cellY + 1) * cellSizeY
-        );
-    }
-    
-    // Get or create spatial cell
-    SpatialCell16x16* getOrCreateCell(int cellX, int cellY) {
-        auto key = std::make_pair(cellX, cellY);
-        auto it = spatialCells.find(key);
-        if (it != spatialCells.end()) {
-            return it->second.get();
-        }
-        
-        // Create new SpatialCell16x16
-        Vec2 minCorner = getCellMinCorner(cellX, cellY);
-        Vec2 maxCorner = getCellMaxCorner(cellX, cellY);
-        spatialCells[key] = std::make_unique<SpatialCell16x16>(minCorner, maxCorner);
-        return spatialCells[key].get();
-    }
-    
-    // Check if an object can fit in SpatialCell16x16
-    bool canFitInSpatialCell(const Vec2& position, float size) const {
-        if (!useSpatialPartitioning) return false;
-        
-        auto cellCoord = worldToCellCoord(position);
-        Vec2 cellMin = getCellMinCorner(cellCoord.first, cellCoord.second);
-        Vec2 cellMax = getCellMaxCorner(cellCoord.first, cellCoord.second);
-        
-        float halfSize = size * 0.5f;
-        return (position.x - halfSize >= cellMin.x && 
-                position.x + halfSize <= cellMax.x &&
-                position.y - halfSize >= cellMin.y && 
-                position.y + halfSize <= cellMax.y);
-    }
-    
-    // Add object to appropriate storage
-    bool addToSpatialCell(size_t id, const Vec2& position, const Vec4& color, float size) {
-        if (!useSpatialPartitioning || !canFitInSpatialCell(position, size)) {
-            return false;
-        }
-        
-        auto cellCoord = worldToCellCoord(position);
-        SpatialCell16x16* cell = getOrCreateCell(cellCoord.first, cellCoord.second);
-        return cell->addObject(id, position, color, size);
-    }
-    
-    // Get all cells that overlap with a circle
-    std::vector<SpatialCell16x16*> getCellsInRadius(const Vec2& center, float radius) const {
-        std::vector<SpatialCell16x16*> result;
-        if (!useSpatialPartitioning) return result;
-        
-        Vec2 searchMin(center.x - radius, center.y - radius);
-        Vec2 searchMax(center.x + radius, center.y + radius);
-        
-        auto [minCellX, minCellY] = worldToCellCoord(searchMin);
-        auto [maxCellX, maxCellY] = worldToCellCoord(searchMax);
-        
-        for (int cellY = minCellY; cellY <= maxCellY; ++cellY) {
-            for (int cellX = minCellX; cellX <= maxCellX; ++cellX) {
-                auto key = std::make_pair(cellX, cellY);
-                auto it = spatialCells.find(key);
-                if (it != spatialCells.end()) {
-                    result.push_back(it->second.get());
-                }
-            }
-        }
-        
-        return result;
-    }
-    
-    // Get all cells that overlap with a region
-    std::vector<SpatialCell16x16*> getCellsInRegion(const Vec2& minCorner, const Vec2& maxCorner) const {
-        std::vector<SpatialCell16x16*> result;
-        if (!useSpatialPartitioning) return result;
-        
-        auto [minCellX, minCellY] = worldToCellCoord(minCorner);
-        auto [maxCellX, maxCellY] = worldToCellCoord(maxCorner);
-        
-        for (int cellY = minCellY; cellY <= maxCellY; ++cellY) {
-            for (int cellX = minCellX; cellX <= maxCellX; ++cellX) {
-                auto key = std::make_pair(cellX, cellY);
-                auto it = spatialCells.find(key);
-                if (it != spatialCells.end()) {
-                    result.push_back(it->second.get());
-                }
-            }
-        }
-        
-        return result;
-    }
-    
-    // Remove object from spatial cells
-    void removeFromSpatialCells(size_t id, const Vec2& position, float size) {
-        if (!useSpatialPartitioning) return;
-        
-        // Calculate object bounds
-        float halfSize = size * 0.5f;
-        Vec2 objMin(position.x - halfSize, position.y - halfSize);
-        Vec2 objMax(position.x + halfSize, position.y + halfSize);
-        
-        // Get affected cells
-        auto [minCellX, minCellY] = worldToCellCoord(objMin);
-        auto [maxCellX, maxCellY] = worldToCellCoord(objMax);
-        
-        // Remove from all overlapping cells
-        for (int cellY = minCellY; cellY <= maxCellY; ++cellY) {
-            for (int cellX = minCellX; cellX <= maxCellX; ++cellX) {
-                auto key = std::make_pair(cellX, cellY);
-                auto it = spatialCells.find(key);
-                if (it != spatialCells.end()) {
-                    it->second->removeObject(id);
-                }
-            }
-        }
-    }
-    
-    // Check if object is in spatial cells
-    bool isInSpatialCells(size_t id) const {
-        if (!useSpatialPartitioning) return false;
-        
-        for (const auto& cellPair : spatialCells) {
-            if (cellPair.second->hasObject(id)) {
-                return true;
-            }
-        }
-        return false;
-    }
-    
-    // Get object position (handles both storage types)
-    Vec2 getObjectPosition(size_t id) const {
-        // Check spatial cells first
-        if (useSpatialPartitioning) {
-            for (const auto& cellPair : spatialCells) {
-                if (cellPair.second->hasObject(id)) {
-                    return cellPair.second->getPosition(id);
-                }
-            }
-        }
-        
-        // Check loose objects
-        auto it = loosePositions.find(id);
-        return it != loosePositions.end() ? it->second : Vec2();
-    }
-    
-    // Get object color (handles both storage types)
-    Vec4 getObjectColor(size_t id) const {
-        // Check spatial cells first
-        if (useSpatialPartitioning) {
-            for (const auto& cellPair : spatialCells) {
-                if (cellPair.second->hasObject(id)) {
-                    return cellPair.second->getColor(id);
-                }
-            }
-        }
-        
-        // Check loose objects
-        auto it = looseColors.find(id);
-        return it != looseColors.end() ? it->second : Vec4();
-    }
-    
-    // Get object size (handles both storage types)
-    float getObjectSize(size_t id) const {
-        // Check spatial cells first
-        if (useSpatialPartitioning) {
-            for (const auto& cellPair : spatialCells) {
-                if (cellPair.second->hasObject(id)) {
-                    return cellPair.second->getSize(id);
-                }
-            }
-        }
-        
-        // Check loose objects
-        auto it = looseSizes.find(id);
-        return it != looseSizes.end() ? it->second : 1.0f;
-    }
-    
 public:
-    Grid2() : next_id(0), useSpatialPartitioning(false) {}
-    
-    // Initialize with spatial partitioning
-    void initializeSpatialPartitioning(const Vec2& minCorner, const Vec2& maxCorner) {
-        gridMin = minCorner;
-        gridMax = maxCorner;
-        spatialCells.clear();
-        useSpatialPartitioning = true;
-        
-        // Move existing objects to appropriate storage
-        std::vector<size_t> toRemove;
-        for (const std::pair<const size_t, Vec2>& pair : loosePositions) {
-            size_t id = pair.first;
-            const Vec2& pos = pair.second;
-            const Vec4& color = looseColors[id];
-            float size = looseSizes[id];
-            
-            if (addToSpatialCell(id, pos, color, size)) {
-                toRemove.push_back(id);
-            }
-        }
-        
-        // Remove objects that were moved to spatial cells
-        for (size_t id : toRemove) {
-            loosePositions.erase(id);
-            looseColors.erase(id);
-            looseSizes.erase(id);
-        }
-    }
-    
-    void initializeSpatialPartitioning(float minX, float minY, float maxX, float maxY) {
-        initializeSpatialPartitioning(Vec2(minX, minY), Vec2(maxX, maxY));
-    }
-    
-    void addObjects(const std::vector<std::tuple<Vec2, Vec4, float>>& objects) {
-        for (const auto& obj : objects) {
-            addObject(std::get<0>(obj), std::get<1>(obj), std::get<2>(obj));
-        }
+    Vec2 at(size_t id) const {
+        auto it = Positions.at(id);
+        return it;
     }
 
-    size_t addObject(const Vec2& position, const Vec4& color, float size = 1.0f) {
-        size_t id = next_id++;
-        
-        // Try to add to spatial cell first
-        if (!addToSpatialCell(id, position, color, size)) {
-            // Fall back to loose storage
-            loosePositions[id] = position;
-            looseColors[id] = color;
-            looseSizes[id] = size;
-        }
-        
+    size_t at(const Vec2& pos) const {
+        size_t id = ƨnoiƚiƨoꟼ.at(pos);
         return id;
     }
 
-    // Simple getters
-    Vec2 getPosition(size_t id) const {
-        return getObjectPosition(id);
+    Vec2 find(size_t id) {
+        return Positions.at(id);
     }
 
-    Vec4 getColor(size_t id) const {
-        return getObjectColor(id);
+    size_t set(const Vec2& pos) {
+        size_t id = next_id++;
+        Positions[id] = pos;
+        ƨnoiƚiƨoꟼ[pos] = id;
+        return id;
     }
 
-    float getSize(size_t id) const {
-        return getObjectSize(id);
+    size_t remove(size_t id) {
+        Vec2& pos = Positions[id];
+        Positions.erase(id);
+        ƨnoiƚiƨoꟼ.erase(pos);
+        return id;
     }
 
-    void setPosition(size_t id, const Vec2& position) {
-        if (!hasObject(id)) return;
-        
-        Vec2 oldPos = getObjectPosition(id);
-        float size = getObjectSize(id);
-        
-        // Remove from current storage
-        if (isInSpatialCells(id)) {
-            removeFromSpatialCells(id, oldPos, size);
-        } else {
-            loosePositions.erase(id);
-        }
-        
-        // Add to appropriate storage
-        if (!addToSpatialCell(id, position, getObjectColor(id), size)) {
-            loosePositions[id] = position;
-        }
+    size_t remove(const Vec2& pos) {
+        size_t id = ƨnoiƚiƨoꟼ[pos];
+        Positions.erase(id);
+        ƨnoiƚiƨoꟼ.erase(pos);
+        return id;
     }
 
-    void setColor(size_t id, const Vec4& color) {
-        if (!hasObject(id)) return;
-        
-        if (isInSpatialCells(id)) {
-            // Update in spatial cell
-            Vec2 pos = getObjectPosition(id);
-            float size = getObjectSize(id);
-            removeFromSpatialCells(id, pos, size);
-            addToSpatialCell(id, pos, color, size);
-        } else {
-            // Update in loose storage
-            looseColors[id] = color;
-        }
+    void reserve(size_t size) {
+        Positions.reserve(size);
+        ƨnoiƚiƨoꟼ.reserve(size);
     }
 
-    void setSize(size_t id, float size) {
-        if (!hasObject(id)) return;
-        
-        Vec2 pos = getObjectPosition(id);
-        Vec4 color = getObjectColor(id);
-        float oldSize = getObjectSize(id);
-        
-        // Remove from current storage
-        if (isInSpatialCells(id)) {
-            removeFromSpatialCells(id, pos, oldSize);
-        } else {
-            loosePositions.erase(id);
-            looseColors.erase(id);
-            looseSizes.erase(id);
-        }
-        
-        // Add to appropriate storage with new size
-        if (!addToSpatialCell(id, pos, color, size)) {
-            loosePositions[id] = pos;
-            looseColors[id] = color;
-            looseSizes[id] = size;
+    size_t size() const {
+        return Positions.size();
+    }
+
+    size_t getNext_id() {
+        return next_id + 1;
+    }
+    
+    size_t bucket_count() {
+        return Positions.bucket_count();
+    }
+
+    bool empty() {
+        return Positions.empty();
+    }
+    
+    void clear() {
+        Positions.clear();
+        ƨnoiƚiƨoꟼ.clear();
+        next_id = 0;
+    }
+    
+    using iterator = typename std::unordered_map<size_t, Vec2>::iterator;
+    using const_iterator = typename std::unordered_map<size_t, Vec2>::const_iterator;
+
+    iterator begin() { 
+        return Positions.begin(); 
+    }
+    iterator end() { 
+        return Positions.end(); 
+    }
+    const_iterator begin() const { 
+        return Positions.begin(); 
+    }
+    const_iterator end() const { 
+        return Positions.end(); 
+    }
+    const_iterator cbegin() const { 
+        return Positions.cbegin(); 
+    }
+    const_iterator cend() const { 
+        return Positions.cend(); 
+    }
+    
+};
+
+class SpatialGrid {
+private:
+    float cellSize;
+public:
+    std::unordered_map<Vec2, std::unordered_set<size_t>, Vec2::Hash> grid;
+    SpatialGrid(float cellSize = 2.0f) : cellSize(cellSize) {}
+    
+    Vec2 worldToGrid(const Vec2& worldPos) const {
+        return (worldPos / cellSize).floor();
+    }
+    
+    void insert(size_t id, const Vec2& pos) {
+        Vec2 gridPos = worldToGrid(pos);
+        grid[gridPos].insert(id);
+    }
+    
+    void remove(size_t id, const Vec2& pos) {
+        Vec2 gridPos = worldToGrid(pos);
+        auto cellIt = grid.find(gridPos);
+        if (cellIt != grid.end()) {
+            cellIt->second.erase(id);
+            if (cellIt->second.empty()) {
+                grid.erase(cellIt);
+            }
         }
     }
     
-    bool hasObject(size_t id) const {
-        if (isInSpatialCells(id)) return true;
-        return loosePositions.find(id) != loosePositions.end();
-    }
-
-    
-    void removeObjects(const std::vector<size_t>& ids) {
-        for (size_t id : ids) {
-            removeObject(id);
+    void update(size_t id, const Vec2& oldPos, const Vec2& newPos) {
+        Vec2 oldGridPos = worldToGrid(oldPos);
+        Vec2 newGridPos = worldToGrid(newPos);
+        
+        if (oldGridPos != newGridPos) {
+            remove(id, oldPos);
+            insert(id, newPos);
         }
     }
     
-    void removeObject(size_t id) {
-        if (!hasObject(id)) return;
+    std::vector<size_t> queryRange(const Vec2& center, float radius) const {
+        std::vector<size_t> results;
+        float radiusSq = radius * radius;
         
-        Vec2 pos = getObjectPosition(id);
-        float size = getObjectSize(id);
+        // Calculate grid bounds for the query
+        Vec2 minGrid = worldToGrid(center - Vec2(radius, radius));
+        Vec2 maxGrid = worldToGrid(center + Vec2(radius, radius));
         
-        if (isInSpatialCells(id)) {
-            removeFromSpatialCells(id, pos, size);
-        } else {
-            loosePositions.erase(id);
-            looseColors.erase(id);
-            looseSizes.erase(id);
-        }
-    }
-    
-    std::vector<size_t> getIndicesAt(const Vec2& position, float radius = 0.0f) const {
-        TIME_FUNCTION;
-        
-        std::unordered_set<size_t> result;
-        
-        // Query spatial cells
-        if (useSpatialPartitioning && radius > 0.0f) {
-            auto cells = getCellsInRadius(position, radius);
-            for (SpatialCell16x16* cell : cells) {
-                auto objects = cell->getObjectsInRadius(position, radius);
-                result.insert(objects.begin(), objects.end());
-            }
-        } else if (useSpatialPartitioning && radius == 0.0f) {
-            auto cellCoord = worldToCellCoord(position);
-            auto key = std::make_pair(cellCoord.first, cellCoord.second);
-            auto it = spatialCells.find(key);
-            if (it != spatialCells.end()) {
-                auto objects = it->second->getObjectsAt(position);
-                result.insert(objects.begin(), objects.end());
-            }
-        }
-        
-        // Query loose objects
-        float radius_sq = radius * radius;
-        for (const auto& pair : loosePositions) {
-            float dx = pair.second.x - position.x;
-            float dy = pair.second.y - position.y;
-            if (dx * dx + dy * dy <= radius_sq) {
-                result.insert(pair.first);
-            }
-        }
-        
-        return std::vector<size_t>(result.begin(), result.end());
-    }
-
-    void updatePositions(const std::unordered_map<size_t, Vec2>& newPositions) {
-        TIME_FUNCTION;
-        
-        for (const auto& [id, newPos] : newPositions) {
-            if (!hasObject(id)) continue;
-            
-            Vec2 oldPos = getObjectPosition(id);
-            Vec4 color = getObjectColor(id);
-            float size = getObjectSize(id);
-            
-            // Remove from current storage
-            if (isInSpatialCells(id)) {
-                removeFromSpatialCells(id, oldPos, size);
-            } else {
-                loosePositions.erase(id);
-            }
-            
-            // Add to appropriate storage with new position
-            if (!addToSpatialCell(id, newPos, color, size)) {
-                loosePositions[id] = newPos;
-            }
-        }
-    }
-
-    // Get all object IDs in the grid
-    std::vector<size_t> getAllObjectIds() const {
-        TIME_FUNCTION;
-        
-        std::unordered_set<size_t> result;
-        
-        // Get IDs from spatial cells
-        if (useSpatialPartitioning) {
-            for (const auto& cellPair : spatialCells) {
-                auto cellIds = cellPair.second->getAllObjectIds();
-                result.insert(cellIds.begin(), cellIds.end());
-            }
-        }
-        
-        // Get IDs from loose objects
-        for (const auto& pair : loosePositions) {
-            result.insert(pair.first);
-        }
-        
-        return std::vector<size_t>(result.begin(), result.end());
-    }
-
-    // Bulk update colors using a function
-    void bulkUpdateColors(const std::function<Vec4(size_t id, const Vec2& pos, const Vec4& currentColor)>& colorFunc) {
-        TIME_FUNCTION;
-        
-        // Update colors in spatial cells
-        if (useSpatialPartitioning) {
-            for (auto& cellPair : spatialCells) {
-                auto cell = cellPair.second.get();
-                auto ids = cell->getAllObjectIds();
-                
-                for (size_t id : ids) {
-                    Vec2 pos = cell->getPosition(id);
-                    Vec4 currentColor = cell->getColor(id);
-                    Vec4 newColor = colorFunc(id, pos, currentColor);
-                    
-                    // Remove and re-add with new color
-                    float size = cell->getSize(id);
-                    cell->removeObject(id);
-                    cell->addObject(id, pos, newColor, size);
+        // Check all relevant grid cells
+        //#pragma omp parallel for
+        for (int x = minGrid.x; x <= maxGrid.x; ++x) {
+            for (int y = minGrid.y; y <= maxGrid.y; ++y) {
+                Vec2 gridPos(x, y);
+                auto cellIt = grid.find(gridPos);
+                if (cellIt != grid.end()) {
+                    for (size_t id : cellIt->second) {
+                        results.push_back(id);
+                    }
                 }
             }
         }
         
-        // Update colors in loose objects
-        for (auto& pair : looseColors) {
-            size_t id = pair.first;
-            Vec2 pos = loosePositions[id];
-            Vec4 currentColor = pair.second;
-            Vec4 newColor = colorFunc(id, pos, currentColor);
-            pair.second = newColor;
+        return results;
+    }
+    
+    void clear() {
+        grid.clear();
+    }
+};
+
+class Grid2 { 
+private:
+    //all positions
+    reverselookupassistantclasscausecppisdumb Positions;
+    //all colors
+    std::unordered_map<size_t, Vec4> Colors;
+    //all sizes
+    std::unordered_map<size_t, float> Sizes;
+
+    std::vector<size_t> unassignedIDs;
+    
+    //grid min
+    Vec2 gridMin;
+    //grid max
+    Vec2 gridMax;
+
+    //neighbor map
+    std::unordered_map<size_t, std::vector<size_t>> neighborMap;
+    float neighborRadius = 1.0f;
+    
+    //TODO: spatial map
+    SpatialGrid spatialGrid;
+    float spatialCellSize = 2.0f;
+public:
+    //get position from id
+    Vec2 getPositionID(size_t id) const {
+        Vec2 it = Positions.at(id);
+        return it;
+    }
+
+    //get id from position (optional radius, picks first found. radius of 0 becomes epsilon if none are found)
+    size_t getPositionVec(const Vec2& pos, float radius = 0.0f) {
+        TIME_FUNCTION;
+        if (radius == 0.0f) {
+            // Exact match - use spatial grid to find the cell
+            Vec2 gridPos = spatialGrid.worldToGrid(pos);
+            auto cellIt = spatialGrid.grid.find(gridPos);
+            if (cellIt != spatialGrid.grid.end()) {
+                for (size_t id : cellIt->second) {
+                    if (Positions.at(id) == pos) {
+                        return id;
+                    }
+                }
+            }
+            throw std::out_of_range("Position not found");
+        } else {
+            auto results = getPositionVecRegion(pos, radius);
+            if (!results.empty()) {
+                return results[0]; // Return first found
+            }
+            throw std::out_of_range("No positions found in radius");
         }
     }
 
-    // Get grid region as RGB data (for visualization/export)
-    void getGridRegionAsRGB(const Vec2& minCorner, const Vec2& maxCorner,
-                           int& width, int& height, std::vector<int>& rgbData) const {
+    size_t getPositionVec(float x, float y, float radius = 0.0f) { 
+        return getPositionVec(Vec2(x,y), radius);
+    }
+
+    //get all id in region
+    std::vector<size_t> getPositionVecRegion(const Vec2& pos, float radius = 1.0f) {
         TIME_FUNCTION;
+        float searchRadius = (radius == 0.0f) ? std::numeric_limits<float>::epsilon() : radius;
         
-        // Determine output dimensions
+        // Get candidates from spatial grid
+        std::vector<size_t> candidates = spatialGrid.queryRange(pos, searchRadius);
+        
+        // Fine-filter by exact distance
+        std::vector<size_t> results;
+        float radiusSq = searchRadius * searchRadius;
+        
+        for (size_t id : candidates) {
+            if (Positions.at(id).distanceSquared(pos) <= radiusSq) {
+                results.push_back(id);
+            }
+        }
+        
+        return results;
+    }
+    
+    //get color from id
+    Vec4 getColor(size_t id) {
+        return Colors.at(id);
+    }
+    
+    //get color from position (use get id from position and then get color from id)
+    Vec4 getColor(float x, float y) {
+        size_t id = getPositionVec(Vec2(x,y),0.0);
+        return getColor(id);
+    }
+    
+    //get size from id
+    Vec4 getSize(size_t id) {
+        return Colors.at(id);
+    }
+    
+    //get size from position (use get id from position and then get size from id)
+    Vec4 getSize(float x, float y) {
+        size_t id = getPositionVec(Vec2(x,y),0.0);
+        return getSize(id);
+    }
+    
+    //add pixel (default color and default size provided)
+    size_t addObject(const Vec2& pos, const Vec4& color, float size = 1.0f) {
+        size_t id = Positions.set(pos);
+        Colors[id] = color;
+        Sizes[id] = size;
+        
+        // Add to spatial grid
+        spatialGrid.insert(id, pos);
+        updateNeighborForID(id);
+        return id;
+    }
+    
+    //set position by id
+    void setPosition(size_t id, const Vec2& newPosition) {
+        Vec2 oldPosition = Positions.at(id);
+        spatialGrid.update(id, oldPosition, newPosition);
+        Positions.at(id).move(newPosition);
+        updateNeighborForID(id);
+    }
+    
+    void setPosition(size_t id, float x, float y) {
+        Vec2 newPos = Vec2(x,y);
+        Vec2 oldPos = Positions.at(id);
+
+        spatialGrid.update(id, oldPos, newPos);
+        Positions.at(id).move(newPos);
+        updateNeighborForID(id);
+    }
+    
+    //set color by id (by pos same as get color)
+    void setColor(size_t id, const Vec4 color) {
+        Colors.at(id).recolor(color);
+    }
+    
+    void setColor(size_t id, float r, float g, float b, float a=1.0f) {
+        Colors.at(id).recolor(Vec4(r,g,b,a));
+    }
+    
+    void setColor(float x, float y, const Vec4 color) {
+        size_t id = getPositionVec(Vec2(x,y));
+        Colors.at(id).recolor(color);
+    }
+    
+    void setColor(float x, float y, float r, float g, float b, float a=1.0f) {
+        size_t id = getPositionVec(Vec2(x,y));
+        Colors.at(id).recolor(Vec4(r,g,b,a));
+    }
+    
+    void setColor(const Vec2& pos, const Vec4 color) {
+        size_t id = getPositionVec(pos);
+        Colors.at(id).recolor(color);
+    }
+    
+    void setColor(const Vec2& pos, float r, float g, float b, float a=1.0f) {
+        size_t id = getPositionVec(pos);
+        Colors.at(id).recolor(Vec4(r,g,b,a));
+    }
+    
+    //set size by id (by pos same as get size)
+    void setSize(size_t id, float size) {
+        Sizes.at(id) = size;
+    }
+    
+    void setSize(float x, float y, float size) {
+        size_t id = getPositionVec(Vec2(x,y));
+        Sizes.at(id) = size;
+    }
+    
+    void setSize(const Vec2& pos, float size) {
+        size_t id = getPositionVec(pos);
+        Sizes.at(id) = size;
+    }
+
+    //remove object (should remove the id, the color, the position, and the size)
+    size_t removeID(size_t id) {
+        Vec2 oldPosition = Positions.at(id);
+        Positions.remove(id);
+        Colors.erase(id);
+        Sizes.erase(id);
+        unassignedIDs.push_back(id);
+        spatialGrid.remove(id, oldPosition);
+        updateNeighborForID(id);
+        return id;
+    }
+    
+    size_t removeID(Vec2 pos) {
+        size_t id = getPositionVec(pos);
+        Positions.remove(id);
+        Colors.erase(id);
+        Sizes.erase(id);
+        unassignedIDs.push_back(id);
+        spatialGrid.remove(id, pos);
+        updateNeighborForID(id);
+        return id;
+    }
+
+    //bulk update positions
+    void bulkUpdatePositions(const std::unordered_map<size_t, Vec2>& newPositions) {
+        TIME_FUNCTION;
+        //#pragma omp parallel for
+        for (const auto& [id, newPos] : newPositions) {
+            Vec2 oldPosition = Positions.at(id);
+            Positions.at(id).move(newPos);
+            spatialGrid.update(id, oldPosition, newPos);
+        }
+        updateNeighborMap();
+    }
+    
+    // Bulk update colors
+    void bulkUpdateColors(const std::unordered_map<size_t, Vec4>& newColors) {
+        TIME_FUNCTION;
+        //#pragma omp parallel for
+        for (const auto& [id, newColor] : newColors) {
+            auto it = Colors.find(id);
+            if (it != Colors.end()) {
+                it->second = newColor;
+            }
+        }
+    }
+    
+    // Bulk update sizes
+    void bulkUpdateSizes(const std::unordered_map<size_t, float>& newSizes) {
+        TIME_FUNCTION;
+        //#pragma omp parallel for
+        for (const auto& [id, newSize] : newSizes) {
+            auto it = Sizes.find(id);
+            if (it != Sizes.end()) {
+                it->second = newSize;
+            }
+        }
+    }
+
+    void shrinkIfNeeded() {
+        //TODO: cleanup all as needed.
+    }
+    
+    //bulk add
+    std::vector<size_t> bulkAddObjects(const std::vector<std::tuple<Vec2, Vec4, float>>& objects) {
+        TIME_FUNCTION;
+        std::vector<size_t> ids;
+        ids.reserve(objects.size());
+        
+        // Reserve space in maps to avoid rehashing
+        Positions.reserve(Positions.size() + objects.size());
+        Colors.reserve(Colors.size() + objects.size());
+        Sizes.reserve(Sizes.size() + objects.size());
+        
+        // Batch insertion
+        //#pragma omp parallel for
+        for (size_t i = 0; i < objects.size(); ++i) {
+            const auto& [pos, color, size] = objects[i];
+            size_t id = Positions.set(pos);
+            
+            Colors[id] = color;
+            Sizes[id] = size;
+            spatialGrid.insert(id,pos);
+        }
+        
+        shrinkIfNeeded();
+        updateNeighborMap();
+        return getAllIDs(); // Or generate ID range
+    }
+    
+    std::vector<size_t> bulkAddObjects(const std::vector<Vec2> poses, std::vector<Vec4> colors, std::vector<float>& sizes) {
+        TIME_FUNCTION;
+        std::vector<size_t> ids;
+        ids.reserve(poses.size());
+        
+        // Reserve space in maps to avoid rehashing
+        if (Positions.bucket_count() < Positions.size() + poses.size()) {
+            Positions.reserve(Positions.size() + poses.size());
+            Colors.reserve(Colors.size() + colors.size());
+            Sizes.reserve(Sizes.size() + sizes.size());
+        }
+        
+        // Batch insertion
+        //#pragma omp parallel for
+        for (size_t i = 0; i < poses.size(); ++i) {
+            size_t id = Positions.set(poses[i]);
+            Colors[id] = colors[i];
+            Sizes[id] = sizes[i];
+            spatialGrid.insert(id,poses[i]);
+        }
+        
+        shrinkIfNeeded();
+        updateNeighborMap();
+        
+        return getAllIDs();
+    }
+
+    //get all ids
+    std::vector<size_t> getAllIDs() {
+        TIME_FUNCTION;
+        std::vector<size_t> ids;
+        ids.reserve(Positions.size());
+        
+        for (const auto& pair : Positions) {
+            ids.push_back(pair.first);
+        }
+        
+        return ids;
+    }
+
+    // no return because it passes back a 1d vector of ints between 0 and 255 with a width and height
+    //get region as rgb 
+    void getGridRegionAsRGB(const Vec2& minCorner, const Vec2& maxCorner,
+                           int& width, int& height, std::vector<uint8_t>& rgbData) const {
+        TIME_FUNCTION;
+        // Calculate dimensions
         width = static_cast<int>(maxCorner.x - minCorner.x);
         height = static_cast<int>(maxCorner.y - minCorner.y);
         
         if (width <= 0 || height <= 0) {
             width = height = 0;
             rgbData.clear();
+            rgbData.shrink_to_fit();
             return;
         }
         
-        // Initialize output data (3 channels per pixel)
+        // Initialize RGB data (3 bytes per pixel: R, G, B)
         rgbData.resize(width * height * 3, 0);
         
-        // Get objects in the region
-        std::vector<size_t> objectIds;
-        
-        if (useSpatialPartitioning) {
-            // Use spatial partitioning for efficient query
-            auto cells = getCellsInRegion(minCorner, maxCorner);
-            for (SpatialCell16x16* cell : cells) {
-                auto cellObjects = cell->getObjectsInRegion(minCorner, maxCorner);
-                objectIds.insert(objectIds.end(), cellObjects.begin(), cellObjects.end());
-            }
-        } else {
-            // Fall back to checking all loose objects
-            for (const auto& pair : loosePositions) {
-                const Vec2& pos = pair.second;
-                if (pos.x >= minCorner.x && pos.x <= maxCorner.x &&
-                    pos.y >= minCorner.y && pos.y <= maxCorner.y) {
-                    objectIds.push_back(pair.first);
+        // For each position in the grid, find the corresponding pixel
+        //#pragma omp parallel for
+        for (const auto& [id, pos] : Positions) {
+            if (pos.x >= minCorner.x && pos.x < maxCorner.x &&
+                pos.y >= minCorner.y && pos.y < maxCorner.y) {
+                
+                // Calculate pixel coordinates
+                int pixelX = static_cast<int>(pos.x - minCorner.x);
+                int pixelY = static_cast<int>(pos.y - minCorner.y);
+                
+                // Ensure within bounds
+                if (pixelX >= 0 && pixelX < width && pixelY >= 0 && pixelY < height) {
+                    // Get color and convert to RGB
+                    const Vec4& color = Colors.at(id);
+                    int index = (pixelY * width + pixelX) * 3;
+                    
+                    // Convert from [0,1] to [0,255] and store as RGB
+                    rgbData[index]     = static_cast<unsigned char>(color.r * 255);
+                    rgbData[index + 1] = static_cast<unsigned char>(color.g * 255);
+                    rgbData[index + 2] = static_cast<unsigned char>(color.b * 255);
                 }
             }
         }
-        
-        // Rasterize objects to RGB
-        for (size_t id : objectIds) {
-            Vec2 pos = getObjectPosition(id);
-            Vec4 color = getObjectColor(id);
-            float size = getObjectSize(id);
-            
-            // Convert world coordinates to pixel coordinates
-            int pixelX = static_cast<int>((pos.x - minCorner.x));
-            int pixelY = static_cast<int>((pos.y - minCorner.y));
-            
-            // Clamp to image bounds
-            pixelX = std::clamp(pixelX, 0, width - 1);
-            pixelY = std::clamp(pixelY, 0, height - 1);
-            
-            // Convert normalized color to 8-bit RGB
-            int r = static_cast<int>(std::clamp(color.x, 0.0f, 1.0f) * 255);
-            int g = static_cast<int>(std::clamp(color.y, 0.0f, 1.0f) * 255);
-            int b = static_cast<int>(std::clamp(color.z, 0.0f, 1.0f) * 255);
-            
-            // Set pixel color (RGB order)
-            int index = (pixelY * width + pixelX) * 3;
-            rgbData[index] = r;
-            rgbData[index + 1] = g;
-            rgbData[index + 2] = b;
-        }
     }
 
-    // Get grid region as BGR data (OpenCV compatible)
+    // Get region as BGR
     void getGridRegionAsBGR(const Vec2& minCorner, const Vec2& maxCorner,
-                           int& width, int& height, std::vector<int>& bgrData) const {
+                           int& width, int& height, std::vector<uint8_t>& bgrData) const {
         TIME_FUNCTION;
-        
-        // First get as RGB
-        std::vector<int> rgbData;
-        getGridRegionAsRGB(minCorner, maxCorner, width, height, rgbData);
+        // Calculate dimensions
+        width = static_cast<int>(maxCorner.x - minCorner.x);
+        height = static_cast<int>(maxCorner.y - minCorner.y);
         
         if (width <= 0 || height <= 0) {
+            width = height = 0;
             bgrData.clear();
+            bgrData.shrink_to_fit();
             return;
         }
         
-        // Convert RGB to BGR by swapping channels
-        bgrData.resize(rgbData.size());
-        for (int i = 0; i < width * height; ++i) {
-            int rgbIndex = i * 3;
-            int bgrIndex = i * 3;
-            bgrData[bgrIndex] = rgbData[rgbIndex + 2];     // B <- R
-            bgrData[bgrIndex + 1] = rgbData[rgbIndex + 1]; // G <- G  
-            bgrData[bgrIndex + 2] = rgbData[rgbIndex];     // R <- B
-        }
-    }
-
-    void getBoundingBox(Vec2& minCorner, Vec2& maxCorner) const {
-        TIME_FUNCTION;
+        // Initialize BGR data (3 bytes per pixel: B, G, R)
+        bgrData.resize(width * height * 3, 0);
         
-        bool hasObjects = false;
-        minCorner = Vec2(std::numeric_limits<float>::max(), std::numeric_limits<float>::max());
-        maxCorner = Vec2(std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest());
-        
-        // Process spatial cells
-        if (useSpatialPartitioning) {
-            for (const auto& cellPair : spatialCells) {
-                auto ids = cellPair.second->getAllObjectIds();
-                for (size_t id : ids) {
-                    const Vec2& pos = cellPair.second->getPosition(id);
-                    float size = cellPair.second->getSize(id);
-                    float halfSize = size * 0.5f;
+        // For each position in the grid, find the corresponding pixel
+        //#pragma omp parallel for
+        for (const auto& [id, pos] : Positions) {
+            if (pos.x >= minCorner.x && pos.x < maxCorner.x &&
+                pos.y >= minCorner.y && pos.y < maxCorner.y) {
+                
+                // Calculate pixel coordinates
+                int pixelX = static_cast<int>(pos.x - minCorner.x);
+                int pixelY = static_cast<int>(pos.y - minCorner.y);
+                
+                // Ensure within bounds
+                if (pixelX >= 0 && pixelX < width && pixelY >= 0 && pixelY < height) {
+                    // Get color and convert to BGR
+                    const Vec4& color = Colors.at(id);
+                    int index = (pixelY * width + pixelX) * 3;
                     
-                    minCorner.x = std::min(minCorner.x, pos.x - halfSize);
-                    minCorner.y = std::min(minCorner.y, pos.y - halfSize);
-                    maxCorner.x = std::max(maxCorner.x, pos.x + halfSize);
-                    maxCorner.y = std::max(maxCorner.y, pos.y + halfSize);
-                    hasObjects = true;
+                    // Convert from [0,1] to [0,255] and store as BGR
+                    bgrData[index]     = static_cast<unsigned char>(color.b * 255);  // Blue
+                    bgrData[index + 1] = static_cast<unsigned char>(color.g * 255);  // Green
+                    bgrData[index + 2] = static_cast<unsigned char>(color.r * 255);  // Red
                 }
             }
         }
+    }
+    
+    //get full as rgb/bgr
+    void getGridAsRGB(int& width, int& height, std::vector<uint8_t>& rgbData)  {
+        Vec2 minCorner, maxCorner;
+        getBoundingBox(minCorner, maxCorner);
+        getGridRegionAsRGB(minCorner, maxCorner, width, height, rgbData);
+    }
+
+    void getGridAsBGR(int& width, int& height, std::vector<uint8_t>& bgrData)  {
+        Vec2 minCorner, maxCorner;
+        getBoundingBox(minCorner, maxCorner);
+        getGridRegionAsBGR(minCorner, maxCorner, width, height, bgrData);
+    }
+      
+    
+    //frame stuff
+    frame getGridRegionAsFrameRGB(const Vec2& minCorner, const Vec2& maxCorner) const {
+        TIME_FUNCTION;
+        int width, height;
+        std::vector<uint8_t> rgbData;
+        getGridRegionAsRGB(minCorner, maxCorner, width, height, rgbData);
         
-        // Process loose objects
-        for (const auto& pair : loosePositions) {
-            const Vec2& pos = pair.second;
-            float size = looseSizes.at(pair.first);
-            float halfSize = size * 0.5f;
-            
-            minCorner.x = std::min(minCorner.x, pos.x - halfSize);
-            minCorner.y = std::min(minCorner.y, pos.y - halfSize);
-            maxCorner.x = std::max(maxCorner.x, pos.x + halfSize);
-            maxCorner.y = std::max(maxCorner.y, pos.y + halfSize);
-            hasObjects = true;
+        frame resultFrame(width, height, frame::colormap::RGB);
+        resultFrame.setData(rgbData);
+        return resultFrame;
+    }
+
+    // Get region as frame (BGR format)
+    frame getGridRegionAsFrameBGR(const Vec2& minCorner, const Vec2& maxCorner) const {
+        TIME_FUNCTION;
+        int width, height;
+        std::vector<uint8_t> bgrData;
+        getGridRegionAsBGR(minCorner, maxCorner, width, height, bgrData);
+        
+        frame resultFrame(width, height, frame::colormap::BGR);
+        resultFrame.setData(bgrData);
+        return resultFrame;
+    }
+
+    // Get region as frame (RGBA format)
+    frame getGridRegionAsFrameRGBA(const Vec2& minCorner, const Vec2& maxCorner) const {
+        TIME_FUNCTION;
+        int width, height;
+        std::vector<uint8_t> rgbData;
+        getGridRegionAsRGB(minCorner, maxCorner, width, height, rgbData);
+        
+        // Convert RGB to RGBA
+        std::vector<uint8_t> rgbaData;
+        rgbaData.reserve(width * height * 4);
+        
+        //#pragma omp parallel for
+        for (size_t i = 0; i < rgbData.size(); i += 3) {
+            rgbaData.push_back(rgbData[i]);     // R
+            rgbaData.push_back(rgbData[i + 1]); // G
+            rgbaData.push_back(rgbData[i + 2]); // B
+            rgbaData.push_back(255);            // A (fully opaque)
         }
         
-        if (!hasObjects) {
-            minCorner = Vec2(0.0f, 0.0f);
-            maxCorner = Vec2(0.0f, 0.0f);
+        frame resultFrame(width, height, frame::colormap::RGBA);
+        resultFrame.setData(rgbaData);
+        return resultFrame;
+    }
+
+    // Get region as frame (BGRA format)
+    frame getGridRegionAsFrameBGRA(const Vec2& minCorner, const Vec2& maxCorner) const {
+        TIME_FUNCTION;
+        int width, height;
+        std::vector<uint8_t> bgrData;
+        getGridRegionAsBGR(minCorner, maxCorner, width, height, bgrData);
+        
+        // Convert BGR to BGRA
+        std::vector<uint8_t> bgraData;
+        bgraData.reserve(width * height * 4);
+        
+        //#pragma omp parallel for
+        for (size_t i = 0; i < bgrData.size(); i += 3) {
+            bgraData.push_back(bgrData[i]);     // B
+            bgraData.push_back(bgrData[i + 1]); // G
+            bgraData.push_back(bgrData[i + 2]); // R
+            bgraData.push_back(255);            // A (fully opaque)
+        }
+        
+        frame resultFrame(width, height, frame::colormap::BGRA);
+        resultFrame.setData(bgraData);
+        return resultFrame;
+    }
+
+    // Get region as frame (Grayscale format)
+    frame getGridRegionAsFrameGrayscale(const Vec2& minCorner, const Vec2& maxCorner) const {
+        int width, height;
+        std::vector<uint8_t> rgbData;
+        getGridRegionAsRGB(minCorner, maxCorner, width, height, rgbData);
+        
+        // Convert RGB to grayscale
+        std::vector<uint8_t> grayData;
+        grayData.reserve(width * height);
+        
+        //#pragma omp parallel for
+        for (size_t i = 0; i < rgbData.size(); i += 3) {
+            uint8_t r = rgbData[i];
+            uint8_t g = rgbData[i + 1];
+            uint8_t b = rgbData[i + 2];
+            // Standard grayscale conversion formula
+            uint8_t gray = static_cast<uint8_t>(0.299 * r + 0.587 * g + 0.114 * b);
+            grayData.push_back(gray);
+        }
+        
+        frame resultFrame(width, height, frame::colormap::B); // B for single channel/grayscale
+        resultFrame.setData(grayData);
+        return resultFrame;
+    }
+
+    // Get entire grid as frame with specified format
+    frame getGridAsFrame(frame::colormap format = frame::colormap::RGB) {
+        TIME_FUNCTION;
+        Vec2 minCorner, maxCorner;
+        getBoundingBox(minCorner, maxCorner);
+        frame Frame;
+
+        switch (format) {
+            case frame::colormap::RGB:
+                Frame = std::move(getGridRegionAsFrameRGB(minCorner, maxCorner));
+                break;
+            case frame::colormap::BGR:
+                Frame = std::move(getGridRegionAsFrameBGR(minCorner, maxCorner));
+                break;
+            case frame::colormap::RGBA:
+                Frame = std::move(getGridRegionAsFrameRGBA(minCorner, maxCorner));
+                break;
+            case frame::colormap::BGRA:
+                Frame = std::move(getGridRegionAsFrameBGRA(minCorner, maxCorner));
+                break;
+            case frame::colormap::B:
+                Frame = std::move(getGridRegionAsFrameGrayscale(minCorner, maxCorner));
+                break;
+            default:
+                Frame = std::move(getGridRegionAsFrameRGB(minCorner, maxCorner));
+                break;
+        }
+        //Frame.compressFrameDiff();
+        //Frame.compressFrameRLE();
+        Frame.compressFrameLZ78();
+        return Frame;
+    }
+
+    // Get compressed frame with specified compression
+    frame getGridAsCompressedFrame(frame::colormap format = frame::colormap::RGB,
+                                frame::compresstype compression = frame::compresstype::RLE) {
+        TIME_FUNCTION;
+        frame gridFrame = getGridAsFrame(format);
+        
+        if (gridFrame.getData().empty()) {
+            return gridFrame;
+        }
+        
+        switch (compression) {
+            case frame::compresstype::RLE:
+                return gridFrame.compressFrameRLE();
+            case frame::compresstype::DIFF:
+                return gridFrame.compressFrameDiff();
+            case frame::compresstype::DIFFRLE:
+                return gridFrame.compressFrameDiffRLE();
+            case frame::compresstype::HUFFMAN:
+                return gridFrame.compressFrameHuffman();
+            case frame::compresstype::RAW:
+            default:
+                return gridFrame;
         }
     }
 
-    // Spatial grid statistics
-    size_t getSpatialGridCellCount() const { 
-        return useSpatialPartitioning ? spatialCells.size() : 0; 
-    }
-    
-    size_t getSpatialGridObjectCount() const { 
-        if (!useSpatialPartitioning) return 0;
-        
-        size_t total = 0;
-        for (const auto& pair : spatialCells) {
-            total += pair.second->getObjectCount();
+
+    //get bounding box
+    void getBoundingBox(Vec2& minCorner, Vec2& maxCorner) {
+        TIME_FUNCTION;
+        if (Positions.empty()) {
+            minCorner = Vec2(0, 0);
+            maxCorner = Vec2(0, 0);
+            return;
         }
-        return total;
+        
+        // Initialize with first position
+        auto it = Positions.begin();
+        minCorner = it->second;
+        maxCorner = it->second;
+        
+        // Find min and max coordinates
+        //#pragma omp parallel for
+        for (const auto& [id, pos] : Positions) {
+            minCorner.x = std::min(minCorner.x, pos.x);
+            minCorner.y = std::min(minCorner.y, pos.y);
+            maxCorner.x = std::max(maxCorner.x, pos.x);
+            maxCorner.y = std::max(maxCorner.y, pos.y);
+        }
+        
+        // Add a small margin to avoid edge cases
+        float margin = 1.0f;
+        minCorner.x -= margin;
+        minCorner.y -= margin;
+        maxCorner.x += margin;
+        maxCorner.y += margin;
     }
-    
-    size_t getLooseObjectCount() const {
-        return loosePositions.size();
-    }
-    
-    bool isUsingSpatialPartitioning() const { return useSpatialPartitioning; }
-    
+
+    //clear
     void clear() {
-        loosePositions.clear();
-        looseColors.clear();
-        looseSizes.clear();
-        spatialCells.clear();
-        next_id = 0;
-    }
-    
-private:
-    std::unordered_map<std::pair<int, int>, std::unique_ptr<Grid2>, PairHash> nestedGrids;
-    int gridLevel; 
-    int maxLevels;
-    bool isLeafGrid;
-    
-    Grid2* getOrCreateNestedGrid(int cellX, int cellY) {
-        auto key = std::make_pair(cellX, cellY);
-        auto it = nestedGrids.find(key);
-        if (it != nestedGrids.end()) {
-            return it->second.get();
-        }
-        
-        if (gridLevel >= maxLevels) {
-            return nullptr; // Reached maximum depth
-        }
-        
-        // Create new nested grid with subdivided bounds
-        Vec2 nestedMin = getCellMinCorner(cellX, cellY);
-        Vec2 nestedMax = getCellMaxCorner(cellX, cellY);
-        
-        auto nestedGrid = std::make_unique<Grid2>();
-        nestedGrid->initializeSpatialPartitioning(nestedMin, nestedMax);
-        nestedGrid->setGridLevel(gridLevel + 1);
-        nestedGrid->setMaxLevels(maxLevels);
-        
-        nestedGrids[key] = std::move(nestedGrid);
-        return nestedGrids[key].get();
-    }
-    
-    // Check if object should be pushed to nested grid
-    bool shouldPushToNestedGrid(const Vec2& position, float size) const {
-        if (gridLevel >= maxLevels) return false;
-        
-        // Push to nested grid if object fits completely in a single cell
-        // and we haven't reached maximum depth
-        return canFitInSpatialCell(position, size);
+        Positions.clear();
+        Colors.clear();
+        Sizes.clear();
+        spatialGrid.clear();
+        neighborMap.clear();
     }
 
-public:
-    void setGridLevel(int level) { gridLevel = level; }
-    void setMaxLevels(int levels) { maxLevels = levels; }
-    int getGridLevel() const { return gridLevel; }
+    // neighbor map
+    void updateNeighborMap() {
+        TIME_FUNCTION;
+        neighborMap.clear();
+        
+        // For each object, find nearby neighbors
+        //#pragma omp parallel for
+        for (const auto& [id1, pos1] : Positions) {
+            std::vector<size_t> neighbors;
+            float radiusSq = neighborRadius * neighborRadius;
+            auto candidate_ids = spatialGrid.queryRange(pos1, neighborRadius);
+            
+            for (size_t id2 : candidate_ids) {
+                if (id1 != id2 && Positions.at(id1).distanceSquared(Positions.at(id2)) <= radiusSq) {
+                    neighbors.push_back(id2);
+                }
+            }
+            neighborMap[id1] = std::move(neighbors);
+        }
+    }
+    
+    // Update neighbor map for a single object
+    void updateNeighborForID(size_t id) {
+        TIME_FUNCTION;
+        Vec2 pos_it = Positions.at(id);
+
+        std::vector<size_t> neighbors;
+        float radiusSq = neighborRadius * neighborRadius;
+        
+        for (const auto& [id2, pos2] : Positions) {
+            if (id != id2 && pos_it.distanceSquared(pos2) <= radiusSq) {
+                neighbors.push_back(id2);
+            }
+        }
+        neighborMap[id] = std::move(neighbors);
+    }
+    
+    // Get neighbors for an ID
+    const std::vector<size_t>& getNeighbors(size_t id) const {
+        static const std::vector<size_t> empty;
+        auto it = neighborMap.find(id);
+        return it != neighborMap.end() ? it->second : empty;
+    }
+    
+    // Set neighbor search radius
+    void setNeighborRadius(float radius) {
+        neighborRadius = radius;
+        updateNeighborMap(); // Recompute all neighbors
+    }
+    
 };
 
 #endif

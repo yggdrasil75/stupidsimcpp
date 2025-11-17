@@ -5,7 +5,7 @@
 #include <cmath>
 #include <tuple>
 #include <unordered_set>
-#include "../util/grid/grid22.hpp"
+#include "../util/grid/grid2.hpp"
 #include "../util/output/aviwriter.hpp"
 #include "../util/output/bmpwriter.hpp"
 #include "../util/timing_decorator.cpp"
