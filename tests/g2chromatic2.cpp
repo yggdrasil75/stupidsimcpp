@@ -125,29 +125,24 @@ bool exportavi(std::vector<frame> frames, AnimationConfig config) {
     std::cout << "\n=== Frame Compression Statistics ===" << std::endl;
     size_t totalOriginalSize = 0;
     size_t totalCompressedSize = 0;
-    int compressedFrameCount = 0;
     
     for (int i = 0; i < frames.size(); ++i) {    
         totalOriginalSize += frames[i].getSourceSize();
-        totalCompressedSize += frames[i].getCompressedSize();
-        compressedFrameCount++;
+        totalCompressedSize += frames[i].getTotalCompressedSize();
     }
     
-    // Print summary
-    //if (compressedFrameCount > 0) {
-        double overallRatio = static_cast<double>(totalOriginalSize) / totalCompressedSize;
-        double overallSavings = (1.0 - 1.0/overallRatio) * 100.0;
-        
-        std::cout << "\n=== Overall Compression Summary ===" << std::endl;
-        std::cout << "Total frames: " << frames.size() << std::endl;
-        std::cout << "Compressed frames: " << compressedFrameCount << std::endl;
-        std::cout << "Total original size: " << totalOriginalSize << " bytes (" 
-                  << std::fixed << std::setprecision(2) << (totalOriginalSize / (1024.0 * 1024.0)) << " MB)" << std::endl;
-        std::cout << "Total compressed size: " << totalCompressedSize << " bytes (" 
-                  << std::fixed << std::setprecision(2) << (totalCompressedSize / (1024.0 * 1024.0)) << " MB)" << std::endl;
-        std::cout << "Overall compression ratio: " << std::fixed << std::setprecision(2) << overallRatio << ":1" << std::endl;
-        std::cout << "Overall space savings: " << std::fixed << std::setprecision(1) << overallSavings << "%" << std::endl;
-    //}
+    double overallRatio = static_cast<double>(totalOriginalSize) / totalCompressedSize;
+    double overallSavings = (1.0 - 1.0/overallRatio) * 100.0;
+    
+    std::cout << "\n=== Overall Compression Summary ===" << std::endl;
+    std::cout << "Total frames: " << frames.size() << std::endl;
+    std::cout << "Compressed frames: " << frames.size() << std::endl;
+    std::cout << "Total original size: " << totalOriginalSize << " bytes (" 
+                << std::fixed << std::setprecision(2) << (totalOriginalSize / (1024.0 * 1024.0)) << " MB)" << std::endl;
+    std::cout << "Total compressed size: " << totalCompressedSize << " bytes (" 
+                << std::fixed << std::setprecision(2) << (totalCompressedSize / (1024.0 * 1024.0)) << " MB)" << std::endl;
+    std::cout << "Overall compression ratio: " << std::fixed << std::setprecision(2) << overallRatio << ":1" << std::endl;
+    std::cout << "Overall space savings: " << std::fixed << std::setprecision(1) << overallSavings << "%" << std::endl;
     
     std::filesystem::path dir = "output";
     if (!std::filesystem::exists(dir)) {
@@ -183,12 +178,12 @@ int main() {
     std::vector<frame> frames;
 
     for (int i = 0; i < config.totalFrames; ++i){
-        std::cout << "Processing frame " << i + 1 << "/" << config.totalFrames << std::endl;
         expandPixel(grid,config,seeds);
-        frame bgrframe;
         
         // Print compression info for this frame
         if (i % 10 == 0 ) {
+            frame bgrframe;
+            std::cout << "Processing frame " << i + 1 << "/" << config.totalFrames << std::endl;
             bgrframe = grid.getGridAsFrame(frame::colormap::BGR);
             bgrframe.printCompressionStats();
             //(bgrframe, i + 1);

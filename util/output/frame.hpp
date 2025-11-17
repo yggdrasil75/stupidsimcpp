@@ -72,6 +72,7 @@ public:
         cformat = compresstype::RAW;
         _compressedData.clear();
         _compressedData.shrink_to_fit();
+        overheadmap.clear();
     }
 
     const std::vector<uint8_t>& getData() const {
@@ -151,7 +152,7 @@ public:
             std::mutex mutex;
             std::vector<std::vector<uint8_t>> matches128plus;
             std::vector<std::vector<uint8_t>> matches64plus;
-            std::vector<std::vector<uint8_t>> matches32plus;
+            //std::vector<std::vector<uint8_t>> matches32plus;
             std::vector<std::vector<uint8_t>> matchesAll;
             
             void addMatch(std::vector<uint8_t>&& match, size_t length) {
@@ -160,9 +161,11 @@ public:
                     if (matches128plus.size() < 65534) matches128plus.push_back(std::move(match));
                 } else if (length >= 64) {
                     if (matches64plus.size() < 65534) matches64plus.push_back(std::move(match));
-                } else if (length >= 32) {
-                    if (matches32plus.size() < 65534) matches32plus.push_back(std::move(match));
-                } else {
+                } 
+                // else if (length >= 32) {
+                //     if (matches32plus.size() < 65534) matches32plus.push_back(std::move(match));
+                // }
+                else {
                     if (matchesAll.size() < 65534) matchesAll.push_back(std::move(match));
                 }
             }
@@ -254,15 +257,15 @@ public:
             else break;
         }
         
-        for (const auto& match : threadMatches.matches32plus) {
-            if (result.size() < 65534) result.push_back(match);
-            else break;
-        }
+        // for (const auto& match : threadMatches.matches32plus) {
+        //     if (result.size() < 65534) result.push_back(match);
+        //     else break;
+        // }
         
-        for (const auto& match : threadMatches.matchesAll) {
-            if (result.size() < 65534) result.push_back(match);
-            else break;
-        }
+        // for (const auto& match : threadMatches.matchesAll) {
+        //     if (result.size() < 65534) result.push_back(match);
+        //     else break;
+        // }
         
         return result;
     }
@@ -389,6 +392,7 @@ public:
         _data = std::move(decompressedData);
         _compressedData.clear();
         _compressedData.shrink_to_fit();
+        overheadmap.clear();
         cformat = compresstype::RAW;
         
         return *this;
@@ -449,9 +453,25 @@ public:
         }
     }
 
+    // Calculate the size of the dictionary in bytes
+    size_t getDictionarySize() const {
+        size_t dictSize = 0;
+        dictSize = sizeof(overheadmap);
+        return dictSize;
+    }
+
+    // Get compressed size including dictionary overhead
+    size_t getTotalCompressedSize() const {
+        size_t baseSize = getCompressedSize() * 2; // Convert 16-bit words to bytes
+        if (cformat == compresstype::LZ78) {
+            baseSize += getDictionarySize();
+        }
+        return baseSize;
+    }
+
     double getCompressionRatio() const {
         if (_compressedData.empty() || sourceSize == 0) return 0.0;
-        return static_cast<double>(sourceSize) / _compressedData.size();
+        return static_cast<double>(sourceSize) / getTotalCompressedSize();
     }
 
     // Get source size (uncompressed size)
@@ -459,8 +479,13 @@ public:
         return sourceSize;
     }
 
-    // Get compressed size
+    // Get compressed size (just the compressed data in bytes, excluding dictionary)
     size_t getCompressedSize() const {
+        return _compressedData.size() * 2; // Convert 16-bit words to bytes
+    }
+
+    // Get just the compressed data size in 16-bit words
+    size_t getCompressedDataSize() const {
         return _compressedData.size();
     }
 
@@ -479,26 +504,37 @@ public:
         std::cout << std::endl;
         
         std::cout << "Source Size: " << getSourceSize() << " bytes" << std::endl;
-        std::cout << "Compressed Size: " << getCompressedSize() << " 16-bit words" << std::endl;
-        std::cout << "Compressed Size: " << getCompressedSize() * 2 << " bytes" << std::endl;
+        std::cout << "Compressed data Size: " << getCompressedDataSize() << " 16-bit words" << std::endl;
+        std::cout << "Compressed Size: " << getCompressedSize() << " bytes" << std::endl;
+        
+        if (cformat == compresstype::LZ78) {
+            std::cout << "Dictionary Size: " << getDictionarySize() << " bytes" << std::endl;
+            std::cout << "Dictionary Entries: " << overheadmap.size() << std::endl;
+            std::cout << "Total Compressed Size: " << getTotalCompressedSize() << " bytes" << std::endl;
+        } else {
+            std::cout << "Total Compressed Size: " << getTotalCompressedSize() << " bytes" << std::endl;
+        }
+        
         std::cout << "Compression Ratio: " << getCompressionRatio() << ":1" << std::endl;
         
         if (getCompressionRatio() > 1.0) {
             double savings = (1.0 - (1.0 / getCompressionRatio())) * 100.0;
             std::cout << "Space Savings: " << savings << "%" << std::endl;
         }
-        
-        // Show dictionary size for LZ78
-        if (cformat == compresstype::LZ78) {
-            std::cout << "Dictionary Size: " << overheadmap.size() << " entries" << std::endl;
-        }
     }
 
     // Print compression information in a compact format
     void printCompressionStats() const {
-        std::cout << "[" << getCompressionTypeString() << "] "
-                  << getSourceSize() << "B -> " << getCompressedSize() * 2 << "B "
-                  << "(ratio: " << getCompressionRatio() << ":1)" << std::endl;
+        if (cformat == compresstype::LZ78) {
+            std::cout << "[" << getCompressionTypeString() << "] "
+                      << getSourceSize() << "B -> " << getCompressedSize() << "B + " 
+                      << getDictionarySize() << "B dict = " << getTotalCompressedSize() << "B "
+                      << "(ratio: " << getCompressionRatio() << ":1)" << std::endl;
+        } else {
+            std::cout << "[" << getCompressionTypeString() << "] "
+                      << getSourceSize() << "B -> " << getTotalCompressedSize() << "B "
+                      << "(ratio: " << getCompressionRatio() << ":1)" << std::endl;
+        }
     }
 
     // Get compression type as string
