@@ -73,7 +73,9 @@ public:
     
     void clear() {
         Positions.clear();
+        Positions.rehash(0);
         ƨnoiƚiƨoꟼ.clear();
+        ƨnoiƚiƨoꟼ.rehash(0);
         next_id = 0;
     }
     
@@ -165,6 +167,7 @@ public:
     
     void clear() {
         grid.clear();
+        grid.rehash(0);
     }
 };
 
@@ -767,6 +770,9 @@ public:
         Sizes.clear();
         spatialGrid.clear();
         neighborMap.clear();
+        Colors.rehash(0);
+        Sizes.rehash(0);
+        neighborMap.rehash(0);
     }
 
     // neighbor map

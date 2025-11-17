@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <chrono>
+#include <tuple>
 #include <iostream>
 #include "frame.hpp"
 
@@ -188,37 +189,8 @@ private:
         
         return paddedFrame;
     }
-public:
-    // Original method for vector of raw frame data
-    static bool saveAVI(const std::string& filename, 
-                       const std::vector<std::vector<uint8_t>>& frames, 
-                       int width, int height, float fps = 30.0f) {
-        TIME_FUNCTION;
-        if (frames.empty() || width <= 0 || height <= 0 || fps <= 0) {
-            return false;
-        }
-        
-        // Validate frame sizes
-        size_t expectedFrameSize = width * height * 3;
-        for (const auto& frame : frames) {
-            if (frame.size() != expectedFrameSize) {
-                return false;
-            }
-        }
 
-        // Create directory if needed
-        if (!createDirectoryIfNeeded(filename)) {
-            return false;
-        }
-
-        std::ofstream file(filename, std::ios::binary);
-        if (!file) {
-            return false;
-        }
-
-        uint32_t frameCount = static_cast<uint32_t>(frames.size());
-        uint32_t microSecPerFrame = static_cast<uint32_t>(1000000.0f / fps);
-        
+    static std::tuple<uint32_t, uint32_t, uint32_t, uint32_t> writeheader(int width, int height, float fps, std::ofstream& file, uint32_t frameCount, uint32_t microSecPerFrame) {
         // Calculate padding for each frame (BMP-style row padding)
         uint32_t rowSize = (width * 3 + 3) & ~3;
         uint32_t frameSize = rowSize * height;
@@ -316,9 +288,62 @@ public:
         uint32_t moviListStart = static_cast<uint32_t>(file.tellp());
         writeList(file, 0x69766F6D, nullptr, 0); // 'movi' - we'll fill size later
 
+        return {moviListStart, frameSize, rowSize, riffStartPos};
+    }
+
+    static void writeFooter(std::ofstream& file, uint32_t moviListStart, uint32_t riffStartPos, std::vector<AVIWriter::AVIIndexEntry>& indexEntries) {
+        // Update movi list size
+        uint32_t moviListEnd = static_cast<uint32_t>(file.tellp());
+        file.seekp(moviListStart + 4);
+        uint32_t moviListSize = moviListEnd - moviListStart - 8;
+        file.write(reinterpret_cast<const char*>(&moviListSize), 4);
+        file.seekp(moviListEnd);
+
+        // idx1 chunk - index
+        uint32_t idx1Size = static_cast<uint32_t>(indexEntries.size() * sizeof(AVIIndexEntry));
+        writeChunk(file, 0x31786469, indexEntries.data(), idx1Size); // 'idx1'
+
+        // Update RIFF chunk size
+        uint32_t fileEnd = static_cast<uint32_t>(file.tellp());
+        file.seekp(riffStartPos + 4);
+        uint32_t riffSize = fileEnd - riffStartPos - 8;
+        file.write(reinterpret_cast<const char*>(&riffSize), 4);
+
+    }
+
+public:
+    // Original method for vector of raw frame data
+    static bool saveAVI(const std::string& filename, 
+                       const std::vector<std::vector<uint8_t>>& frames, 
+                       int width, int height, float fps = 30.0f) {
+        TIME_FUNCTION;
+        if (frames.empty() || width <= 0 || height <= 0 || fps <= 0) {
+            return false;
+        }
+        
+        // Validate frame sizes
+        size_t expectedFrameSize = width * height * 3;
+        for (const auto& frame : frames) {
+            if (frame.size() != expectedFrameSize) {
+                return false;
+            }
+        }
+
+        // Create directory if needed
+        createDirectoryIfNeeded(filename);
+
+        std::ofstream file(filename, std::ios::binary);
+        if (!file) {
+            return false;
+        }
+
+        uint32_t frameCount = static_cast<uint32_t>(frames.size());
+        uint32_t microSecPerFrame = static_cast<uint32_t>(1000000.0f / fps);
+        
+        auto [moviListStart, frameSize, rowSize, riffStartPos] = writeheader(width, height, fps, file, frameCount, microSecPerFrame);
+
         std::vector<AVIIndexEntry> indexEntries;
         indexEntries.reserve(frameCount);
-
         // Write frames
         for (uint32_t i = 0; i < frameCount; ++i) {
             uint32_t frameStart = static_cast<uint32_t>(file.tellp()) - moviListStart - 4;
@@ -348,71 +373,14 @@ public:
             indexEntries.push_back(entry);
         }
 
-        // Update movi list size
-        uint32_t moviListEnd = static_cast<uint32_t>(file.tellp());
-        file.seekp(moviListStart + 4);
-        uint32_t moviListSize = moviListEnd - moviListStart - 8;
-        file.write(reinterpret_cast<const char*>(&moviListSize), 4);
-        file.seekp(moviListEnd);
-
-        // idx1 chunk - index
-        uint32_t idx1Size = static_cast<uint32_t>(indexEntries.size() * sizeof(AVIIndexEntry));
-        writeChunk(file, 0x31786469, indexEntries.data(), idx1Size); // 'idx1'
-
-        // Update RIFF chunk size
-        uint32_t fileEnd = static_cast<uint32_t>(file.tellp());
-        file.seekp(riffStartPos + 4);
-        uint32_t riffSize = fileEnd - riffStartPos - 8;
-        file.write(reinterpret_cast<const char*>(&riffSize), 4);
+        writeFooter(file, moviListStart, riffStartPos, indexEntries);
 
         return true;
     }
 
-    // Convenience function to save from individual frame files
-    static bool saveAVIFromFrames(const std::string& filename,
-                                 const std::vector<std::string>& frameFiles,
-                                 int width, int height,
-                                 float fps = 30.0f) {
-        TIME_FUNCTION;
-        std::vector<std::vector<uint8_t>> frames;
-        frames.reserve(frameFiles.size());
-
-        for (const auto& frameFile : frameFiles) {
-            std::ifstream file(frameFile, std::ios::binary);
-            if (!file) {
-                return false;
-            }
-
-            // Read BMP file and extract pixel data
-            file.seekg(0, std::ios::end);
-            size_t fileSize = file.tellg();
-            file.seekg(0, std::ios::beg);
-
-            std::vector<uint8_t> buffer(fileSize);
-            file.read(reinterpret_cast<char*>(buffer.data()), fileSize);
-
-            // Simple BMP parsing - assumes 24-bit uncompressed BMP
-            if (fileSize < 54 || buffer[0] != 'B' || buffer[1] != 'M') {
-                return false;
-            }
-
-            // Extract pixel data offset from BMP header
-            uint32_t dataOffset = *reinterpret_cast<uint32_t*>(&buffer[10]);
-            if (dataOffset >= fileSize) {
-                return false;
-            }
-
-            // Read pixel data (BGR format)
-            std::vector<uint8_t> pixelData(buffer.begin() + dataOffset, buffer.end());
-            frames.push_back(pixelData);
-        }
-
-        return saveAVI(filename, frames, width, height, fps);
-    }
-
     // New method for streaming decompression of frame objects
     static bool saveAVIFromCompressedFrames(const std::string& filename,
-                                          const std::vector<frame>& frames,
+                                          std::vector<frame> frames,
                                           int width, int height, 
                                           float fps = 30.0f) {
         TIME_FUNCTION;
@@ -432,113 +400,19 @@ public:
 
         uint32_t frameCount = static_cast<uint32_t>(frames.size());
         uint32_t microSecPerFrame = static_cast<uint32_t>(1000000.0f / fps);
-        
-        // Calculate padding for each frame (BMP-style row padding)
-        uint32_t rowSize = (width * 3 + 3) & ~3;
-        uint32_t frameSize = rowSize * height;
 
-        // RIFF AVI header
-        RIFFChunk riffHeader;
-        riffHeader.chunkId = 0x46464952; // 'RIFF'
-        riffHeader.format = 0x20495641;  // 'AVI '
-        
-        // We'll come back and write the size at the end
-        uint32_t riffStartPos = static_cast<uint32_t>(file.tellp());
-        file.write(reinterpret_cast<const char*>(&riffHeader), sizeof(riffHeader));
-
-        // hdrl list
-        uint32_t hdrlListStart = static_cast<uint32_t>(file.tellp());
-        writeList(file, 0x6C726468, nullptr, 0); // 'hdrl' - we'll fill size later
-
-        // avih chunk
-        AVIMainHeader mainHeader;
-        mainHeader.microSecPerFrame = microSecPerFrame;
-        mainHeader.maxBytesPerSec = frameSize * static_cast<uint32_t>(fps);
-        mainHeader.paddingGranularity = 0;
-        mainHeader.flags = 0x000010; // HASINDEX flag
-        mainHeader.totalFrames = frameCount;
-        mainHeader.initialFrames = 0;
-        mainHeader.streams = 1;
-        mainHeader.suggestedBufferSize = frameSize;
-        mainHeader.width = width;
-        mainHeader.height = height;
-        mainHeader.reserved[0] = 0;
-        mainHeader.reserved[1] = 0;
-        mainHeader.reserved[2] = 0;
-        mainHeader.reserved[3] = 0;
-        
-        writeChunk(file, 0x68697661, &mainHeader, sizeof(mainHeader)); // 'avih'
-
-        // strl list
-        uint32_t strlListStart = static_cast<uint32_t>(file.tellp());
-        writeList(file, 0x6C727473, nullptr, 0); // 'strl' - we'll fill size later
-
-        // strh chunk
-        AVIStreamHeader streamHeader;
-        streamHeader.type = 0x73646976; // 'vids'
-        streamHeader.handler = 0x00000000; // Uncompressed
-        streamHeader.flags = 0;
-        streamHeader.priority = 0;
-        streamHeader.language = 0;
-        streamHeader.initialFrames = 0;
-        streamHeader.scale = 1;
-        streamHeader.rate = static_cast<uint32_t>(fps);
-        streamHeader.start = 0;
-        streamHeader.length = frameCount;
-        streamHeader.suggestedBufferSize = frameSize;
-        streamHeader.quality = 0xFFFFFFFF; // Default quality
-        streamHeader.sampleSize = 0;
-        streamHeader.rcFrame.left = 0;
-        streamHeader.rcFrame.top = 0;
-        streamHeader.rcFrame.right = width;
-        streamHeader.rcFrame.bottom = height;
-        
-        writeChunk(file, 0x68727473, &streamHeader, sizeof(streamHeader)); // 'strh'
-
-        // strf chunk
-        BITMAPINFOHEADER bitmapInfo;
-        bitmapInfo.size = sizeof(BITMAPINFOHEADER);
-        bitmapInfo.width = width;
-        bitmapInfo.height = height;
-        bitmapInfo.planes = 1;
-        bitmapInfo.bitCount = 24;
-        bitmapInfo.compression = 0; // BI_RGB - uncompressed
-        bitmapInfo.sizeImage = frameSize;
-        bitmapInfo.xPelsPerMeter = 0;
-        bitmapInfo.yPelsPerMeter = 0;
-        bitmapInfo.clrUsed = 0;
-        bitmapInfo.clrImportant = 0;
-        
-        writeChunk(file, 0x66727473, &bitmapInfo, sizeof(bitmapInfo)); // 'strf'
-
-        // Update strl list size
-        uint32_t strlListEnd = static_cast<uint32_t>(file.tellp());
-        file.seekp(strlListStart + 4);
-        uint32_t strlListSize = strlListEnd - strlListStart - 8;
-        file.write(reinterpret_cast<const char*>(&strlListSize), 4);
-        file.seekp(strlListEnd);
-
-        // Update hdrl list size
-        uint32_t hdrlListEnd = static_cast<uint32_t>(file.tellp());
-        file.seekp(hdrlListStart + 4);
-        uint32_t hdrlListSize = hdrlListEnd - hdrlListStart - 8;
-        file.write(reinterpret_cast<const char*>(&hdrlListSize), 4);
-        file.seekp(hdrlListEnd);
-
-        // movi list
-        uint32_t moviListStart = static_cast<uint32_t>(file.tellp());
-        writeList(file, 0x69766F6D, nullptr, 0); // 'movi' - we'll fill size later
+        auto [moviListStart, frameSize, rowSize, riffStartPos] = writeheader(width, height, fps, file, frameCount, microSecPerFrame);
 
         std::vector<AVIIndexEntry> indexEntries;
         indexEntries.reserve(frameCount);
 
         // Write frames with streaming decompression
-        for (uint32_t i = 0; i < frameCount; ++i) {
+        while (frameCount > 0) {
             uint32_t frameStart = static_cast<uint32_t>(file.tellp()) - moviListStart - 4;
             
             // Prepare frame data (decompresses if necessary and converts to RGB)
-            std::vector<uint8_t> paddedFrame = prepareFrameData(frames[i], width, height, rowSize);
-            
+            std::vector<uint8_t> paddedFrame = prepareFrameData(frames[0], width, height, rowSize);
+            //frames[i].free();
             // Write frame as '00db' chunk
             writeChunk(file, 0x62643030, paddedFrame.data(), frameSize); // '00db'
             
@@ -550,25 +424,12 @@ public:
             entry.size = frameSize;
             indexEntries.push_back(entry);
             paddedFrame.clear();
+            frames.erase(frames.begin());
             paddedFrame.shrink_to_fit();
+            frameCount = frames.size();
         }
 
-        // Update movi list size
-        uint32_t moviListEnd = static_cast<uint32_t>(file.tellp());
-        file.seekp(moviListStart + 4);
-        uint32_t moviListSize = moviListEnd - moviListStart - 8;
-        file.write(reinterpret_cast<const char*>(&moviListSize), 4);
-        file.seekp(moviListEnd);
-
-        // idx1 chunk - index
-        uint32_t idx1Size = static_cast<uint32_t>(indexEntries.size() * sizeof(AVIIndexEntry));
-        writeChunk(file, 0x31786469, indexEntries.data(), idx1Size); // 'idx1'
-
-        // Update RIFF chunk size
-        uint32_t fileEnd = static_cast<uint32_t>(file.tellp());
-        file.seekp(riffStartPos + 4);
-        uint32_t riffSize = fileEnd - riffStartPos - 8;
-        file.write(reinterpret_cast<const char*>(&riffSize), 4);
+        writeFooter(file, moviListStart, riffStartPos, indexEntries);
 
         return true;
     }

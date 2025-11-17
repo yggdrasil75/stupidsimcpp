@@ -79,10 +79,6 @@ public:
         return _data;
     }
 
-    const std::vector<uint16_t>& getCompressedData() const {
-        return _compressedData;
-    }
-
     // Run-Length Encoding (RLE) compression
     frame& compressFrameRLE() {
         TIME_FUNCTION;
@@ -117,6 +113,295 @@ public:
         _data.shrink_to_fit();
         return *this;
     }
+
+    // LZ78 compression
+    frame& compressFrameLZ78() {
+        TIME_FUNCTION;
+        if (_data.empty()) {
+            return *this;
+        }
+        if (cformat != compresstype::RAW) {
+            throw std::runtime_error("LZ78 compression can only be applied to raw data");
+        }
+        
+        std::vector<std::vector<uint8_t>> repeats = getRepeats();
+        repeats = sortvecs(repeats);
+        uint16_t nextDict = 1;
+
+        std::vector<uint16_t> compressed;
+        size_t cpos = 0;
+        
+        for (const auto& rseq : repeats) {
+            if (!rseq.empty() && rseq.size() > 1 && overheadmap.size() < 65535) {
+                overheadmap[nextDict] = rseq;
+                nextDict++;
+            }
+        }
+
+        while (cpos < _data.size()) {
+            bool found_match = false;
+            uint16_t best_dict_index = 0;
+            size_t best_match_length = 0;
+            
+            // Iterate through dictionary in priority order (longest patterns first)
+            for (uint16_t dict_idx = 1; dict_idx <= overheadmap.size(); dict_idx++) {
+                const auto& dict_seq = overheadmap[dict_idx];
+                
+                // Quick length check - if remaining data is shorter than pattern, skip
+                if (dict_seq.size() > (_data.size() - cpos)) {
+                    continue;
+                }
+                
+                // Check if this pattern matches at current position
+                bool match = true;
+                for (size_t i = 0; i < dict_seq.size(); ++i) {
+                    if (_data[cpos + i] != dict_seq[i]) {
+                        match = false;
+                        break;
+                    }
+                }
+                
+                if (match) {
+                    // Found a match - use it immediately (first match is best due to sorting)
+                    best_dict_index = dict_idx;
+                    best_match_length = dict_seq.size();
+                    found_match = true;
+                    break; // Stop searching - we found our match
+                }
+            }
+            
+            if (found_match && best_match_length > 1) {
+                // Write dictionary reference
+                compressed.push_back(best_dict_index);
+                cpos += best_match_length;
+            } else {
+                // Write literal: 0 followed by the literal byte
+                compressed.push_back(0);
+                compressed.push_back(_data[cpos]);
+                cpos++;
+            }
+        }
+
+        ratio = compressed.size() / _data.size();
+        sourceSize = _data.size();
+        
+        _compressedData = std::move(compressed);
+        _compressedData.shrink_to_fit();
+        
+        // Clear uncompressed data
+        _data.clear();
+        _data.shrink_to_fit();
+        
+        cformat = compresstype::LZ78;
+
+        return *this;
+    }
+
+    // Differential compression
+    frame& compressFrameDiff() {
+        // TODO
+        throw std::logic_error("Function not yet implemented");
+    }
+
+    // Huffman compression
+    frame& compressFrameHuffman() {
+        // TODO
+        throw std::logic_error("Function not yet implemented");
+    }
+
+    // Combined compression methods
+    frame& compressFrameZigZagRLE() {
+        // TODO
+        throw std::logic_error("Function not yet implemented");
+    }
+
+    frame& compressFrameDiffRLE() {
+        // TODO
+        throw std::logic_error("Function not yet implemented");
+    }
+
+    // Generic decompression that detects compression type
+    frame& decompress() {
+        switch (cformat) {
+            case compresstype::RLE:
+                return decompressFrameRLE();
+                break;
+            case compresstype::DIFF:
+                return decompressFrameDiff();
+                break;
+            case compresstype::DIFFRLE:
+                // For combined methods, first decompress RLE then the base method
+                decompressFrameRLE();
+                cformat = compresstype::DIFF;
+                return decompressFrameDiff();
+                break;
+            case compresstype::LZ78:
+                return decompressFrameLZ78();
+                break;
+            case compresstype::HUFFMAN:
+                // Huffman decompression would be implemented here
+                throw std::runtime_error("Huffman decompression not fully implemented");
+                break;
+            case compresstype::RAW:
+            default:
+                return *this; // Already decompressed
+        }
+    }
+
+    // Calculate the size of the dictionary in bytes
+    size_t getDictionarySize() const {
+        size_t dictSize = 0;
+        dictSize = sizeof(overheadmap);
+        return dictSize;
+    }
+
+    // Get compressed size including dictionary overhead
+    size_t getTotalCompressedSize() const {
+        size_t baseSize = getCompressedDataSize();
+        if (cformat == compresstype::LZ78) {
+            baseSize += getDictionarySize();
+        }
+        return baseSize;
+    }
+
+    double getCompressionRatio() const {
+        if (_compressedData.empty() || sourceSize == 0) return 0.0;
+        return static_cast<double>(sourceSize) / getTotalCompressedSize();
+    }
+
+    size_t getSourceSize() const {
+        return sourceSize;
+    }
+
+    size_t getCompressedDataSize() const {
+        return _compressedData.size();
+    }
+
+    void printCompressionInfo() const {
+        std::cout << "Compression Type: ";
+        switch (cformat) {
+            case compresstype::RLE: std::cout << "RLE"; break;
+            case compresstype::DIFF: std::cout << "DIFF"; break;
+            case compresstype::DIFFRLE: std::cout << "DIFF + RLE"; break;
+            case compresstype::LZ78: std::cout << "LZ78 (kinda)"; break;
+            case compresstype::HUFFMAN: std::cout << "HUFFMAN"; break;
+            case compresstype::RAW: std::cout << "RAW (uncompressed)"; break;
+            default: std::cout << "UNKNOWN"; break;
+        }
+        std::cout << std::endl;
+        
+        std::cout << "Source Size: " << getSourceSize() << " bytes" << std::endl;
+        std::cout << "Compressed data Size: " << getCompressedDataSize() << " 16-bit words" << std::endl;
+        std::cout << "Compressed Size: " << getCompressedDataSize() * 2 << " bytes" << std::endl;
+        
+        if (cformat == compresstype::LZ78) {
+            std::cout << "Dictionary Size: " << getDictionarySize() << " bytes" << std::endl;
+            std::cout << "Dictionary Entries: " << overheadmap.size() << std::endl;
+            std::cout << "Total Compressed Size: " << getTotalCompressedSize() << " bytes" << std::endl;
+        } else {
+            std::cout << "Total Compressed Size: " << getTotalCompressedSize() << " bytes" << std::endl;
+        }
+        
+        std::cout << "Compression Ratio: " << getCompressionRatio() << ":1" << std::endl;
+        
+        if (getCompressionRatio() > 1.0) {
+            double savings = (1.0 - (1.0 / getCompressionRatio())) * 100.0;
+            std::cout << "Space Savings: " << savings << "%" << std::endl;
+        }
+    }
+
+    void printCompressionStats() const {
+        if (cformat == compresstype::LZ78) {
+            std::cout << "[" << getCompressionTypeString() << "] "
+                      << "Source Size: " << getSourceSize() << " bytes"
+                      << getTotalCompressedSize() << "B "
+                      << "(ratio: " << getCompressionRatio() << ":1)" << std::endl;
+        } else {
+            std::cout << "[" << getCompressionTypeString() << "] "
+                      << getSourceSize() << "B -> " << getTotalCompressedSize() << "B "
+                      << "(ratio: " << getCompressionRatio() << ":1)" << std::endl;
+        }
+    }
+
+    // Get compression type as string
+    std::string getCompressionTypeString() const {
+        switch (cformat) {
+            case compresstype::RLE: return "RLE";
+            case compresstype::DIFF: return "DIFF";
+            case compresstype::DIFFRLE: return "DIFF+RLE";
+            case compresstype::LZ78: return "LZ78";
+            case compresstype::HUFFMAN: return "HUFFMAN";
+            case compresstype::RAW: return "RAW";
+            default: return "UNKNOWN";
+        }
+    }
+
+    compresstype getCompressionType() const {
+        return cformat;
+    }
+
+    bool isCompressed() const {
+        return cformat != compresstype::RAW;
+    }
+
+    //does this actually work? am I overthinking memory management?
+    void free() {
+        overheadmap.clear();
+        overheadmap.rehash(0);
+        _compressedData.clear();
+        _data.clear();
+        _compressedData.shrink_to_fit();
+        _data.shrink_to_fit();
+    }
+
+private:
+    //moving decompression to private to prevent breaking stuff from external calls
+
+    std::vector<std::vector<uint8_t>> sortvecs(std::vector<std::vector<uint8_t>> source) {
+        std::sort(source.begin(), source.end(), [](const std::vector<uint8_t> & a, const std::vector<uint8_t> & b) {return a.size() > b.size();});
+        return source;
+    }
+    
+    frame& decompressFrameLZ78() {
+        TIME_FUNCTION;
+        if (cformat != compresstype::LZ78) {
+            throw std::runtime_error("Data is not LZ78 compressed");
+        }
+        //std::cout << "why is this breaking? breakpoint f366" << std::endl;
+        std::vector<uint8_t> decompressedData;
+        decompressedData.reserve(sourceSize);
+        
+        size_t cpos = 0;
+        
+        while (cpos < _compressedData.size()) {
+            uint16_t token = _compressedData[cpos++];
+            //std::cout << "why is this breaking? breakpoint f374." << cpos << std::endl;
+            if (token != 0) {
+                // Dictionary reference
+                auto it = overheadmap.find(token);
+                if (it != overheadmap.end()) {
+                    const std::vector<uint8_t>& dict_entry = it->second;
+                    decompressedData.insert(decompressedData.end(), dict_entry.begin(), dict_entry.end());
+                } else {
+                    throw std::runtime_error("Invalid dictionary reference in compressed data");
+                }
+            } else {
+                // Literal byte
+                if (cpos < _compressedData.size()) {
+                    decompressedData.push_back(static_cast<uint8_t>(_compressedData[cpos++]));
+                }
+            }
+        }
+        
+        _data = std::move(decompressedData);
+        _compressedData.clear();
+        _compressedData.shrink_to_fit();
+        overheadmap.clear();
+        cformat = compresstype::RAW;
+        
+        return *this;
+    }
+
 
     frame& decompressFrameRLE() {
         TIME_FUNCTION;
@@ -153,7 +438,7 @@ public:
             std::vector<std::vector<uint8_t>> matches128plus;
             std::vector<std::vector<uint8_t>> matches64plus;
             //std::vector<std::vector<uint8_t>> matches32plus;
-            std::vector<std::vector<uint8_t>> matchesAll;
+            //std::vector<std::vector<uint8_t>> matchesAll;
             
             void addMatch(std::vector<uint8_t>&& match, size_t length) {
                 std::lock_guard<std::mutex> lock(mutex);
@@ -165,9 +450,9 @@ public:
                 // else if (length >= 32) {
                 //     if (matches32plus.size() < 65534) matches32plus.push_back(std::move(match));
                 // }
-                else {
-                    if (matchesAll.size() < 65534) matchesAll.push_back(std::move(match));
-                }
+                // else {
+                //     if (matchesAll.size() < 65534) matchesAll.push_back(std::move(match));
+                // }
             }
         };
         
@@ -270,307 +555,11 @@ public:
         return result;
     }
 
-    std::vector<std::vector<uint8_t>> sortvecs(std::vector<std::vector<uint8_t>> source) {
-        std::sort(source.begin(), source.end(), [](const std::vector<uint8_t> & a, const std::vector<uint8_t> & b) {return a.size() > b.size();});
-        return source;
-    }
-
-    // LZ78 compression
-    frame& compressFrameLZ78() {
-        TIME_FUNCTION;
-        if (_data.empty()) {
-            return *this;
-        }
-        if (cformat != compresstype::RAW) {
-            throw std::runtime_error("LZ78 compression can only be applied to raw data");
-        }
-        
-        std::vector<std::vector<uint8_t>> repeats = getRepeats();
-        repeats = sortvecs(repeats);
-        uint16_t nextDict = 1;
-
-        std::vector<uint16_t> compressed;
-        size_t cpos = 0;
-        
-        for (const auto& rseq : repeats) {
-            if (!rseq.empty() && rseq.size() > 1 && overheadmap.size() < 65535) {
-                overheadmap[nextDict] = rseq;
-                nextDict++;
-            }
-        }
-
-        while (cpos < _data.size()) {
-            bool found_match = false;
-            uint16_t best_dict_index = 0;
-            size_t best_match_length = 0;
-            
-            // Iterate through dictionary in priority order (longest patterns first)
-            for (uint16_t dict_idx = 1; dict_idx <= overheadmap.size(); dict_idx++) {
-                const auto& dict_seq = overheadmap[dict_idx];
-                
-                // Quick length check - if remaining data is shorter than pattern, skip
-                if (dict_seq.size() > (_data.size() - cpos)) {
-                    continue;
-                }
-                
-                // Check if this pattern matches at current position
-                bool match = true;
-                for (size_t i = 0; i < dict_seq.size(); ++i) {
-                    if (_data[cpos + i] != dict_seq[i]) {
-                        match = false;
-                        break;
-                    }
-                }
-                
-                if (match) {
-                    // Found a match - use it immediately (first match is best due to sorting)
-                    best_dict_index = dict_idx;
-                    best_match_length = dict_seq.size();
-                    found_match = true;
-                    break; // Stop searching - we found our match
-                }
-            }
-            
-            if (found_match && best_match_length > 1) {
-                // Write dictionary reference
-                compressed.push_back(best_dict_index);
-                cpos += best_match_length;
-            } else {
-                // Write literal: 0 followed by the literal byte
-                compressed.push_back(0);
-                compressed.push_back(_data[cpos]);
-                cpos++;
-            }
-        }
-
-        ratio = compressed.size() / _data.size();
-        sourceSize = _data.size();
-        
-        _compressedData = std::move(compressed);
-        _compressedData.shrink_to_fit();
-        
-        // Clear uncompressed data
-        _data.clear();
-        _data.shrink_to_fit();
-        
-        cformat = compresstype::LZ78;
-
-        return *this;
-    }
-
-    frame& decompressFrameLZ78() {
-        TIME_FUNCTION;
-        if (cformat != compresstype::LZ78) {
-            throw std::runtime_error("Data is not LZ78 compressed");
-        }
-        
-        std::vector<uint8_t> decompressedData;
-        decompressedData.reserve(sourceSize);
-        
-        size_t cpos = 0;
-        
-        while (cpos < _compressedData.size()) {
-            uint16_t token = _compressedData[cpos++];
-            
-            if (token == 0) {
-                // Literal byte
-                if (cpos < _compressedData.size()) {
-                    decompressedData.push_back(static_cast<uint8_t>(_compressedData[cpos++]));
-                }
-            } else {
-                // Dictionary reference
-                auto it = overheadmap.find(token);
-                if (it != overheadmap.end()) {
-                    const std::vector<uint8_t>& dict_entry = it->second;
-                    decompressedData.insert(decompressedData.end(), dict_entry.begin(), dict_entry.end());
-                } else {
-                    throw std::runtime_error("Invalid dictionary reference in compressed data");
-                }
-            }
-        }
-        
-        _data = std::move(decompressedData);
-        _compressedData.clear();
-        _compressedData.shrink_to_fit();
-        overheadmap.clear();
-        cformat = compresstype::RAW;
-        
-        return *this;
-    }
-
-    // Differential compression
-    frame& compressFrameDiff() {
-        // TODO
-        throw std::logic_error("Function not yet implemented");
-    }
-
     frame& decompressFrameDiff() {
         // TODO
         throw std::logic_error("Function not yet implemented");
     }
-    // Huffman compression
-    frame& compressFrameHuffman() {
-        // TODO
-        throw std::logic_error("Function not yet implemented");
-    }
 
-    // Combined compression methods
-    frame& compressFrameZigZagRLE() {
-        // TODO
-        throw std::logic_error("Function not yet implemented");
-    }
-
-    frame& compressFrameDiffRLE() {
-        // TODO
-        throw std::logic_error("Function not yet implemented");
-    }
-
-    // Generic decompression that detects compression type
-    frame& decompress() {
-        switch (cformat) {
-            case compresstype::RLE:
-                return decompressFrameRLE();
-                break;
-            case compresstype::DIFF:
-                return decompressFrameDiff();
-                break;
-            case compresstype::DIFFRLE:
-                // For combined methods, first decompress RLE then the base method
-                decompressFrameRLE();
-                cformat = compresstype::DIFF;
-                return decompressFrameDiff();
-                break;
-            case compresstype::LZ78:
-                return decompressFrameLZ78();
-                break;
-            case compresstype::HUFFMAN:
-                // Huffman decompression would be implemented here
-                throw std::runtime_error("Huffman decompression not fully implemented");
-                break;
-            case compresstype::RAW:
-            default:
-                return *this; // Already decompressed
-        }
-    }
-
-    // Calculate the size of the dictionary in bytes
-    size_t getDictionarySize() const {
-        size_t dictSize = 0;
-        dictSize = sizeof(overheadmap);
-        return dictSize;
-    }
-
-    // Get compressed size including dictionary overhead
-    size_t getTotalCompressedSize() const {
-        size_t baseSize = getCompressedSize() * 2; // Convert 16-bit words to bytes
-        if (cformat == compresstype::LZ78) {
-            baseSize += getDictionarySize();
-        }
-        return baseSize;
-    }
-
-    double getCompressionRatio() const {
-        if (_compressedData.empty() || sourceSize == 0) return 0.0;
-        return static_cast<double>(sourceSize) / getTotalCompressedSize();
-    }
-
-    // Get source size (uncompressed size)
-    size_t getSourceSize() const {
-        return sourceSize;
-    }
-
-    // Get compressed size (just the compressed data in bytes, excluding dictionary)
-    size_t getCompressedSize() const {
-        return _compressedData.size() * 2; // Convert 16-bit words to bytes
-    }
-
-    // Get just the compressed data size in 16-bit words
-    size_t getCompressedDataSize() const {
-        return _compressedData.size();
-    }
-
-    // Print compression information
-    void printCompressionInfo() const {
-        std::cout << "Compression Type: ";
-        switch (cformat) {
-            case compresstype::RLE: std::cout << "RLE"; break;
-            case compresstype::DIFF: std::cout << "DIFF"; break;
-            case compresstype::DIFFRLE: std::cout << "DIFF + RLE"; break;
-            case compresstype::LZ78: std::cout << "LZ78 (kinda)"; break;
-            case compresstype::HUFFMAN: std::cout << "HUFFMAN"; break;
-            case compresstype::RAW: std::cout << "RAW (uncompressed)"; break;
-            default: std::cout << "UNKNOWN"; break;
-        }
-        std::cout << std::endl;
-        
-        std::cout << "Source Size: " << getSourceSize() << " bytes" << std::endl;
-        std::cout << "Compressed data Size: " << getCompressedDataSize() << " 16-bit words" << std::endl;
-        std::cout << "Compressed Size: " << getCompressedSize() << " bytes" << std::endl;
-        
-        if (cformat == compresstype::LZ78) {
-            std::cout << "Dictionary Size: " << getDictionarySize() << " bytes" << std::endl;
-            std::cout << "Dictionary Entries: " << overheadmap.size() << std::endl;
-            std::cout << "Total Compressed Size: " << getTotalCompressedSize() << " bytes" << std::endl;
-        } else {
-            std::cout << "Total Compressed Size: " << getTotalCompressedSize() << " bytes" << std::endl;
-        }
-        
-        std::cout << "Compression Ratio: " << getCompressionRatio() << ":1" << std::endl;
-        
-        if (getCompressionRatio() > 1.0) {
-            double savings = (1.0 - (1.0 / getCompressionRatio())) * 100.0;
-            std::cout << "Space Savings: " << savings << "%" << std::endl;
-        }
-    }
-
-    // Print compression information in a compact format
-    void printCompressionStats() const {
-        if (cformat == compresstype::LZ78) {
-            std::cout << "[" << getCompressionTypeString() << "] "
-                      << getSourceSize() << "B -> " << getCompressedSize() << "B + " 
-                      << getDictionarySize() << "B dict = " << getTotalCompressedSize() << "B "
-                      << "(ratio: " << getCompressionRatio() << ":1)" << std::endl;
-        } else {
-            std::cout << "[" << getCompressionTypeString() << "] "
-                      << getSourceSize() << "B -> " << getTotalCompressedSize() << "B "
-                      << "(ratio: " << getCompressionRatio() << ":1)" << std::endl;
-        }
-    }
-
-    // Get compression type as string
-    std::string getCompressionTypeString() const {
-        switch (cformat) {
-            case compresstype::RLE: return "RLE";
-            case compresstype::DIFF: return "DIFF";
-            case compresstype::DIFFRLE: return "DIFF+RLE";
-            case compresstype::LZ78: return "LZ78";
-            case compresstype::HUFFMAN: return "HUFFMAN";
-            case compresstype::RAW: return "RAW";
-            default: return "UNKNOWN";
-        }
-    }
-
-    compresstype getCompressionType() const {
-        return cformat;
-    }
-
-    const std::unordered_map<uint16_t, std::vector<uint8_t>>& getOverheadMap() const {
-        return overheadmap;
-    }
-
-    bool isCompressed() const {
-        return cformat != compresstype::RAW;
-    }
-
-    // Check if compressed data is available
-    bool hasCompressedData() const {
-        return !_compressedData.empty();
-    }
-
-    // Check if uncompressed data is available
-    bool hasUncompressedData() const {
-        return !_data.empty();
-    }
 };
 
 #endif

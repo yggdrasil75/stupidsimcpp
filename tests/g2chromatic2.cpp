@@ -11,8 +11,8 @@
 #include "../util/timing_decorator.cpp"
 
 struct AnimationConfig {
-    int width = 2048;
-    int height = 2048;
+    int width = 1024;
+    int height = 1024;
     int totalFrames = 480;
     float fps = 30.0f;
     int numSeeds = 8;
