@@ -532,7 +532,7 @@ private:
             pos = chunk_end;
         }
         
-        // Merge results (same priority order as original)
+        // Merge results to main
         for (const auto& match : threadMatches.matches128plus) {
             result.push_back(match);
         }
