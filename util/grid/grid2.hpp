@@ -262,12 +262,12 @@ public:
     }
     
     //get size from id
-    Vec4 getSize(size_t id) {
-        return Colors.at(id);
+    size_t getSize(size_t id) {
+        return Sizes.at(id);
     }
     
     //get size from position (use get id from position and then get size from id)
-    Vec4 getSize(float x, float y) {
+    size_t getSize(float x, float y) {
         size_t id = getPositionVec(Vec2(x,y),0.0);
         return getSize(id);
     }
@@ -497,25 +497,37 @@ public:
         // For each position in the grid, find the corresponding pixel
         //#pragma omp parallel for
         for (const auto& [id, pos] : Positions) {
-            if (pos.x >= minCorner.x && pos.x < maxCorner.x &&
-                pos.y >= minCorner.y && pos.y < maxCorner.y) {
+            size_t size = Sizes.at(id);
+            // if (pos.x >= minCorner.x && pos.x < maxCorner.x &&
+            //     pos.y >= minCorner.y && pos.y < maxCorner.y) {
                 
                 // Calculate pixel coordinates
-                int pixelX = static_cast<int>(pos.x - minCorner.x);
-                int pixelY = static_cast<int>(pos.y - minCorner.y);
+                int pixelXm = static_cast<int>(pos.x - size/2 - minCorner.x);
+                int pixelXM = static_cast<int>(pos.x + size/2 - minCorner.x);
+                int pixelYm = static_cast<int>(pos.y - size/2 - minCorner.y);
+                int pixelYM = static_cast<int>(pos.y + size/2 - minCorner.y);
                 
+                pixelXm = std::max(0, pixelXm);
+                pixelXM = std::min(width - 1, pixelXM);
+                pixelYm = std::max(0, pixelYm);
+                pixelYM = std::min(height - 1, pixelYM);
+
                 // Ensure within bounds
-                if (pixelX >= 0 && pixelX < width && pixelY >= 0 && pixelY < height) {
-                    // Get color and convert to RGB
+                if (pixelXM >= minCorner.x && pixelXm < width && pixelYM >= minCorner.y && pixelYm < height) {
                     const Vec4& color = Colors.at(id);
-                    int index = (pixelY * width + pixelX) * 3;
-                    
-                    // Convert from [0,1] to [0,255] and store as RGB
-                    rgbData[index]     = static_cast<unsigned char>(color.r * 255);
-                    rgbData[index + 1] = static_cast<unsigned char>(color.g * 255);
-                    rgbData[index + 2] = static_cast<unsigned char>(color.b * 255);
+                    for (int py = pixelYm; py <= pixelYM; ++py){
+                        for (int px = pixelXm; px <= pixelXM; ++px){
+                            // Get color and convert to RGB
+                            int index = (py * width + px) * 3;
+                            
+                            // Convert from [0,1] to [0,255] and store as RGB
+                            rgbData[index]     = static_cast<unsigned char>(color.r * 255);
+                            rgbData[index + 1] = static_cast<unsigned char>(color.g * 255);
+                            rgbData[index + 2] = static_cast<unsigned char>(color.b * 255);
+                        }
+                    }
                 }
-            }
+            //}
         }
     }
 
@@ -534,31 +546,43 @@ public:
             return;
         }
         
-        // Initialize BGR data (3 bytes per pixel: B, G, R)
+        // Initialize RGB data (3 bytes per pixel: R, G, B)
         bgrData.resize(width * height * 3, 0);
         
         // For each position in the grid, find the corresponding pixel
         //#pragma omp parallel for
         for (const auto& [id, pos] : Positions) {
-            if (pos.x >= minCorner.x && pos.x < maxCorner.x &&
-                pos.y >= minCorner.y && pos.y < maxCorner.y) {
+            size_t size = Sizes.at(id);
+            // if (pos.x >= minCorner.x && pos.x < maxCorner.x &&
+            //     pos.y >= minCorner.y && pos.y < maxCorner.y) {
                 
                 // Calculate pixel coordinates
-                int pixelX = static_cast<int>(pos.x - minCorner.x);
-                int pixelY = static_cast<int>(pos.y - minCorner.y);
+                int pixelXm = static_cast<int>(pos.x - size/2 - minCorner.x);
+                int pixelXM = static_cast<int>(pos.x + size/2 - minCorner.x);
+                int pixelYm = static_cast<int>(pos.y - size/2 - minCorner.y);
+                int pixelYM = static_cast<int>(pos.y + size/2 - minCorner.y);
                 
+                pixelXm = std::max(0, pixelXm);
+                pixelXM = std::min(width - 1, pixelXM);
+                pixelYm = std::max(0, pixelYm);
+                pixelYM = std::min(height - 1, pixelYM);
+
                 // Ensure within bounds
-                if (pixelX >= 0 && pixelX < width && pixelY >= 0 && pixelY < height) {
-                    // Get color and convert to BGR
+                if (pixelXM >= minCorner.x && pixelXm < width && pixelYM >= minCorner.y && pixelYm < height) {
                     const Vec4& color = Colors.at(id);
-                    int index = (pixelY * width + pixelX) * 3;
-                    
-                    // Convert from [0,1] to [0,255] and store as BGR
-                    bgrData[index]     = static_cast<unsigned char>(color.b * 255);  // Blue
-                    bgrData[index + 1] = static_cast<unsigned char>(color.g * 255);  // Green
-                    bgrData[index + 2] = static_cast<unsigned char>(color.r * 255);  // Red
+                    for (int py = pixelYm; py <= pixelYM; ++py){
+                        for (int px = pixelXm; px <= pixelXM; ++px){
+                            // Get color and convert to RGB
+                            int index = (py * width + px) * 3;
+                            
+                            // Convert from [0,1] to [0,255] and store as RGB
+                            bgrData[index + 2]     = static_cast<unsigned char>(color.r * 255);
+                            bgrData[index + 1] = static_cast<unsigned char>(color.g * 255);
+                            bgrData[index] = static_cast<unsigned char>(color.b * 255);
+                        }
+                    }
                 }
-            }
+            //}
         }
     }
     
