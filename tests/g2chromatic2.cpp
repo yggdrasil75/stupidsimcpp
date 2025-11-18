@@ -81,7 +81,7 @@ void expandPixel(Grid2& grid, AnimationConfig config, std::vector<std::tuple<siz
         Vec2 seedPOS = std::get<1>(seed);
         Vec4 seedColor = std::get<2>(seed);
         std::vector<size_t> neighbors = grid.getNeighbors(id);
-        grid.setSize(id, grid.getSize(id)+4);
+        //grid.setSize(id, grid.getSize(id)+4);
         for (size_t neighbor : neighbors) {
             if (visitedThisFrame.count(neighbor)) {
                 continue;
@@ -107,12 +107,12 @@ void expandPixel(Grid2& grid, AnimationConfig config, std::vector<std::tuple<siz
             newcolor = newcolor.clamp(0.0f, 1.0f);
 
             grid.setColor(neighbor, newcolor);
-            //newseeds.emplace_back(neighbor, neipos, newcolor);
+            newseeds.emplace_back(neighbor, neipos, newcolor);
         }
     }
-    //seeds.clear();
-    //seeds.shrink_to_fit();
-    //seeds = std::move(newseeds);
+    seeds.clear();
+    seeds.shrink_to_fit();
+    seeds = std::move(newseeds);
 }
 
 //bool exportavi(std::vector<std::vector<uint8_t>> frames, AnimationConfig config) {

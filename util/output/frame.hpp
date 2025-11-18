@@ -124,69 +124,40 @@ public:
             throw std::runtime_error("LZ78 compression can only be applied to raw data");
         }
         
-        std::vector<std::vector<uint8_t>> repeats = getRepeats();
-        repeats = sortvecs(repeats);
-        uint16_t nextDict = 1;
+        std::unordered_map<uint16_t, uint16_t> dict;
+        for (uint16_t i = 0; i < 256; i++) {
+            dict[i] = i;
+        }
+        //std::vector<std::vector<uint8_t>> repeats = getRepeats();
+        //repeats = sortvecs(repeats);
 
         std::vector<uint16_t> compressed;
-        size_t cpos = 0;
+        uint16_t nextDict = 256;
+        uint16_t cpos = 0;
         
-        for (const auto& rseq : repeats) {
-            if (!rseq.empty() && rseq.size() > 1 && overheadmap.size() < 65535) {
-                overheadmap[nextDict] = rseq;
-                nextDict++;
-            }
-        }
-
-        while (cpos < _data.size()) {
-            bool found_match = false;
-            uint16_t best_dict_index = 0;
-            size_t best_match_length = 0;
-            
-            // Iterate through dictionary in priority order (longest patterns first)
-            for (uint16_t dict_idx = 1; dict_idx <= overheadmap.size(); dict_idx++) {
-                const auto& dict_seq = overheadmap[dict_idx];
-                
-                // Quick length check - if remaining data is shorter than pattern, skip
-                if (dict_seq.size() > (_data.size() - cpos)) {
-                    continue;
-                }
-                
-                // Check if this pattern matches at current position
-                bool match = true;
-                for (size_t i = 0; i < dict_seq.size(); ++i) {
-                    if (_data[cpos + i] != dict_seq[i]) {
-                        match = false;
-                        break;
-                    }
-                }
-                
-                if (match) {
-                    // Found a match - use it immediately (first match is best due to sorting)
-                    best_dict_index = dict_idx;
-                    best_match_length = dict_seq.size();
-                    found_match = true;
-                    break; // Stop searching - we found our match
-                }
-            }
-            
-            if (found_match && best_match_length > 1) {
-                // Write dictionary reference
-                compressed.push_back(best_dict_index);
-                cpos += best_match_length;
+        for (uint8_t byte : _data) {
+            uint16_t newval = cpos << 8 | byte;
+            if (dict.find(newval) != dict.end()) {
+                cpos = dict[newval];
             } else {
-                // Write literal: 0 followed by the literal byte
-                compressed.push_back(0);
-                compressed.push_back(_data[cpos]);
-                cpos++;
+                _compressedData.push_back(cpos);
+                _compressedData.push_back(byte);
+                if (nextDict < 65535) {
+                    dict[newval] = nextDict++;
+                }
             }
+            cpos = 0;
+        }
+        if (cpos != 0) {
+            _compressedData.push_back(cpos);
+            _compressedData.push_back(0);
         }
 
         ratio = compressed.size() / _data.size();
         sourceSize = _data.size();
         
-        _compressedData = std::move(compressed);
-        _compressedData.shrink_to_fit();
+        // _compressedData = std::move(compressed);
+        // _compressedData.shrink_to_fit();
         
         // Clear uncompressed data
         _data.clear();
@@ -367,41 +338,28 @@ private:
         if (cformat != compresstype::LZ78) {
             throw std::runtime_error("Data is not LZ78 compressed");
         }
-        //std::cout << "why is this breaking? breakpoint f366" << std::endl;
-        std::vector<uint8_t> decompressedData;
-        decompressedData.reserve(sourceSize);
-        
-        size_t cpos = 0;
-        
-        while (cpos < _compressedData.size()) {
-            uint16_t token = _compressedData[cpos++];
-            //std::cout << "why is this breaking? breakpoint f374." << cpos << std::endl;
-            if (token != 0) {
-                // Dictionary reference
-                auto it = overheadmap.find(token);
-                if (it != overheadmap.end()) {
-                    const std::vector<uint8_t>& dict_entry = it->second;
-                    decompressedData.insert(decompressedData.end(), dict_entry.begin(), dict_entry.end());
-                } else {
-                    throw std::runtime_error("Invalid dictionary reference in compressed data");
-                }
-            } else {
-                // Literal byte
-                if (cpos < _compressedData.size()) {
-                    decompressedData.push_back(static_cast<uint8_t>(_compressedData[cpos++]));
-                }
+
+        std::unordered_map<uint16_t, std::vector<uint8_t>> dict;
+        for (uint16_t i = 0; i < 256; i++) {
+            dict[i] = {static_cast<uint8_t>(i)};
+        }
+
+        uint16_t nextdict = 256;
+
+        for (size_t i = 0; i < _compressedData.size(); i+=2) {
+            uint16_t cpos = _compressedData[i];
+            uint8_t byte = _compressedData[i+1];
+            std::vector<uint8_t> seq = dict[cpos];
+            seq.push_back(byte);
+            _data.insert(_data.end(), seq.begin(), seq.end());
+            if (nextdict < 65535 && cpos != 0) {
+                dict[nextdict++] = seq;
             }
         }
-        
-        _data = std::move(decompressedData);
-        _compressedData.clear();
-        _compressedData.shrink_to_fit();
-        overheadmap.clear();
-        cformat = compresstype::RAW;
-        
+        cformat == compresstype::RAW;
+
         return *this;
     }
-
 
     frame& decompressFrameRLE() {
         TIME_FUNCTION;
