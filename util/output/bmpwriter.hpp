@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <filesystem>
 #include "../vectorlogic/vec3.hpp"
+#include "frame.hpp"
 
 class BMPWriter {
 private:
@@ -137,6 +138,10 @@ public:
         return true;
     }
     
+    static bool saveBMP(const std::string& filename, frame& frame) {
+        return saveBMP(filename, frame.getData(), frame.getWidth(), frame.getHeight());
+    }
+
 private:
     static bool saveBMP(const std::string& filename, const std::vector<std::vector<Vec3>>& pixels, int width, int height) {
         // Create directory if needed

@@ -40,10 +40,13 @@ void Preview(Grid2 grid) {
     TIME_FUNCTION;
     int width;
     int height;
-    std::vector<uint8_t> rgbData;
+    //std::vector<uint8_t> rgbData;
 
-    grid.getGridAsRGB(width,height,rgbData);
-    bool success = BMPWriter::saveBMP("output/grayscalesource.bmp", rgbData, width, height);
+    frame rgbData = grid.getGridAsFrame(frame::colormap::RGB);
+    bool success = BMPWriter::saveBMP("output/grayscalesource.bmp", rgbData);
+    if (!success) {
+        std::cout << "yo! this failed in Preview" << std::endl;
+    }
 }
 
 std::vector<std::tuple<size_t, Vec2, Vec4>> pickSeeds(Grid2 grid, AnimationConfig config) {
@@ -58,7 +61,7 @@ std::vector<std::tuple<size_t, Vec2, Vec4>> pickSeeds(Grid2 grid, AnimationConfi
 
     for (int i = 0; i < config.numSeeds; ++i) {
         Vec2 point(xDist(gen), yDist(gen));
-        Vec4 color(colorDist(gen), colorDist(gen), colorDist(gen), 1.0f);
+        Vec4 color(colorDist(gen), colorDist(gen), colorDist(gen), 255);
         size_t id = grid.getPositionVec(point);
         grid.setColor(id, color);
         seeds.push_back(std::make_tuple(id,point, color));
@@ -172,8 +175,10 @@ bool exportavi(std::vector<frame> frames, AnimationConfig config) {
 
 int main() {
     AnimationConfig config;
+    // std::cout << "g2c2175" << std::endl;
     
     Grid2 grid = setup(config);
+    // std::cout << "g2c2178" << std::endl;
     Preview(grid);
     std::vector<std::tuple<size_t, Vec2, Vec4>> seeds = pickSeeds(grid,config);
     std::vector<frame> frames;
@@ -189,6 +194,9 @@ int main() {
             bgrframe.printCompressionStats();
             //(bgrframe, i + 1);
             frames.push_back(bgrframe);
+            //bgrframe.decompress();
+            //BMPWriter::saveBMP(std::format("output/grayscalesource.{}.bmp", i), bgrframe);
+            bgrframe.compressFrameLZ78();
         }
 
     }

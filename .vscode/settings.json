@@ -91,7 +91,9 @@
         "__split_buffer": "cpp",
         "__tree": "cpp",
         "stack": "cpp",
-        "future": "cpp"
+        "future": "cpp",
+        "coroutine": "cpp",
+        "resumable": "cpp"
     },
     "files.exclude": {
         "**/*.rpyc": true,

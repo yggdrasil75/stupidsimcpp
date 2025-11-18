@@ -157,29 +157,29 @@ private:
                     break;
                 case frame::colormap::RGBA:
                     for (uint32_t x = 0; x < width; ++x) {
-                        dstRow[x * 3] = srcRow[x * 4];     // R
+                        dstRow[x * 3 + 2] = srcRow[x * 4 + 0];     // R
                         dstRow[x * 3 + 1] = srcRow[x * 4 + 1]; // G
-                        dstRow[x * 3 + 2] = srcRow[x * 4 + 2]; // B
+                        dstRow[x * 3 + 0] = srcRow[x * 4 + 2]; // B
                     }
                     break;
                 case frame::colormap::BGR:
                     for (uint32_t x = 0; x < width; ++x) {
-                        dstRow[x * 3] = srcRow[x * 3 + 2];     // R
+                        dstRow[x * 3 + 2] = srcRow[x * 3 + 2];     // R
                         dstRow[x * 3 + 1] = srcRow[x * 3 + 1]; // G
-                        dstRow[x * 3 + 2] = srcRow[x * 3];     // B
+                        dstRow[x * 3 + 0] = srcRow[x * 3 + 0];     // B
                     }
                     break;
                 case frame::colormap::BGRA:
                     for (uint32_t x = 0; x < width; ++x) {
-                        dstRow[x * 3] = srcRow[x * 4 + 2];     // R
+                        dstRow[x * 3 + 2] = srcRow[x * 4 + 2];     // R
                         dstRow[x * 3 + 1] = srcRow[x * 4 + 1]; // G
-                        dstRow[x * 3 + 2] = srcRow[x * 4];     // B
+                        dstRow[x * 3 + 0] = srcRow[x * 4 + 0];     // B
                     }
                     break;
                 case frame::colormap::B:
                     for (uint32_t x = 0; x < width; ++x) {
                         uint8_t gray = srcRow[x];
-                        dstRow[x * 3] = gray;     // R
+                        dstRow[x * 3 + 0] = gray; // R
                         dstRow[x * 3 + 1] = gray; // G
                         dstRow[x * 3 + 2] = gray; // B
                     }

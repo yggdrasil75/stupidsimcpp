@@ -480,6 +480,7 @@ public:
     void getGridRegionAsRGB(const Vec2& minCorner, const Vec2& maxCorner,
                            int& width, int& height, std::vector<uint8_t>& rgbData) const {
         TIME_FUNCTION;
+        // std::cout << "excessdebug g2.483" << std::endl;
         // Calculate dimensions
         width = static_cast<int>(maxCorner.x - minCorner.x);
         height = static_cast<int>(maxCorner.y - minCorner.y);
@@ -490,99 +491,133 @@ public:
             rgbData.shrink_to_fit();
             return;
         }
+        // std::cout << "excessdebug g2.494" << std::endl;
         
         // Initialize RGB data (3 bytes per pixel: R, G, B)
-        rgbData.resize(width * height * 3, 0);
+        std::vector<Vec4> rgbaBuffer(width * height, Vec4(0.0f, 0.0f, 0.0f, 0.0f));
         
         // For each position in the grid, find the corresponding pixel
-        //#pragma omp parallel for
         for (const auto& [id, pos] : Positions) {
+            // std::cout << "excessdebug g2.501." << id << std::endl;
             size_t size = Sizes.at(id);
-            // if (pos.x >= minCorner.x && pos.x < maxCorner.x &&
-            //     pos.y >= minCorner.y && pos.y < maxCorner.y) {
                 
-                // Calculate pixel coordinates
-                int pixelXm = static_cast<int>(pos.x - size/2 - minCorner.x);
-                int pixelXM = static_cast<int>(pos.x + size/2 - minCorner.x);
-                int pixelYm = static_cast<int>(pos.y - size/2 - minCorner.y);
-                int pixelYM = static_cast<int>(pos.y + size/2 - minCorner.y);
-                
-                pixelXm = std::max(0, pixelXm);
-                pixelXM = std::min(width - 1, pixelXM);
-                pixelYm = std::max(0, pixelYm);
-                pixelYM = std::min(height - 1, pixelYM);
+            // Calculate pixel coordinates
+            int pixelXm = static_cast<int>(pos.x - size/2 - minCorner.x);
+            int pixelXM = static_cast<int>(pos.x + size/2 - minCorner.x);
+            int pixelYm = static_cast<int>(pos.y - size/2 - minCorner.y);
+            int pixelYM = static_cast<int>(pos.y + size/2 - minCorner.y);
+            
+            pixelXm = std::max(0, pixelXm);
+            pixelXM = std::min(width - 1, pixelXM);
+            pixelYm = std::max(0, pixelYm);
+            pixelYM = std::min(height - 1, pixelYM);
+            // std::cout << "excessdebug g2.514." << id << std::endl;
 
-                // Ensure within bounds
-                if (pixelXM >= minCorner.x && pixelXm < width && pixelYM >= minCorner.y && pixelYm < height) {
-                    const Vec4& color = Colors.at(id);
-                    for (int py = pixelYm; py <= pixelYM; ++py){
-                        for (int px = pixelXm; px <= pixelXM; ++px){
-                            // Get color and convert to RGB
-                            int index = (py * width + px) * 3;
-                            
-                            // Convert from [0,1] to [0,255] and store as RGB
-                            rgbData[index]     = static_cast<unsigned char>(color.r * 255);
-                            rgbData[index + 1] = static_cast<unsigned char>(color.g * 255);
-                            rgbData[index + 2] = static_cast<unsigned char>(color.b * 255);
-                        }
+            // Ensure within bounds
+            if (pixelXM >= minCorner.x && pixelXm < width && pixelYM >= minCorner.y && pixelYm < height) {
+                // std::cout << "excessdebug g2.518." << id << " - (" << pixelXm << "," << pixelYM << ")" << std::endl;
+                const Vec4& color = Colors.at(id);
+                float srcAlpha = color.a;
+                float invSrcAlpha = 1.0f - srcAlpha;
+                for (int py = pixelYm; py <= pixelYM; ++py){
+                    for (int px = pixelXm; px <= pixelXM; ++px){
+                        // std::cout << "excessdebug g2.524." << id << " - (" << py << "," << px << ")" << std::endl;
+                        int index = (py * width + px);
+                        Vec4 dest = rgbaBuffer[index];
+                        
+                        dest.r = color.r * srcAlpha + dest.r; // * invSrcAlpha;
+                        dest.g = color.g * srcAlpha + dest.g; // * invSrcAlpha;
+                        dest.b = color.b * srcAlpha + dest.b; // * invSrcAlpha;
+                        dest.a = srcAlpha + dest.a; // * invSrcAlpha;
+                        rgbaBuffer[index] = dest;
                     }
                 }
-            //}
+            }
+        }
+        rgbData.resize(rgbaBuffer.size() * 3);
+        for (int i = 0; i < rgbaBuffer.size(); ++i) {
+            const Vec4& color = rgbaBuffer[i];
+            int bgrIndex = i * 3;
+            
+            // Convert from [0,1] to [0,255] and store as RGB
+            rgbData[bgrIndex + 0] = static_cast<unsigned char>(color.r * 255);
+            rgbData[bgrIndex + 1] = static_cast<unsigned char>(color.g * 255);
+            rgbData[bgrIndex + 2] = static_cast<unsigned char>(color.b * 255);
+                        
         }
     }
 
     // Get region as BGR
     void getGridRegionAsBGR(const Vec2& minCorner, const Vec2& maxCorner,
-                           int& width, int& height, std::vector<uint8_t>& bgrData) const {
+                           int& width, int& height, std::vector<uint8_t>& rgbData) const {
         TIME_FUNCTION;
+        // std::cout << "excessdebug g2.483" << std::endl;
         // Calculate dimensions
         width = static_cast<int>(maxCorner.x - minCorner.x);
         height = static_cast<int>(maxCorner.y - minCorner.y);
         
         if (width <= 0 || height <= 0) {
             width = height = 0;
-            bgrData.clear();
-            bgrData.shrink_to_fit();
+            rgbData.clear();
+            rgbData.shrink_to_fit();
             return;
         }
+        // std::cout << "excessdebug g2.494" << std::endl;
         
         // Initialize RGB data (3 bytes per pixel: R, G, B)
-        bgrData.resize(width * height * 3, 0);
+        std::vector<Vec4> rgbaBuffer(width * height, Vec4(0.0f, 0.0f, 0.0f, 0.0f));
         
         // For each position in the grid, find the corresponding pixel
-        //#pragma omp parallel for
         for (const auto& [id, pos] : Positions) {
+            // std::cout << "excessdebug g2.501." << id << std::endl;
             size_t size = Sizes.at(id);
-            // if (pos.x >= minCorner.x && pos.x < maxCorner.x &&
-            //     pos.y >= minCorner.y && pos.y < maxCorner.y) {
                 
-                // Calculate pixel coordinates
-                int pixelXm = static_cast<int>(pos.x - size/2 - minCorner.x);
-                int pixelXM = static_cast<int>(pos.x + size/2 - minCorner.x);
-                int pixelYm = static_cast<int>(pos.y - size/2 - minCorner.y);
-                int pixelYM = static_cast<int>(pos.y + size/2 - minCorner.y);
-                
-                pixelXm = std::max(0, pixelXm);
-                pixelXM = std::min(width - 1, pixelXM);
-                pixelYm = std::max(0, pixelYm);
-                pixelYM = std::min(height - 1, pixelYM);
+            // Calculate pixel coordinates
+            int pixelXm = static_cast<int>(pos.x - size/2 - minCorner.x);
+            int pixelXM = static_cast<int>(pos.x + size/2 - minCorner.x);
+            int pixelYm = static_cast<int>(pos.y - size/2 - minCorner.y);
+            int pixelYM = static_cast<int>(pos.y + size/2 - minCorner.y);
+            
+            pixelXm = std::max(0, pixelXm);
+            pixelXM = std::min(width - 1, pixelXM);
+            pixelYm = std::max(0, pixelYm);
+            pixelYM = std::min(height - 1, pixelYM);
+            // std::cout << "excessdebug g2.514." << id << std::endl;
 
-                // Ensure within bounds
-                if (pixelXM >= minCorner.x && pixelXm < width && pixelYM >= minCorner.y && pixelYm < height) {
-                    const Vec4& color = Colors.at(id);
-                    for (int py = pixelYm; py <= pixelYM; ++py){
-                        for (int px = pixelXm; px <= pixelXM; ++px){
-                            // Get color and convert to RGB
-                            int index = (py * width + px) * 3;
-                            
-                            // Convert from [0,1] to [0,255] and store as RGB
-                            bgrData[index + 2]     = static_cast<unsigned char>(color.r * 255);
-                            bgrData[index + 1] = static_cast<unsigned char>(color.g * 255);
-                            bgrData[index] = static_cast<unsigned char>(color.b * 255);
-                        }
+            // Ensure within bounds
+            if (pixelXM >= minCorner.x && pixelXm < width && pixelYM >= minCorner.y && pixelYm < height) {
+                // std::cout << "excessdebug g2.518." << id << " - (" << pixelXm << "," << pixelYM << ")" << std::endl;
+                const Vec4& color = Colors.at(id);
+                float srcAlpha = color.a;
+                float invSrcAlpha = 1.0f - srcAlpha;
+                for (int py = pixelYm; py <= pixelYM; ++py){
+                    for (int px = pixelXm; px <= pixelXM; ++px){
+                        // std::cout << "excessdebug g2.524." << id << " - (" << py << "," << px << ")" << std::endl;
+                        int index = (py * width + px);
+                        Vec4 dest = rgbaBuffer[index];
+                        
+                        dest.r = color.r * srcAlpha + dest.r; // * invSrcAlpha;
+                        dest.g = color.g * srcAlpha + dest.g; // * invSrcAlpha;
+                        dest.b = color.b * srcAlpha + dest.b; // * invSrcAlpha;
+                        dest.a = srcAlpha + dest.a; // * invSrcAlpha;
+                        rgbaBuffer[index] = dest;
                     }
                 }
-            //}
+            }
+        }
+        rgbData.resize(rgbaBuffer.size() * 3);
+        for (int i = 0; i < rgbaBuffer.size(); ++i) {
+            const Vec4& color = rgbaBuffer[i];
+            int bgrIndex = i * 3;
+            
+            // Convert from [0,1] to [0,255] and store as RGB
+            // rgbData.push_back(color.r);
+            // rgbData.push_back(color.g);
+            // rgbData.push_back(color.b);
+            rgbData[bgrIndex + 2] = static_cast<unsigned char>(color.r * 255);
+            rgbData[bgrIndex + 1] = static_cast<unsigned char>(color.g * 255);
+            rgbData[bgrIndex + 0] = static_cast<unsigned char>(color.b * 255);
+                        
         }
     }
     
@@ -599,7 +634,6 @@ public:
         getGridRegionAsBGR(minCorner, maxCorner, width, height, bgrData);
     }
       
-    
     //frame stuff
     frame getGridRegionAsFrameRGB(const Vec2& minCorner, const Vec2& maxCorner) const {
         TIME_FUNCTION;
@@ -624,79 +658,6 @@ public:
         return resultFrame;
     }
 
-    // Get region as frame (RGBA format)
-    frame getGridRegionAsFrameRGBA(const Vec2& minCorner, const Vec2& maxCorner) const {
-        TIME_FUNCTION;
-        int width, height;
-        std::vector<uint8_t> rgbData;
-        getGridRegionAsRGB(minCorner, maxCorner, width, height, rgbData);
-        
-        // Convert RGB to RGBA
-        std::vector<uint8_t> rgbaData;
-        rgbaData.reserve(width * height * 4);
-        
-        //#pragma omp parallel for
-        for (size_t i = 0; i < rgbData.size(); i += 3) {
-            rgbaData.push_back(rgbData[i]);     // R
-            rgbaData.push_back(rgbData[i + 1]); // G
-            rgbaData.push_back(rgbData[i + 2]); // B
-            rgbaData.push_back(255);            // A (fully opaque)
-        }
-        
-        frame resultFrame(width, height, frame::colormap::RGBA);
-        resultFrame.setData(rgbaData);
-        return resultFrame;
-    }
-
-    // Get region as frame (BGRA format)
-    frame getGridRegionAsFrameBGRA(const Vec2& minCorner, const Vec2& maxCorner) const {
-        TIME_FUNCTION;
-        int width, height;
-        std::vector<uint8_t> bgrData;
-        getGridRegionAsBGR(minCorner, maxCorner, width, height, bgrData);
-        
-        // Convert BGR to BGRA
-        std::vector<uint8_t> bgraData;
-        bgraData.reserve(width * height * 4);
-        
-        //#pragma omp parallel for
-        for (size_t i = 0; i < bgrData.size(); i += 3) {
-            bgraData.push_back(bgrData[i]);     // B
-            bgraData.push_back(bgrData[i + 1]); // G
-            bgraData.push_back(bgrData[i + 2]); // R
-            bgraData.push_back(255);            // A (fully opaque)
-        }
-        
-        frame resultFrame(width, height, frame::colormap::BGRA);
-        resultFrame.setData(bgraData);
-        return resultFrame;
-    }
-
-    // Get region as frame (Grayscale format)
-    frame getGridRegionAsFrameGrayscale(const Vec2& minCorner, const Vec2& maxCorner) const {
-        int width, height;
-        std::vector<uint8_t> rgbData;
-        getGridRegionAsRGB(minCorner, maxCorner, width, height, rgbData);
-        
-        // Convert RGB to grayscale
-        std::vector<uint8_t> grayData;
-        grayData.reserve(width * height);
-        
-        //#pragma omp parallel for
-        for (size_t i = 0; i < rgbData.size(); i += 3) {
-            uint8_t r = rgbData[i];
-            uint8_t g = rgbData[i + 1];
-            uint8_t b = rgbData[i + 2];
-            // Standard grayscale conversion formula
-            uint8_t gray = static_cast<uint8_t>(0.299 * r + 0.587 * g + 0.114 * b);
-            grayData.push_back(gray);
-        }
-        
-        frame resultFrame(width, height, frame::colormap::B); // B for single channel/grayscale
-        resultFrame.setData(grayData);
-        return resultFrame;
-    }
-
     // Get entire grid as frame with specified format
     frame getGridAsFrame(frame::colormap format = frame::colormap::RGB) {
         TIME_FUNCTION;
@@ -711,22 +672,13 @@ public:
             case frame::colormap::BGR:
                 Frame = std::move(getGridRegionAsFrameBGR(minCorner, maxCorner));
                 break;
-            case frame::colormap::RGBA:
-                Frame = std::move(getGridRegionAsFrameRGBA(minCorner, maxCorner));
-                break;
-            case frame::colormap::BGRA:
-                Frame = std::move(getGridRegionAsFrameBGRA(minCorner, maxCorner));
-                break;
-            case frame::colormap::B:
-                Frame = std::move(getGridRegionAsFrameGrayscale(minCorner, maxCorner));
-                break;
             default:
                 Frame = std::move(getGridRegionAsFrameRGB(minCorner, maxCorner));
                 break;
         }
         //Frame.compressFrameDiff();
         //Frame.compressFrameRLE();
-        Frame.compressFrameLZ78();
+        //Frame.compressFrameLZ78();
         return Frame;
     }
 
@@ -754,7 +706,6 @@ public:
                 return gridFrame;
         }
     }
-
 
     //get bounding box
     void getBoundingBox(Vec2& minCorner, Vec2& maxCorner) {

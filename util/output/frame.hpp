@@ -15,6 +15,7 @@
 #include <future>
 #include <mutex>
 #include <atomic>
+#include "../timing_decorator.hpp"
 
 class frame {
 private:
@@ -47,10 +48,11 @@ public:
     colormap colorFormat = colormap::RGB;
     compresstype cformat = compresstype::RAW;
 
-    size_t getWidth() {
+    const size_t& getWidth() {
         return width;
     }
-    size_t getHeight() {
+    
+    const size_t& getHeight() {
         return height;
     }
     frame() {};
@@ -73,6 +75,8 @@ public:
         _compressedData.clear();
         _compressedData.shrink_to_fit();
         overheadmap.clear();
+        sourceSize = data.size();
+        
     }
 
     const std::vector<uint8_t>& getData() const {
@@ -221,9 +225,6 @@ public:
     // Get compressed size including dictionary overhead
     size_t getTotalCompressedSize() const {
         size_t baseSize = getCompressedDataSize();
-        if (cformat == compresstype::LZ78) {
-            baseSize += getDictionarySize();
-        }
         return baseSize;
     }
 
@@ -237,7 +238,7 @@ public:
     }
 
     size_t getCompressedDataSize() const {
-        return _compressedData.size();
+        return _compressedData.size() * 2;
     }
 
     void printCompressionInfo() const {
@@ -274,16 +275,9 @@ public:
     }
 
     void printCompressionStats() const {
-        if (cformat == compresstype::LZ78) {
-            std::cout << "[" << getCompressionTypeString() << "] "
-                      << "Source Size: " << getSourceSize() << " bytes"
-                      << getTotalCompressedSize() << "B "
-                      << "(ratio: " << getCompressionRatio() << ":1)" << std::endl;
-        } else {
-            std::cout << "[" << getCompressionTypeString() << "] "
-                      << getSourceSize() << "B -> " << getTotalCompressedSize() << "B "
-                      << "(ratio: " << getCompressionRatio() << ":1)" << std::endl;
-        }
+        std::cout << "[" << getCompressionTypeString() << "] "
+                    << getSourceSize() << "B -> " << getTotalCompressedSize() << "B "
+                    << "(ratio: " << getCompressionRatio() << ":1)" << std::endl;
     }
 
     // Get compression type as string
@@ -318,8 +312,6 @@ public:
     }
 
 private:
-    //moving decompression to private to prevent breaking stuff from external calls
-
     std::vector<std::vector<uint8_t>> sortvecs(std::vector<std::vector<uint8_t>> source) {
         std::sort(source.begin(), source.end(), [](const std::vector<uint8_t> & a, const std::vector<uint8_t> & b) {return a.size() > b.size();});
         return source;
