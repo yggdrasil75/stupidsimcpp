@@ -128,10 +128,7 @@ public:
         for (uint16_t i = 0; i < 256; i++) {
             dict[i] = i;
         }
-        //std::vector<std::vector<uint8_t>> repeats = getRepeats();
-        //repeats = sortvecs(repeats);
 
-        std::vector<uint16_t> compressed;
         uint16_t nextDict = 256;
         uint16_t cpos = 0;
         
@@ -153,13 +150,8 @@ public:
             _compressedData.push_back(0);
         }
 
-        ratio = compressed.size() / _data.size();
+        ratio = _compressedData.size() / _data.size();
         sourceSize = _data.size();
-        
-        // _compressedData = std::move(compressed);
-        // _compressedData.shrink_to_fit();
-        
-        // Clear uncompressed data
         _data.clear();
         _data.shrink_to_fit();
         
