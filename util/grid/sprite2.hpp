@@ -46,24 +46,27 @@ public:
         Orientations[id] = orientation;
     }
 
-    void getGridRegionAsBGR(const Vec2& minCorner, const Vec2& maxCorner, int& width, int& height, std::vector<uint8_t>& bgrData) const {
+    void getGridRegionAsBGR(const Vec2& minCorner, const Vec2& maxCorner, int& width, int& height, std::vector<uint8_t>& rgbData) const {
         TIME_FUNCTION;
+        // std::cout << "excessdebug g2.483" << std::endl;
         // Calculate dimensions
         width = static_cast<int>(maxCorner.x - minCorner.x);
         height = static_cast<int>(maxCorner.y - minCorner.y);
         
         if (width <= 0 || height <= 0) {
             width = height = 0;
-            bgrData.clear();
-            bgrData.shrink_to_fit();
+            rgbData.clear();
+            rgbData.shrink_to_fit();
             return;
         }
+        // std::cout << "excessdebug g2.494" << std::endl;
         
         // Initialize RGB data (3 bytes per pixel: R, G, B)
         std::vector<Vec4> rgbaBuffer(width * height, Vec4(0.0f, 0.0f, 0.0f, 0.0f));
         
         // For each position in the grid, find the corresponding pixel
         for (const auto& [id, pos] : Positions) {
+            // std::cout << "excessdebug g2.501." << id << std::endl;
             size_t size = Sizes.at(id);
                 
             // Calculate pixel coordinates
@@ -76,34 +79,42 @@ public:
             pixelXM = std::min(width - 1, pixelXM);
             pixelYm = std::max(0, pixelYm);
             pixelYM = std::min(height - 1, pixelYM);
+            // std::cout << "excessdebug g2.514." << id << std::endl;
 
             // Ensure within bounds
             if (pixelXM >= minCorner.x && pixelXm < width && pixelYM >= minCorner.y && pixelYm < height) {
+                // std::cout << "excessdebug g2.518." << id << " - (" << pixelXm << "," << pixelYM << ")" << std::endl;
                 const Vec4& color = Colors.at(id);
                 float srcAlpha = color.a;
                 float invSrcAlpha = 1.0f - srcAlpha;
                 for (int py = pixelYm; py <= pixelYM; ++py){
                     for (int px = pixelXm; px <= pixelXM; ++px){
-                        int index = (py * width + px) * 3;
-                        Vec4& dest = rgbaBuffer[index];
+                        // std::cout << "excessdebug g2.524." << id << " - (" << py << "," << px << ")" << std::endl;
+                        int index = (py * width + px);
+                        Vec4 dest = rgbaBuffer[index];
                         
-                        dest.r = color.r * srcAlpha + dest.r * invSrcAlpha;
-                        dest.g = color.g * srcAlpha + dest.g * invSrcAlpha;
-                        dest.b = color.b * srcAlpha + dest.b * invSrcAlpha;
-                        dest.a = srcAlpha + dest.a * invSrcAlpha;
+                        dest.r = color.r * srcAlpha + dest.r; // * invSrcAlpha;
+                        dest.g = color.g * srcAlpha + dest.g; // * invSrcAlpha;
+                        dest.b = color.b * srcAlpha + dest.b; // * invSrcAlpha;
+                        dest.a = srcAlpha + dest.a; // * invSrcAlpha;
+                        rgbaBuffer[index] = dest;
                     }
                 }
             }
         }
-        bgrData.resize(dest.size() * 4);
-        for (int i = 0; i < width * height; ++i) {
+        rgbData.resize(rgbaBuffer.size() * 3);
+        for (int i = 0; i < rgbaBuffer.size(); ++i) {
             const Vec4& color = rgbaBuffer[i];
             int bgrIndex = i * 3;
             
-            // Convert from [0,1] to [0,255] and store as BGR
-            bgrData[bgrIndex + 0] = static_cast<uint8_t>(color.b * 255);  // Blue
-            bgrData[bgrIndex + 1] = static_cast<uint8_t>(color.g * 255);  // Green
-            bgrData[bgrIndex + 2] = static_cast<uint8_t>(color.r * 255);  // Red
+            // Convert from [0,1] to [0,255] and store as RGB
+            // rgbData.push_back(color.r);
+            // rgbData.push_back(color.g);
+            // rgbData.push_back(color.b);
+            rgbData[bgrIndex + 2] = static_cast<unsigned char>(color.r * 255);
+            rgbData[bgrIndex + 1] = static_cast<unsigned char>(color.g * 255);
+            rgbData[bgrIndex + 0] = static_cast<unsigned char>(color.b * 255);
+                        
         }
     }
 

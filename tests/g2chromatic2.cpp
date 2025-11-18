@@ -9,6 +9,7 @@
 #include "../util/output/aviwriter.hpp"
 #include "../util/output/bmpwriter.hpp"
 #include "../util/timing_decorator.cpp"
+#include <imgui.h>
 
 struct AnimationConfig {
     int width = 1024;
@@ -173,7 +174,7 @@ bool exportavi(std::vector<frame> frames, AnimationConfig config) {
     return success;
 }
 
-int main() {
+void mainLogic(){
     AnimationConfig config;
     // std::cout << "g2c2175" << std::endl;
     
@@ -200,8 +201,40 @@ int main() {
         }
 
     }
-    
+
     exportavi(frames,config);
+}
+
+int main() {
+    static bool window = true;
+    ImGui::SetNextWindowSize(ImVec2(1110,667));
+    
+    if (ImGui::Begin("window_name", &window))
+    {
+
+        ImGui::SetCursorPos(ImVec2(435.5,200));
+        ImGui::PushItemWidth(200);
+        static int i1 = 123;
+        ImGui::InputInt("Width", &i1);
+        ImGui::PopItemWidth();
+
+        ImGui::SetCursorPos(ImVec2(432,166));
+        ImGui::PushItemWidth(200);
+        static int i2 = 123;
+        ImGui::InputInt("Height", &i2);
+        ImGui::PopItemWidth();
+
+        ImGui::SetCursorPos(ImVec2(533.5,271));
+        ImGui::Button("Start", ImVec2(43,19)); //remove size argument (ImVec2) to auto-resize
+
+        ImGui::SetCursorPos(ImVec2(400.5,366));
+        ImGui::PushItemWidth(200);
+        static int i6 = 123;
+        ImGui::InputInt("number of Seeds", &i6);
+        ImGui::PopItemWidth();
+
+    }
+    ImGui::End();
     FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
     return 0;
 }

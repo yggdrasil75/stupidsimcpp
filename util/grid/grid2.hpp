@@ -172,7 +172,7 @@ public:
 };
 
 class Grid2 { 
-private:
+protected:
     //all positions
     reverselookupassistantclasscausecppisdumb Positions;
     //all colors
