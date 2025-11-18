@@ -9,7 +9,7 @@
 #include "../util/output/aviwriter.hpp"
 #include "../util/output/bmpwriter.hpp"
 #include "../util/timing_decorator.cpp"
-#include <imgui.h>
+#include "../imgui/imgui.h"
 
 struct AnimationConfig {
     int width = 1024;
@@ -208,9 +208,8 @@ void mainLogic(){
 int main() {
     static bool window = true;
     ImGui::SetNextWindowSize(ImVec2(1110,667));
-    
-    if (ImGui::Begin("window_name", &window))
-    {
+    auto beg = ImGui::Begin("Gradient thing", &window);
+    if (beg) {
 
         ImGui::SetCursorPos(ImVec2(435.5,200));
         ImGui::PushItemWidth(200);
@@ -238,3 +237,6 @@ int main() {
     FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
     return 0;
 }
+//I need this: https://raais.github.io/ImStudio/
+// or this: https://github.com/tpecholt/imrad/
+// g++ -std=c++23 -O3 -march=native -o ./bin/g2gradc ./tests/g2chromatic2.cpp -I./imgui -L./imgui -limgui `pkg-config --cflags --libs glfw3` && ./bin/g2gradc
