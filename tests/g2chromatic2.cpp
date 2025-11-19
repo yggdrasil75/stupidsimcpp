@@ -179,8 +179,8 @@ bool exportavi(std::vector<frame> frames, AnimationConfig config) {
     return success;
 }
 
-void mainLogic(){
-    AnimationConfig config;
+void mainLogic(float f, int i1, int i2, int i3, int i4){
+    AnimationConfig config = AnimationConfig(i1, i2, i3, f, i4);
     // std::cout << "g2c2175" << std::endl;
     
     Grid2 grid = setup(config);
@@ -210,58 +210,130 @@ void mainLogic(){
     exportavi(frames,config);
 }
 
+static void glfw_error_callback(int error, const char* description)
+{
+    fprintf(stderr, "GLFW Error %d: %s\n", error, description);
+}
+
 int main() {
     //static bool window = true;
+    glfwSetErrorCallback(glfw_error_callback);
     if (!glfwInit()) {
         std::cerr << "gui stuff is dumb in c++." << std::endl;
         glfwTerminate();
         return 1;
     }
+    // COPIED VERBATIM FROM IMGUI.
+    #if defined(IMGUI_IMPL_OPENGL_ES2)
+        // GL ES 2.0 + GLSL 100 (WebGL 1.0)
+        const char* glsl_version = "#version 100";
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2);
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
+        glfwWindowHint(GLFW_CLIENT_API, GLFW_OPENGL_ES_API);
+    #elif defined(IMGUI_IMPL_OPENGL_ES3)
+        // GL ES 3.0 + GLSL 300 es (WebGL 2.0)
+        const char* glsl_version = "#version 300 es";
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
+        glfwWindowHint(GLFW_CLIENT_API, GLFW_OPENGL_ES_API);
+    #elif defined(__APPLE__)
+        // GL 3.2 + GLSL 150
+        const char* glsl_version = "#version 150";
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
+        glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);  // 3.2+ only
+        glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);            // Required on Mac
+    #else
+        // GL 3.0 + GLSL 130
+        const char* glsl_version = "#version 130";
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
+        //glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);  // 3.2+ only
+        //glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);            // 3.0+ only
+    #endif
     //ImGui::SetNextWindowSize(ImVec2(1110,667));
     //auto beg = ImGui::Begin("Gradient thing", &window);
     //if (beg) {
-    std::cout << "stuff breaks at 220" << std::endl;
+    std::cout << "stuff breaks at 223" << std::endl;
     bool application_not_closed = true;
-    //IMGUI_CHECKVERSION(); //this was listed in imgui docs to add. dont know version strings to put here yet.
+    //float main_scale = ImGui_ImplGlfw_GetContentScaleForMonitor(glfwGetPrimaryMonitor());
+    GLFWwindow* window = glfwCreateWindow((int)(1280), (int)(800), "Chromatic gradient generator thing", nullptr, nullptr);
+    if (window == nullptr)
+        return 1;
+    glfwMakeContextCurrent(window);
+    glfwSwapInterval(1);
+    //IMGUI_CHECKVERSION(); //this might be more important than I realize. but cant run with it so currently ignoring. 
     ImGui::CreateContext();
     std::cout << "context created" << std::endl;
-    ImGuiIO& io = ImGui::GetIO();
-    std::cout << "io init?" << std::endl;
-    //float main_scale = ImGui_ImplGlfw_GetContentScaleForMonitor(glfwGetPrimaryMonitor());
-    GLFWwindow* window = glfwCreateWindow((int)(1280), (int)(800), "Dear ImGui GLFW+OpenGL3 example", nullptr, nullptr);
+    ImGuiIO& io = ImGui::GetIO(); (void)io;
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
+    ImGui::StyleColorsDark();
+    ImGuiStyle& style = ImGui::GetStyle();
+    //style.ScaleAllSizes(1);        // Bake a fixed style scale. (until we have a solution for dynamic style scaling, changing this requires resetting Style + calling this again)
+    //style.FontScaleDpi = 1; //will need to implement my own scaling at some point. currently just ignoring it.
+    ImGui_ImplGlfw_InitForOpenGL(window, true);
+
+
+    #ifdef __EMSCRIPTEN__
+        ImGui_ImplGlfw_InstallEmscriptenCallbacks(window, "#canvas");
+    #endif
+        ImGui_ImplOpenGL3_Init(glsl_version);
+
+
     std::cout << "created glfw window" << std::endl;
 
-    ImGui_ImplGlfw_InitForOpenGL(window, true);          // Second param install_callback=true will install GLFW callbacks and chain to existing ones.
-    ImGui_ImplOpenGL3_Init();
 
-    while (true) {
-        std::cout << "stuff breaks at 220" << std::endl;
+    // Our state
+    bool show_demo_window = true;
+    bool show_another_window = false;
+    ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
 
-        ImGui::SetCursorPos(ImVec2(435.5,200));
-        ImGui::PushItemWidth(200);
-        static int i1 = 123;
-        ImGui::InputInt("Width", &i1);
-        ImGui::PopItemWidth();
-        std::cout << "stuff breaks at 227" << std::endl;
+    
+    while (!glfwWindowShouldClose(window)) {
+        glfwPollEvents();
 
-        ImGui::SetCursorPos(ImVec2(432,166));
-        ImGui::PushItemWidth(200);
-        static int i2 = 123;
-        ImGui::InputInt("Height", &i2);
-        ImGui::PopItemWidth();
-        std::cout << "stuff breaks at 234" << std::endl;
+        // Start the Dear ImGui frame
+        ImGui_ImplOpenGL3_NewFrame();
+        ImGui_ImplGlfw_NewFrame();
+        ImGui::NewFrame();
 
-        ImGui::SetCursorPos(ImVec2(533.5,271));
-        ImGui::Button("Start", ImVec2(43,19)); //remove size argument (ImVec2) to auto-resize
-        std::cout << "stuff breaks at 238" << std::endl;
 
-        ImGui::SetCursorPos(ImVec2(400.5,366));
-        ImGui::PushItemWidth(200);
-        static int i6 = 123;
-        ImGui::InputInt("number of Seeds", &i6);
-        ImGui::PopItemWidth();
-        std::cout << "stuff breaks at 245" << std::endl;
+        {
+            static float f = 30.0f;
+            static int i1 = 1024;
+            static int i2 = 1024;
+            static int i3 = 480;
+            static int i4 = 8;
 
+            ImGui::Begin("Gradient settings");                          // Create a window called "Hello, world!" and append into it.
+
+            //ImGui::Text("");               // Display some text (you can use a format strings too)
+            //ImGui::Checkbox("Demo Window", &show_demo_window);      // Edit bools storing our window open/close state
+            //ImGui::Checkbox("Another Window", &show_another_window);
+            ImGui::SliderFloat("fps", &f, 20.0f, 60.0f);            // Edit 1 float using a slider from 0.0f to 1.0f
+            ImGui::SliderInt("width", &i1, 256, 4096);
+            ImGui::SliderInt("height", &i2, 256, 4096);
+            ImGui::SliderInt("framecount", &i3, 10, 5000);
+            ImGui::SliderInt("numSeeds", &i4, 0, 10);
+
+            if (ImGui::Button("Button"))                            // Buttons return true when clicked (most widgets return true when edited/activated)
+                mainLogic(f,i1,i2,i3,i4);
+            ImGui::SameLine();
+
+            ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / io.Framerate, io.Framerate);
+            ImGui::End();
+        }
+
+
+        ImGui::Render();
+        int display_w, display_h;
+        glfwGetFramebufferSize(window, &display_w, &display_h);
+        //glViewport(0, 0, display_w, display_h);
+        //glClearColor(clear_color.x * clear_color.w, clear_color.y * clear_color.w, clear_color.z * clear_color.w, clear_color.w);
+        //glClear(GL_COLOR_BUFFER_BIT);
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+        glfwSwapBuffers(window);
     }
     //ImGui::End();
     FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
