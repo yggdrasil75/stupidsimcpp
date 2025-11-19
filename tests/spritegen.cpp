@@ -9,12 +9,7 @@
 #include "../util/output/aviwriter.hpp"
 #include "../util/output/bmpwriter.hpp"
 #include "../util/timing_decorator.cpp"
-
 #include "../imgui/imgui.h"
-#include "../imgui/backends/imgui_impl_glfw.h"
-#include "../imgui/backends/imgui_impl_opengl3.h"
-#include <GLFW/glfw3.h>
-
 
 struct AnimationConfig {
     int width = 1024;
@@ -211,62 +206,34 @@ void mainLogic(){
 }
 
 int main() {
-    //static bool window = true;
-    if (!glfwInit()) {
-        std::cerr << "gui stuff is dumb in c++." << std::endl;
-        glfwTerminate();
-        return 1;
-    }
-    //ImGui::SetNextWindowSize(ImVec2(1110,667));
-    //auto beg = ImGui::Begin("Gradient thing", &window);
-    //if (beg) {
-    std::cout << "stuff breaks at 220" << std::endl;
-    bool application_not_closed = true;
-    //IMGUI_CHECKVERSION(); //this was listed in imgui docs to add. dont know version strings to put here yet.
-    ImGui::CreateContext();
-    std::cout << "context created" << std::endl;
-    ImGuiIO& io = ImGui::GetIO();
-    std::cout << "io init?" << std::endl;
-    //float main_scale = ImGui_ImplGlfw_GetContentScaleForMonitor(glfwGetPrimaryMonitor());
-    GLFWwindow* window = glfwCreateWindow((int)(1280), (int)(800), "Dear ImGui GLFW+OpenGL3 example", nullptr, nullptr);
-    std::cout << "created glfw window" << std::endl;
-
-    ImGui_ImplGlfw_InitForOpenGL(window, true);          // Second param install_callback=true will install GLFW callbacks and chain to existing ones.
-    ImGui_ImplOpenGL3_Init();
-
-    while (true) {
-        std::cout << "stuff breaks at 220" << std::endl;
+    static bool window = true;
+    ImGui::SetNextWindowSize(ImVec2(1110,667));
+    auto beg = ImGui::Begin("Gradient thing", &window);
+    if (beg) {
 
         ImGui::SetCursorPos(ImVec2(435.5,200));
         ImGui::PushItemWidth(200);
         static int i1 = 123;
         ImGui::InputInt("Width", &i1);
         ImGui::PopItemWidth();
-        std::cout << "stuff breaks at 227" << std::endl;
 
         ImGui::SetCursorPos(ImVec2(432,166));
         ImGui::PushItemWidth(200);
         static int i2 = 123;
         ImGui::InputInt("Height", &i2);
         ImGui::PopItemWidth();
-        std::cout << "stuff breaks at 234" << std::endl;
 
         ImGui::SetCursorPos(ImVec2(533.5,271));
         ImGui::Button("Start", ImVec2(43,19)); //remove size argument (ImVec2) to auto-resize
-        std::cout << "stuff breaks at 238" << std::endl;
 
         ImGui::SetCursorPos(ImVec2(400.5,366));
         ImGui::PushItemWidth(200);
         static int i6 = 123;
         ImGui::InputInt("number of Seeds", &i6);
         ImGui::PopItemWidth();
-        std::cout << "stuff breaks at 245" << std::endl;
 
     }
-    //ImGui::End();
+    ImGui::End();
     FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
     return 0;
 }
-//I need this: https://raais.github.io/ImStudio/
-// or this: https://github.com/tpecholt/imrad/
-// g++ -std=c++23 -O3 -march=native -o ./bin/g2gradc ./tests/g2chromatic2.cpp -I./imgui -L./imgui -limgui -lstb `pkg-config --cflags --libs glfw3` && ./bin/g2gradc
