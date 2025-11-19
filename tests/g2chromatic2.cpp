@@ -316,7 +316,7 @@ int main() {
             ImGui::SliderInt("framecount", &i3, 10, 5000);
             ImGui::SliderInt("numSeeds", &i4, 0, 10);
 
-            if (ImGui::Button("Button"))                            // Buttons return true when clicked (most widgets return true when edited/activated)
+            if (ImGui::Button("Generate Animation"))                            // Buttons return true when clicked (most widgets return true when edited/activated)
                 mainLogic(f,i1,i2,i3,i4);
             ImGui::SameLine();
 
@@ -328,9 +328,9 @@ int main() {
         ImGui::Render();
         int display_w, display_h;
         glfwGetFramebufferSize(window, &display_w, &display_h);
-        //glViewport(0, 0, display_w, display_h);
-        //glClearColor(clear_color.x * clear_color.w, clear_color.y * clear_color.w, clear_color.z * clear_color.w, clear_color.w);
-        //glClear(GL_COLOR_BUFFER_BIT);
+        glViewport(0, 0, display_w, display_h);
+        glClearColor(clear_color.x * clear_color.w, clear_color.y * clear_color.w, clear_color.z * clear_color.w, clear_color.w);
+        glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
         glfwSwapBuffers(window);
