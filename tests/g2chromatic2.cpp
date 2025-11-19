@@ -14,6 +14,7 @@
 #include "../imgui/backends/imgui_impl_glfw.h"
 #include "../imgui/backends/imgui_impl_opengl3.h"
 #include <GLFW/glfw3.h>
+#include "../stb/stb_image.h"
 
 #include <thread>
 #include <atomic>
@@ -23,6 +24,11 @@
 std::mutex m;
 std::atomic<bool> isGenerating{false};
 std::future<void> generationFuture;
+
+std::mutex previewMutex;
+std::atomic<bool> updatePreview{false};
+frame currentPreviewFrame;
+GLuint previewTexture = 0;
 
 struct AnimationConfig {
     int width = 1024;
@@ -50,7 +56,7 @@ Grid2 setup(AnimationConfig config) {
     return grid;
 }
 
-void Preview(Grid2 grid) {
+void Preview(Grid2& grid) {
     TIME_FUNCTION;
     int width;
     int height;
@@ -61,6 +67,14 @@ void Preview(Grid2 grid) {
     if (!success) {
         std::cout << "yo! this failed in Preview" << std::endl;
     }
+}
+
+void livePreview(GLFWwindow* window, Grid2& grid) {
+    // frame Frame = grid.getGridAsFrame(frame::colormap::RGB);
+    // int image_width = Frame.getWidth();
+    // int image_height = Frame.getHeight();
+    // auto data = reinterpret_cast<char*>(Frame.getData());
+    // uint8_t* image_data = stbi_load_from_memory((const unsigned char*)data, (int)data.size(), &image_width, &image_height, 3, 4);
 }
 
 std::vector<std::tuple<size_t, Vec2, Vec4>> pickSeeds(Grid2 grid, AnimationConfig config) {
@@ -187,12 +201,12 @@ bool exportavi(std::vector<frame> frames, AnimationConfig config) {
     return success;
 }
 
-void mainLogic(const AnimationConfig& config) {
+void mainLogic(const AnimationConfig& config, Grid2& grid) {
     isGenerating = true;
     try {
-        Grid2 grid = setup(config);
+        grid = setup(config);
         Preview(grid);
-        std::vector<std::tuple<size_t, Vec2, Vec4>> seeds = pickSeeds(grid,config);
+        std::vector<std::tuple<size_t, Vec2, Vec4>> seeds = pickSeeds(grid, config);
         std::vector<frame> frames;
 
         for (int i = 0; i < config.totalFrames; ++i){
@@ -322,6 +336,7 @@ int main() {
     static int i4 = 8;
 
     std::future<void> mainlogicthread;
+    Grid2 grid;
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
 
@@ -329,8 +344,6 @@ int main() {
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
-
-
         {
 
             ImGui::Begin("Gradient settings");
@@ -348,7 +361,7 @@ int main() {
             
             if (ImGui::Button("Generate Animation")) {
                 AnimationConfig config = AnimationConfig(i1, i2, i3, f, i4);
-                mainlogicthread = std::async(std::launch::async, mainLogic, config);
+                mainlogicthread = std::async(std::launch::async, mainLogic, config, std::ref(grid));
             }
             
             if (isGenerating) {
@@ -366,6 +379,43 @@ int main() {
             //ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / io.Framerate, io.Framerate); // is this broken or is it just cause I have no refresh buffer in this loop?
             ImGui::End();
         }
+
+        // ImGui::NewFrame();
+        // {
+        //     ImGui::Begin("Live Preview");
+            
+        //     if (previewTexture != 0) {
+        //         // Get available space
+        //         ImVec2 availableSize = ImGui::GetContentRegionAvail();
+                
+        //         // Maintain aspect ratio (assuming square or config width/height)
+        //         float aspectRatio = static_cast<float>(currentPreviewFrame.getWidth()) / 
+        //                         static_cast<float>(currentPreviewFrame.getHeight());
+                
+        //         ImVec2 imageSize;
+        //         if (availableSize.x / aspectRatio <= availableSize.y) {
+        //             imageSize.x = availableSize.x;
+        //             imageSize.y = availableSize.x / aspectRatio;
+        //         } else {
+        //             imageSize.y = availableSize.y;
+        //             imageSize.x = availableSize.y * aspectRatio;
+        //         }
+                
+        //         ImGui::Image((ImTextureID)(intptr_t)previewTexture, imageSize);
+                
+        //         ImGui::Text("Frame: %dx%d", currentPreviewFrame.getWidth(), currentPreviewFrame.getHeight());
+        //         if (isGenerating) {
+        //             ImGui::TextColored(ImVec4(0, 1, 0, 1), "Generating...");
+        //         } else {
+        //             ImGui::Text("Ready");
+        //         }
+        //     } else {
+        //         ImGui::Text("No preview available");
+        //         ImGui::Text("Start generation to see live preview");
+        //     }
+            
+        //     ImGui::End();
+        // }
 
 
         ImGui::Render();
@@ -386,6 +436,10 @@ int main() {
     ImGui::DestroyContext();
 
     glfwDestroyWindow(window);
+    if (previewTexture != 0) {
+        glDeleteTextures(1, &previewTexture);
+        previewTexture = 0;
+    }
     glfwTerminate();
     FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
     return 0;
