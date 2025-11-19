@@ -363,7 +363,7 @@ int main() {
                 // Optional: Show a progress indicator
                 ImGui::Text("Generating...");
             }
-            ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / io.Framerate, io.Framerate);
+            //ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / io.Framerate, io.Framerate); // is this broken or is it just cause I have no refresh buffer in this loop?
             ImGui::End();
         }
 
