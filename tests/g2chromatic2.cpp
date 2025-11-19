@@ -13,6 +13,7 @@
 #include "../imgui/imgui.h"
 #include "../imgui/backends/imgui_impl_glfw.h"
 #include "../imgui/backends/imgui_impl_opengl3.h"
+//#include "../imgui/"
 #include <GLFW/glfw3.h>
 #include "../stb/stb_image.h"
 
@@ -70,11 +71,25 @@ void Preview(Grid2& grid) {
 }
 
 void livePreview(GLFWwindow* window, Grid2& grid) {
-    // frame Frame = grid.getGridAsFrame(frame::colormap::RGB);
-    // int image_width = Frame.getWidth();
-    // int image_height = Frame.getHeight();
-    // auto data = reinterpret_cast<char*>(Frame.getData());
-    // uint8_t* image_data = stbi_load_from_memory((const unsigned char*)data, (int)data.size(), &image_width, &image_height, 3, 4);
+    frame Frame = grid.getGridAsFrame(frame::colormap::RGB);
+    int image_width = Frame.getWidth();
+    int image_height = Frame.getHeight();
+    std::vector<uint8_t> framedata = Frame.getData();
+
+    GLuint textu;
+    glGenTextures(1, &textu);
+    glBindTexture(GL_TEXTURE_2D, textu);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, image_width, image_height, 0, GL_RGB, GL_UNSIGNED_BYTE, framedata.data());
+    
+    ImGui::Begin("");
+    //ImGui::Image((ImTextureRef)(intptr_t)textu, ImVec2(image_width, image_height));
+    ImGui::Image(ImTextureRef((uint64_t)textu), ImVec2((float)image_width, (float)image_height));
+    ImGui::End();
+
+    glDeleteTextures(1,&textu);
 }
 
 std::vector<std::tuple<size_t, Vec2, Vec4>> pickSeeds(Grid2 grid, AnimationConfig config) {
