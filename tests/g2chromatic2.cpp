@@ -15,6 +15,14 @@
 #include "../imgui/backends/imgui_impl_opengl3.h"
 #include <GLFW/glfw3.h>
 
+#include <thread>
+#include <atomic>
+#include <future>
+#include <mutex>
+
+std::mutex m;
+std::atomic<bool> isGenerating{false};
+std::future<void> generationFuture;
 
 struct AnimationConfig {
     int width = 1024;
@@ -179,35 +187,55 @@ bool exportavi(std::vector<frame> frames, AnimationConfig config) {
     return success;
 }
 
-void mainLogic(float f, int i1, int i2, int i3, int i4){
-    AnimationConfig config = AnimationConfig(i1, i2, i3, f, i4);
-    // std::cout << "g2c2175" << std::endl;
-    
-    Grid2 grid = setup(config);
-    // std::cout << "g2c2178" << std::endl;
-    Preview(grid);
-    std::vector<std::tuple<size_t, Vec2, Vec4>> seeds = pickSeeds(grid,config);
-    std::vector<frame> frames;
+void mainLogic(const AnimationConfig& config) {
+    isGenerating = true;
+    try {
+        Grid2 grid = setup(config);
+        Preview(grid);
+        std::vector<std::tuple<size_t, Vec2, Vec4>> seeds = pickSeeds(grid,config);
+        std::vector<frame> frames;
 
-    for (int i = 0; i < config.totalFrames; ++i){
-        expandPixel(grid,config,seeds);
-        
-        // Print compression info for this frame
-        if (i % 10 == 0 ) {
-            frame bgrframe;
-            std::cout << "Processing frame " << i + 1 << "/" << config.totalFrames << std::endl;
-            bgrframe = grid.getGridAsFrame(frame::colormap::BGR);
-            bgrframe.printCompressionStats();
-            //(bgrframe, i + 1);
-            frames.push_back(bgrframe);
-            //bgrframe.decompress();
-            //BMPWriter::saveBMP(std::format("output/grayscalesource.{}.bmp", i), bgrframe);
-            bgrframe.compressFrameLZ78();
+        for (int i = 0; i < config.totalFrames; ++i){
+            // Check if we should stop the generation
+            if (!isGenerating) {
+                std::cout << "Generation cancelled at frame " << i << std::endl;
+                return;
+            }
+            
+            expandPixel(grid,config,seeds);
+            
+            // Print compression info for this frame
+            if (i % 10 == 0 ) {
+                frame bgrframe;
+                std::cout << "Processing frame " << i + 1 << "/" << config.totalFrames << std::endl;
+                bgrframe = grid.getGridAsFrame(frame::colormap::BGR);
+                bgrframe.printCompressionStats();
+                frames.push_back(bgrframe);
+                //bgrframe.decompress();
+                //BMPWriter::saveBMP(std::format("output/grayscalesource.{}.bmp", i), bgrframe);
+                bgrframe.compressFrameLZ78();
+            }
         }
-
+        exportavi(frames,config);
     }
+    catch (const std::exception& e) {
+        std::cerr << "errored at: " << e.what() << std::endl;
+    }
+    isGenerating = false;
+}
 
-    exportavi(frames,config);
+// Function to cancel ongoing generation
+void cancelGeneration() {
+    if (isGenerating) {
+        isGenerating = false;
+        // Wait for the thread to finish (with timeout to avoid hanging)
+        if (generationFuture.valid()) {
+            auto status = generationFuture.wait_for(std::chrono::milliseconds(100));
+            if (status != std::future_status::ready) {
+                std::cout << "Waiting for generation thread to finish..." << std::endl;
+            }
+        }
+    }
 }
 
 static void glfw_error_callback(int error, const char* description)
@@ -287,8 +315,13 @@ int main() {
     bool show_demo_window = true;
     bool show_another_window = false;
     ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
+    static float f = 30.0f;
+    static int i1 = 1024;
+    static int i2 = 1024;
+    static int i3 = 480;
+    static int i4 = 8;
 
-    
+    std::future<void> mainlogicthread;
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
 
@@ -299,27 +332,37 @@ int main() {
 
 
         {
-            static float f = 30.0f;
-            static int i1 = 1024;
-            static int i2 = 1024;
-            static int i3 = 480;
-            static int i4 = 8;
 
-            ImGui::Begin("Gradient settings");                          // Create a window called "Hello, world!" and append into it.
+            ImGui::Begin("Gradient settings");
 
-            //ImGui::Text("");               // Display some text (you can use a format strings too)
-            //ImGui::Checkbox("Demo Window", &show_demo_window);      // Edit bools storing our window open/close state
-            //ImGui::Checkbox("Another Window", &show_another_window);
-            ImGui::SliderFloat("fps", &f, 20.0f, 60.0f);            // Edit 1 float using a slider from 0.0f to 1.0f
+            ImGui::SliderFloat("fps", &f, 20.0f, 60.0f);
             ImGui::SliderInt("width", &i1, 256, 4096);
             ImGui::SliderInt("height", &i2, 256, 4096);
             ImGui::SliderInt("framecount", &i3, 10, 5000);
             ImGui::SliderInt("numSeeds", &i4, 0, 10);
 
-            if (ImGui::Button("Generate Animation"))                            // Buttons return true when clicked (most widgets return true when edited/activated)
-                mainLogic(f,i1,i2,i3,i4);
-            ImGui::SameLine();
-
+            // Disable button while generating
+            if (isGenerating) {
+                ImGui::BeginDisabled();
+            }
+            
+            if (ImGui::Button("Generate Animation")) {
+                AnimationConfig config = AnimationConfig(i1, i2, i3, f, i4);
+                mainlogicthread = std::async(std::launch::async, mainLogic, config);
+            }
+            
+            if (isGenerating) {
+                ImGui::EndDisabled();
+                
+                // Show cancel button and progress indicator
+                ImGui::SameLine();
+                if (ImGui::Button("Cancel")) {
+                    cancelGeneration();
+                }
+                
+                // Optional: Show a progress indicator
+                ImGui::Text("Generating...");
+            }
             ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / io.Framerate, io.Framerate);
             ImGui::End();
         }
@@ -334,8 +377,16 @@ int main() {
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
         glfwSwapBuffers(window);
+        //mainlogicthread.join();
     }
-    //ImGui::End();
+    cancelGeneration();
+
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+    ImGui::DestroyContext();
+
+    glfwDestroyWindow(window);
+    glfwTerminate();
     FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
     return 0;
 }
