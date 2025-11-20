@@ -13,7 +13,6 @@
 #include "../imgui/imgui.h"
 #include "../imgui/backends/imgui_impl_glfw.h"
 #include "../imgui/backends/imgui_impl_opengl3.h"
-//#include "../imgui/"
 #include <GLFW/glfw3.h>
 #include "../stb/stb_image.h"
 
@@ -70,11 +69,11 @@ void Preview(Grid2& grid) {
     }
 }
 
-void livePreview(GLFWwindow* window, Grid2& grid) {
-    frame Frame = grid.getGridAsFrame(frame::colormap::RGB);
-    int image_width = Frame.getWidth();
-    int image_height = Frame.getHeight();
-    std::vector<uint8_t> framedata = Frame.getData();
+void livePreview(Grid2& grid) {
+    currentPreviewFrame = grid.getGridAsFrame(frame::colormap::RGB);
+    int image_width = currentPreviewFrame.getWidth();
+    int image_height = currentPreviewFrame.getHeight();
+    std::vector<uint8_t> framedata = currentPreviewFrame.getData();
 
     GLuint textu;
     glGenTextures(1, &textu);
@@ -84,12 +83,7 @@ void livePreview(GLFWwindow* window, Grid2& grid) {
     glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, image_width, image_height, 0, GL_RGB, GL_UNSIGNED_BYTE, framedata.data());
     
-    ImGui::Begin("");
-    //ImGui::Image((ImTextureRef)(intptr_t)textu, ImVec2(image_width, image_height));
-    ImGui::Image(ImTextureRef((uint64_t)textu), ImVec2((float)image_width, (float)image_height));
-    ImGui::End();
-
-    glDeleteTextures(1,&textu);
+    previewTexture = textu;
 }
 
 std::vector<std::tuple<size_t, Vec2, Vec4>> pickSeeds(Grid2 grid, AnimationConfig config) {
@@ -352,6 +346,7 @@ int main() {
 
     std::future<void> mainlogicthread;
     Grid2 grid;
+    AnimationConfig config;
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
 
@@ -369,68 +364,49 @@ int main() {
             ImGui::SliderInt("framecount", &i3, 10, 5000);
             ImGui::SliderInt("numSeeds", &i4, 0, 10);
 
-            // Disable button while generating
             if (isGenerating) {
                 ImGui::BeginDisabled();
             }
             
             if (ImGui::Button("Generate Animation")) {
-                AnimationConfig config = AnimationConfig(i1, i2, i3, f, i4);
+                config = AnimationConfig(i1, i2, i3, f, i4);
                 mainlogicthread = std::async(std::launch::async, mainLogic, config, std::ref(grid));
             }
             
             if (isGenerating) {
                 ImGui::EndDisabled();
                 
-                // Show cancel button and progress indicator
                 ImGui::SameLine();
                 if (ImGui::Button("Cancel")) {
                     cancelGeneration();
                 }
                 
-                // Optional: Show a progress indicator
                 ImGui::Text("Generating...");
             }
             //ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / io.Framerate, io.Framerate); // is this broken or is it just cause I have no refresh buffer in this loop?
+
+            ImGui::Text("livepreview");
+            if (isGenerating) {
+                livePreview(grid);
+                ImVec2 availableSize = ImGui::GetContentRegionAvail();
+                
+                float aspectRatio = static_cast<float>(currentPreviewFrame.getWidth()) / 
+                                static_cast<float>(currentPreviewFrame.getHeight());
+                
+                ImVec2 imageSize = ImVec2(config.height,config.width);
+                ImVec2 uv_min = ImVec2(0.0f, 0.0f); // Top-left
+                ImVec2 uv_max = ImVec2(1.0f, 1.0f); // Lower-right
+                auto ptex = const_cast<void*>(static_cast<const void*>(currentPreviewFrame.getData().data()));
+                ImGui::ImageWithBg((ImTextureRef)ptex, imageSize, uv_min, uv_max, ImVec4(0.0f, 0.0f, 0.0f, 1.0f));
+                
+                
+            } else {
+                ImGui::Text("No preview available");
+                ImGui::Text("Start generation to see live preview");
+            }
+            
             ImGui::End();
         }
-
-        // ImGui::NewFrame();
-        // {
-        //     ImGui::Begin("Live Preview");
-            
-        //     if (previewTexture != 0) {
-        //         // Get available space
-        //         ImVec2 availableSize = ImGui::GetContentRegionAvail();
-                
-        //         // Maintain aspect ratio (assuming square or config width/height)
-        //         float aspectRatio = static_cast<float>(currentPreviewFrame.getWidth()) / 
-        //                         static_cast<float>(currentPreviewFrame.getHeight());
-                
-        //         ImVec2 imageSize;
-        //         if (availableSize.x / aspectRatio <= availableSize.y) {
-        //             imageSize.x = availableSize.x;
-        //             imageSize.y = availableSize.x / aspectRatio;
-        //         } else {
-        //             imageSize.y = availableSize.y;
-        //             imageSize.x = availableSize.y * aspectRatio;
-        //         }
-                
-        //         ImGui::Image((ImTextureID)(intptr_t)previewTexture, imageSize);
-                
-        //         ImGui::Text("Frame: %dx%d", currentPreviewFrame.getWidth(), currentPreviewFrame.getHeight());
-        //         if (isGenerating) {
-        //             ImGui::TextColored(ImVec4(0, 1, 0, 1), "Generating...");
-        //         } else {
-        //             ImGui::Text("Ready");
-        //         }
-        //     } else {
-        //         ImGui::Text("No preview available");
-        //         ImGui::Text("Start generation to see live preview");
-        //     }
-            
-        //     ImGui::End();
-        // }
 
 
         ImGui::Render();
