@@ -77,7 +77,7 @@ public:
         x = y = z = w = scalar;
         return *this;
     }
-    
+        
     Vec4& operator+=(const Vec4& other) {
         x += other.x;
         y += other.y;

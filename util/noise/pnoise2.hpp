@@ -20,14 +20,55 @@ public:
             permutation[i] = i;
         }
         std::ranges::shuffle(permutation, rng);
-        TR = permutation[permutation[1]+1];
-        TR = permutation[permutation[0]+1];
-        TR = permutation[permutation[1]+0];
-        TR = permutation[permutation[0]+0];
+        permutation.insert(permutation.end(),permutation.begin(),permutation.end());
     }
 
-    Vec2 GetConstantVector(Vec2 v) {
-        Vec2 h = v & 3;
+    float permute(Vec2 point) {
+        float x = point.x;
+        float y = point.y;
+        int X = (int)floor(x);
+        int xmod = X & 255;
+        int Y = (int)floor(point.y);
+        int ymod = Y & 255;
+        float xf = point.x - X;
+        float yf = point.y - Y;
+
+        Vec2 TR = Vec2(xf-1, yf-1);
+        Vec2 TL = Vec2(xf-0, yf-1);
+        Vec2 BR = Vec2(xf-1, yf-0);
+        Vec2 BL = Vec2(xf-0, yf-0);
+
+        int vTR = permutation[permutation[xmod+1]+ymod+1];
+        int vTL = permutation[permutation[xmod+0]+ymod+1];
+        int vBR = permutation[permutation[xmod+1]+ymod+0];
+        int vBL = permutation[permutation[xmod+0]+ymod+0];
+
+        float dTR = TR.dot(GetConstantVector(vTR));
+        float dTL = TL.dot(GetConstantVector(vTL));
+        float dBR = BR.dot(GetConstantVector(vBR));
+        float dBL = BL.dot(GetConstantVector(vBL));
+        
+        float u = Fade(xf);
+        float v = Fade(yf);
+
+        return lerp(u,lerp(v,dBL,dTL),lerp(v,dBR,dTR));
+        
+    }
+
+    float lerp(float t, float a1, float a2) {
+        return a1 + t * (a2 - a1);
+    }
+
+    float Fade(float t) {
+        return (((6 * t - 15)* t + 10) * t * t * t);
+    }
+
+    Vec2 GetConstantVector(float v) {
+        int h = (int)v & 3;
+        if (h == 0) return Vec2(1,1);
+        else if (h == 1) return Vec2(-1,1);
+        else if (h == 2) return Vec2(-1,-1);
+        else return Vec2(1,-1);
     }
 
 };

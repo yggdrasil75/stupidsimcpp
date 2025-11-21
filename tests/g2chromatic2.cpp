@@ -22,6 +22,10 @@
 #include <mutex>
 #include <chrono>
 
+#ifndef M_PI
+#define M_PI = 3.1415
+#endif
+
 std::mutex m;
 std::atomic<bool> isGenerating{false};
 std::future<void> generationFuture;
@@ -109,7 +113,7 @@ std::vector<std::tuple<size_t, Vec2, Vec4>> pickSeeds(Grid2 grid, AnimationConfi
     for (int i = 0; i < config.numSeeds; ++i) {
         Vec2 point(xDist(gen), yDist(gen));
         Vec4 color(colorDist(gen), colorDist(gen), colorDist(gen), 255);
-        size_t id = grid.getPositionVec(point);
+        size_t id = grid.getOrCreatePositionVec(point, 0.0, true);
         grid.setColor(id, color);
         seeds.push_back(std::make_tuple(id,point, color));
     }
@@ -220,10 +224,16 @@ bool exportavi(std::vector<frame> frames, AnimationConfig config) {
     return success;
 }
 
-void mainLogic(const AnimationConfig& config, Shared& state) {
+void mainLogic(const AnimationConfig& config, Shared& state, int gradnoise) {
     isGenerating = true;
     try {
-        Grid2 grid = setup(config);
+        Grid2 grid;
+        if (gradnoise == 0) {
+            grid = setup(config);
+        } else if (gradnoise == 1) {
+            grid = grid.noiseGenGrid(0,0,config.height, config.width);
+        }
+        grid.setDefault(Vec4(0,0,0,0));
         {
             std:: lock_guard<std::mutex> lock(state.mutex);
             state.grid = grid;
@@ -364,12 +374,14 @@ int main() {
     static int i2 = 1024;
     static int i3 = 480;
     static int i4 = 8;
+    static float fs = 1.0;
 
     std::future<void> mainlogicthread;
     Shared state;
     Grid2 grid;
     AnimationConfig config;
     previewText = "Please generate";
+    int gradnoise = true;
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
 
@@ -379,13 +391,16 @@ int main() {
         ImGui::NewFrame();
         {
 
-            ImGui::Begin("Gradient settings");
+            ImGui::Begin("settings");
 
             ImGui::SliderFloat("fps", &f, 20.0f, 60.0f);
             ImGui::SliderInt("width", &i1, 256, 4096);
             ImGui::SliderInt("height", &i2, 256, 4096);
             ImGui::SliderInt("framecount", &i3, 10, 5000);
             ImGui::SliderInt("numSeeds", &i4, 0, 10);
+            ImGui::SliderFloat("ScalePreview", &fs, 0.0, 2.0);
+            ImGui::RadioButton("Gradient", &gradnoise, 0);
+            ImGui::RadioButton("Perlin Noise", &gradnoise, 1);
 
             if (isGenerating) {
                 ImGui::BeginDisabled();
@@ -393,17 +408,16 @@ int main() {
             
             if (ImGui::Button("Generate Animation")) {
                 config = AnimationConfig(i1, i2, i3, f, i4);
-                mainlogicthread = std::async(std::launch::async, mainLogic, config, std::ref(state));
+                mainlogicthread = std::async(std::launch::async, mainLogic, config, std::ref(state), gradnoise);
             }
-            
-            if (isGenerating) {
+
+            if (isGenerating && textu != 0) {
                 ImGui::EndDisabled();
                 
                 ImGui::SameLine();
                 if (ImGui::Button("Cancel")) {
                     cancelGeneration();
                 }
-                
                 // Check for new frames from the generation thread
                 bool hasNewFrame = false;
                 {
@@ -418,7 +432,41 @@ int main() {
                 ImGui::Text(previewText.c_str());
                 
                 if (textu != 0) {
-                    ImVec2 imageSize = ImVec2(config.width * 0.3f, config.height * 0.3f); // Scale down for preview
+                    ImVec2 imageSize = ImVec2(config.width * fs, config.height * fs);
+                    ImVec2 uv_min = ImVec2(0.0f, 0.0f);
+                    ImVec2 uv_max = ImVec2(1.0f, 1.0f);
+                    ImGui::Image((void*)(intptr_t)textu, imageSize, uv_min, uv_max);
+                } else {
+                    ImGui::Text("Generating preview...");
+                }
+                
+            } else if (isGenerating) {
+                ImGui::EndDisabled();
+                
+                ImGui::SameLine();
+                if (ImGui::Button("Cancel")) {
+                    cancelGeneration();
+                }
+                // Check for new frames from the generation thread
+                bool hasNewFrame = false;
+                {
+                    std::lock_guard<std::mutex> lock(state.mutex);
+                    if (state.hasNewFrame) {
+                        livePreview(state.grid);
+                        state.hasNewFrame = false;
+                        previewText = "Generating... Frame: " + std::to_string(state.currentFrame);
+                    }
+                }
+                
+                ImGui::Text(previewText.c_str());
+
+            } else if (textu != 0){
+                //ImGui::EndDisabled();
+                                
+                ImGui::Text(previewText.c_str());
+                
+                if (textu != 0) {
+                    ImVec2 imageSize = ImVec2(config.width * 0.5f, config.height * 0.5f);
                     ImVec2 uv_min = ImVec2(0.0f, 0.0f);
                     ImVec2 uv_max = ImVec2(1.0f, 1.0f);
                     ImGui::Image((void*)(intptr_t)textu, imageSize, uv_min, uv_max);
@@ -474,5 +522,4 @@ int main() {
     return 0;
 }
 //I need this: https://raais.github.io/ImStudio/
-// or this: https://github.com/tpecholt/imrad/
 // g++ -std=c++23 -O3 -march=native -o ./bin/g2gradc ./tests/g2chromatic2.cpp -I./imgui -L./imgui -limgui -lstb `pkg-config --cflags --libs glfw3` && ./bin/g2gradc

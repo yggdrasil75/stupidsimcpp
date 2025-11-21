@@ -6,6 +6,7 @@
 #include "../vectorlogic/vec4.hpp"
 #include "../timing_decorator.hpp"
 #include "../output/frame.hpp"
+#include "../noise/pnoise2.hpp"
 #include <vector>
 #include <unordered_set>
 
@@ -195,16 +196,90 @@ protected:
     SpatialGrid spatialGrid;
     float spatialCellSize = 2.0f;
 
+    // Default background color for empty spaces
+    Vec4 defaultBackgroundColor = Vec4(0.0f, 0.0f, 0.0f, 0.0f);
+
+    PNoise2 noisegen;
 public:
     bool usable = false;
+    
+    // Set default background color for empty spaces
+    void setDefault(const Vec4& color) {
+        defaultBackgroundColor = color;
+    }
+    
+    void setDefault(float r, float g, float b, float a = 0.0f) {
+        defaultBackgroundColor = Vec4(r, g, b, a);
+    }
+    
+    // Get current default background color
+    Vec4 getDefaultBackgroundColor() const {
+        return defaultBackgroundColor;
+    }
+
     //get position from id
     Vec2 getPositionID(size_t id) const {
         Vec2 it = Positions.at(id);
         return it;
     }
 
+    Grid2 noiseGenGrid(size_t minx,size_t miny, size_t maxx, size_t maxy
+                       , float minChance = 0.1f, float maxChance = 1.0f, bool color = true) {
+        std::vector<Vec2> poses;
+        std::vector<Vec4> colors;
+        std::vector<float> sizes;
+        for (int x = minx; x < maxx; x++) {
+            for (int y = miny; y < maxy; y++) {
+                Vec2 pos = Vec2(x,y);
+                float alpha = noisegen.permute(Vec2(x,y));
+                if (alpha > minChance && alpha < maxChance) {
+                    if (color) {
+                        float red = noisegen.permute(pos);
+                        float green = noisegen.permute(pos);
+                        float blue = noisegen.permute(pos);
+                        Vec4 newc = Vec4(red,green,blue,alpha);
+                        colors.push_back(newc);
+                        poses.push_back(pos);
+                        sizes.push_back(1.0f);
+                    }
+                    else {
+                        Vec4 newc = Vec4(alpha,alpha,alpha,alpha);
+                        colors.push_back(newc);
+                        poses.push_back(pos);
+                        sizes.push_back(1.0f);
+                    }
+                }
+            }
+        }
+        bulkAddObjects(poses,colors,sizes);
+        return *this;
+    }
+
+    size_t NoiseGenPointB(const Vec2& pos) {
+        float grayc = noisegen.permute(pos);
+        Vec4 newc = Vec4(grayc,grayc,grayc,grayc);
+        return addObject(pos,newc,1.0);
+    }
+    
+    size_t NoiseGenPointRGB(const Vec2& pos) {
+        float red = noisegen.permute(pos);
+        float green = noisegen.permute(pos);
+        float blue = noisegen.permute(pos);
+        Vec4 newc = Vec4(red,green,blue,1);
+        return addObject(pos,newc,1.0);
+    }
+
+    size_t NoiseGenPointRGBA(const Vec2& pos) {
+        float red = noisegen.permute(pos);
+        float green = noisegen.permute(pos);
+        float blue = noisegen.permute(pos);
+        float alpha = noisegen.permute(pos);
+        Vec4 newc = Vec4(red,green,blue,alpha);
+        return addObject(pos,newc,1.0);
+    }
+
     //get id from position (optional radius, picks first found. radius of 0 becomes epsilon if none are found)
-    size_t getPositionVec(const Vec2& pos, float radius = 0.0f) {
+    size_t getPositionVec(const Vec2& pos, float radius = 0.0f) const {
         TIME_FUNCTION;
         if (radius == 0.0f) {
             // Exact match - use spatial grid to find the cell
@@ -227,12 +302,41 @@ public:
         }
     }
 
-    size_t getPositionVec(float x, float y, float radius = 0.0f) { 
+    size_t getOrCreatePositionVec(const Vec2& pos, float radius = 0.0f, bool create = false) {
+        TIME_FUNCTION;
+        if (radius == 0.0f) {
+            // Exact match - use spatial grid to find the cell
+            Vec2 gridPos = spatialGrid.worldToGrid(pos);
+            auto cellIt = spatialGrid.grid.find(gridPos);
+            if (cellIt != spatialGrid.grid.end()) {
+                for (size_t id : cellIt->second) {
+                    if (Positions.at(id) == pos) {
+                        return id;
+                    }
+                }
+            }
+            if (create) {
+                return addObject(pos, defaultBackgroundColor, 1.0f);
+            }
+            throw std::out_of_range("Position not found");
+        } else {
+            auto results = getPositionVecRegion(pos, radius);
+            if (!results.empty()) {
+                return results[0]; // Return first found
+            }
+            if (create) {
+                return addObject(pos, defaultBackgroundColor, 1.0f);
+            }
+            throw std::out_of_range("No positions found in radius");
+        }
+    }
+
+    size_t getPositionVec(float x, float y, float radius = 0.0f) const { 
         return getPositionVec(Vec2(x,y), radius);
     }
 
     //get all id in region
-    std::vector<size_t> getPositionVecRegion(const Vec2& pos, float radius = 1.0f) {
+    std::vector<size_t> getPositionVecRegion(const Vec2& pos, float radius = 1.0f) const {
         TIME_FUNCTION;
         float searchRadius = (radius == 0.0f) ? std::numeric_limits<float>::epsilon() : radius;
         
@@ -483,7 +587,6 @@ public:
     void getGridRegionAsRGB(const Vec2& minCorner, const Vec2& maxCorner,
                            int& width, int& height, std::vector<uint8_t>& rgbData) const {
         TIME_FUNCTION;
-        // std::cout << "excessdebug g2.483" << std::endl;
         // Calculate dimensions
         width = static_cast<int>(maxCorner.x - minCorner.x);
         height = static_cast<int>(maxCorner.y - minCorner.y);
@@ -494,14 +597,19 @@ public:
             rgbData.shrink_to_fit();
             return;
         }
-        // std::cout << "excessdebug g2.494" << std::endl;
         
-        // Initialize RGB data (3 bytes per pixel: R, G, B)
-        std::vector<Vec4> rgbaBuffer(width * height, Vec4(0.0f, 0.0f, 0.0f, 0.0f));
+        // Initialize RGB data with default background color
+        std::vector<Vec4> rgbaBuffer(width * height, Vec4(0,0,0,0));
         
+        // for (int x = minCorner.x; x < maxCorner.x; x++) {
+        //     for (int y = minCorner.y; x < maxCorner.y; y++){
+        //         Vec2 pos = Vec2(x,y);
+        //         size_t posID = getPositionVec(pos, 1.0f, false);
+
+        //     }
+        // }
         // For each position in the grid, find the corresponding pixel
         for (const auto& [id, pos] : Positions) {
-            // std::cout << "excessdebug g2.501." << id << std::endl;
             size_t size = Sizes.at(id);
                 
             // Calculate pixel coordinates
@@ -514,65 +622,69 @@ public:
             pixelXM = std::min(width - 1, pixelXM);
             pixelYm = std::max(0, pixelYm);
             pixelYM = std::min(height - 1, pixelYM);
-            // std::cout << "excessdebug g2.514." << id << std::endl;
 
             // Ensure within bounds
             if (pixelXM >= minCorner.x && pixelXm < width && pixelYM >= minCorner.y && pixelYm < height) {
-                // std::cout << "excessdebug g2.518." << id << " - (" << pixelXm << "," << pixelYM << ")" << std::endl;
                 const Vec4& color = Colors.at(id);
                 float srcAlpha = color.a;
                 float invSrcAlpha = 1.0f - srcAlpha;
                 for (int py = pixelYm; py <= pixelYM; ++py){
                     for (int px = pixelXm; px <= pixelXM; ++px){
-                        // std::cout << "excessdebug g2.524." << id << " - (" << py << "," << px << ")" << std::endl;
                         int index = (py * width + px);
                         Vec4 dest = rgbaBuffer[index];
                         
-                        dest.r = color.r * srcAlpha + dest.r; // * invSrcAlpha;
-                        dest.g = color.g * srcAlpha + dest.g; // * invSrcAlpha;
-                        dest.b = color.b * srcAlpha + dest.b; // * invSrcAlpha;
-                        dest.a = srcAlpha + dest.a; // * invSrcAlpha;
+                        // Alpha blending: new_color = src * src_alpha + dest * (1 - src_alpha)
+                        dest.r = color.r * srcAlpha + dest.r * invSrcAlpha;
+                        dest.g = color.g * srcAlpha + dest.g * invSrcAlpha;
+                        dest.b = color.b * srcAlpha + dest.b * invSrcAlpha;
+                        dest.a = srcAlpha + dest.a * invSrcAlpha;
                         rgbaBuffer[index] = dest;
                     }
                 }
             }
         }
+        
+        // Convert to RGB bytes
         rgbData.resize(rgbaBuffer.size() * 3);
         for (int i = 0; i < rgbaBuffer.size(); ++i) {
-            const Vec4& color = rgbaBuffer[i];
-            int bgrIndex = i * 3;
+            Vec4& color = rgbaBuffer[i];
+            int rgbIndex = i * 3;
+            float alpha = color.a;
+
+            if (alpha < 1.0) {
+                float invalpha = 1.0 - alpha;
+                color.r = defaultBackgroundColor.r * alpha + color.r * invalpha;
+                color.g = defaultBackgroundColor.g * alpha + color.g * invalpha;
+                color.b = defaultBackgroundColor.b * alpha + color.b * invalpha;
+            }
             
             // Convert from [0,1] to [0,255] and store as RGB
-            rgbData[bgrIndex + 0] = static_cast<unsigned char>(color.r * 255);
-            rgbData[bgrIndex + 1] = static_cast<unsigned char>(color.g * 255);
-            rgbData[bgrIndex + 2] = static_cast<unsigned char>(color.b * 255);
-                        
+            rgbData[rgbIndex + 0] = static_cast<unsigned char>(color.r * 255);
+            rgbData[rgbIndex + 1] = static_cast<unsigned char>(color.g * 255);
+            rgbData[rgbIndex + 2] = static_cast<unsigned char>(color.b * 255);
         }
     }
 
     // Get region as BGR
     void getGridRegionAsBGR(const Vec2& minCorner, const Vec2& maxCorner,
-                           int& width, int& height, std::vector<uint8_t>& rgbData) const {
+                           int& width, int& height, std::vector<uint8_t>& bgrData) const {
         TIME_FUNCTION;
-        // std::cout << "excessdebug g2.483" << std::endl;
         // Calculate dimensions
         width = static_cast<int>(maxCorner.x - minCorner.x);
         height = static_cast<int>(maxCorner.y - minCorner.y);
         
         if (width <= 0 || height <= 0) {
             width = height = 0;
-            rgbData.clear();
-            rgbData.shrink_to_fit();
+            bgrData.clear();
+            bgrData.shrink_to_fit();
             return;
         }
-        // std::cout << "excessdebug g2.494" << std::endl;
         
-        // Initialize RGB data (3 bytes per pixel: R, G, B)
-        std::vector<Vec4> rgbaBuffer(width * height, Vec4(0.0f, 0.0f, 0.0f, 0.0f));
+        // Initialize RGB data with default background color
+        std::vector<Vec4> rgbaBuffer(width * height, defaultBackgroundColor);
         
         // For each position in the grid, find the corresponding pixel
         for (const auto& [id, pos] : Positions) {
-            // std::cout << "excessdebug g2.501." << id << std::endl;
             size_t size = Sizes.at(id);
                 
             // Calculate pixel coordinates
@@ -585,68 +697,61 @@ public:
             pixelXM = std::min(width - 1, pixelXM);
             pixelYm = std::max(0, pixelYm);
             pixelYM = std::min(height - 1, pixelYM);
-            // std::cout << "excessdebug g2.514." << id << std::endl;
 
             // Ensure within bounds
             if (pixelXM >= minCorner.x && pixelXm < width && pixelYM >= minCorner.y && pixelYm < height) {
-                // std::cout << "excessdebug g2.518." << id << " - (" << pixelXm << "," << pixelYM << ")" << std::endl;
                 const Vec4& color = Colors.at(id);
                 float srcAlpha = color.a;
                 float invSrcAlpha = 1.0f - srcAlpha;
                 for (int py = pixelYm; py <= pixelYM; ++py){
                     for (int px = pixelXm; px <= pixelXM; ++px){
-                        // std::cout << "excessdebug g2.524." << id << " - (" << py << "," << px << ")" << std::endl;
                         int index = (py * width + px);
                         Vec4 dest = rgbaBuffer[index];
                         
-                        dest.r = color.r * srcAlpha + dest.r; // * invSrcAlpha;
-                        dest.g = color.g * srcAlpha + dest.g; // * invSrcAlpha;
-                        dest.b = color.b * srcAlpha + dest.b; // * invSrcAlpha;
-                        dest.a = srcAlpha + dest.a; // * invSrcAlpha;
+                        // Alpha blending: new_color = src * src_alpha + dest * (1 - src_alpha)
+                        dest.r = color.r * srcAlpha + dest.r * invSrcAlpha;
+                        dest.g = color.g * srcAlpha + dest.g * invSrcAlpha;
+                        dest.b = color.b * srcAlpha + dest.b * invSrcAlpha;
+                        dest.a = srcAlpha + dest.a * invSrcAlpha;
                         rgbaBuffer[index] = dest;
                     }
                 }
             }
         }
-        rgbData.resize(rgbaBuffer.size() * 3);
+        
+        // Convert to BGR bytes
+        bgrData.resize(rgbaBuffer.size() * 3);
         for (int i = 0; i < rgbaBuffer.size(); ++i) {
             const Vec4& color = rgbaBuffer[i];
             int bgrIndex = i * 3;
             
-            // Convert from [0,1] to [0,255] and store as RGB
-            // rgbData.push_back(color.r);
-            // rgbData.push_back(color.g);
-            // rgbData.push_back(color.b);
-            rgbData[bgrIndex + 2] = static_cast<unsigned char>(color.r * 255);
-            rgbData[bgrIndex + 1] = static_cast<unsigned char>(color.g * 255);
-            rgbData[bgrIndex + 0] = static_cast<unsigned char>(color.b * 255);
-                        
+            // Convert from [0,1] to [0,255] and store as BGR
+            bgrData[bgrIndex + 2] = static_cast<unsigned char>(color.r * 255);
+            bgrData[bgrIndex + 1] = static_cast<unsigned char>(color.g * 255);
+            bgrData[bgrIndex + 0] = static_cast<unsigned char>(color.b * 255);
         }
     }
 
     
     void getGridRegionAsRGBA(const Vec2& minCorner, const Vec2& maxCorner,
-                           int& width, int& height, std::vector<uint8_t>& rgbData) const {
+                           int& width, int& height, std::vector<uint8_t>& rgbaData) const {
         TIME_FUNCTION;
-        // std::cout << "excessdebug g2.483" << std::endl;
         // Calculate dimensions
         width = static_cast<int>(maxCorner.x - minCorner.x);
         height = static_cast<int>(maxCorner.y - minCorner.y);
         
         if (width <= 0 || height <= 0) {
             width = height = 0;
-            rgbData.clear();
-            rgbData.shrink_to_fit();
+            rgbaData.clear();
+            rgbaData.shrink_to_fit();
             return;
         }
-        // std::cout << "excessdebug g2.494" << std::endl;
         
-        // Initialize RGB data (3 bytes per pixel: R, G, B)
-        std::vector<Vec4> rgbaBuffer(width * height, Vec4(0.0f, 0.0f, 0.0f, 0.0f));
+        // Initialize RGBA data with default background color
+        std::vector<Vec4> rgbaBuffer(width * height, defaultBackgroundColor);
         
         // For each position in the grid, find the corresponding pixel
         for (const auto& [id, pos] : Positions) {
-            // std::cout << "excessdebug g2.501." << id << std::endl;
             size_t size = Sizes.at(id);
                 
             // Calculate pixel coordinates
@@ -659,40 +764,39 @@ public:
             pixelXM = std::min(width - 1, pixelXM);
             pixelYm = std::max(0, pixelYm);
             pixelYM = std::min(height - 1, pixelYM);
-            // std::cout << "excessdebug g2.514." << id << std::endl;
 
             // Ensure within bounds
             if (pixelXM >= minCorner.x && pixelXm < width && pixelYM >= minCorner.y && pixelYm < height) {
-                // std::cout << "excessdebug g2.518." << id << " - (" << pixelXm << "," << pixelYM << ")" << std::endl;
                 const Vec4& color = Colors.at(id);
                 float srcAlpha = color.a;
                 float invSrcAlpha = 1.0f - srcAlpha;
                 for (int py = pixelYm; py <= pixelYM; ++py){
                     for (int px = pixelXm; px <= pixelXM; ++px){
-                        // std::cout << "excessdebug g2.524." << id << " - (" << py << "," << px << ")" << std::endl;
                         int index = (py * width + px);
                         Vec4 dest = rgbaBuffer[index];
                         
-                        dest.r = color.r * srcAlpha + dest.r; // * invSrcAlpha;
-                        dest.g = color.g * srcAlpha + dest.g; // * invSrcAlpha;
-                        dest.b = color.b * srcAlpha + dest.b; // * invSrcAlpha;
-                        dest.a = srcAlpha + dest.a; // * invSrcAlpha;
+                        // Alpha blending: new_color = src * src_alpha + dest * (1 - src_alpha)
+                        dest.r = color.r * srcAlpha + dest.r * invSrcAlpha;
+                        dest.g = color.g * srcAlpha + dest.g * invSrcAlpha;
+                        dest.b = color.b * srcAlpha + dest.b * invSrcAlpha;
+                        dest.a = srcAlpha + dest.a * invSrcAlpha;
                         rgbaBuffer[index] = dest;
                     }
                 }
             }
         }
-        rgbData.resize(rgbaBuffer.size() * 4);
+        
+        // Convert to RGBA bytes
+        rgbaData.resize(rgbaBuffer.size() * 4);
         for (int i = 0; i < rgbaBuffer.size(); ++i) {
             const Vec4& color = rgbaBuffer[i];
-            int bgrIndex = i * 4;
+            int rgbaIndex = i * 4;
             
-            // Convert from [0,1] to [0,255] and store as RGB
-            rgbData[bgrIndex + 0] = static_cast<unsigned char>(color.r * 255);
-            rgbData[bgrIndex + 1] = static_cast<unsigned char>(color.g * 255);
-            rgbData[bgrIndex + 2] = static_cast<unsigned char>(color.b * 255);
-            rgbData[bgrIndex + 2] = static_cast<unsigned char>(color.a * 255);
-                        
+            // Convert from [0,1] to [0,255] and store as RGBA
+            rgbaData[rgbaIndex + 0] = static_cast<unsigned char>(color.r * 255);
+            rgbaData[rgbaIndex + 1] = static_cast<unsigned char>(color.g * 255);
+            rgbaData[rgbaIndex + 2] = static_cast<unsigned char>(color.b * 255);
+            rgbaData[rgbaIndex + 3] = static_cast<unsigned char>(color.a * 255);
         }
     }
     
@@ -724,11 +828,11 @@ public:
     frame getGridRegionAsFrameRGBA(const Vec2& minCorner, const Vec2& maxCorner) const {
         TIME_FUNCTION;
         int width, height;
-        std::vector<uint8_t> rgbData;
-        getGridRegionAsRGBA(minCorner, maxCorner, width, height, rgbData);
+        std::vector<uint8_t> rgbaData;
+        getGridRegionAsRGBA(minCorner, maxCorner, width, height, rgbaData);
         
-        frame resultFrame(width, height, frame::colormap::RGB);
-        resultFrame.setData(rgbData);
+        frame resultFrame(width, height, frame::colormap::RGBA);
+        resultFrame.setData(rgbaData);
         return resultFrame;
     }
 
@@ -837,6 +941,8 @@ public:
         Colors.rehash(0);
         Sizes.rehash(0);
         neighborMap.rehash(0);
+        // Reset to default background color
+        defaultBackgroundColor = Vec4(0.0f, 0.0f, 0.0f, 0.0f);
     }
 
     // neighbor map
