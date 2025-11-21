@@ -504,4 +504,43 @@ private:
 
 };
 
+
+std::ostream& operator<<(std::ostream& os, frame& f) {
+    os << "Frame[" << f.getWidth() << "x" << f.getHeight() << "] ";
+    
+    // Color format
+    os << "Format: ";
+    switch (f.colorFormat) {
+        case frame::colormap::RGB: os << "RGB"; break;
+        case frame::colormap::RGBA: os << "RGBA"; break;
+        case frame::colormap::BGR: os << "BGR"; break;
+        case frame::colormap::BGRA: os << "BGRA"; break;
+        case frame::colormap::B: os << "Grayscale"; break;
+        default: os << "Unknown"; break;
+    }
+    
+    // Compression info
+    os << " | Compression: " << f.getCompressionTypeString();
+    
+    // Size info
+    if (f.isCompressed()) {
+        os << " | " << f.getSourceSize() << "B -> " << f.getTotalCompressedSize() 
+        << "B (ratio: " << std::fixed << std::setprecision(2) << f.getCompressionRatio() << ":1)";
+    } else {
+        os << " | Size: " << f.getData().size() << "B";
+    }
+    
+    // Data status
+    os << " | Data: ";
+    if (!f.getData().empty()) {
+        os << "raw(" << f.getData().size() << " bytes)";
+    } else if (f.getCompressedDataSize() > 0) {
+        os << "compressed(" << f.getCompressedDataSize() << " words)";
+    } else {
+        os << "empty";
+    }
+    
+    return os;
+}
+
 #endif

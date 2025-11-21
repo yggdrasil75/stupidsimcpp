@@ -225,6 +225,9 @@ public:
 
     Grid2 noiseGenGrid(size_t minx,size_t miny, size_t maxx, size_t maxy
                        , float minChance = 0.1f, float maxChance = 1.0f, bool color = true) {
+        std::cout << "generating a noise grid with the following: (" << minx << ", " << miny 
+                << ") by (" << maxx << ", " << maxy << ") " << "chance: " << minChance 
+                << " max: " << maxChance << " gen colors: " << color << std::endl;
         std::vector<Vec2> poses;
         std::vector<Vec4> colors;
         std::vector<float> sizes;
@@ -233,6 +236,7 @@ public:
                 Vec2 pos = Vec2(x,y);
                 float alpha = noisegen.permute(Vec2(x,y));
                 if (alpha > minChance && alpha < maxChance) {
+                    std::cout << "generating at: " << pos.x << ", " << pos.y << ")" << std::endl;
                     if (color) {
                         float red = noisegen.permute(pos);
                         float green = noisegen.permute(pos);
@@ -585,7 +589,7 @@ public:
     // no return because it passes back a 1d vector of ints between 0 and 255 with a width and height
     //get region as rgb 
     void getGridRegionAsRGB(const Vec2& minCorner, const Vec2& maxCorner,
-                           int& width, int& height, std::vector<uint8_t>& rgbData) const {
+                       int& width, int& height, std::vector<uint8_t>& rgbData) const {
         TIME_FUNCTION;
         // Calculate dimensions
         width = static_cast<int>(maxCorner.x - minCorner.x);
@@ -605,13 +609,13 @@ public:
         //     for (int y = minCorner.y; x < maxCorner.y; y++){
         //         Vec2 pos = Vec2(x,y);
         //         size_t posID = getPositionVec(pos, 1.0f, false);
-
+        
         //     }
         // }
         // For each position in the grid, find the corresponding pixel
         for (const auto& [id, pos] : Positions) {
             size_t size = Sizes.at(id);
-                
+            
             // Calculate pixel coordinates
             int pixelXm = static_cast<int>(pos.x - size/2 - minCorner.x);
             int pixelXM = static_cast<int>(pos.x + size/2 - minCorner.x);
@@ -622,7 +626,7 @@ public:
             pixelXM = std::min(width - 1, pixelXM);
             pixelYm = std::max(0, pixelYm);
             pixelYM = std::min(height - 1, pixelYM);
-
+            
             // Ensure within bounds
             if (pixelXM >= minCorner.x && pixelXm < width && pixelYM >= minCorner.y && pixelYm < height) {
                 const Vec4& color = Colors.at(id);
@@ -632,7 +636,7 @@ public:
                     for (int px = pixelXm; px <= pixelXM; ++px){
                         int index = (py * width + px);
                         Vec4 dest = rgbaBuffer[index];
-                        
+                    
                         // Alpha blending: new_color = src * src_alpha + dest * (1 - src_alpha)
                         dest.r = color.r * srcAlpha + dest.r * invSrcAlpha;
                         dest.g = color.g * srcAlpha + dest.g * invSrcAlpha;

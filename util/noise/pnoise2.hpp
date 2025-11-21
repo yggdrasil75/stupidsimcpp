@@ -14,13 +14,16 @@ private:
     std::default_random_engine rng;
     float TR,TL,BR,BL;
 public:
-    PNoise2() {
-        permutation.reserve(256);
-        for (int i = 0; i < 256; i++){
-            permutation[i] = i;
+    PNoise2() : rng(std::random_device{}()){
+        //permutation.reserve(256);
+        std::vector<float> permutationt;
+        for (int i = 0; i < 255; i++){
+            //permutation[i] = i;
+            permutationt.push_back(i);
         }
-        std::ranges::shuffle(permutation, rng);
-        permutation.insert(permutation.end(),permutation.begin(),permutation.end());
+        std::ranges::shuffle(permutationt, rng);
+        permutation.insert(permutation.end(),permutationt.begin(),permutationt.end());
+        permutation.insert(permutation.end(),permutationt.begin(),permutationt.end());
     }
 
     float permute(Vec2 point) {

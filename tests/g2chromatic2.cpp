@@ -76,6 +76,7 @@ void Preview(Grid2& grid) {
     //std::vector<uint8_t> rgbData;
 
     frame rgbData = grid.getGridAsFrame(frame::colormap::RGB);
+    std::cout << "Frame looks like: " << rgbData << std::endl;
     bool success = BMPWriter::saveBMP("output/grayscalesource.bmp", rgbData);
     if (!success) {
         std::cout << "yo! this failed in Preview" << std::endl;
@@ -261,13 +262,13 @@ void mainLogic(const AnimationConfig& config, Shared& state, int gradnoise) {
             // Print compression info for this frame
             if (i % 10 == 0 ) {
                 frame bgrframe;
-                std::cout << "Processing frame " << i + 1 << "/" << config.totalFrames << std::endl;
+                //std::cout << "Processing frame " << i + 1 << "/" << config.totalFrames << std::endl;
                 bgrframe = grid.getGridAsFrame(frame::colormap::BGR);
                 frames.push_back(bgrframe);
                 //bgrframe.decompress();
                 //BMPWriter::saveBMP(std::format("output/grayscalesource.{}.bmp", i), bgrframe);
                 bgrframe.compressFrameLZ78();
-                bgrframe.printCompressionStats();
+                //bgrframe.printCompressionStats();
             }
         }
         exportavi(frames,config);
