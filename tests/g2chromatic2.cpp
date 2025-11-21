@@ -20,6 +20,7 @@
 #include <atomic>
 #include <future>
 #include <mutex>
+#include <chrono>
 
 std::mutex m;
 std::atomic<bool> isGenerating{false};
@@ -28,7 +29,15 @@ std::future<void> generationFuture;
 std::mutex previewMutex;
 std::atomic<bool> updatePreview{false};
 frame currentPreviewFrame;
-GLuint previewTexture = 0;
+GLuint textu = 0;
+std::string previewText;
+
+struct Shared {
+    std::mutex mutex;
+    Grid2 grid;
+    bool hasNewFrame = false;
+    int currentFrame = 0;
+};
 
 struct AnimationConfig {
     int width = 1024;
@@ -69,12 +78,22 @@ void Preview(Grid2& grid) {
     }
 }
 
-void livePreview(GLFWwindow* window, Grid2& grid) {
-    // frame Frame = grid.getGridAsFrame(frame::colormap::RGB);
-    // int image_width = Frame.getWidth();
-    // int image_height = Frame.getHeight();
-    // auto data = reinterpret_cast<char*>(Frame.getData());
-    // uint8_t* image_data = stbi_load_from_memory((const unsigned char*)data, (int)data.size(), &image_width, &image_height, 3, 4);
+void livePreview(const Grid2& grid) {
+    std::lock_guard<std::mutex> lock(previewMutex);
+    
+    currentPreviewFrame = grid.getGridAsFrame(frame::colormap::RGBA);
+
+    glGenTextures(1, &textu);
+    glBindTexture(GL_TEXTURE_2D, textu);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    
+    glBindTexture(GL_TEXTURE_2D, textu);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, currentPreviewFrame.getWidth(), currentPreviewFrame.getHeight(), 
+                 0, GL_RGBA, GL_UNSIGNED_BYTE, currentPreviewFrame.getData().data());
+    
+    updatePreview = true;
 }
 
 std::vector<std::tuple<size_t, Vec2, Vec4>> pickSeeds(Grid2 grid, AnimationConfig config) {
@@ -201,10 +220,16 @@ bool exportavi(std::vector<frame> frames, AnimationConfig config) {
     return success;
 }
 
-void mainLogic(const AnimationConfig& config, Grid2& grid) {
+void mainLogic(const AnimationConfig& config, Shared& state) {
     isGenerating = true;
     try {
-        grid = setup(config);
+        Grid2 grid = setup(config);
+        {
+            std:: lock_guard<std::mutex> lock(state.mutex);
+            state.grid = grid;
+            state.hasNewFrame = true;
+            state.currentFrame = 0;
+        }
         Preview(grid);
         std::vector<std::tuple<size_t, Vec2, Vec4>> seeds = pickSeeds(grid, config);
         std::vector<frame> frames;
@@ -218,16 +243,21 @@ void mainLogic(const AnimationConfig& config, Grid2& grid) {
             
             expandPixel(grid,config,seeds);
             
+            std::lock_guard<std::mutex> lock(state.mutex);
+            state.grid = grid;
+            state.hasNewFrame = true;
+            state.currentFrame = i;
+
             // Print compression info for this frame
             if (i % 10 == 0 ) {
                 frame bgrframe;
                 std::cout << "Processing frame " << i + 1 << "/" << config.totalFrames << std::endl;
                 bgrframe = grid.getGridAsFrame(frame::colormap::BGR);
-                bgrframe.printCompressionStats();
                 frames.push_back(bgrframe);
                 //bgrframe.decompress();
                 //BMPWriter::saveBMP(std::format("output/grayscalesource.{}.bmp", i), bgrframe);
                 bgrframe.compressFrameLZ78();
+                bgrframe.printCompressionStats();
             }
         }
         exportavi(frames,config);
@@ -296,7 +326,7 @@ int main() {
     //ImGui::SetNextWindowSize(ImVec2(1110,667));
     //auto beg = ImGui::Begin("Gradient thing", &window);
     //if (beg) {
-    std::cout << "stuff breaks at 223" << std::endl;
+    // std::cout << "stuff breaks at 223" << std::endl;
     bool application_not_closed = true;
     //float main_scale = ImGui_ImplGlfw_GetContentScaleForMonitor(glfwGetPrimaryMonitor());
     GLFWwindow* window = glfwCreateWindow((int)(1280), (int)(800), "Chromatic gradient generator thing", nullptr, nullptr);
@@ -306,7 +336,7 @@ int main() {
     glfwSwapInterval(1);
     //IMGUI_CHECKVERSION(); //this might be more important than I realize. but cant run with it so currently ignoring. 
     ImGui::CreateContext();
-    std::cout << "context created" << std::endl;
+    // std::cout << "context created" << std::endl;
     ImGuiIO& io = ImGui::GetIO(); (void)io;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
     ImGui::StyleColorsDark();
@@ -322,7 +352,7 @@ int main() {
         ImGui_ImplOpenGL3_Init(glsl_version);
 
 
-    std::cout << "created glfw window" << std::endl;
+    // std::cout << "created glfw window" << std::endl;
 
 
     // Our state
@@ -336,7 +366,10 @@ int main() {
     static int i4 = 8;
 
     std::future<void> mainlogicthread;
+    Shared state;
     Grid2 grid;
+    AnimationConfig config;
+    previewText = "Please generate";
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
 
@@ -354,94 +387,90 @@ int main() {
             ImGui::SliderInt("framecount", &i3, 10, 5000);
             ImGui::SliderInt("numSeeds", &i4, 0, 10);
 
-            // Disable button while generating
             if (isGenerating) {
                 ImGui::BeginDisabled();
             }
             
             if (ImGui::Button("Generate Animation")) {
-                AnimationConfig config = AnimationConfig(i1, i2, i3, f, i4);
-                mainlogicthread = std::async(std::launch::async, mainLogic, config, std::ref(grid));
+                config = AnimationConfig(i1, i2, i3, f, i4);
+                mainlogicthread = std::async(std::launch::async, mainLogic, config, std::ref(state));
             }
             
             if (isGenerating) {
                 ImGui::EndDisabled();
                 
-                // Show cancel button and progress indicator
                 ImGui::SameLine();
                 if (ImGui::Button("Cancel")) {
                     cancelGeneration();
                 }
                 
-                // Optional: Show a progress indicator
-                ImGui::Text("Generating...");
+                // Check for new frames from the generation thread
+                bool hasNewFrame = false;
+                {
+                    std::lock_guard<std::mutex> lock(state.mutex);
+                    if (state.hasNewFrame) {
+                        livePreview(state.grid);
+                        state.hasNewFrame = false;
+                        previewText = "Generating... Frame: " + std::to_string(state.currentFrame);
+                    }
+                }
+                
+                ImGui::Text(previewText.c_str());
+                
+                if (textu != 0) {
+                    ImVec2 imageSize = ImVec2(config.width * 0.3f, config.height * 0.3f); // Scale down for preview
+                    ImVec2 uv_min = ImVec2(0.0f, 0.0f);
+                    ImVec2 uv_max = ImVec2(1.0f, 1.0f);
+                    ImGui::Image((void*)(intptr_t)textu, imageSize, uv_min, uv_max);
+                } else {
+                    ImGui::Text("Generating preview...");
+                }
+                
+            } else {
+                ImGui::Text("No preview available");
+                ImGui::Text("Start generation to see live preview");
             }
-            //ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / io.Framerate, io.Framerate); // is this broken or is it just cause I have no refresh buffer in this loop?
+            //std::cout << "sleeping" << std::endl;
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            //std::cout << "ending" << std::endl;
             ImGui::End();
         }
 
-        // ImGui::NewFrame();
-        // {
-        //     ImGui::Begin("Live Preview");
-            
-        //     if (previewTexture != 0) {
-        //         // Get available space
-        //         ImVec2 availableSize = ImGui::GetContentRegionAvail();
-                
-        //         // Maintain aspect ratio (assuming square or config width/height)
-        //         float aspectRatio = static_cast<float>(currentPreviewFrame.getWidth()) / 
-        //                         static_cast<float>(currentPreviewFrame.getHeight());
-                
-        //         ImVec2 imageSize;
-        //         if (availableSize.x / aspectRatio <= availableSize.y) {
-        //             imageSize.x = availableSize.x;
-        //             imageSize.y = availableSize.x / aspectRatio;
-        //         } else {
-        //             imageSize.y = availableSize.y;
-        //             imageSize.x = availableSize.y * aspectRatio;
-        //         }
-                
-        //         ImGui::Image((ImTextureID)(intptr_t)previewTexture, imageSize);
-                
-        //         ImGui::Text("Frame: %dx%d", currentPreviewFrame.getWidth(), currentPreviewFrame.getHeight());
-        //         if (isGenerating) {
-        //             ImGui::TextColored(ImVec4(0, 1, 0, 1), "Generating...");
-        //         } else {
-        //             ImGui::Text("Ready");
-        //         }
-        //     } else {
-        //         ImGui::Text("No preview available");
-        //         ImGui::Text("Start generation to see live preview");
-        //     }
-            
-        //     ImGui::End();
-        // }
-
-
+        
+        // std::cout << "ending frame" << std::endl;
         ImGui::Render();
         int display_w, display_h;
         glfwGetFramebufferSize(window, &display_w, &display_h);
         glViewport(0, 0, display_w, display_h);
         glClearColor(clear_color.x * clear_color.w, clear_color.y * clear_color.w, clear_color.z * clear_color.w, clear_color.w);
         glClear(GL_COLOR_BUFFER_BIT);
+        
+        // std::cout << "rendering" << std::endl;
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
         glfwSwapBuffers(window);
         //mainlogicthread.join();
+        
+        // std::cout << "swapping buffers" << std::endl;
     }
     cancelGeneration();
 
+    
+    // std::cout << "shutting down" << std::endl;
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
 
+    // std::cout << "destroying" << std::endl;
     glfwDestroyWindow(window);
-    if (previewTexture != 0) {
-        glDeleteTextures(1, &previewTexture);
-        previewTexture = 0;
+    if (textu != 0) {
+        glDeleteTextures(1, &textu);
+        textu = 0;
     }
     glfwTerminate();
     FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
+    
+    // std::cout << "printing" << std::endl;
     return 0;
 }
 //I need this: https://raais.github.io/ImStudio/
