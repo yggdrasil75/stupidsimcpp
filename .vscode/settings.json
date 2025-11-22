@@ -93,7 +93,10 @@
         "stack": "cpp",
         "future": "cpp",
         "coroutine": "cpp",
-        "resumable": "cpp"
+        "resumable": "cpp",
+        "set": "cpp",
+        "shared_mutex": "cpp",
+        "cfenv": "cpp"
     },
     "files.exclude": {
         "**/*.rpyc": true,

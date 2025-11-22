@@ -49,6 +49,7 @@ struct AnimationConfig {
     int totalFrames = 480;
     float fps = 30.0f;
     int numSeeds = 8;
+    int noisemod = 42;
 };
 
 Grid2 setup(AnimationConfig config) {
@@ -232,7 +233,7 @@ void mainLogic(const AnimationConfig& config, Shared& state, int gradnoise) {
         if (gradnoise == 0) {
             grid = setup(config);
         } else if (gradnoise == 1) {
-            grid = grid.noiseGenGrid(0,0,config.height, config.width);
+            grid = grid.noiseGenGrid(0,0,config.height, config.width, 0.01, 1.0, true, config.noisemod);
         }
         grid.setDefault(Vec4(0,0,0,0));
         {
@@ -241,7 +242,9 @@ void mainLogic(const AnimationConfig& config, Shared& state, int gradnoise) {
             state.hasNewFrame = true;
             state.currentFrame = 0;
         }
+        std::cout << "generated grid" << std::endl;
         Preview(grid);
+        std::cout << "generated preview" << std::endl;
         std::vector<std::tuple<size_t, Vec2, Vec4>> seeds = pickSeeds(grid, config);
         std::vector<frame> frames;
 
@@ -262,7 +265,7 @@ void mainLogic(const AnimationConfig& config, Shared& state, int gradnoise) {
             // Print compression info for this frame
             if (i % 10 == 0 ) {
                 frame bgrframe;
-                //std::cout << "Processing frame " << i + 1 << "/" << config.totalFrames << std::endl;
+                std::cout << "Processing frame " << i + 1 << "/" << config.totalFrames << std::endl;
                 bgrframe = grid.getGridAsFrame(frame::colormap::BGR);
                 frames.push_back(bgrframe);
                 //bgrframe.decompress();
@@ -375,6 +378,7 @@ int main() {
     static int i2 = 1024;
     static int i3 = 480;
     static int i4 = 8;
+    static int noisemod = 42;
     static float fs = 1.0;
 
     std::future<void> mainlogicthread;
@@ -397,9 +401,10 @@ int main() {
             ImGui::SliderFloat("fps", &f, 20.0f, 60.0f);
             ImGui::SliderInt("width", &i1, 256, 4096);
             ImGui::SliderInt("height", &i2, 256, 4096);
-            ImGui::SliderInt("framecount", &i3, 10, 5000);
-            ImGui::SliderInt("numSeeds", &i4, 0, 10);
-            ImGui::SliderFloat("ScalePreview", &fs, 0.0, 2.0);
+            ImGui::SliderInt("frame count", &i3, 10, 5000);
+            ImGui::SliderInt("number of Seeds", &i4, 0, 10);
+            ImGui::SliderInt("Noise Mod", &noisemod, 0, 1000);
+            ImGui::SliderFloat("Scale Preview", &fs, 0.0, 2.0);
             ImGui::RadioButton("Gradient", &gradnoise, 0);
             ImGui::RadioButton("Perlin Noise", &gradnoise, 1);
 
@@ -408,7 +413,7 @@ int main() {
             }
             
             if (ImGui::Button("Generate Animation")) {
-                config = AnimationConfig(i1, i2, i3, f, i4);
+                config = AnimationConfig(i1, i2, i3, f, i4, noisemod);
                 mainlogicthread = std::async(std::launch::async, mainLogic, config, std::ref(state), gradnoise);
             }
 

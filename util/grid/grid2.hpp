@@ -3,12 +3,15 @@
 
 #include <unordered_map>
 #include "../vectorlogic/vec2.hpp"
+#include "../vectorlogic/vec3.hpp"
 #include "../vectorlogic/vec4.hpp"
 #include "../timing_decorator.hpp"
 #include "../output/frame.hpp"
 #include "../noise/pnoise2.hpp"
 #include <vector>
 #include <unordered_set>
+
+const float EPSILON = 0.0000000000000000000000001;
 
 class reverselookupassistantclasscausecppisdumb {
 private:
@@ -223,8 +226,9 @@ public:
         return it;
     }
 
-    Grid2 noiseGenGrid(size_t minx,size_t miny, size_t maxx, size_t maxy
-                       , float minChance = 0.1f, float maxChance = 1.0f, bool color = true) {
+    Grid2 noiseGenGrid(size_t minx,size_t miny, size_t maxx, size_t maxy, float minChance = 0.1f
+                        , float maxChance = 1.0f, bool color = true, int noisemod = 42) {
+        TIME_FUNCTION;
         std::cout << "generating a noise grid with the following: (" << minx << ", " << miny 
                 << ") by (" << maxx << ", " << maxy << ") " << "chance: " << minChance 
                 << " max: " << maxChance << " gen colors: " << color << std::endl;
@@ -233,21 +237,24 @@ public:
         std::vector<float> sizes;
         for (int x = minx; x < maxx; x++) {
             for (int y = miny; y < maxy; y++) {
-                Vec2 pos = Vec2(x,y);
-                float alpha = noisegen.permute(Vec2(x,y));
+                float nx = (x+noisemod)/(maxx+EPSILON)/0.1;
+                float ny = (y+noisemod)/(maxy+EPSILON)/0.1;
+                Vec2 pos = Vec2(nx,ny);
+                float alpha = noisegen.permute(pos);
                 if (alpha > minChance && alpha < maxChance) {
-                    std::cout << "generating at: " << pos.x << ", " << pos.y << ")" << std::endl;
                     if (color) {
-                        float red = noisegen.permute(pos);
-                        float green = noisegen.permute(pos);
-                        float blue = noisegen.permute(pos);
-                        Vec4 newc = Vec4(red,green,blue,alpha);
+                        // float red = noisegen.noise(x,y,1000);
+                        // float green = noisegen.noise(x,y,2000);
+                        // float blue = noisegen.noise(x,y,3000);
+                        float red = noisegen.permute(Vec2(nx*0.3,ny*0.3));
+                        float green = noisegen.permute(Vec2(nx*0.6,ny*.06));
+                        float blue = noisegen.permute(Vec2(nx*0.9,ny*0.9));
+                        Vec4 newc = Vec4(red,green,blue,1.0);
                         colors.push_back(newc);
-                        poses.push_back(pos);
+                        poses.push_back(Vec2(x,y));
                         sizes.push_back(1.0f);
-                    }
-                    else {
-                        Vec4 newc = Vec4(alpha,alpha,alpha,alpha);
+                    } else {
+                        Vec4 newc = Vec4(alpha,alpha,alpha,1.0);
                         colors.push_back(newc);
                         poses.push_back(pos);
                         sizes.push_back(1.0f);
@@ -255,6 +262,7 @@ public:
                 }
             }
         }
+        std::cout << "noise generated" << std::endl;
         bulkAddObjects(poses,colors,sizes);
         return *this;
     }
@@ -558,19 +566,22 @@ public:
         }
         
         // Batch insertion
-        //#pragma omp parallel for
+        std::vector<size_t> newids;
         for (size_t i = 0; i < poses.size(); ++i) {
             size_t id = Positions.set(poses[i]);
             Colors[id] = colors[i];
             Sizes[id] = sizes[i];
             spatialGrid.insert(id,poses[i]);
+            newids.push_back(id);
         }
         
         shrinkIfNeeded();
+        std::cout << "shrunk. " << std::endl;
         updateNeighborMap();
+        std::cout << "neighbormap updated. " << std::endl;
         
         usable = true;
-        return getAllIDs();
+        return newids;
     }
 
     //get all ids
@@ -955,7 +966,7 @@ public:
         neighborMap.clear();
         
         // For each object, find nearby neighbors
-        //#pragma omp parallel for
+        #pragma omp parallel for
         for (const auto& [id1, pos1] : Positions) {
             std::vector<size_t> neighbors;
             float radiusSq = neighborRadius * neighborRadius;
