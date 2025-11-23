@@ -8,6 +8,7 @@
 #include "../timing_decorator.hpp"
 #include "../output/frame.hpp"
 #include "../noise/pnoise2.hpp"
+#include "../simblocks/water.hpp"
 #include <vector>
 #include <unordered_set>
 
@@ -203,6 +204,10 @@ protected:
     Vec4 defaultBackgroundColor = Vec4(0.0f, 0.0f, 0.0f, 0.0f);
 
     PNoise2 noisegen;
+
+
+    //water
+    std::unordered_map<size_t, WaterParticle> water;
 public:
     bool usable = false;
     

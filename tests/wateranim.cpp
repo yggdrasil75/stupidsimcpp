@@ -48,27 +48,8 @@ struct AnimationConfig {
     int height = 1024;
     int totalFrames = 480;
     float fps = 30.0f;
-    int numSeeds = 8;
     int noisemod = 42;
 };
-
-Grid2 setup(AnimationConfig config) {
-    TIME_FUNCTION;
-    Grid2 grid;
-    std::vector<Vec2> pos;
-    std::vector<Vec4> colors;
-    std::vector<float> sizes;
-    for (int y = 0; y < config.height; ++y) {
-        for (int x = 0; x < config.width; ++x) {
-            float gradient = (x + y) / float(config.width + config.height - 2);
-            pos.push_back(Vec2(x,y));
-            colors.push_back(Vec4(gradient, gradient, gradient, 1.0f));
-            sizes.push_back(1.0f);
-        }
-    }
-    grid.bulkAddObjects(pos,colors,sizes);
-    return grid;
-}
 
 void Preview(Grid2& grid) {
     TIME_FUNCTION;
@@ -102,76 +83,10 @@ void livePreview(const Grid2& grid) {
     updatePreview = true;
 }
 
-std::vector<std::tuple<size_t, Vec2, Vec4>> pickSeeds(Grid2 grid, AnimationConfig config) {
-    TIME_FUNCTION;
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<> xDist(0, config.width - 1);
-    std::uniform_int_distribution<> yDist(0, config.height - 1);
-    std::uniform_real_distribution<> colorDist(0.2f, 0.8f);
-
-    std::vector<std::tuple<size_t, Vec2, Vec4>> seeds;
-
-    for (int i = 0; i < config.numSeeds; ++i) {
-        Vec2 point(xDist(gen), yDist(gen));
-        Vec4 color(colorDist(gen), colorDist(gen), colorDist(gen), 255);
-        size_t id = grid.getOrCreatePositionVec(point, 0.0, true);
-        grid.setColor(id, color);
-        seeds.push_back(std::make_tuple(id,point, color));
-    }
-    return seeds;
+void flowWater(Grid2& grid, AnimationConfig config) {
+    
 }
 
-void expandPixel(Grid2& grid, AnimationConfig config, std::vector<std::tuple<size_t, Vec2, Vec4>>& seeds) {
-    TIME_FUNCTION;
-    std::vector<std::tuple<size_t, Vec2, Vec4>> newseeds; 
-
-    std::unordered_set<size_t> visitedThisFrame; 
-    for (const auto& seed : seeds) {
-        visitedThisFrame.insert(std::get<0>(seed));
-    }
-
-    //#pragma omp parallel for
-    for (const std::tuple<size_t, Vec2, Vec4>& seed : seeds) {
-        size_t id = std::get<0>(seed);
-        Vec2 seedPOS = std::get<1>(seed);
-        Vec4 seedColor = std::get<2>(seed);
-        std::vector<size_t> neighbors = grid.getNeighbors(id);
-        //grid.setSize(id, grid.getSize(id)+4);
-        for (size_t neighbor : neighbors) {
-            if (visitedThisFrame.count(neighbor)) {
-                continue;
-            }
-            visitedThisFrame.insert(neighbor);
-
-            Vec2 neipos = grid.getPositionID(neighbor);
-            Vec4 neighborColor = grid.getColor(neighbor);
-            float distance = seedPOS.distance(neipos);
-            float angle = seedPOS.directionTo(neipos);
-
-            float normalizedAngle = (angle + M_PI) / (2.0f * M_PI);
-            float blendFactor = 0.3f + 0.4f * std::sin(normalizedAngle * 2.0f * M_PI);
-            blendFactor = std::clamp(blendFactor, 0.1f, 0.9f);
-            
-            Vec4 newcolor = Vec4(
-                seedColor.r * blendFactor + neighborColor.r * (1.0f - blendFactor),
-                seedColor.g * (1.0f - blendFactor) + neighborColor.g * blendFactor,
-                seedColor.b * (0.5f + 0.5f * std::sin(normalizedAngle * 4.0f * M_PI)),
-                1.0f
-            );
-            
-            newcolor = newcolor.clamp(0.0f, 1.0f);
-
-            grid.setColor(neighbor, newcolor);
-            newseeds.emplace_back(neighbor, neipos, newcolor);
-        }
-    }
-    seeds.clear();
-    seeds.shrink_to_fit();
-    seeds = std::move(newseeds);
-}
-
-//bool exportavi(std::vector<std::vector<uint8_t>> frames, AnimationConfig config) {
 bool exportavi(std::vector<frame> frames, AnimationConfig config) {
     TIME_FUNCTION;
     std::string filename = "output/chromatic_transformation.avi";
@@ -190,17 +105,7 @@ bool exportavi(std::vector<frame> frames, AnimationConfig config) {
     
     double overallRatio = static_cast<double>(totalOriginalSize) / totalCompressedSize;
     double overallSavings = (1.0 - 1.0/overallRatio) * 100.0;
-    
-    std::cout << "\n=== Overall Compression Summary ===" << std::endl;
-    std::cout << "Total frames: " << frames.size() << std::endl;
-    std::cout << "Compressed frames: " << frames.size() << std::endl;
-    std::cout << "Total original size: " << totalOriginalSize << " bytes (" 
-                << std::fixed << std::setprecision(2) << (totalOriginalSize / (1024.0 * 1024.0)) << " MB)" << std::endl;
-    std::cout << "Total compressed size: " << totalCompressedSize << " bytes (" 
-                << std::fixed << std::setprecision(2) << (totalCompressedSize / (1024.0 * 1024.0)) << " MB)" << std::endl;
-    std::cout << "Overall compression ratio: " << std::fixed << std::setprecision(2) << overallRatio << ":1" << std::endl;
-    std::cout << "Overall space savings: " << std::fixed << std::setprecision(1) << overallSavings << "%" << std::endl;
-    
+        
     std::filesystem::path dir = "output";
     if (!std::filesystem::exists(dir)) {
         if (!std::filesystem::create_directories(dir)) {
@@ -211,15 +116,7 @@ bool exportavi(std::vector<frame> frames, AnimationConfig config) {
     
     bool success = AVIWriter::saveAVIFromCompressedFrames(filename, frames, frames[0].getWidth(), frames[0].getHeight(), config.fps);
     
-    if (success) {
-        // Check if file actually exists
-        if (std::filesystem::exists(filename)) {
-            auto file_size = std::filesystem::file_size(filename);
-            std::cout << "\nAVI file created successfully: " << filename 
-                      << " (" << file_size << " bytes, " 
-                      << std::fixed << std::setprecision(2) << (file_size / (1024.0 * 1024.0)) << " MB)" << std::endl;
-        } 
-    } else {
+    if (!success) {
         std::cout << "Failed to save AVI file!" << std::endl;
     }
     
@@ -231,10 +128,8 @@ void mainLogic(const AnimationConfig& config, Shared& state, int gradnoise) {
     isGenerating = true;
     try {
         Grid2 grid;
-        if (gradnoise == 0) {
-            grid = setup(config);
-        } else if (gradnoise == 1) {
-            grid = grid.noiseGenGrid(0,0,config.height, config.width, 0.01, 1.0, true, config.noisemod);
+        if (gradnoise == 1) {
+            grid = grid.noiseGenGrid(0,0,config.height, config.width, 0.0, 1.0, false, config.noisemod);
         }
         grid.setDefault(Vec4(0,0,0,0));
         {
@@ -246,7 +141,6 @@ void mainLogic(const AnimationConfig& config, Shared& state, int gradnoise) {
         std::cout << "generated grid" << std::endl;
         Preview(grid);
         std::cout << "generated preview" << std::endl;
-        std::vector<std::tuple<size_t, Vec2, Vec4>> seeds = pickSeeds(grid, config);
         std::vector<frame> frames;
 
         for (int i = 0; i < config.totalFrames; ++i){
@@ -256,7 +150,7 @@ void mainLogic(const AnimationConfig& config, Shared& state, int gradnoise) {
                 return;
             }
             
-            expandPixel(grid,config,seeds);
+            flowWater(grid,config);
             
             std::lock_guard<std::mutex> lock(state.mutex);
             state.grid = grid;
@@ -377,7 +271,6 @@ int main() {
     static int i1 = 1024;
     static int i2 = 1024;
     static int i3 = 480;
-    static int i4 = 8;
     static int noisemod = 42;
     static float fs = 1.0;
 
@@ -402,7 +295,6 @@ int main() {
             ImGui::SliderInt("width", &i1, 256, 4096);
             ImGui::SliderInt("height", &i2, 256, 4096);
             ImGui::SliderInt("frame count", &i3, 10, 5000);
-            ImGui::SliderInt("number of Seeds", &i4, 0, 10);
             ImGui::SliderInt("Noise Mod", &noisemod, 0, 1000);
             ImGui::SliderFloat("Scale Preview", &fs, 0.0, 2.0);
             ImGui::RadioButton("Gradient", &gradnoise, 0);
@@ -413,7 +305,7 @@ int main() {
             }
             
             if (ImGui::Button("Generate Animation")) {
-                config = AnimationConfig(i1, i2, i3, f, i4, noisemod);
+                config = AnimationConfig(i1, i2, i3, f, noisemod);
                 mainlogicthread = std::async(std::launch::async, mainLogic, config, std::ref(state), gradnoise);
             }
 
