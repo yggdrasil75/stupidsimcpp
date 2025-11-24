@@ -290,10 +290,10 @@ class Vec2 {
     };
 };
 
-// inline std::ostream& operator<<(std::ostream& os, const Vec2& vec) {
-//     os << vec.toString();
-//     return os;
-// }
+inline std::ostream& operator<<(std::ostream& os, const Vec2& vec) {
+    os << vec.toString();
+    return os;
+}
 
 namespace std {
     template<>

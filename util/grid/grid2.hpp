@@ -9,6 +9,7 @@
 #include "../output/frame.hpp"
 #include "../noise/pnoise2.hpp"
 #include "../simblocks/water.hpp"
+#include "../simblocks/temp.hpp"
 #include <vector>
 #include <unordered_set>
 
@@ -145,6 +146,15 @@ public:
         }
     }
     
+    std::unordered_set<size_t> find(const Vec2& center) const {
+        //Vec2 g2pos = worldToGrid(center);
+        auto cellIt = grid.find(worldToGrid(center));
+        if (cellIt != grid.end()) {
+            return cellIt->second;
+        }
+        return std::unordered_set<size_t>();
+    }
+
     std::vector<size_t> queryRange(const Vec2& center, float radius) const {
         std::vector<size_t> results;
         float radiusSq = radius * radius;
@@ -153,16 +163,15 @@ public:
         Vec2 minGrid = worldToGrid(center - Vec2(radius, radius));
         Vec2 maxGrid = worldToGrid(center + Vec2(radius, radius));
         
+        size_t estimatedSize = (maxGrid.x - minGrid.x + 1) * (maxGrid.y - minGrid.y + 1) * 10;
+        results.reserve(estimatedSize);
+
         // Check all relevant grid cells
-        //#pragma omp parallel for
         for (int x = minGrid.x; x <= maxGrid.x; ++x) {
             for (int y = minGrid.y; y <= maxGrid.y; ++y) {
-                Vec2 gridPos(x, y);
-                auto cellIt = grid.find(gridPos);
+                auto cellIt = grid.find(Vec2(x, y));
                 if (cellIt != grid.end()) {
-                    for (size_t id : cellIt->second) {
-                        results.push_back(id);
-                    }
+                    results.insert(results.end(), cellIt->second.begin(), cellIt->second.end());
                 }
             }
         }
@@ -198,7 +207,8 @@ protected:
     
     //TODO: spatial map
     SpatialGrid spatialGrid;
-    float spatialCellSize = 2.0f;
+    //float spatialCellSize = 2.0f;
+    float spatialCellSize = neighborRadius * 1.5f;
 
     // Default background color for empty spaces
     Vec4 defaultBackgroundColor = Vec4(0.0f, 0.0f, 0.0f, 0.0f);
@@ -208,6 +218,9 @@ protected:
 
     //water
     std::unordered_map<size_t, WaterParticle> water;
+
+    std::unordered_map<size_t, Temp> tempMap;
+    bool updatingView = false;
 public:
     bool usable = false;
     
@@ -550,7 +563,7 @@ public:
             
             Colors[id] = color;
             Sizes[id] = size;
-            spatialGrid.insert(id,pos);
+            //spatialGrid.insert(id,pos);
         }
         
         shrinkIfNeeded();
@@ -581,9 +594,7 @@ public:
         }
         
         shrinkIfNeeded();
-        std::cout << "shrunk. " << std::endl;
         updateNeighborMap();
-        std::cout << "neighbormap updated. " << std::endl;
         
         usable = true;
         return newids;
@@ -965,27 +976,49 @@ public:
         defaultBackgroundColor = Vec4(0.0f, 0.0f, 0.0f, 0.0f);
     }
 
-    // neighbor map
+    void optimizeSpatialGrid() {
+        //std::cout << "optimizeSpatialGrid()" << std::endl;
+        neighborRadius = 1.0;
+        spatialCellSize = neighborRadius * neighborRadius;
+        spatialGrid = SpatialGrid(spatialCellSize);
+        
+        // Rebuild spatial grid
+        spatialGrid.clear();
+        for (const auto& [id, pos] : Positions) {
+            spatialGrid.insert(id, pos);
+        }
+    }
+
     void updateNeighborMap() {
+        //std::cout << "updateNeighborMap()" << std::endl;
         TIME_FUNCTION;
         neighborMap.clear();
+        optimizeSpatialGrid();
         
         // For each object, find nearby neighbors
+        float radiusSq = neighborRadius * neighborRadius;
         #pragma omp parallel for
         for (const auto& [id1, pos1] : Positions) {
             std::vector<size_t> neighbors;
-            float radiusSq = neighborRadius * neighborRadius;
-            auto candidate_ids = spatialGrid.queryRange(pos1, neighborRadius);
+            //std::vector<size_t> candidate_ids = spatialGrid.queryRange(pos1, neighborRadius);
+            std::unordered_set<size_t> candidate_idset = spatialGrid.find(pos1);
+            std::vector<size_t> candidate_ids;
+            candidate_ids.reserve(candidate_idset.size());
+            for (auto it = candidate_idset.begin(); it != candidate_idset.end();) {
+                candidate_ids.push_back(std::move(candidate_idset.extract(it++).value()));
+            }
+            
             
             for (size_t id2 : candidate_ids) {
-                if (id1 != id2 && Positions.at(id1).distanceSquared(Positions.at(id2)) <= radiusSq) {
+                if (id1 != id2) { // && Positions.at(id1).distanceSquared(Positions.at(id2)) <= radiusSq) {
                     neighbors.push_back(id2);
                 }
             }
+            #pragma omp critical
             neighborMap[id1] = std::move(neighbors);
         }
     }
-    
+
     // Update neighbor map for a single object
     void updateNeighborForID(size_t id) {
         TIME_FUNCTION;
@@ -1015,6 +1048,97 @@ public:
         updateNeighborMap(); // Recompute all neighbors
     }
     
+
+    //temp stuff
+    void setTemp(const Vec2 pos, double temp) {
+        size_t id = getOrCreatePositionVec(pos, 0.0, true);
+        setTemp(id, temp);
+    }
+
+    void setTemp(size_t id, double temp) {
+        Temp tval = Temp(temp);
+        tempMap[id] = tval;
+    }
+    
+    double getTemp(size_t id) {
+        if (tempMap.find(id) != tempMap.end()) {
+            Temp temp;
+            double dtemp = temp.calTempIDW(getPositionID(id), getTemps());
+            setTemp(id, dtemp);
+        }
+        return tempMap.at(id).temp;
+    }
+
+    std::unordered_map<Vec2, Temp> getTemps() {
+        std::unordered_map<Vec2, Temp> out;
+        for (const auto& [id, temp] : tempMap) {
+            out[getPositionID(id)] = temp;
+        }
+        return out;
+    }
+
+    double getTemp(const Vec2 pos) {
+        size_t id = getOrCreatePositionVec(pos, 0.0f, true);
+        if (tempMap.find(id) == tempMap.end()) {
+            Temp temp;
+            double dtemp = temp.calTempIDW(pos, getTemps());
+            setTemp(id, dtemp);
+            return dtemp;
+        }
+        else return tempMap.at(id).temp;
+    }
+
+    frame getTempAsFrame(Vec2 minCorner, Vec2 maxCorner, Vec2 res)  {
+        TIME_FUNCTION;
+        if (updatingView) return frame();
+        updatingView = true;
+        int pcount = 0;
+        std::cout << "getTempAsFrame() started" << pcount++ << std::endl;
+        size_t sheight = maxCorner.x - minCorner.x;
+        size_t swidth = maxCorner.y - minCorner.y;
+        // std::cout << "getTempAsFrame() started" << pcount++ << std::endl;
+
+        int width = static_cast<int>(res.x);
+        int height = static_cast<int>(res.y);
+        // std::cout << "getTempAsFrame() started" << pcount++ << std::endl;
+        std::unordered_map<Vec2, double> tempBuffer;
+        tempBuffer.reserve(res.x * res.y);
+        // std::cout << "getTempAsFrame() started" << pcount++ << std::endl;
+        double maxTemp = 0.0;
+        double minTemp = 0.0;
+        // std::cout << "getTempAsFrame() started" << pcount++ << std::endl;
+        for (int x = 0; x < res.x; x++) {
+            for (int y = 0; y < res.y; y++) {
+                Vec2 cposout = Vec2(x,y);
+                Vec2 cposin = Vec2(x/sheight, y/swidth);
+                // std::cout << "getTempAsFrame() started" << pcount++ << std::endl;
+                double ctemp = getTemp(cposin);
+                
+                tempBuffer[Vec2(x,y)] = ctemp;
+                // std::cout << "getTempAsFrame() started" << pcount++ << std::endl;
+                if (ctemp > maxTemp) maxTemp = ctemp;
+                else if (ctemp < minTemp) minTemp = ctemp;
+            }
+        }
+
+        // std::cout << "getTempAsFrame() middle" << std::endl;
+
+        std::vector<uint8_t> rgbaBuffer;
+        rgbaBuffer.reserve(tempBuffer.size() * 4);
+        for (const auto& [v2, temp] : tempBuffer) {
+            size_t index = (v2.y + v2.y) * 4;
+            double atemp  = static_cast<unsigned char>((((temp-minTemp) * 100) / (maxTemp-minTemp)) * 255);
+            rgbaBuffer[index] = atemp;
+            rgbaBuffer[index+1] = atemp;
+            rgbaBuffer[index+2] = atemp;
+            rgbaBuffer[index+3] = 1.0;
+        }
+        frame result = frame(res.x,res.y, frame::colormap::RGBA);
+        result.setData(rgbaBuffer);
+        return result;
+        updatingView = false;
+    }
+
 };
 
 #endif

@@ -89,11 +89,15 @@ public:
     // Save from 1D vector of uint8_t pixels (BGR order: pixels[i]=b, pixels[i+1]=g, pixels[i+2]=r)
     static bool saveBMP(const std::string& filename, const std::vector<uint8_t>& pixels, int width, int height) {
         if (pixels.size() != width * height * 3) {
+            std::cout << "wrong pixel count." << std::endl;
+            std::cout << "expected: " << width*height*3 << std::endl;
+            std::cout << "got: " << pixels.size() << std::endl;
             return false;
         }
         
         // Create directory if needed
         if (!createDirectoryIfNeeded(filename)) {
+            std::cout << "directory creation failed" << std::endl;
             return false;
         }
         
@@ -110,6 +114,7 @@ public:
         
         std::ofstream file(filename, std::ios::binary);
         if (!file) {
+            std::cout << "file wasnt made" << std::endl;
             return false;
         }
         
@@ -139,7 +144,18 @@ public:
     }
     
     static bool saveBMP(const std::string& filename, frame& frame) {
-        return saveBMP(filename, frame.getData(), frame.getWidth(), frame.getHeight());
+        if (frame.colorFormat == frame::colormap::RGB) {
+            std::cout << "found correct colormap" << std::endl;
+            return saveBMP(filename, frame.getData(), frame.getWidth(), frame.getHeight());
+        } else if (frame.colorFormat == frame::colormap::RGBA) {
+            std::cout << "found incorrect colormap. converting from RGBA" << std::endl;
+            std::vector<uint8_t> fdata = convertRGBAtoRGB(frame.getData());
+            return saveBMP(filename, fdata, frame.getWidth(), frame.getHeight());
+        }
+        else {
+            std::cout << "found incorrect colormap." << std::endl;
+            return false;
+        }
     }
 
 private:
@@ -190,6 +206,21 @@ private:
         
         return true;
     }
+    
+    static std::vector<uint8_t> convertRGBAtoRGB(const std::vector<uint8_t>& rgba) {
+        std::vector<uint8_t> rgb;
+        rgb.reserve((rgba.size() / 4) * 3);
+        
+        for (size_t i = 0; i < rgba.size() / 4; i++) {
+            size_t index = i * 4;
+            rgb.push_back(rgba[index + 0]);
+            rgb.push_back(rgba[index + 1]);
+            rgb.push_back(rgba[index + 2]);
+        }
+        
+        return rgb;
+    }
+    
 };
 
 #endif
