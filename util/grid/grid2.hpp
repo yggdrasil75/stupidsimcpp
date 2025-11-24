@@ -1120,23 +1120,23 @@ public:
                 else if (ctemp < minTemp) minTemp = ctemp;
             }
         }
-
+        std::cout << "max temp: " << maxTemp << " min temp: " << minTemp << std::endl;
         // std::cout << "getTempAsFrame() middle" << std::endl;
 
-        std::vector<uint8_t> rgbaBuffer;
-        rgbaBuffer.reserve(tempBuffer.size() * 4);
+        std::vector<uint8_t> rgbaBuffer(width*height*4, 0);
         for (const auto& [v2, temp] : tempBuffer) {
-            size_t index = (v2.y + v2.y) * 4;
-            double atemp  = static_cast<unsigned char>((((temp-minTemp) * 100) / (maxTemp-minTemp)) * 255);
+            size_t index = (v2.y * width + v2.y) * 4;
+            uint8_t atemp  = static_cast<unsigned char>((((temp-minTemp) * 100) / (maxTemp-minTemp)) * 255);
             rgbaBuffer[index] = atemp;
             rgbaBuffer[index+1] = atemp;
             rgbaBuffer[index+2] = atemp;
-            rgbaBuffer[index+3] = 1.0;
+            rgbaBuffer[index+3] = 255;
         }
+        std::cout << "rgba buffer is " << rgbaBuffer.size() << std::endl;
         frame result = frame(res.x,res.y, frame::colormap::RGBA);
         result.setData(rgbaBuffer);
-        return result;
         updatingView = false;
+        return result;
     }
 
 };
