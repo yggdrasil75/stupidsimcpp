@@ -202,7 +202,7 @@ protected:
     Vec2 gridMax;
 
     //neighbor map
-    std::unordered_map<size_t, std::vector<size_t>> neighborMap;
+    //std::unordered_map<size_t, std::vector<size_t>> neighborMap;
     float neighborRadius = 1.0f;
     
     //TODO: spatial map
@@ -416,7 +416,7 @@ public:
         
         // Add to spatial grid
         spatialGrid.insert(id, pos);
-        updateNeighborForID(id);
+        // updateNeighborForID(id);
         return id;
     }
     
@@ -425,7 +425,7 @@ public:
         Vec2 oldPosition = Positions.at(id);
         spatialGrid.update(id, oldPosition, newPosition);
         Positions.at(id).move(newPosition);
-        updateNeighborForID(id);
+        // updateNeighborForID(id);
     }
     
     void setPosition(size_t id, float x, float y) {
@@ -434,7 +434,7 @@ public:
 
         spatialGrid.update(id, oldPos, newPos);
         Positions.at(id).move(newPos);
-        updateNeighborForID(id);
+        // updateNeighborForID(id);
     }
     
     //set color by id (by pos same as get color)
@@ -489,7 +489,7 @@ public:
         Sizes.erase(id);
         unassignedIDs.push_back(id);
         spatialGrid.remove(id, oldPosition);
-        updateNeighborForID(id);
+        // updateNeighborForID(id);
         return id;
     }
     
@@ -500,7 +500,7 @@ public:
         Sizes.erase(id);
         unassignedIDs.push_back(id);
         spatialGrid.remove(id, pos);
-        updateNeighborForID(id);
+        // updateNeighborForID(id);
         return id;
     }
 
@@ -513,7 +513,7 @@ public:
             Positions.at(id).move(newPos);
             spatialGrid.update(id, oldPosition, newPos);
         }
-        updateNeighborMap();
+        // updateNeighborMap();
     }
     
     // Bulk update colors
@@ -567,7 +567,7 @@ public:
         }
         
         shrinkIfNeeded();
-        updateNeighborMap();
+        // updateNeighborMap();
         return getAllIDs(); // Or generate ID range
     }
     
@@ -594,7 +594,38 @@ public:
         }
         
         shrinkIfNeeded();
-        updateNeighborMap();
+        // updateNeighborMap();
+        
+        usable = true;
+        return newids;
+    }
+
+    std::vector<size_t> bulkAddObjects(const std::vector<Vec2> poses, std::vector<Vec4> colors, std::vector<float>& sizes, std::vector<float>& temps) {
+        TIME_FUNCTION;
+        std::vector<size_t> ids;
+        ids.reserve(poses.size());
+        
+        // Reserve space in maps to avoid rehashing
+        if (Positions.bucket_count() < Positions.size() + poses.size()) {
+            Positions.reserve(Positions.size() + poses.size());
+            Colors.reserve(Colors.size() + colors.size());
+            Sizes.reserve(Sizes.size() + sizes.size());
+            tempMap.reserve(tempMap.size() + temps.size());
+        }
+        
+        // Batch insertion
+        std::vector<size_t> newids;
+        for (size_t i = 0; i < poses.size(); ++i) {
+            size_t id = Positions.set(poses[i]);
+            Colors[id] = colors[i];
+            Sizes[id] = sizes[i];
+            tempMap.emplace(id, Temp(temps[i]));
+            spatialGrid.insert(id,poses[i]);
+            newids.push_back(id);
+        }
+        
+        shrinkIfNeeded();
+        // updateNeighborMap();
         
         usable = true;
         return newids;
@@ -900,36 +931,9 @@ public:
                 Frame = std::move(getGridRegionAsFrameRGB(minCorner, maxCorner));
                 break;
         }
-        //Frame.compressFrameDiff();
-        //Frame.compressFrameRLE();
-        //Frame.compressFrameLZ78();
         return Frame;
     }
 
-    // Get compressed frame with specified compression
-    frame getGridAsCompressedFrame(frame::colormap format = frame::colormap::RGB,
-                                frame::compresstype compression = frame::compresstype::RLE) {
-        TIME_FUNCTION;
-        frame gridFrame = getGridAsFrame(format);
-        
-        if (gridFrame.getData().empty()) {
-            return gridFrame;
-        }
-        
-        switch (compression) {
-            case frame::compresstype::RLE:
-                return gridFrame.compressFrameRLE();
-            case frame::compresstype::DIFF:
-                return gridFrame.compressFrameDiff();
-            case frame::compresstype::DIFFRLE:
-                return gridFrame.compressFrameDiffRLE();
-            case frame::compresstype::HUFFMAN:
-                return gridFrame.compressFrameHuffman();
-            case frame::compresstype::RAW:
-            default:
-                return gridFrame;
-        }
-    }
 
     //get bounding box
     void getBoundingBox(Vec2& minCorner, Vec2& maxCorner) const {
@@ -968,10 +972,10 @@ public:
         Colors.clear();
         Sizes.clear();
         spatialGrid.clear();
-        neighborMap.clear();
+        //neighborMap.clear();
         Colors.rehash(0);
         Sizes.rehash(0);
-        neighborMap.rehash(0);
+        // neighborMap.rehash(0);
         // Reset to default background color
         defaultBackgroundColor = Vec4(0.0f, 0.0f, 0.0f, 0.0f);
     }
@@ -989,63 +993,82 @@ public:
         }
     }
 
-    void updateNeighborMap() {
-        //std::cout << "updateNeighborMap()" << std::endl;
-        TIME_FUNCTION;
-        neighborMap.clear();
-        optimizeSpatialGrid();
+    // void updateNeighborMap() {
+    //     //std::cout << "updateNeighborMap()" << std::endl;
+    //     TIME_FUNCTION;
+    //     neighborMap.clear();
+    //     optimizeSpatialGrid();
         
-        // For each object, find nearby neighbors
-        float radiusSq = neighborRadius * neighborRadius;
-        #pragma omp parallel for
-        for (const auto& [id1, pos1] : Positions) {
-            std::vector<size_t> neighbors;
-            //std::vector<size_t> candidate_ids = spatialGrid.queryRange(pos1, neighborRadius);
-            std::unordered_set<size_t> candidate_idset = spatialGrid.find(pos1);
-            std::vector<size_t> candidate_ids;
-            candidate_ids.reserve(candidate_idset.size());
-            for (auto it = candidate_idset.begin(); it != candidate_idset.end();) {
-                candidate_ids.push_back(std::move(candidate_idset.extract(it++).value()));
-            }
+    //     // For each object, find nearby neighbors
+    //     float radiusSq = neighborRadius * neighborRadius;
+    //     #pragma omp parallel for
+    //     for (const auto& [id1, pos1] : Positions) {
+    //         std::vector<size_t> neighbors;
+    //         //std::vector<size_t> candidate_ids = spatialGrid.queryRange(pos1, neighborRadius);
+    //         std::unordered_set<size_t> candidate_idset = spatialGrid.find(pos1);
+    //         std::vector<size_t> candidate_ids;
+    //         candidate_ids.reserve(candidate_idset.size());
+    //         for (auto it = candidate_idset.begin(); it != candidate_idset.end();) {
+    //             candidate_ids.push_back(std::move(candidate_idset.extract(it++).value()));
+    //         }
             
             
-            for (size_t id2 : candidate_ids) {
-                if (id1 != id2) { // && Positions.at(id1).distanceSquared(Positions.at(id2)) <= radiusSq) {
-                    neighbors.push_back(id2);
-                }
-            }
-            #pragma omp critical
-            neighborMap[id1] = std::move(neighbors);
-        }
-    }
+    //         for (size_t id2 : candidate_ids) {
+    //             if (id1 != id2) { // && Positions.at(id1).distanceSquared(Positions.at(id2)) <= radiusSq) {
+    //                 neighbors.push_back(id2);
+    //             }
+    //         }
+    //         #pragma omp critical
+    //         neighborMap[id1] = std::move(neighbors);
+    //     }
+    // }
 
     // Update neighbor map for a single object
-    void updateNeighborForID(size_t id) {
-        TIME_FUNCTION;
-        Vec2 pos_it = Positions.at(id);
+    // void updateNeighborForID(size_t id) {
+    //     TIME_FUNCTION;
+    //     Vec2 pos_it = Positions.at(id);
 
+    //     std::vector<size_t> neighbors;
+    //     float radiusSq = neighborRadius * neighborRadius;
+        
+    //     for (const auto& [id2, pos2] : Positions) {
+    //         if (id != id2 && pos_it.distanceSquared(pos2) <= radiusSq) {
+    //             neighbors.push_back(id2);
+    //         }
+    //     }
+    //     neighborMap[id] = std::move(neighbors);
+    // }
+    
+    // // Get neighbors for an ID
+    // const std::vector<size_t>& getNeighbors(size_t id) const {
+    //     static const std::vector<size_t> empty;
+    //     auto it = neighborMap.find(id);
+    //     return it != neighborMap.end() ? it->second : empty;
+    // }
+
+    std::vector<size_t> getNeighbors(size_t id) const {
+        Vec2 pos = Positions.at(id);
+        std::vector<size_t> candidates = spatialGrid.queryRange(pos, neighborRadius);
+        
+        // Filter out self and apply exact distance check
         std::vector<size_t> neighbors;
         float radiusSq = neighborRadius * neighborRadius;
         
-        for (const auto& [id2, pos2] : Positions) {
-            if (id != id2 && pos_it.distanceSquared(pos2) <= radiusSq) {
-                neighbors.push_back(id2);
+        for (size_t candidateId : candidates) {
+            if (candidateId != id && 
+                pos.distanceSquared(Positions.at(candidateId)) <= radiusSq) {
+                neighbors.push_back(candidateId);
             }
         }
-        neighborMap[id] = std::move(neighbors);
-    }
-    
-    // Get neighbors for an ID
-    const std::vector<size_t>& getNeighbors(size_t id) const {
-        static const std::vector<size_t> empty;
-        auto it = neighborMap.find(id);
-        return it != neighborMap.end() ? it->second : empty;
+        
+        return neighbors;
     }
     
     // Set neighbor search radius
     void setNeighborRadius(float radius) {
         neighborRadius = radius;
-        updateNeighborMap(); // Recompute all neighbors
+        // updateNeighborMap(); // Recompute all neighbors
+        optimizeSpatialGrid();
     }
     
 
@@ -1057,14 +1080,56 @@ public:
 
     void setTemp(size_t id, double temp) {
         Temp tval = Temp(temp);
-        tempMap[id] = tval;
+        tempMap.emplace(id, tval);
     }
     
+    Grid2 noiseGenGridTemps(size_t minx,size_t miny, size_t maxx, size_t maxy, float minChance = 0.1f
+                        , float maxChance = 1.0f, bool color = true, int noisemod = 42) {
+        TIME_FUNCTION;
+        std::cout << "generating a noise grid with the following: (" << minx << ", " << miny 
+                << ") by (" << maxx << ", " << maxy << ") " << "chance: " << minChance 
+                << " max: " << maxChance << " gen colors: " << color << std::endl;
+        std::vector<Vec2> poses;
+        std::vector<Vec4> colors;
+        std::vector<float> sizes;
+        for (int x = minx; x < maxx; x++) {
+            for (int y = miny; y < maxy; y++) {
+                float nx = (x+noisemod)/(maxx+EPSILON)/0.1;
+                float ny = (y+noisemod)/(maxy+EPSILON)/0.1;
+                Vec2 pos = Vec2(nx,ny);
+                float alpha = noisegen.permute(pos);
+                if (alpha > minChance && alpha < maxChance) {
+                    if (color) {
+                        float red = noisegen.permute(Vec2(nx*0.3,ny*0.3));
+                        float green = noisegen.permute(Vec2(nx*0.6,ny*.06));
+                        float blue = noisegen.permute(Vec2(nx*0.9,ny*0.9));
+                        std::uniform_real_distribution<> temp(0.0f, 100.0f);
+                        Vec4 newc = Vec4(red,green,blue,1.0);
+                        colors.push_back(newc);
+                        poses.push_back(Vec2(x,y));
+                        sizes.push_back(1.0f);
+                    } else {
+                        Vec4 newc = Vec4(alpha,alpha,alpha,1.0);
+                        colors.push_back(newc);
+                        poses.push_back(pos);
+                        sizes.push_back(1.0f);
+                    }
+                }
+            }
+        }
+        std::cout << "noise generated" << std::endl;
+        bulkAddObjects(poses,colors,sizes);
+        return *this;
+    }
+
     double getTemp(size_t id) {
         if (tempMap.find(id) != tempMap.end()) {
-            Temp temp;
-            double dtemp = temp.calTempIDW(getPositionID(id), getTemps());
-            setTemp(id, dtemp);
+            Temp temp = Temp(getPositionID(id), getTemps());
+            //double dtemp = Temp::calTempIDW(getPositionID(id), getTemps());
+            tempMap.emplace(id, temp);
+        }
+        else {
+            std::cout << "found a temp: " << tempMap.at(id).temp << std::endl;
         }
         return tempMap.at(id).temp;
     }
@@ -1072,7 +1137,18 @@ public:
     std::unordered_map<Vec2, Temp> getTemps() {
         std::unordered_map<Vec2, Temp> out;
         for (const auto& [id, temp] : tempMap) {
-            out[getPositionID(id)] = temp;
+            out.emplace(getPositionID(id), temp);
+        }
+        return out;
+    }
+
+    std::unordered_map<Vec2, Temp> getTemps(size_t id) {
+        std::unordered_map<Vec2, Temp> out;
+        std::vector<size_t> tval = spatialGrid.queryRange(Positions.at(id), 10);
+        for (size_t tempid : tval) {
+            Vec2 pos = Positions.at(tempid);
+            Temp temp = tempMap.at(tempid);
+            out.insert({pos, temp});
         }
         return out;
     }
@@ -1080,8 +1156,7 @@ public:
     double getTemp(const Vec2 pos) {
         size_t id = getOrCreatePositionVec(pos, 0.0f, true);
         if (tempMap.find(id) == tempMap.end()) {
-            Temp temp;
-            double dtemp = temp.calTempIDW(pos, getTemps());
+            double dtemp = Temp::calTempIDW(pos, getTemps(id));
             setTemp(id, dtemp);
             return dtemp;
         }
@@ -1106,11 +1181,13 @@ public:
         // std::cout << "getTempAsFrame() started" << pcount++ << std::endl;
         double maxTemp = 0.0;
         double minTemp = 0.0;
+        float xdiff = (maxCorner.x - minCorner.x);
+        float ydiff = (maxCorner.y - minCorner.y);
         // std::cout << "getTempAsFrame() started" << pcount++ << std::endl;
         for (int x = 0; x < res.x; x++) {
             for (int y = 0; y < res.y; y++) {
                 Vec2 cposout = Vec2(x,y);
-                Vec2 cposin = Vec2(x/sheight, y/swidth);
+                Vec2 cposin = Vec2(minCorner.x + (x * xdiff / res.x),minCorner.y + (y * ydiff / res.y));
                 // std::cout << "getTempAsFrame() started" << pcount++ << std::endl;
                 double ctemp = getTemp(cposin);
                 
@@ -1123,17 +1200,17 @@ public:
         std::cout << "max temp: " << maxTemp << " min temp: " << minTemp << std::endl;
         // std::cout << "getTempAsFrame() middle" << std::endl;
 
-        std::vector<uint8_t> rgbaBuffer(width*height*4, 0);
+        std::vector<uint8_t> rgbaBuffer(width*height*3, 0);
         for (const auto& [v2, temp] : tempBuffer) {
-            size_t index = (v2.y * width + v2.y) * 4;
-            uint8_t atemp  = static_cast<unsigned char>((((temp-minTemp) * 100) / (maxTemp-minTemp)) * 255);
+            size_t index = (v2.y * width + v2.x) * 3;
+            uint8_t atemp  = static_cast<unsigned char>((((temp-minTemp)) / (maxTemp-minTemp)) * 255);
             rgbaBuffer[index] = atemp;
             rgbaBuffer[index+1] = atemp;
             rgbaBuffer[index+2] = atemp;
-            rgbaBuffer[index+3] = 255;
+            //rgbaBuffer[index+3] = 255;
         }
         std::cout << "rgba buffer is " << rgbaBuffer.size() << std::endl;
-        frame result = frame(res.x,res.y, frame::colormap::RGBA);
+        frame result = frame(res.x,res.y, frame::colormap::RGB);
         result.setData(rgbaBuffer);
         updatingView = false;
         return result;

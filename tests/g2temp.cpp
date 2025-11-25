@@ -85,25 +85,25 @@ void Preview(Grid2& grid) {
 }
 
 void livePreview(Grid2& grid) {
-    // std::lock_guard<std::mutex> lock(previewMutex);
+    std::lock_guard<std::mutex> lock(previewMutex);
     
-    // //currentPreviewFrame = grid.getGridAsFrame(frame::colormap::RGBA);
+    currentPreviewFrame = grid.getGridAsFrame(frame::colormap::RGBA);
     // Vec2 min;
     // Vec2 max;
     // grid.getBoundingBox(min, max);
-    // currentPreviewFrame = grid.getTempAsFrame(min,max, Vec2(1024,1024));
+    //currentPreviewFrame = grid.getTempAsFrame(min,max, Vec2(1024,1024));
 
-    // glGenTextures(1, &textu);
-    // glBindTexture(GL_TEXTURE_2D, textu);
-    // glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    // glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    // glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glGenTextures(1, &textu);
+    glBindTexture(GL_TEXTURE_2D, textu);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
     
-    // glBindTexture(GL_TEXTURE_2D, textu);
-    // glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, currentPreviewFrame.getWidth(), currentPreviewFrame.getHeight(), 
-    //              0, GL_RGBA, GL_UNSIGNED_BYTE, currentPreviewFrame.getData().data());
+    glBindTexture(GL_TEXTURE_2D, textu);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, currentPreviewFrame.getWidth(), currentPreviewFrame.getHeight(), 
+                 0, GL_RGBA, GL_UNSIGNED_BYTE, currentPreviewFrame.getData().data());
     
-    // updatePreview = true;
+    updatePreview = true;
 }
 
 std::vector<std::tuple<size_t, Vec2, Vec4>> pickSeeds(Grid2 grid, AnimationConfig config) {
@@ -134,7 +134,7 @@ void pickTempSeeds(Grid2& grid, AnimationConfig config) {
     std::uniform_int_distribution<> yDist(0, config.height - 1);
     std::uniform_real_distribution<> temp(0.0f, 100.0f);
 
-    for (int i = 0; i < config.numSeeds; ++i){
+    for (int i = 0; i < config.numSeeds * 100; ++i){
         grid.setTemp(Vec2(xDist(gen),yDist(gen)).floor(), temp(gen));
     }
 }
@@ -276,33 +276,33 @@ void mainLogic(const AnimationConfig& config, Shared& state, int gradnoise) {
         
         std::vector<frame> frames;
 
-        // for (int i = 0; i < config.totalFrames; ++i){
-        //     // Check if we should stop the generation
-        //     if (!isGenerating) {
-        //         std::cout << "Generation cancelled at frame " << i << std::endl;
-        //         return;
-        //     }
+        for (int i = 0; i < config.totalFrames; ++i){
+            // Check if we should stop the generation
+            if (!isGenerating) {
+                std::cout << "Generation cancelled at frame " << i << std::endl;
+                return;
+            }
             
-        //     //expandPixel(grid,config,seeds);
+            //expandPixel(grid,config,seeds);
             
-        //     std::lock_guard<std::mutex> lock(state.mutex);
-        //     state.grid = grid;
-        //     state.hasNewFrame = true;
-        //     state.currentFrame = i;
+            std::lock_guard<std::mutex> lock(state.mutex);
+            state.grid = grid;
+            state.hasNewFrame = true;
+            state.currentFrame = i;
 
-        //     // Print compression info for this frame
-        //     if (i % 10 == 0 ) {
-        //         frame bgrframe;
-        //         std::cout << "Processing frame " << i + 1 << "/" << config.totalFrames << std::endl;
-        //         bgrframe = grid.getGridAsFrame(frame::colormap::BGR);
-        //         frames.push_back(bgrframe);
-        //         //bgrframe.decompress();
-        //         //BMPWriter::saveBMP(std::format("output/grayscalesource.{}.bmp", i), bgrframe);
-        //         bgrframe.compressFrameLZ78();
-        //         //bgrframe.printCompressionStats();
-        //     }
-        // }
-        // exportavi(frames,config);
+            // Print compression info for this frame
+            if (i % 10 == 0 ) {
+                frame bgrframe;
+                std::cout << "Processing frame " << i + 1 << "/" << config.totalFrames << std::endl;
+                bgrframe = grid.getGridAsFrame(frame::colormap::BGR);
+                frames.push_back(bgrframe);
+                //bgrframe.decompress();
+                //BMPWriter::saveBMP(std::format("output/grayscalesource.{}.bmp", i), bgrframe);
+                bgrframe.compressFrameLZ78();
+                //bgrframe.printCompressionStats();
+            }
+        }
+        exportavi(frames,config);
     }
     catch (const std::exception& e) {
         std::cerr << "errored at: " << e.what() << std::endl;
