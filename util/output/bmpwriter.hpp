@@ -145,12 +145,9 @@ public:
     
     static bool saveBMP(const std::string& filename, frame& frame) {
         if (frame.colorFormat == frame::colormap::RGB) {
-            std::cout << "found correct colormap" << std::endl;
             return saveBMP(filename, frame.getData(), frame.getWidth(), frame.getHeight());
         } else if (frame.colorFormat == frame::colormap::RGBA) {
-            std::cout << "found incorrect colormap. converting from RGBA" << std::endl;
             std::vector<uint8_t> fdata = convertRGBAtoRGB(frame.getData());
-            std::cout << "source data: " << frame.getData().size() << " out data: " << fdata.size() << std::endl;
             return saveBMP(filename, fdata, frame.getWidth(), frame.getHeight());
         }
         else {

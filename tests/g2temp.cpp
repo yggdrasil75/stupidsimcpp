@@ -252,7 +252,7 @@ void mainLogic(const AnimationConfig& config, Shared& state, int gradnoise) {
         if (gradnoise == 0) {
             grid = setup(config);
         } else if (gradnoise == 1) {
-            grid = grid.noiseGenGrid(0,0,config.height, config.width, 0.01, 1.0, false, config.noisemod);
+            grid = grid.noiseGenGridTemps(0,0,config.height, config.width, 0.01, 1.0, false, config.noisemod);
         }
         grid.setDefault(Vec4(0,0,0,0));
         {
@@ -261,7 +261,7 @@ void mainLogic(const AnimationConfig& config, Shared& state, int gradnoise) {
             state.hasNewFrame = true;
             state.currentFrame = 0;
         }
-        pickTempSeeds(grid,config);
+        //pickTempSeeds(grid,config);
         
         //std::vector<std::tuple<size_t, Vec2, Vec4>> seeds = pickSeeds(grid, config);
         std::cout << "generated grid" << std::endl;
@@ -294,7 +294,7 @@ void mainLogic(const AnimationConfig& config, Shared& state, int gradnoise) {
             if (i % 10 == 0 ) {
                 frame bgrframe;
                 std::cout << "Processing frame " << i + 1 << "/" << config.totalFrames << std::endl;
-                bgrframe = grid.getGridAsFrame(frame::colormap::BGR);
+                bgrframe = grid.getTempAsFrame(Vec2(0,0), Vec2(config.height,config.width), Vec2(256,256), frame::colormap::BGR);
                 frames.push_back(bgrframe);
                 //bgrframe.decompress();
                 //BMPWriter::saveBMP(std::format("output/grayscalesource.{}.bmp", i), bgrframe);
@@ -407,7 +407,7 @@ int main() {
     static int i4 = 8;
     static int noisemod = 42;
     static float fs = 1.0;
-    int gradnoise = 0;
+    int gradnoise = 1;
 
     std::future<void> mainlogicthread;
     Shared state;

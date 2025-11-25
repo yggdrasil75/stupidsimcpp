@@ -76,7 +76,6 @@ public:
         _compressedData.shrink_to_fit();
         overheadmap.clear();
         sourceSize = data.size();
-        std::cout << "wrote " << data.size() << " as frame" << std::endl;
     }
 
     const std::vector<uint8_t>& getData() const {

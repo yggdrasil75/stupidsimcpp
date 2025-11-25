@@ -274,7 +274,7 @@ public:
                     } else {
                         Vec4 newc = Vec4(alpha,alpha,alpha,1.0);
                         colors.push_back(newc);
-                        poses.push_back(pos);
+                        poses.push_back(Vec2(x,y));
                         sizes.push_back(1.0f);
                     }
                 }
@@ -619,13 +619,13 @@ public:
             size_t id = Positions.set(poses[i]);
             Colors[id] = colors[i];
             Sizes[id] = sizes[i];
-            tempMap.emplace(id, Temp(temps[i]));
+            Temp temptemp = Temp(temps[i]);
+            tempMap.insert({id, temptemp});
             spatialGrid.insert(id,poses[i]);
             newids.push_back(id);
         }
         
         shrinkIfNeeded();
-        // updateNeighborMap();
         
         usable = true;
         return newids;
@@ -663,13 +663,6 @@ public:
         // Initialize RGB data with default background color
         std::vector<Vec4> rgbaBuffer(width * height, Vec4(0,0,0,0));
         
-        // for (int x = minCorner.x; x < maxCorner.x; x++) {
-        //     for (int y = minCorner.y; x < maxCorner.y; y++){
-        //         Vec2 pos = Vec2(x,y);
-        //         size_t posID = getPositionVec(pos, 1.0f, false);
-        
-        //     }
-        // }
         // For each position in the grid, find the corresponding pixel
         for (const auto& [id, pos] : Positions) {
             size_t size = Sizes.at(id);
@@ -993,59 +986,6 @@ public:
         }
     }
 
-    // void updateNeighborMap() {
-    //     //std::cout << "updateNeighborMap()" << std::endl;
-    //     TIME_FUNCTION;
-    //     neighborMap.clear();
-    //     optimizeSpatialGrid();
-        
-    //     // For each object, find nearby neighbors
-    //     float radiusSq = neighborRadius * neighborRadius;
-    //     #pragma omp parallel for
-    //     for (const auto& [id1, pos1] : Positions) {
-    //         std::vector<size_t> neighbors;
-    //         //std::vector<size_t> candidate_ids = spatialGrid.queryRange(pos1, neighborRadius);
-    //         std::unordered_set<size_t> candidate_idset = spatialGrid.find(pos1);
-    //         std::vector<size_t> candidate_ids;
-    //         candidate_ids.reserve(candidate_idset.size());
-    //         for (auto it = candidate_idset.begin(); it != candidate_idset.end();) {
-    //             candidate_ids.push_back(std::move(candidate_idset.extract(it++).value()));
-    //         }
-            
-            
-    //         for (size_t id2 : candidate_ids) {
-    //             if (id1 != id2) { // && Positions.at(id1).distanceSquared(Positions.at(id2)) <= radiusSq) {
-    //                 neighbors.push_back(id2);
-    //             }
-    //         }
-    //         #pragma omp critical
-    //         neighborMap[id1] = std::move(neighbors);
-    //     }
-    // }
-
-    // Update neighbor map for a single object
-    // void updateNeighborForID(size_t id) {
-    //     TIME_FUNCTION;
-    //     Vec2 pos_it = Positions.at(id);
-
-    //     std::vector<size_t> neighbors;
-    //     float radiusSq = neighborRadius * neighborRadius;
-        
-    //     for (const auto& [id2, pos2] : Positions) {
-    //         if (id != id2 && pos_it.distanceSquared(pos2) <= radiusSq) {
-    //             neighbors.push_back(id2);
-    //         }
-    //     }
-    //     neighborMap[id] = std::move(neighbors);
-    // }
-    
-    // // Get neighbors for an ID
-    // const std::vector<size_t>& getNeighbors(size_t id) const {
-    //     static const std::vector<size_t> empty;
-    //     auto it = neighborMap.find(id);
-    //     return it != neighborMap.end() ? it->second : empty;
-    // }
-
     std::vector<size_t> getNeighbors(size_t id) const {
         Vec2 pos = Positions.at(id);
         std::vector<size_t> candidates = spatialGrid.queryRange(pos, neighborRadius);
@@ -1071,7 +1011,6 @@ public:
         optimizeSpatialGrid();
     }
     
-
     //temp stuff
     void setTemp(const Vec2 pos, double temp) {
         size_t id = getOrCreatePositionVec(pos, 0.0, true);
@@ -1092,33 +1031,38 @@ public:
         std::vector<Vec2> poses;
         std::vector<Vec4> colors;
         std::vector<float> sizes;
+        std::vector<float> temps;
+        int callnumber = 0;
         for (int x = minx; x < maxx; x++) {
             for (int y = miny; y < maxy; y++) {
                 float nx = (x+noisemod)/(maxx+EPSILON)/0.1;
                 float ny = (y+noisemod)/(maxy+EPSILON)/0.1;
                 Vec2 pos = Vec2(nx,ny);
+                float temp = noisegen.permute(Vec2(nx*0.2+1,ny*0.1+2));
                 float alpha = noisegen.permute(pos);
                 if (alpha > minChance && alpha < maxChance) {
                     if (color) {
                         float red = noisegen.permute(Vec2(nx*0.3,ny*0.3));
                         float green = noisegen.permute(Vec2(nx*0.6,ny*.06));
                         float blue = noisegen.permute(Vec2(nx*0.9,ny*0.9));
-                        std::uniform_real_distribution<> temp(0.0f, 100.0f);
                         Vec4 newc = Vec4(red,green,blue,1.0);
                         colors.push_back(newc);
                         poses.push_back(Vec2(x,y));
                         sizes.push_back(1.0f);
+                        temps.push_back(temp * 100);
+                        //std::cout << "temp: " << temp << std::endl;
                     } else {
                         Vec4 newc = Vec4(alpha,alpha,alpha,1.0);
                         colors.push_back(newc);
-                        poses.push_back(pos);
+                        poses.push_back(Vec2(x,y));
                         sizes.push_back(1.0f);
+                        temps.push_back(temp * 100);
                     }
                 }
             }
         }
         std::cout << "noise generated" << std::endl;
-        bulkAddObjects(poses,colors,sizes);
+        bulkAddObjects(poses, colors, sizes, temps);
         return *this;
     }
 
@@ -1147,8 +1091,10 @@ public:
         std::vector<size_t> tval = spatialGrid.queryRange(Positions.at(id), 10);
         for (size_t tempid : tval) {
             Vec2 pos = Positions.at(tempid);
-            Temp temp = tempMap.at(tempid);
-            out.insert({pos, temp});
+            if (tempMap.find(id) != tempMap.end()) {
+                Temp temp = tempMap.at(tempid);
+                out.insert({pos, temp});
+            }
         }
         return out;
     }
@@ -1163,12 +1109,12 @@ public:
         else return tempMap.at(id).temp;
     }
 
-    frame getTempAsFrame(Vec2 minCorner, Vec2 maxCorner, Vec2 res)  {
+    frame getTempAsFrame(Vec2 minCorner, Vec2 maxCorner, Vec2 res, frame::colormap outcolor = frame::colormap::RGB)  {
         TIME_FUNCTION;
         if (updatingView) return frame();
         updatingView = true;
         int pcount = 0;
-        std::cout << "getTempAsFrame() started" << pcount++ << std::endl;
+        // std::cout << "getTempAsFrame() started" << pcount++ << std::endl;
         size_t sheight = maxCorner.x - minCorner.x;
         size_t swidth = maxCorner.y - minCorner.y;
         // std::cout << "getTempAsFrame() started" << pcount++ << std::endl;
@@ -1200,21 +1146,62 @@ public:
         std::cout << "max temp: " << maxTemp << " min temp: " << minTemp << std::endl;
         // std::cout << "getTempAsFrame() middle" << std::endl;
 
-        std::vector<uint8_t> rgbaBuffer(width*height*3, 0);
-        for (const auto& [v2, temp] : tempBuffer) {
-            size_t index = (v2.y * width + v2.x) * 3;
-            uint8_t atemp  = static_cast<unsigned char>((((temp-minTemp)) / (maxTemp-minTemp)) * 255);
-            rgbaBuffer[index] = atemp;
-            rgbaBuffer[index+1] = atemp;
-            rgbaBuffer[index+2] = atemp;
-            //rgbaBuffer[index+3] = 255;
+        switch (outcolor) {
+            case frame::colormap::RGBA: {
+                std::vector<uint8_t> rgbaBuffer(width*height*4, 0);
+                for (const auto& [v2, temp] : tempBuffer) {
+                    size_t index = (v2.y * width + v2.x) * 4;
+                    uint8_t atemp  = static_cast<unsigned char>((((temp-minTemp)) / (maxTemp-minTemp)) * 255);
+                    rgbaBuffer[index+0] = atemp;
+                    rgbaBuffer[index+1] = atemp;
+                    rgbaBuffer[index+2] = atemp;
+                    rgbaBuffer[index+3] = 255;
+                }
+                // std::cout << "rgba buffer is " << rgbaBuffer.size() << std::endl;
+                frame result = frame(res.x,res.y, frame::colormap::RGBA);
+                result.setData(rgbaBuffer);
+                updatingView = false;
+                return result;
+                break;
+            }
+            case frame::colormap::BGR: {
+                std::vector<uint8_t> rgbaBuffer(width*height*3, 0);
+                for (const auto& [v2, temp] : tempBuffer) {
+                    size_t index = (v2.y * width + v2.x) * 3;
+                    uint8_t atemp  = static_cast<unsigned char>((((temp-minTemp)) / (maxTemp-minTemp)) * 255);
+                    rgbaBuffer[index+2] = atemp;
+                    rgbaBuffer[index+1] = atemp;
+                    rgbaBuffer[index+0] = atemp;
+                    //rgbaBuffer[index+3] = 255;
+                }
+                // std::cout << "rgba buffer is " << rgbaBuffer.size() << std::endl;
+                frame result = frame(res.x,res.y, frame::colormap::BGR);
+                result.setData(rgbaBuffer);
+                updatingView = false;
+                return result;
+                break;
+            }
+            case frame::colormap::RGB: 
+            default: {
+                std::vector<uint8_t> rgbaBuffer(width*height*3, 0);
+                for (const auto& [v2, temp] : tempBuffer) {
+                    size_t index = (v2.y * width + v2.x) * 3;
+                    uint8_t atemp  = static_cast<unsigned char>((((temp-minTemp)) / (maxTemp-minTemp)) * 255);
+                    rgbaBuffer[index+0] = atemp;
+                    rgbaBuffer[index+1] = atemp;
+                    rgbaBuffer[index+2] = atemp;
+                    //rgbaBuffer[index+3] = 255;
+                }
+                // std::cout << "rgba buffer is " << rgbaBuffer.size() << std::endl;
+                frame result = frame(res.x,res.y, frame::colormap::RGB);
+                result.setData(rgbaBuffer);
+                updatingView = false;
+                return result;
+                break;
+            }
         }
-        std::cout << "rgba buffer is " << rgbaBuffer.size() << std::endl;
-        frame result = frame(res.x,res.y, frame::colormap::RGB);
-        result.setData(rgbaBuffer);
-        updatingView = false;
-        return result;
     }
+
 
 };
 
