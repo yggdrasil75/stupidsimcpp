@@ -115,6 +115,74 @@ public:
         float estimatedTemp = refTemp + (calpoint.x * displacement.x + calpoint.y * displacement.y);
         return estimatedTemp;
     }
+    
+    static double diffuseHeat(const Vec2& position, const std::unordered_map<Vec2, Temp>& neighbors,
+                             double currentTemp, double thermalDiffusivity, double timeStep, double gridSpacing = 1.0) {
+        TIME_FUNCTION;
+        
+        double laplacian = 0.0;
+        int validNeighbors = 0;
+        
+        for (const auto& [neighborPos, neighborTemp] : neighbors) {
+            double distance = position.distance(neighborPos);
+            
+            if (std::abs(distance - gridSpacing) < 0.1 * gridSpacing) {
+                laplacian += (neighborTemp.temp - currentTemp);
+                validNeighbors++;
+            }
+        }
+        
+        if (validNeighbors > 0) {
+            laplacian /= (gridSpacing * gridSpacing);
+            
+            double tempChange = thermalDiffusivity * timeStep * laplacian;
+            return currentTemp + tempChange;
+        }
+        
+        return currentTemp;
+    }
+    
+    static double diffuseHeatWeighted(const Vec2& position, const std::unordered_map<Vec2, Temp>& neighbors,
+                                     double currentTemp, double thermalDiffusivity, double timeStep) {
+        TIME_FUNCTION;
+        
+        if (neighbors.empty()) {
+            return currentTemp;
+        }
+        
+        double weightedSum = 0.0;
+        double totalWeight = 0.0;
+        
+        for (const auto& [neighborPos, neighborTemp] : neighbors) {
+            double distance = position.distance(neighborPos);
+            
+            if (distance < 1e-10) continue;
+            
+            double weight = 1.0 / (distance * distance);
+            weightedSum += weight * neighborTemp.temp;
+            totalWeight += weight;
+        }
+        
+        if (totalWeight < 1e-10) {
+            return currentTemp;
+        }
+        
+        double averageNeighborTemp = weightedSum / totalWeight;
+        
+        double diffusionRate = thermalDiffusivity * timeStep;
+        
+        diffusionRate = std::min(diffusionRate, 1.0);
+        
+        return currentTemp + diffusionRate * (averageNeighborTemp - currentTemp);
+    }
+    
+    void diffuse(const std::unordered_map<Vec2, Temp>& neighbors,
+                double thermalDiffusivity,
+                double timeStep,
+                double gridSpacing = 1.0) {
+        this->temp = diffuseHeatWeighted(Vec2(0, 0), neighbors, this->temp, 
+                                        thermalDiffusivity, timeStep);
+    }
 };
 
 #endif
