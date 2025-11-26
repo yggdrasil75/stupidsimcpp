@@ -201,8 +201,6 @@ protected:
     //grid max
     Vec2 gridMax;
 
-    //neighbor map
-    //std::unordered_map<size_t, std::vector<size_t>> neighborMap;
     float neighborRadius = 1.0f;
     
     //TODO: spatial map
@@ -1202,6 +1200,112 @@ public:
         }
     }
 
+    void diffuseTemperatures(double thermalDiffusivity, double timeStep, double gridSpacing = 1.0) {
+        TIME_FUNCTION;
+        
+        if (tempMap.empty()) {
+            return;
+        }
+        
+        // Create a copy of current temperatures to avoid modifying while iterating
+        std::unordered_map<size_t, double> newTemps;
+        newTemps.reserve(tempMap.size());
+        
+        // Diffuse heat for each point
+        for (const auto& [id, tempObj] : tempMap) {
+            Vec2 position = Positions.at(id);
+            double currentTemp = tempObj.temp;
+            
+            // Get nearby points for diffusion
+            std::unordered_map<Vec2, Temp> neighbors;
+            std::vector<size_t> neighborIDs = spatialGrid.queryRange(position, neighborRadius * 2.0); // Use larger radius for temp diffusion
+            
+            for (size_t neighborID : neighborIDs) {
+                if (neighborID != id && tempMap.find(neighborID) != tempMap.end()) {
+                    Vec2 neighborPos = Positions.at(neighborID);
+                    neighbors.emplace(neighborPos, tempMap.at(neighborID));
+                }
+            }
+            
+            // Diffuse heat using the existing function from Temp class
+            double newTemp = Temp::diffuseHeat(position, neighbors, currentTemp, 
+                                            thermalDiffusivity, timeStep, gridSpacing);
+            
+            newTemps[id] = newTemp;
+        }
+        
+        // Update temperatures
+        for (const auto& [id, newTemp] : newTemps) {
+            tempMap.at(id).temp = newTemp;
+        }
+    }
+
+    void diffuseTemperaturesWeighted(double thermalDiffusivity, double timeStep) {
+        TIME_FUNCTION;
+        
+        if (tempMap.empty()) {
+            return;
+        }
+        
+        // Create a copy of current temperatures to avoid modifying while iterating
+        std::unordered_map<size_t, double> newTemps;
+        newTemps.reserve(tempMap.size());
+        
+        // Diffuse heat for each point using weighted method
+        for (const auto& [id, tempObj] : tempMap) {
+            Vec2 position = Positions.at(id);
+            double currentTemp = tempObj.temp;
+            
+            // Get nearby points for diffusion
+            std::unordered_map<Vec2, Temp> neighbors;
+            std::vector<size_t> neighborIDs = spatialGrid.queryRange(position, neighborRadius * 2.0);
+            
+            for (size_t neighborID : neighborIDs) {
+                if (neighborID != id && tempMap.find(neighborID) != tempMap.end()) {
+                    Vec2 neighborPos = Positions.at(neighborID);
+                    neighbors.emplace(neighborPos, tempMap.at(neighborID));
+                }
+            }
+            
+            // Diffuse heat using the weighted method
+            double newTemp = Temp::diffuseHeatWeighted(position, neighbors, currentTemp, 
+                                                    thermalDiffusivity, timeStep);
+            
+            newTemps[id] = newTemp;
+        }
+        
+        // Update temperatures
+        for (const auto& [id, newTemp] : newTemps) {
+            tempMap.at(id).temp = newTemp;
+        }
+    }
+
+    // Optional: Diffuse temperature for a specific point
+    double diffuseTemperatureAtPoint(size_t id, double thermalDiffusivity, double timeStep, double gridSpacing = 1.0) {
+        if (tempMap.find(id) == tempMap.end()) {
+            return 0.0;
+        }
+        
+        Vec2 position = Positions.at(id);
+        double currentTemp = tempMap.at(id).temp;
+        
+        // Get nearby points
+        std::unordered_map<Vec2, Temp> neighbors;
+        std::vector<size_t> neighborIDs = spatialGrid.queryRange(position, neighborRadius * 2.0);
+        
+        for (size_t neighborID : neighborIDs) {
+            if (neighborID != id && tempMap.find(neighborID) != tempMap.end()) {
+                Vec2 neighborPos = Positions.at(neighborID);
+                neighbors.emplace(neighborPos, tempMap.at(neighborID));
+            }
+        }
+        
+        double newTemp = Temp::diffuseHeat(position, neighbors, currentTemp, 
+                                        thermalDiffusivity, timeStep, gridSpacing);
+        
+        tempMap.at(id).temp = newTemp;
+        return newTemp;
+    }
 
 };
 

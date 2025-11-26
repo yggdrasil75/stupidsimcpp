@@ -84,10 +84,10 @@ void Preview(Grid2& grid) {
     }
 }
 
-void livePreview(Grid2& grid) {
+void livePreview(Grid2& grid, AnimationConfig config) {
     std::lock_guard<std::mutex> lock(previewMutex);
     
-    currentPreviewFrame = grid.getGridAsFrame(frame::colormap::RGBA);
+    currentPreviewFrame = grid.getTempAsFrame(Vec2(0,0), Vec2(config.height,config.width), Vec2(256,256));
     // Vec2 min;
     // Vec2 max;
     // grid.getBoundingBox(min, max);
@@ -246,7 +246,7 @@ bool exportavi(std::vector<frame> frames, AnimationConfig config) {
 void mainLogic(const AnimationConfig& config, Shared& state, int gradnoise) {
     TIME_FUNCTION;
     if (isGenerating) return; //apparently sometimes this function is called twice. dont know how, but this might resolve that.
-    isGenerating = true;
+    
     try {
         Grid2 grid;
         if (gradnoise == 0) {
@@ -273,7 +273,7 @@ void mainLogic(const AnimationConfig& config, Shared& state, int gradnoise) {
         if (!success) {
             std::cout << "yo! this failed in Preview" << std::endl;
         }
-        
+        isGenerating = true;
         std::vector<frame> frames;
 
         for (int i = 0; i < config.totalFrames; ++i){
@@ -284,6 +284,7 @@ void mainLogic(const AnimationConfig& config, Shared& state, int gradnoise) {
             }
             
             //expandPixel(grid,config,seeds);
+            grid.diffuseTemperatures(1.0, 1.0, 1.0);
             
             std::lock_guard<std::mutex> lock(state.mutex);
             state.grid = grid;
@@ -291,7 +292,7 @@ void mainLogic(const AnimationConfig& config, Shared& state, int gradnoise) {
             state.currentFrame = i;
 
             // Print compression info for this frame
-            if (i % 10 == 0 ) {
+            //if (i % 10 == 0 ) {
                 frame bgrframe;
                 std::cout << "Processing frame " << i + 1 << "/" << config.totalFrames << std::endl;
                 bgrframe = grid.getTempAsFrame(Vec2(0,0), Vec2(config.height,config.width), Vec2(256,256), frame::colormap::BGR);
@@ -300,7 +301,7 @@ void mainLogic(const AnimationConfig& config, Shared& state, int gradnoise) {
                 //BMPWriter::saveBMP(std::format("output/grayscalesource.{}.bmp", i), bgrframe);
                 bgrframe.compressFrameLZ78();
                 //bgrframe.printCompressionStats();
-            }
+            //}
         }
         exportavi(frames,config);
     }
@@ -457,7 +458,7 @@ int main() {
                 {
                     std::lock_guard<std::mutex> lock(state.mutex);
                     if (state.hasNewFrame) {
-                        livePreview(state.grid);
+                        livePreview(state.grid, config);
                         state.hasNewFrame = false;
                         previewText = "Generating... Frame: " + std::to_string(state.currentFrame);
                     }
@@ -486,7 +487,7 @@ int main() {
                 {
                     std::lock_guard<std::mutex> lock(state.mutex);
                     if (state.hasNewFrame) {
-                        livePreview(state.grid);
+                        livePreview(state.grid, config);
                         state.hasNewFrame = false;
                         previewText = "Generating... Frame: " + std::to_string(state.currentFrame);
                     }

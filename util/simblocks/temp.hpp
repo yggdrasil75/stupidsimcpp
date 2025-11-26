@@ -33,7 +33,6 @@ protected:
 public:
     double temp;
     Temp(float temp) : temp(temp) {
-        //std::cout << "setting temp to: " << temp << std::endl;
     };
     
     Temp(const Vec2& testPos, const std::unordered_map<Vec2, Temp>& others) {
@@ -133,7 +132,7 @@ public:
         }
         
         if (validNeighbors > 0) {
-            laplacian /= (gridSpacing * gridSpacing);
+            laplacian /= (validNeighbors * gridSpacing * gridSpacing);
             
             double tempChange = thermalDiffusivity * timeStep * laplacian;
             return currentTemp + tempChange;
