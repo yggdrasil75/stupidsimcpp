@@ -15,7 +15,7 @@
 
 const float EPSILON = 0.0000000000000000000000001;
 
-class reverselookupassistantclasscausecppisdumb {
+class reverselookupassistant {
 private:
     std::unordered_map<size_t, Vec2> Positions;
     std::unordered_map<Vec2, size_t, Vec2::Hash> ƨnoiƚiƨoꟼ;
@@ -193,15 +193,41 @@ public:
     }
 };
 
+class GenericPixel {
+protected:
+    size_t id;
+    Vec4 color;
+    Vec2 pos;
+public:
+    //constructors
+    GenericPixel(size_t id, Vec4 color, Vec2 pos) : id(id), color(color), pos(pos) {};
+
+    //getters
+    Vec4 getColor() {
+        return color;
+    }
+
+    //setters
+    void setColor(Vec4 newColor) {
+        color = newColor;
+    }
+
+    void move(Vec2 newPos) {
+        pos = newPos;
+    }
+    
+    void recolor(Vec4 newColor) {
+        color.recolor(newColor);
+    }
+    
+};
+
 class Grid2 { 
 protected:
     //all positions
-    reverselookupassistantclasscausecppisdumb Positions;
-    //all colors
-    std::unordered_map<size_t, Vec4> Colors;
-    //all sizes
-    std::unordered_map<size_t, float> Sizes;
-
+    reverselookupassistant Positions;
+    std::unordered_map<size_t /*id*/, GenericPixel> Pixels;
+    
     std::vector<size_t> unassignedIDs;
     
     //grid min
@@ -297,12 +323,8 @@ public:
     //add pixel (default color and default size provided)
     size_t addObject(const Vec2& pos, const Vec4& color, float size = 1.0f) {
         size_t id = Positions.set(pos);
-        Colors[id] = color;
-        Sizes[id] = size;
-        
-        // Add to spatial grid
+        Pixels.insert({id, GenericPixel(id, color, pos)});
         spatialGrid.insert(id, pos);
-        // updateNeighborForID(id);
         return id;
     }
 
@@ -316,80 +338,25 @@ public:
     }
     
     void setMaterialProperties(size_t id, double conductivity, double specific_heat, double density = 1.0) {
-        auto it = tempMap.find(id);
-        if (it != tempMap.end()) {
-            it->second.conductivity = conductivity;
-            it->second.specific_heat = specific_heat;
-            it->second.diffusivity = conductivity / (density * specific_heat);
-        }
-    }
-
-    void setMaterialProperties(const Vec2& pos, double conductivity, double specific_heat, double density = 1.0) {
-        size_t id = getOrCreatePositionVec(pos, 0.0f, true);
-        setMaterialProperties(id, conductivity, specific_heat, density);
+        auto it = tempMap.at(id);
+        it.conductivity = conductivity;
+        it.specific_heat = specific_heat;
+        it.diffusivity = conductivity / (density * specific_heat);
     }
     
     //set position by id
     void setPosition(size_t id, const Vec2& newPosition) {
         Vec2 oldPosition = Positions.at(id);
+        Pixels.at(id).move(newPosition);
         spatialGrid.update(id, oldPosition, newPosition);
         Positions.at(id).move(newPosition);
-        // updateNeighborForID(id);
     }
-    
-    void setPosition(size_t id, float x, float y) {
-        Vec2 newPos = Vec2(x,y);
-        Vec2 oldPos = Positions.at(id);
-
-        spatialGrid.update(id, oldPos, newPos);
-        Positions.at(id).move(newPos);
-        // updateNeighborForID(id);
-    }
-    
+        
     //set color by id (by pos same as get color)
     void setColor(size_t id, const Vec4 color) {
-        Colors.at(id).recolor(color);
+        Pixels.at(id).recolor(color);
     }
     
-    void setColor(size_t id, float r, float g, float b, float a=1.0f) {
-        Colors.at(id).recolor(Vec4(r,g,b,a));
-    }
-    
-    void setColor(float x, float y, const Vec4 color) {
-        size_t id = getPositionVec(Vec2(x,y));
-        Colors.at(id).recolor(color);
-    }
-    
-    void setColor(float x, float y, float r, float g, float b, float a=1.0f) {
-        size_t id = getPositionVec(Vec2(x,y));
-        Colors.at(id).recolor(Vec4(r,g,b,a));
-    }
-    
-    void setColor(const Vec2& pos, const Vec4 color) {
-        size_t id = getPositionVec(pos);
-        Colors.at(id).recolor(color);
-    }
-    
-    void setColor(const Vec2& pos, float r, float g, float b, float a=1.0f) {
-        size_t id = getPositionVec(pos);
-        Colors.at(id).recolor(Vec4(r,g,b,a));
-    }
-    
-    //set size by id (by pos same as get size)
-    void setSize(size_t id, float size) {
-        Sizes.at(id) = size;
-    }
-    
-    void setSize(float x, float y, float size) {
-        size_t id = getPositionVec(Vec2(x,y));
-        Sizes.at(id) = size;
-    }
-    
-    void setSize(const Vec2& pos, float size) {
-        size_t id = getPositionVec(pos);
-        Sizes.at(id) = size;
-    }
-
     // Set neighbor search radius
     void setNeighborRadius(float radius) {
         neighborRadius = radius;
@@ -397,7 +364,6 @@ public:
         optimizeSpatialGrid();
     }
     
-    //temp stuff
     void setTemp(const Vec2 pos, double temp) {
         size_t id = getOrCreatePositionVec(pos, 0.0, true);
         setTemp(id, temp);
@@ -419,7 +385,6 @@ public:
         return it;
     }
 
-    //get id from position (optional radius, picks first found. radius of 0 becomes epsilon if none are found)
     size_t getPositionVec(const Vec2& pos, float radius = 0.0f) const {
         TIME_FUNCTION;
         if (radius == 0.0f) {
@@ -472,10 +437,6 @@ public:
         }
     }
 
-    size_t getPositionVec(float x, float y, float radius = 0.0f) const { 
-        return getPositionVec(Vec2(x,y), radius);
-    }
-
     //get all id in region
     std::vector<size_t> getPositionVecRegion(const Vec2& pos, float radius = 1.0f) const {
         TIME_FUNCTION;
@@ -502,23 +463,6 @@ public:
         return Colors.at(id);
     }
     
-    //get color from position (use get id from position and then get color from id)
-    Vec4 getColor(float x, float y) {
-        size_t id = getPositionVec(Vec2(x,y),0.0);
-        return getColor(id);
-    }
-    
-    //get size from id
-    size_t getSize(size_t id) {
-        return Sizes.at(id);
-    }
-    
-    //get size from position (use get id from position and then get size from id)
-    size_t getSize(float x, float y) {
-        size_t id = getPositionVec(Vec2(x,y),0.0);
-        return getSize(id);
-    }
-        
     double getTemp(size_t id) {
         if (tempMap.find(id) != tempMap.end()) {
             Temp temp = Temp(getPositionID(id), getTemps());
@@ -552,17 +496,6 @@ public:
         return out;
     }
 
-    double getTemp(const Vec2 pos) {
-        size_t id = getOrCreatePositionVec(pos, 0.01f, true);
-        if (tempMap.find(id) == tempMap.end()) {
-            //std::cout << "missing a temp at: " << pos << std::endl;
-            double dtemp = Temp::calTempIDW(pos, getTemps(id));
-            setTemp(id, dtemp);
-            return dtemp;
-        }
-        else return tempMap.at(id).temp;
-    }
-
     //get bounding box
     void getBoundingBox(Vec2& minCorner, Vec2& maxCorner) const {
         TIME_FUNCTION;
@@ -594,20 +527,81 @@ public:
         maxCorner.y += margin;
     }
 
-    std::vector<size_t> getAllIDs() {
+    frame getGridRegionAsFrame(const Vec2& minCorner, const Vec2& maxCorner,
+                       Vec2& res, frame::colormap outChannels = frame::colormap::RGB) const {
         TIME_FUNCTION;
-        std::vector<size_t> ids;
-        ids.reserve(Positions.size());
-        
-        for (const auto& pair : Positions) {
-            ids.push_back(pair.first);
+        // Calculate dimensions
+        size_t width = static_cast<int>(maxCorner.x - minCorner.x);
+        size_t height = static_cast<int>(maxCorner.y - minCorner.y);
+        frame outframe = frame();
+        outframe.colorFormat = outChannels;
+
+        if (width <= 0 || height <= 0) {
+            width = height = 0;
+            return outframe;
         }
         
-        return ids;
+        std::vector<Vec4> colorBuffer(width * height, Vec4(0,0,0,0));
+        
+        for (const auto& [id, pos] : Positions) {
+            if (maxCorner.x > pos.x > minCorner.x && maxCorner.y pos.y > mincorner.y) {
+                
+            }
+            
+            // Calculate pixel coordinates
+            int pixelXm = static_cast<int>(pos.x/2 - minCorner.x);
+            int pixelXM = static_cast<int>(pos.x/2 - minCorner.x);
+            int pixelYm = static_cast<int>(pos.y/2 - minCorner.y);
+            int pixelYM = static_cast<int>(pos.y/2 - minCorner.y);
+            
+            pixelXm = std::max(0, pixelXm);
+            pixelXM = std::min(width - 1, pixelXM);
+            pixelYm = std::max(0, pixelYm);
+            pixelYM = std::min(height - 1, pixelYM);
+            
+            // Ensure within bounds
+            if (pixelXM >= minCorner.x && pixelXm < width && pixelYM >= minCorner.y && pixelYm < height) {
+                const Vec4& color = Colors.at(id);
+                float srcAlpha = color.a;
+                float invSrcAlpha = 1.0f - srcAlpha;
+                for (int py = pixelYm; py <= pixelYM; ++py){
+                    for (int px = pixelXm; px <= pixelXM; ++px){
+                        int index = (py * width + px);
+                        Vec4 dest = colorBuffer[index];
+                    
+                        // Alpha blending: new_color = src * src_alpha + dest * (1 - src_alpha)
+                        dest.r = color.r * srcAlpha + dest.r * invSrcAlpha;
+                        dest.g = color.g * srcAlpha + dest.g * invSrcAlpha;
+                        dest.b = color.b * srcAlpha + dest.b * invSrcAlpha;
+                        dest.a = srcAlpha + dest.a * invSrcAlpha;
+                        colorBuffer[index] = dest;
+                    }
+                }
+            }
+        }
+        
+        // Convert to RGB bytes
+        rgbData.resize(colorBuffer.size() * 3);
+        for (int i = 0; i < colorBuffer.size(); ++i) {
+            Vec4& color = colorBuffer[i];
+            int rgbIndex = i * 3;
+            float alpha = color.a;
+
+            if (alpha < 1.0) {
+                float invalpha = 1.0 - alpha;
+                color.r = defaultBackgroundColor.r * alpha + color.r * invalpha;
+                color.g = defaultBackgroundColor.g * alpha + color.g * invalpha;
+                color.b = defaultBackgroundColor.b * alpha + color.b * invalpha;
+            }
+            
+            // Convert from [0,1] to [0,255] and store as RGB
+            rgbData[rgbIndex + 0] = static_cast<unsigned char>(color.r * 255);
+            rgbData[rgbIndex + 1] = static_cast<unsigned char>(color.g * 255);
+            rgbData[rgbIndex + 2] = static_cast<unsigned char>(color.b * 255);
+        }
     }
 
-    // no return because it passes back a 1d vector of ints between 0 and 255 with a width and height
-    //get region as rgb 
+
     void getGridRegionAsRGB(const Vec2& minCorner, const Vec2& maxCorner,
                        int& width, int& height, std::vector<uint8_t>& rgbData) const {
         TIME_FUNCTION;
@@ -1040,32 +1034,6 @@ public:
         }
     }
 
-    std::vector<size_t> bulkAddObjects(const std::vector<std::tuple<Vec2, Vec4, float>>& objects) {
-        TIME_FUNCTION;
-        std::vector<size_t> ids;
-        ids.reserve(objects.size());
-        
-        // Reserve space in maps to avoid rehashing
-        Positions.reserve(Positions.size() + objects.size());
-        Colors.reserve(Colors.size() + objects.size());
-        Sizes.reserve(Sizes.size() + objects.size());
-        
-        // Batch insertion
-        //#pragma omp parallel for
-        for (size_t i = 0; i < objects.size(); ++i) {
-            const auto& [pos, color, size] = objects[i];
-            size_t id = Positions.set(pos);
-            
-            Colors[id] = color;
-            Sizes[id] = size;
-            //spatialGrid.insert(id,pos);
-        }
-        
-        shrinkIfNeeded();
-        // updateNeighborMap();
-        return getAllIDs(); // Or generate ID range
-    }
-    
     std::vector<size_t> bulkAddObjects(const std::vector<Vec2> poses, std::vector<Vec4> colors, std::vector<float>& sizes) {
         TIME_FUNCTION;
         std::vector<size_t> ids;
@@ -1146,7 +1114,6 @@ public:
 
     void optimizeSpatialGrid() {
         //std::cout << "optimizeSpatialGrid()" << std::endl;
-        neighborRadius = 1.0;
         spatialCellSize = neighborRadius * neighborRadius;
         spatialGrid = SpatialGrid(spatialCellSize);
         
@@ -1326,9 +1293,9 @@ public:
         }
     }
 
-    void diffuseTemps(uint timestep) {
+    void diffuseTemps(int timestep) {
         TIME_FUNCTION;
-        if (tempMap.empty() || timestep == 0) return;
+        if (tempMap.empty() || timestep < 1) return;
         std::unordered_map<size_t, float> cTemps;
         cTemps.reserve(tempMap.size());
         for (const auto& [id, temp] : tempMap) {
