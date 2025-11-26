@@ -27,7 +27,7 @@
 #endif
 
 std::mutex m;
-std::atomic<bool> isGenerating{false};
+std::atomic<int> isGenerating{0};
 std::future<void> generationFuture;
 
 std::mutex previewMutex;
@@ -245,10 +245,11 @@ bool exportavi(std::vector<frame> frames, AnimationConfig config) {
 
 void mainLogic(const AnimationConfig& config, Shared& state, int gradnoise) {
     TIME_FUNCTION;
-    if (isGenerating) return; //apparently sometimes this function is called twice. dont know how, but this might resolve that.
+    if (isGenerating != 0) return; //apparently sometimes this function is called twice. dont know how, but this might resolve that.
     
     try {
         Grid2 grid;
+        isGenerating = 1;
         if (gradnoise == 0) {
             grid = setup(config);
         } else if (gradnoise == 1) {
@@ -267,24 +268,25 @@ void mainLogic(const AnimationConfig& config, Shared& state, int gradnoise) {
         std::cout << "generated grid" << std::endl;
         Preview(grid);
         std::cout << "generated preview" << std::endl;
+        grid = grid.backfillGrid();
         frame tempData = grid.getTempAsFrame(Vec2(0,0), Vec2(config.height,config.width), Vec2(256,256));
         std::cout << "Temp frame looks like: " << tempData << std::endl;
         bool success = BMPWriter::saveBMP("output/temperature.bmp", tempData);
         if (!success) {
             std::cout << "yo! this failed in Preview" << std::endl;
         }
-        isGenerating = true;
+        isGenerating = 2;
         std::vector<frame> frames;
 
         for (int i = 0; i < config.totalFrames; ++i){
             // Check if we should stop the generation
-            if (!isGenerating) {
+            if (isGenerating == 0) {
                 std::cout << "Generation cancelled at frame " << i << std::endl;
                 return;
             }
             
             //expandPixel(grid,config,seeds);
-            grid.diffuseTemperatures(1.0, 1.0, 1.0);
+            //grid.diffuseTemperatures(1.0, 1.0, 1.0);
             
             std::lock_guard<std::mutex> lock(state.mutex);
             state.grid = grid;
@@ -308,13 +310,13 @@ void mainLogic(const AnimationConfig& config, Shared& state, int gradnoise) {
     catch (const std::exception& e) {
         std::cerr << "errored at: " << e.what() << std::endl;
     }
-    isGenerating = false;
+    isGenerating = 0;
 }
 
 // Function to cancel ongoing generation
 void cancelGeneration() {
     if (isGenerating) {
-        isGenerating = false;
+        isGenerating = 0;
         // Wait for the thread to finish (with timeout to avoid hanging)
         if (generationFuture.valid()) {
             auto status = generationFuture.wait_for(std::chrono::milliseconds(100));
@@ -437,7 +439,7 @@ int main() {
             ImGui::RadioButton("Gradient", &gradnoise, 0);
             ImGui::RadioButton("Perlin Noise", &gradnoise, 1);
 
-            if (isGenerating) {
+            if (isGenerating != 0) {
                 ImGui::BeginDisabled();
             }
             
@@ -446,7 +448,7 @@ int main() {
                 mainlogicthread = std::async(std::launch::async, mainLogic, config, std::ref(state), gradnoise);
             }
 
-            if (isGenerating && textu != 0) {
+            if (isGenerating == 2 && textu != 0) {
                 ImGui::EndDisabled();
                 
                 ImGui::SameLine();
@@ -475,7 +477,7 @@ int main() {
                     ImGui::Text("Generating preview...");
                 }
                 
-            } else if (isGenerating) {
+            } else if (isGenerating == 2) {
                 ImGui::EndDisabled();
                 
                 ImGui::SameLine();
@@ -509,6 +511,20 @@ int main() {
                     ImGui::Text("Generating preview...");
                 }
                 
+            } else if (isGenerating != 0) {
+                ImGui::EndDisabled();
+                                
+                ImGui::Text(previewText.c_str());
+                
+                if (textu != 0) {
+                    ImVec2 imageSize = ImVec2(config.width * 0.5f, config.height * 0.5f);
+                    ImVec2 uv_min = ImVec2(0.0f, 0.0f);
+                    ImVec2 uv_max = ImVec2(1.0f, 1.0f);
+                    ImGui::Image((void*)(intptr_t)textu, imageSize, uv_min, uv_max);
+                } else {
+                    ImGui::Text("Generating preview...");
+                }
+
             } else {
                 ImGui::Text("No preview available");
                 ImGui::Text("Start generation to see live preview");
