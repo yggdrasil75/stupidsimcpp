@@ -87,7 +87,7 @@ void Preview(Grid2& grid) {
 void livePreview(Grid2& grid, AnimationConfig config) {
     std::lock_guard<std::mutex> lock(previewMutex);
     
-    currentPreviewFrame = grid.getTempAsFrame(Vec2(0,0), Vec2(config.height,config.width), Vec2(256,256));
+    currentPreviewFrame = grid.getTempAsFrame(Vec2(0,0), Vec2(config.height,config.width), Vec2(256,256),frame::colormap::RGBA);
     // Vec2 min;
     // Vec2 max;
     // grid.getBoundingBox(min, max);
@@ -253,7 +253,7 @@ void mainLogic(const AnimationConfig& config, Shared& state, int gradnoise) {
         if (gradnoise == 0) {
             grid = setup(config);
         } else if (gradnoise == 1) {
-            grid = grid.noiseGenGridTemps(0,0,config.height-1, config.width-1, 0.01, 1.0, false, config.noisemod);
+            grid = grid.noiseGenGridTemps(0,0,config.height, config.width, 0.01, 1.0, false, config.noisemod);
         }
         grid.setDefault(Vec4(0,0,0,0));
         {
@@ -268,7 +268,7 @@ void mainLogic(const AnimationConfig& config, Shared& state, int gradnoise) {
         std::cout << "generated grid" << std::endl;
         Preview(grid);
         std::cout << "generated preview" << std::endl;
-        grid = grid.backfillGrid();
+        //grid = grid.backfillGrid();
         frame tempData = grid.getTempAsFrame(Vec2(0,0), Vec2(config.height,config.width), Vec2(256,256));
         std::cout << "Temp frame looks like: " << tempData << std::endl;
         bool success = BMPWriter::saveBMP("output/temperature.bmp", tempData);
@@ -286,7 +286,7 @@ void mainLogic(const AnimationConfig& config, Shared& state, int gradnoise) {
             }
             
             //expandPixel(grid,config,seeds);
-            //grid.diffuseTemperatures(1.0, 1.0, 1.0);
+            grid.diffuseTemps(100);
             
             std::lock_guard<std::mutex> lock(state.mutex);
             state.grid = grid;
@@ -395,11 +395,7 @@ int main() {
         ImGui_ImplGlfw_InstallEmscriptenCallbacks(window, "#canvas");
     #endif
         ImGui_ImplOpenGL3_Init(glsl_version);
-
-
-    // std::cout << "created glfw window" << std::endl;
-
-
+    
     bool show_demo_window = true;
     bool show_another_window = false;
     ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
@@ -498,7 +494,6 @@ int main() {
                 ImGui::Text(previewText.c_str());
 
             } else if (textu != 0){
-                //ImGui::EndDisabled();
                                 
                 ImGui::Text(previewText.c_str());
                 
@@ -529,14 +524,11 @@ int main() {
                 ImGui::Text("No preview available");
                 ImGui::Text("Start generation to see live preview");
             }
-            //std::cout << "sleeping" << std::endl;
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            //std::cout << "ending" << std::endl;
             ImGui::End();
         }
 
         
-        // std::cout << "ending frame" << std::endl;
         ImGui::Render();
         int display_w, display_h;
         glfwGetFramebufferSize(window, &display_w, &display_h);
@@ -544,31 +536,25 @@ int main() {
         glClearColor(clear_color.x * clear_color.w, clear_color.y * clear_color.w, clear_color.z * clear_color.w, clear_color.w);
         glClear(GL_COLOR_BUFFER_BIT);
         
-        // std::cout << "rendering" << std::endl;
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
         glfwSwapBuffers(window);
-        //mainlogicthread.join();
         
-        // std::cout << "swapping buffers" << std::endl;
     }
     cancelGeneration();
+    FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
 
     
-    // std::cout << "shutting down" << std::endl;
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
 
-    // std::cout << "destroying" << std::endl;
     glfwDestroyWindow(window);
     if (textu != 0) {
         glDeleteTextures(1, &textu);
         textu = 0;
     }
     glfwTerminate();
-    FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
     
-    // std::cout << "printing" << std::endl;
     return 0;
 }

@@ -59,7 +59,7 @@ public:
         this->temp = num / den;
     }
     
-    static float calTempIDW(const Vec2& testPos, std::unordered_map<Vec2, Temp> others) {
+    static float calTempIDW(const Vec2& testPos, const std::unordered_map<Vec2, Temp>& others) {
         TIME_FUNCTION;
         float power = 2.0;
         float num = 0.0;
@@ -78,7 +78,7 @@ public:
         return num / den;
     }
     
-    static float calGrad(const Vec2& testPos, std::unordered_map<Vec2, Temp>& others) {
+    static float calGrad(const Vec2& testPos, const std::unordered_map<Vec2, Temp>& others) {
         std::vector<std::pair<Vec2, float>> nearbyPoints;
         for (const auto& [point, temp] : others) {
             if (point.distance(testPos) <= 25) {

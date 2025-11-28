@@ -8,7 +8,6 @@ STB_DIR := ./stb
 # Compiler and flags
 CXX := g++
 CXXFLAGS = -std=c++23 -I$(IMGUI_DIR) -I$(IMGUI_DIR)/backends -I$(STB_DIR)
-#CXXFLAGS += -g -Wall -Wformat
 CXXFLAGS += `pkg-config --cflags glfw3`
 CFLAGS = $(CXXFLAGS)
 LDFLAGS := -L./imgui -limgui -lGL

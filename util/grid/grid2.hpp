@@ -230,11 +230,6 @@ protected:
     
     std::vector<size_t> unassignedIDs;
     
-    //grid min
-    Vec2 gridMin;
-    //grid max
-    Vec2 gridMax;
-
     float neighborRadius = 1.0f;
     
     //TODO: spatial map
@@ -243,20 +238,18 @@ protected:
 
     // Default background color for empty spaces
     Vec4 defaultBackgroundColor = Vec4(0.0f, 0.0f, 0.0f, 0.0f);
-
     PNoise2 noisegen;
-
 
     //water
     std::unordered_map<size_t, WaterParticle> water;
 
     std::unordered_map<size_t, Temp> tempMap;
+    bool regenpreventer = false;
 public:
-    bool usable = false;
-    
     Grid2 noiseGenGrid(size_t minx,size_t miny, size_t maxx, size_t maxy, float minChance = 0.1f
                         , float maxChance = 1.0f, bool color = true, int noisemod = 42) {
         TIME_FUNCTION;
+        noisegen = PNoise2(noisemod);
         std::cout << "generating a noise grid with the following: (" << minx << ", " << miny 
                 << ") by (" << maxx << ", " << maxy << ") " << "chance: " << minChance 
                 << " max: " << maxChance << " gen colors: " << color << std::endl;
@@ -270,9 +263,6 @@ public:
                 float alpha = noisegen.permute(pos);
                 if (alpha > minChance && alpha < maxChance) {
                     if (color) {
-                        // float red = noisegen.noise(x,y,1000);
-                        // float green = noisegen.noise(x,y,2000);
-                        // float blue = noisegen.noise(x,y,3000);
                         float red = noisegen.permute(Vec2(nx*0.3,ny*0.3));
                         float green = noisegen.permute(Vec2(nx*0.6,ny*.06));
                         float blue = noisegen.permute(Vec2(nx*0.9,ny*0.9));
@@ -403,10 +393,9 @@ public:
         }
     }
 
-    size_t getOrCreatePositionVec(const Vec2& pos, float radius = 0.0f, bool create = false) {
+    size_t getOrCreatePositionVec(const Vec2& pos, float radius = 0.0f, bool create = true) {
         TIME_FUNCTION;
         if (radius == 0.0f) {
-            // Exact match - use spatial grid to find the cell
             Vec2 gridPos = spatialGrid.worldToGrid(pos);
             auto cellIt = spatialGrid.grid.find(gridPos);
             if (cellIt != spatialGrid.grid.end()) {
@@ -423,7 +412,7 @@ public:
         } else {
             auto results = getPositionVecRegion(pos, radius);
             if (!results.empty()) {
-                return results[0]; // Return first found
+                return results[0];
             }
             if (create) {
                 return addObject(pos, defaultBackgroundColor, 1.0f);
@@ -432,7 +421,6 @@ public:
         }
     }
 
-    //get all id in region
     std::vector<size_t> getPositionVecRegion(const Vec2& pos, float radius = 1.0f) const {
         TIME_FUNCTION;
         float searchRadius = (radius == 0.0f) ? std::numeric_limits<float>::epsilon() : radius;
@@ -457,7 +445,7 @@ public:
         return Pixels.at(id).getColor();
     }
     
-    double getTemp(size_t id) {
+    float getTemp(size_t id) {
         if (tempMap.find(id) != tempMap.end()) {
             Temp temp = Temp(getPositionID(id), getTemps());
             tempMap.emplace(id, temp);
@@ -468,20 +456,18 @@ public:
         return tempMap.at(id).temp;
     }
     
-    double getTemp(Vec2 pos) {
-        size_t posid;
-        if (Positions.contains(pos)) {
-            posid = Positions.at(pos);
+    double getTemp(const Vec2 pos) {
+        size_t id = getOrCreatePositionVec(pos, 0.01f, true);
+        if (tempMap.find(id) == tempMap.end()) {
+            //std::cout << "missing a temp at: " << pos << std::endl;
+            double dtemp = Temp::calTempIDW(pos, getTemps(id));
+            setTemp(id, dtemp);
+            return dtemp;
         }
-        if (tempMap.find(posid) != tempMap.end()) {
-            return Temp(getPositionID(posid), getTemps()).temp;
-        }
-        else {
-            return tempMap.at(posid).temp;
-        }
+        else return tempMap.at(id).temp;
     }
 
-    std::unordered_map<Vec2, Temp> getTemps() {
+    std::unordered_map<Vec2, Temp> getTemps() const {
         std::unordered_map<Vec2, Temp> out;
         for (const auto& [id, temp] : tempMap) {
             out.emplace(getPositionID(id), temp);
@@ -489,7 +475,7 @@ public:
         return out;
     }
 
-    std::unordered_map<Vec2, Temp> getTemps(size_t id) {
+    std::unordered_map<Vec2, Temp> getTemps(size_t id) const {
         std::unordered_map<Vec2, Temp> out;
         std::vector<size_t> tval = spatialGrid.queryRange(Positions.at(id), 10);
         for (size_t tempid : tval) {
@@ -528,7 +514,7 @@ public:
     }
 
     frame getGridRegionAsFrame(const Vec2& minCorner, const Vec2& maxCorner,
-                       Vec2& res, frame::colormap outChannels = frame::colormap::RGB) const {
+                       Vec2& res, frame::colormap outChannels = frame::colormap::RGB)  {
         TIME_FUNCTION;
         size_t width = static_cast<int>(maxCorner.x - minCorner.x);
         size_t height = static_cast<int>(maxCorner.y - minCorner.y);
@@ -544,6 +530,8 @@ public:
             width = height = 0;
             return outframe;
         }
+        if (regenpreventer) return outframe;
+        else regenpreventer = true;
 
         std::cout << "Rendering region: " << minCorner << " to " << maxCorner 
                 << " at resolution: " << res << std::endl;
@@ -568,7 +556,6 @@ public:
                 
                 colorTempBuffer[pix] += Pixels.at(id).getColor();
                 countBuffer[pix]++;
-                //std::cout << "pixel at " << pix << " is: " << Pixels.at(id).getColor();
             }
         }
         std::cout << std::endl << "built initial buffer" << std::endl;
@@ -596,6 +583,7 @@ public:
                 frame result = frame(res.x,res.y, frame::colormap::RGBA);
                 result.setData(colorBuffer2);
                 std::cout << "returning result" << std::endl;
+                regenpreventer = false;
                 return result;
                 break;
             }
@@ -613,6 +601,7 @@ public:
                 frame result = frame(res.x,res.y, frame::colormap::BGR);
                 result.setData(colorBuffer2);
                 std::cout << "returning result" << std::endl;
+                regenpreventer = false;
                 return result;
                 break;
             }
@@ -631,6 +620,7 @@ public:
                 frame result = frame(res.x,res.y, frame::colormap::RGB);
                 result.setData(colorBuffer2);
                 std::cout << "returning result" << std::endl;
+                regenpreventer = false;
                 return result;
                 break;
             }
@@ -648,6 +638,8 @@ public:
 
     frame getTempAsFrame(Vec2 minCorner, Vec2 maxCorner, Vec2 res, frame::colormap outcolor = frame::colormap::RGB)  {
         TIME_FUNCTION;
+        if (regenpreventer) return frame();
+        else regenpreventer = true;
         int pcount = 0;
         size_t sheight = maxCorner.x - minCorner.x;
         size_t swidth = maxCorner.y - minCorner.y;
@@ -686,6 +678,7 @@ public:
                 }
                 frame result = frame(res.x,res.y, frame::colormap::RGBA);
                 result.setData(rgbaBuffer);
+                regenpreventer = false;
                 return result;
                 break;
             }
@@ -700,6 +693,7 @@ public:
                 }
                 frame result = frame(res.x,res.y, frame::colormap::BGR);
                 result.setData(rgbaBuffer);
+                regenpreventer = false;
                 return result;
                 break;
             }
@@ -715,6 +709,7 @@ public:
                 }
                 frame result = frame(res.x,res.y, frame::colormap::RGB);
                 result.setData(rgbaBuffer);
+                regenpreventer = false;
                 return result;
                 break;
             }
@@ -763,7 +758,6 @@ public:
         
         shrinkIfNeeded();
         
-        usable = true;
         return newids;
     }
 
@@ -792,7 +786,6 @@ public:
         
         shrinkIfNeeded();
         
-        usable = true;
         return newids;
     }
 
@@ -860,6 +853,7 @@ public:
     Grid2 noiseGenGridTemps(size_t minx,size_t miny, size_t maxx, size_t maxy, float minChance = 0.1f
                         , float maxChance = 1.0f, bool color = true, int noisemod = 42) {
         TIME_FUNCTION;
+        noisegen = PNoise2(noisemod);
         std::cout << "generating a noise grid with the following: (" << minx << ", " << miny 
                 << ") by (" << maxx << ", " << maxy << ") " << "chance: " << minChance 
                 << " max: " << maxChance << " gen colors: " << color << std::endl;
@@ -990,9 +984,12 @@ public:
         if (tempMap.empty() || timestep < 1) return;
         std::unordered_map<size_t, float> cTemps;
         cTemps.reserve(tempMap.size());
-        for (const auto& [id, temp] : tempMap) {
-            Vec2 pos = getPositionID(id);
-
+        for (const auto& [id, pos] : Positions) {
+            float oldtemp = getTemp(id);
+            tempMap.erase(id);
+            float newtemp = Temp::calGrad(pos, getTemps(id));
+            float newtempMult = (newtemp-oldtemp) * timestep;
+            setTemp(id, newtempMult);
         }
     }
 };

@@ -14,6 +14,7 @@ class PNoise2 {
 private:
     std::vector<int> permutation;
     std::default_random_engine rng;
+    
     float lerp(float t, float a1, float a2) {
         return a1 + t * (a2 - a1);
     }
@@ -49,18 +50,26 @@ private:
         return ((h & 1) == 0 ? u : -u) + ((h & 2) == 0 ? v : -v);
     }
 
-public:
-    PNoise2() : rng(std::random_device{}()) {
+    void initializePermutation() {
+        permutation.clear();
         std::vector<int> permutationt;
         permutationt.reserve(256);
         for (int i = 0; i < 256; i++){
             permutationt.push_back(i);
         }
         std::ranges::shuffle(permutationt, rng);
-        permutation.insert(permutation.end(),permutationt.begin(),permutationt.end());
-        permutation.insert(permutation.end(),permutationt.begin(),permutationt.end());
+        permutation.insert(permutation.end(), permutationt.begin(), permutationt.end());
+        permutation.insert(permutation.end(), permutationt.begin(), permutationt.end());
     }
-
+public:
+    PNoise2() : rng(std::random_device{}()) {
+        initializePermutation();
+    }
+    
+    PNoise2(unsigned int seed) : rng(seed) {
+        initializePermutation();
+    }
+    
     float permute(Vec2 point) {
         TIME_FUNCTION;
         float x = point.x;
