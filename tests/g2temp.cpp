@@ -58,8 +58,8 @@ Grid2 setup(AnimationConfig config) {
     std::vector<Vec2> pos;
     std::vector<Vec4> colors;
     std::vector<float> sizes;
-    for (int y = 0; y < config.height; ++y) {
-        for (int x = 0; x < config.width; ++x) {
+    for (int y = 0; y < config.height - 1; ++y) {
+        for (int x = 0; x < config.width - 1; ++x) {
             float gradient = (x + y) / float(config.width + config.height - 2);
             pos.push_back(Vec2(x,y));
             colors.push_back(Vec4(gradient, gradient, gradient, 1.0f));
@@ -253,7 +253,7 @@ void mainLogic(const AnimationConfig& config, Shared& state, int gradnoise) {
         if (gradnoise == 0) {
             grid = setup(config);
         } else if (gradnoise == 1) {
-            grid = grid.noiseGenGridTemps(0,0,config.height, config.width, 0.01, 1.0, false, config.noisemod);
+            grid = grid.noiseGenGridTemps(0,0,config.height-1, config.width-1, 0.01, 1.0, false, config.noisemod);
         }
         grid.setDefault(Vec4(0,0,0,0));
         {

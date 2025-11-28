@@ -203,7 +203,7 @@ public:
     GenericPixel(size_t id, Vec4 color, Vec2 pos) : id(id), color(color), pos(pos) {};
 
     //getters
-    Vec4 getColor() {
+    Vec4 getColor() const {
         return color;
     }
 
@@ -226,7 +226,7 @@ class Grid2 {
 protected:
     //all positions
     reverselookupassistant Positions;
-    std::unordered_map<size_t /*id*/, GenericPixel> Pixels;
+    std::unordered_map<size_t, GenericPixel> Pixels;
     
     std::vector<size_t> unassignedIDs;
     
@@ -239,7 +239,6 @@ protected:
     
     //TODO: spatial map
     SpatialGrid spatialGrid;
-    //float spatialCellSize = 2.0f;
     float spatialCellSize = neighborRadius * 1.5f;
 
     // Default background color for empty spaces
@@ -252,7 +251,6 @@ protected:
     std::unordered_map<size_t, WaterParticle> water;
 
     std::unordered_map<size_t, Temp> tempMap;
-    bool updatingView = false;
 public:
     bool usable = false;
     
@@ -264,7 +262,6 @@ public:
                 << " max: " << maxChance << " gen colors: " << color << std::endl;
         std::vector<Vec2> poses;
         std::vector<Vec4> colors;
-        std::vector<float> sizes;
         for (int x = minx; x < maxx; x++) {
             for (int y = miny; y < maxy; y++) {
                 float nx = (x+noisemod)/(maxx+EPSILON)/0.1;
@@ -282,18 +279,16 @@ public:
                         Vec4 newc = Vec4(red,green,blue,1.0);
                         colors.push_back(newc);
                         poses.push_back(Vec2(x,y));
-                        sizes.push_back(1.0f);
                     } else {
                         Vec4 newc = Vec4(alpha,alpha,alpha,1.0);
                         colors.push_back(newc);
                         poses.push_back(Vec2(x,y));
-                        sizes.push_back(1.0f);
                     }
                 }
             }
         }
         std::cout << "noise generated" << std::endl;
-        bulkAddObjects(poses,colors,sizes);
+        bulkAddObjects(poses,colors);
         return *this;
     }
 
@@ -458,21 +453,32 @@ public:
         return results;
     }
     
-    //get color from id
     Vec4 getColor(size_t id) {
-        return Colors.at(id);
+        return Pixels.at(id).getColor();
     }
     
     double getTemp(size_t id) {
         if (tempMap.find(id) != tempMap.end()) {
             Temp temp = Temp(getPositionID(id), getTemps());
-            //double dtemp = Temp::calTempIDW(getPositionID(id), getTemps());
             tempMap.emplace(id, temp);
         }
         else {
             std::cout << "found a temp: " << tempMap.at(id).temp << std::endl;
         }
         return tempMap.at(id).temp;
+    }
+    
+    double getTemp(Vec2 pos) {
+        size_t posid;
+        if (Positions.contains(pos)) {
+            posid = Positions.at(pos);
+        }
+        if (tempMap.find(posid) != tempMap.end()) {
+            return Temp(getPositionID(posid), getTemps()).temp;
+        }
+        else {
+            return tempMap.at(posid).temp;
+        }
     }
 
     std::unordered_map<Vec2, Temp> getTemps() {
@@ -519,20 +525,18 @@ public:
             maxCorner.y = std::max(maxCorner.y, pos.y);
         }
         
-        // Add a small margin to avoid edge cases
-        float margin = 1.0f;
-        minCorner.x -= margin;
-        minCorner.y -= margin;
-        maxCorner.x += margin;
-        maxCorner.y += margin;
     }
 
     frame getGridRegionAsFrame(const Vec2& minCorner, const Vec2& maxCorner,
                        Vec2& res, frame::colormap outChannels = frame::colormap::RGB) const {
         TIME_FUNCTION;
-        // Calculate dimensions
         size_t width = static_cast<int>(maxCorner.x - minCorner.x);
         size_t height = static_cast<int>(maxCorner.y - minCorner.y);
+        size_t outputWidth = static_cast<int>(res.x);
+        size_t outputHeight = static_cast<int>(res.y);
+        float widthScale = outputWidth / width;
+        float heightScale = outputHeight / height;
+        
         frame outframe = frame();
         outframe.colorFormat = outChannels;
 
@@ -540,385 +544,135 @@ public:
             width = height = 0;
             return outframe;
         }
+
+        std::cout << "Rendering region: " << minCorner << " to " << maxCorner 
+                << " at resolution: " << res << std::endl;
+        std::cout << "Scale factors: " << widthScale << " x " << heightScale << std::endl;
         
-        std::vector<Vec4> colorBuffer(width * height, Vec4(0,0,0,0));
-        
+        std::unordered_map<Vec2,Vec4> colorBuffer;
+        colorBuffer.reserve(outputHeight*outputWidth);
+        std::unordered_map<Vec2,Vec4> colorTempBuffer;
+        colorTempBuffer.reserve(outputHeight * outputWidth);
+        std::unordered_map<Vec2,int> countBuffer;
+        countBuffer.reserve(outputHeight * outputWidth);
+        std::cout << "built buffers" << std::endl;
+
         for (const auto& [id, pos] : Positions) {
-            if (maxCorner.x > pos.x > minCorner.x && maxCorner.y pos.y > mincorner.y) {
+            if (pos.x >= minCorner.x && pos.x <= maxCorner.x && 
+                pos.y >= minCorner.y && pos.y <= maxCorner.y) {
+                float relx = pos.x - minCorner.x;
+                float rely = pos.y - minCorner.y;
+                int pixx = static_cast<int>(relx * widthScale);
+                int pixy = static_cast<int>(rely * heightScale);
+                Vec2 pix = Vec2(pixx,pixy);
                 
+                colorTempBuffer[pix] += Pixels.at(id).getColor();
+                countBuffer[pix]++;
+                //std::cout << "pixel at " << pix << " is: " << Pixels.at(id).getColor();
             }
-            
-            // Calculate pixel coordinates
-            int pixelXm = static_cast<int>(pos.x/2 - minCorner.x);
-            int pixelXM = static_cast<int>(pos.x/2 - minCorner.x);
-            int pixelYm = static_cast<int>(pos.y/2 - minCorner.y);
-            int pixelYM = static_cast<int>(pos.y/2 - minCorner.y);
-            
-            pixelXm = std::max(0, pixelXm);
-            pixelXM = std::min(width - 1, pixelXM);
-            pixelYm = std::max(0, pixelYm);
-            pixelYM = std::min(height - 1, pixelYM);
-            
-            // Ensure within bounds
-            if (pixelXM >= minCorner.x && pixelXm < width && pixelYM >= minCorner.y && pixelYm < height) {
-                const Vec4& color = Colors.at(id);
-                float srcAlpha = color.a;
-                float invSrcAlpha = 1.0f - srcAlpha;
-                for (int py = pixelYm; py <= pixelYM; ++py){
-                    for (int px = pixelXm; px <= pixelXM; ++px){
-                        int index = (py * width + px);
-                        Vec4 dest = colorBuffer[index];
-                    
-                        // Alpha blending: new_color = src * src_alpha + dest * (1 - src_alpha)
-                        dest.r = color.r * srcAlpha + dest.r * invSrcAlpha;
-                        dest.g = color.g * srcAlpha + dest.g * invSrcAlpha;
-                        dest.b = color.b * srcAlpha + dest.b * invSrcAlpha;
-                        dest.a = srcAlpha + dest.a * invSrcAlpha;
-                        colorBuffer[index] = dest;
-                    }
+        }
+        std::cout << std::endl << "built initial buffer" << std::endl;
+
+        for (size_t y = 0; y < outputHeight; ++y) {
+            for (size_t x = 0; x < outputWidth; ++x) {
+                if (countBuffer[Vec2(x,y)] > 0) colorBuffer[Vec2(x,y)] = colorTempBuffer[Vec2(x,y)] / static_cast<float>(countBuffer[Vec2(x,y)]) * 255;
+                else colorBuffer[Vec2(x,y)] = defaultBackgroundColor;
+            }
+        }
+        std::cout << "blended second buffer" << std::endl;
+
+        switch (outChannels) {
+            case frame::colormap::RGBA: {
+                std::vector<uint8_t> colorBuffer2(outputWidth*outputHeight*4, 0);
+                std::cout << "outputting RGBA: " << std::endl;
+                for (const auto& [v2,getColor] : colorBuffer) {
+                    size_t index = (v2.y * outputWidth + v2.x) * 4;
+                    // std::cout << "index: " << index << std::endl;
+                    colorBuffer2[index+0] = getColor.r;
+                    colorBuffer2[index+1] = getColor.g;
+                    colorBuffer2[index+2] = getColor.b;
+                    colorBuffer2[index+3] = getColor.a;
                 }
+                frame result = frame(res.x,res.y, frame::colormap::RGBA);
+                result.setData(colorBuffer2);
+                std::cout << "returning result" << std::endl;
+                return result;
+                break;
             }
-        }
-        
-        // Convert to RGB bytes
-        rgbData.resize(colorBuffer.size() * 3);
-        for (int i = 0; i < colorBuffer.size(); ++i) {
-            Vec4& color = colorBuffer[i];
-            int rgbIndex = i * 3;
-            float alpha = color.a;
-
-            if (alpha < 1.0) {
-                float invalpha = 1.0 - alpha;
-                color.r = defaultBackgroundColor.r * alpha + color.r * invalpha;
-                color.g = defaultBackgroundColor.g * alpha + color.g * invalpha;
-                color.b = defaultBackgroundColor.b * alpha + color.b * invalpha;
-            }
-            
-            // Convert from [0,1] to [0,255] and store as RGB
-            rgbData[rgbIndex + 0] = static_cast<unsigned char>(color.r * 255);
-            rgbData[rgbIndex + 1] = static_cast<unsigned char>(color.g * 255);
-            rgbData[rgbIndex + 2] = static_cast<unsigned char>(color.b * 255);
-        }
-    }
-
-
-    void getGridRegionAsRGB(const Vec2& minCorner, const Vec2& maxCorner,
-                       int& width, int& height, std::vector<uint8_t>& rgbData) const {
-        TIME_FUNCTION;
-        // Calculate dimensions
-        width = static_cast<int>(maxCorner.x - minCorner.x);
-        height = static_cast<int>(maxCorner.y - minCorner.y);
-        
-        if (width <= 0 || height <= 0) {
-            width = height = 0;
-            rgbData.clear();
-            rgbData.shrink_to_fit();
-            return;
-        }
-        
-        // Initialize RGB data with default background color
-        std::vector<Vec4> rgbaBuffer(width * height, Vec4(0,0,0,0));
-        
-        // For each position in the grid, find the corresponding pixel
-        for (const auto& [id, pos] : Positions) {
-            size_t size = Sizes.at(id);
-            
-            // Calculate pixel coordinates
-            int pixelXm = static_cast<int>(pos.x - size/2 - minCorner.x);
-            int pixelXM = static_cast<int>(pos.x + size/2 - minCorner.x);
-            int pixelYm = static_cast<int>(pos.y - size/2 - minCorner.y);
-            int pixelYM = static_cast<int>(pos.y + size/2 - minCorner.y);
-            
-            pixelXm = std::max(0, pixelXm);
-            pixelXM = std::min(width - 1, pixelXM);
-            pixelYm = std::max(0, pixelYm);
-            pixelYM = std::min(height - 1, pixelYM);
-            
-            // Ensure within bounds
-            if (pixelXM >= minCorner.x && pixelXm < width && pixelYM >= minCorner.y && pixelYm < height) {
-                const Vec4& color = Colors.at(id);
-                float srcAlpha = color.a;
-                float invSrcAlpha = 1.0f - srcAlpha;
-                for (int py = pixelYm; py <= pixelYM; ++py){
-                    for (int px = pixelXm; px <= pixelXM; ++px){
-                        int index = (py * width + px);
-                        Vec4 dest = rgbaBuffer[index];
-                    
-                        // Alpha blending: new_color = src * src_alpha + dest * (1 - src_alpha)
-                        dest.r = color.r * srcAlpha + dest.r * invSrcAlpha;
-                        dest.g = color.g * srcAlpha + dest.g * invSrcAlpha;
-                        dest.b = color.b * srcAlpha + dest.b * invSrcAlpha;
-                        dest.a = srcAlpha + dest.a * invSrcAlpha;
-                        rgbaBuffer[index] = dest;
-                    }
+            case frame::colormap::BGR: {
+                std::vector<uint8_t> colorBuffer2(outputWidth*outputHeight*3, 0);
+                std::cout << "outputting BGR: " << std::endl;
+                for (const auto& [v2,getColor] : colorBuffer) {
+                    size_t index = (v2.y * outputWidth + v2.x) * 3;
+                    // std::cout << "index: " << index << std::endl;
+                    colorBuffer2[index+2] = getColor.r;
+                    colorBuffer2[index+1] = getColor.g;
+                    colorBuffer2[index+0] = getColor.b;
+                    //colorBuffer2[index+3] = getColor.a;
                 }
+                frame result = frame(res.x,res.y, frame::colormap::BGR);
+                result.setData(colorBuffer2);
+                std::cout << "returning result" << std::endl;
+                return result;
+                break;
             }
-        }
-        
-        // Convert to RGB bytes
-        rgbData.resize(rgbaBuffer.size() * 3);
-        for (int i = 0; i < rgbaBuffer.size(); ++i) {
-            Vec4& color = rgbaBuffer[i];
-            int rgbIndex = i * 3;
-            float alpha = color.a;
-
-            if (alpha < 1.0) {
-                float invalpha = 1.0 - alpha;
-                color.r = defaultBackgroundColor.r * alpha + color.r * invalpha;
-                color.g = defaultBackgroundColor.g * alpha + color.g * invalpha;
-                color.b = defaultBackgroundColor.b * alpha + color.b * invalpha;
-            }
-            
-            // Convert from [0,1] to [0,255] and store as RGB
-            rgbData[rgbIndex + 0] = static_cast<unsigned char>(color.r * 255);
-            rgbData[rgbIndex + 1] = static_cast<unsigned char>(color.g * 255);
-            rgbData[rgbIndex + 2] = static_cast<unsigned char>(color.b * 255);
-        }
-    }
-
-    // Get region as BGR
-    void getGridRegionAsBGR(const Vec2& minCorner, const Vec2& maxCorner,
-                           int& width, int& height, std::vector<uint8_t>& bgrData) const {
-        TIME_FUNCTION;
-        // Calculate dimensions
-        width = static_cast<int>(maxCorner.x - minCorner.x);
-        height = static_cast<int>(maxCorner.y - minCorner.y);
-        
-        if (width <= 0 || height <= 0) {
-            width = height = 0;
-            bgrData.clear();
-            bgrData.shrink_to_fit();
-            return;
-        }
-        
-        // Initialize RGB data with default background color
-        std::vector<Vec4> rgbaBuffer(width * height, defaultBackgroundColor);
-        
-        // For each position in the grid, find the corresponding pixel
-        for (const auto& [id, pos] : Positions) {
-            size_t size = Sizes.at(id);
-                
-            // Calculate pixel coordinates
-            int pixelXm = static_cast<int>(pos.x - size/2 - minCorner.x);
-            int pixelXM = static_cast<int>(pos.x + size/2 - minCorner.x);
-            int pixelYm = static_cast<int>(pos.y - size/2 - minCorner.y);
-            int pixelYM = static_cast<int>(pos.y + size/2 - minCorner.y);
-            
-            pixelXm = std::max(0, pixelXm);
-            pixelXM = std::min(width - 1, pixelXM);
-            pixelYm = std::max(0, pixelYm);
-            pixelYM = std::min(height - 1, pixelYM);
-
-            // Ensure within bounds
-            if (pixelXM >= minCorner.x && pixelXm < width && pixelYM >= minCorner.y && pixelYm < height) {
-                const Vec4& color = Colors.at(id);
-                float srcAlpha = color.a;
-                float invSrcAlpha = 1.0f - srcAlpha;
-                for (int py = pixelYm; py <= pixelYM; ++py){
-                    for (int px = pixelXm; px <= pixelXM; ++px){
-                        int index = (py * width + px);
-                        Vec4 dest = rgbaBuffer[index];
-                        
-                        // Alpha blending: new_color = src * src_alpha + dest * (1 - src_alpha)
-                        dest.r = color.r * srcAlpha + dest.r * invSrcAlpha;
-                        dest.g = color.g * srcAlpha + dest.g * invSrcAlpha;
-                        dest.b = color.b * srcAlpha + dest.b * invSrcAlpha;
-                        dest.a = srcAlpha + dest.a * invSrcAlpha;
-                        rgbaBuffer[index] = dest;
-                    }
+            case frame::colormap::RGB: 
+            default: {
+                std::vector<uint8_t> colorBuffer2(outputWidth*outputHeight*3, 0);
+                std::cout << "outputting RGB: " << std::endl;
+                for (const auto& [v2,getColor] : colorBuffer) {
+                    size_t index = (v2.y * outputWidth + v2.x) * 3;
+                    // std::cout << "index: " << index << std::endl;
+                    colorBuffer2[index+0] = getColor.r;
+                    colorBuffer2[index+1] = getColor.g;
+                    colorBuffer2[index+2] = getColor.b;
+                    //colorBuffer2[index+3] = getColor.a;
                 }
+                frame result = frame(res.x,res.y, frame::colormap::RGB);
+                result.setData(colorBuffer2);
+                std::cout << "returning result" << std::endl;
+                return result;
+                break;
             }
         }
-        
-        // Convert to BGR bytes
-        bgrData.resize(rgbaBuffer.size() * 3);
-        for (int i = 0; i < rgbaBuffer.size(); ++i) {
-            const Vec4& color = rgbaBuffer[i];
-            int bgrIndex = i * 3;
-            
-            // Convert from [0,1] to [0,255] and store as BGR
-            bgrData[bgrIndex + 2] = static_cast<unsigned char>(color.r * 255);
-            bgrData[bgrIndex + 1] = static_cast<unsigned char>(color.g * 255);
-            bgrData[bgrIndex + 0] = static_cast<unsigned char>(color.b * 255);
-        }
     }
 
-    void getGridRegionAsRGBA(const Vec2& minCorner, const Vec2& maxCorner,
-                           int& width, int& height, std::vector<uint8_t>& rgbaData) const {
-        TIME_FUNCTION;
-        // Calculate dimensions
-        width = static_cast<int>(maxCorner.x - minCorner.x);
-        height = static_cast<int>(maxCorner.y - minCorner.y);
-        
-        if (width <= 0 || height <= 0) {
-            width = height = 0;
-            rgbaData.clear();
-            rgbaData.shrink_to_fit();
-            return;
-        }
-        
-        // Initialize RGBA data with default background color
-        std::vector<Vec4> rgbaBuffer(width * height, defaultBackgroundColor);
-        
-        // For each position in the grid, find the corresponding pixel
-        for (const auto& [id, pos] : Positions) {
-            size_t size = Sizes.at(id);
-                
-            // Calculate pixel coordinates
-            int pixelXm = static_cast<int>(pos.x - size/2 - minCorner.x);
-            int pixelXM = static_cast<int>(pos.x + size/2 - minCorner.x);
-            int pixelYm = static_cast<int>(pos.y - size/2 - minCorner.y);
-            int pixelYM = static_cast<int>(pos.y + size/2 - minCorner.y);
-            
-            pixelXm = std::max(0, pixelXm);
-            pixelXM = std::min(width - 1, pixelXM);
-            pixelYm = std::max(0, pixelYm);
-            pixelYM = std::min(height - 1, pixelYM);
-
-            // Ensure within bounds
-            if (pixelXM >= minCorner.x && pixelXm < width && pixelYM >= minCorner.y && pixelYm < height) {
-                const Vec4& color = Colors.at(id);
-                float srcAlpha = color.a;
-                float invSrcAlpha = 1.0f - srcAlpha;
-                for (int py = pixelYm; py <= pixelYM; ++py){
-                    for (int px = pixelXm; px <= pixelXM; ++px){
-                        int index = (py * width + px);
-                        Vec4 dest = rgbaBuffer[index];
-                        
-                        // Alpha blending: new_color = src * src_alpha + dest * (1 - src_alpha)
-                        dest.r = color.r * srcAlpha + dest.r * invSrcAlpha;
-                        dest.g = color.g * srcAlpha + dest.g * invSrcAlpha;
-                        dest.b = color.b * srcAlpha + dest.b * invSrcAlpha;
-                        dest.a = srcAlpha + dest.a * invSrcAlpha;
-                        rgbaBuffer[index] = dest;
-                    }
-                }
-            }
-        }
-        
-        // Convert to RGBA bytes
-        rgbaData.resize(rgbaBuffer.size() * 4);
-        for (int i = 0; i < rgbaBuffer.size(); ++i) {
-            const Vec4& color = rgbaBuffer[i];
-            int rgbaIndex = i * 4;
-            
-            // Convert from [0,1] to [0,255] and store as RGBA
-            rgbaData[rgbaIndex + 0] = static_cast<unsigned char>(color.r * 255);
-            rgbaData[rgbaIndex + 1] = static_cast<unsigned char>(color.g * 255);
-            rgbaData[rgbaIndex + 2] = static_cast<unsigned char>(color.b * 255);
-            rgbaData[rgbaIndex + 3] = static_cast<unsigned char>(color.a * 255);
-        }
-    }
-    
-    //get full as rgb/bgr
-    void getGridAsRGB(int& width, int& height, std::vector<uint8_t>& rgbData)  {
-        Vec2 minCorner, maxCorner;
-        getBoundingBox(minCorner, maxCorner);
-        getGridRegionAsRGB(minCorner, maxCorner, width, height, rgbData);
-    }
-
-    void getGridAsBGR(int& width, int& height, std::vector<uint8_t>& bgrData)  {
-        Vec2 minCorner, maxCorner;
-        getBoundingBox(minCorner, maxCorner);
-        getGridRegionAsBGR(minCorner, maxCorner, width, height, bgrData);
-    }
-      
-    //frame stuff
-    frame getGridRegionAsFrameRGB(const Vec2& minCorner, const Vec2& maxCorner) const {
-        TIME_FUNCTION;
-        int width, height;
-        std::vector<uint8_t> rgbData;
-        getGridRegionAsRGB(minCorner, maxCorner, width, height, rgbData);
-        
-        frame resultFrame(width, height, frame::colormap::RGB);
-        resultFrame.setData(rgbData);
-        return resultFrame;
-    }
-    
-    frame getGridRegionAsFrameRGBA(const Vec2& minCorner, const Vec2& maxCorner) const {
-        TIME_FUNCTION;
-        int width, height;
-        std::vector<uint8_t> rgbaData;
-        getGridRegionAsRGBA(minCorner, maxCorner, width, height, rgbaData);
-        
-        frame resultFrame(width, height, frame::colormap::RGBA);
-        resultFrame.setData(rgbaData);
-        return resultFrame;
-    }
-
-    // Get region as frame (BGR format)
-    frame getGridRegionAsFrameBGR(const Vec2& minCorner, const Vec2& maxCorner) const {
-        TIME_FUNCTION;
-        int width, height;
-        std::vector<uint8_t> bgrData;
-        getGridRegionAsBGR(minCorner, maxCorner, width, height, bgrData);
-        
-        frame resultFrame(width, height, frame::colormap::BGR);
-        resultFrame.setData(bgrData);
-        return resultFrame;
-    }
-
-    // Get entire grid as frame with specified format
-    frame getGridAsFrame(frame::colormap format = frame::colormap::RGB) const {
-        TIME_FUNCTION;
-        Vec2 minCorner, maxCorner;
-        getBoundingBox(minCorner, maxCorner);
-        frame Frame;
-
-        switch (format) {
-            case frame::colormap::RGB:
-                Frame = std::move(getGridRegionAsFrameRGB(minCorner, maxCorner));
-                break;
-            case frame::colormap::RGBA:
-                Frame = std::move(getGridRegionAsFrameRGBA(minCorner, maxCorner));
-                break;
-            case frame::colormap::BGR:
-                Frame = std::move(getGridRegionAsFrameBGR(minCorner, maxCorner));
-                break;
-            default:
-                Frame = std::move(getGridRegionAsFrameRGB(minCorner, maxCorner));
-                break;
-        }
-        return Frame;
+    frame getGridAsFrame(frame::colormap outchannel = frame::colormap::RGB) {
+        Vec2 min;
+        Vec2 max;
+        getBoundingBox(min,max);
+        Vec2 res = (max + 1) - min;
+        std::cout << "getting grid as frame with the following: " << min << max << res << std::endl;
+        return getGridRegionAsFrame(min, max, res, outchannel);
     }
 
     frame getTempAsFrame(Vec2 minCorner, Vec2 maxCorner, Vec2 res, frame::colormap outcolor = frame::colormap::RGB)  {
         TIME_FUNCTION;
-        if (updatingView) return frame();
-        updatingView = true;
         int pcount = 0;
-        // std::cout << "getTempAsFrame() started" << pcount++ << std::endl;
         size_t sheight = maxCorner.x - minCorner.x;
         size_t swidth = maxCorner.y - minCorner.y;
-        // std::cout << "getTempAsFrame() started" << pcount++ << std::endl;
-
+        
         int width = static_cast<int>(res.x);
         int height = static_cast<int>(res.y);
-        // std::cout << "getTempAsFrame() started" << pcount++ << std::endl;
         std::unordered_map<Vec2, double> tempBuffer;
         tempBuffer.reserve(res.x * res.y);
-        // std::cout << "getTempAsFrame() started" << pcount++ << std::endl;
         double maxTemp = 0.0;
         double minTemp = 0.0;
         float xdiff = (maxCorner.x - minCorner.x);
         float ydiff = (maxCorner.y - minCorner.y);
-        // std::cout << "getTempAsFrame() started" << pcount++ << std::endl;
         for (int x = 0; x < res.x; x++) {
             for (int y = 0; y < res.y; y++) {
                 Vec2 cposout = Vec2(x,y);
                 Vec2 cposin = Vec2(minCorner.x + (x * xdiff / res.x),minCorner.y + (y * ydiff / res.y));
-                // std::cout << "getTempAsFrame() started" << pcount++ << std::endl;
                 double ctemp = getTemp(cposin);
                 
                 tempBuffer[Vec2(x,y)] = ctemp;
-                // std::cout << "getTempAsFrame() started" << pcount++ << std::endl;
                 if (ctemp > maxTemp) maxTemp = ctemp;
                 else if (ctemp < minTemp) minTemp = ctemp;
             }
         }
         std::cout << "max temp: " << maxTemp << " min temp: " << minTemp << std::endl;
-        // std::cout << "getTempAsFrame() middle" << std::endl;
-
+        
         switch (outcolor) {
             case frame::colormap::RGBA: {
                 std::vector<uint8_t> rgbaBuffer(width*height*4, 0);
@@ -930,10 +684,8 @@ public:
                     rgbaBuffer[index+2] = atemp;
                     rgbaBuffer[index+3] = 255;
                 }
-                // std::cout << "rgba buffer is " << rgbaBuffer.size() << std::endl;
                 frame result = frame(res.x,res.y, frame::colormap::RGBA);
                 result.setData(rgbaBuffer);
-                updatingView = false;
                 return result;
                 break;
             }
@@ -945,12 +697,9 @@ public:
                     rgbaBuffer[index+2] = atemp;
                     rgbaBuffer[index+1] = atemp;
                     rgbaBuffer[index+0] = atemp;
-                    //rgbaBuffer[index+3] = 255;
                 }
-                // std::cout << "rgba buffer is " << rgbaBuffer.size() << std::endl;
                 frame result = frame(res.x,res.y, frame::colormap::BGR);
                 result.setData(rgbaBuffer);
-                updatingView = false;
                 return result;
                 break;
             }
@@ -963,78 +712,36 @@ public:
                     rgbaBuffer[index+0] = atemp;
                     rgbaBuffer[index+1] = atemp;
                     rgbaBuffer[index+2] = atemp;
-                    //rgbaBuffer[index+3] = 255;
                 }
-                // std::cout << "rgba buffer is " << rgbaBuffer.size() << std::endl;
                 frame result = frame(res.x,res.y, frame::colormap::RGB);
                 result.setData(rgbaBuffer);
-                updatingView = false;
                 return result;
                 break;
             }
         }
     }
 
-    //remove object (should remove the id, the color, the position, and the size)
     size_t removeID(size_t id) {
         Vec2 oldPosition = Positions.at(id);
         Positions.remove(id);
-        Colors.erase(id);
-        Sizes.erase(id);
+        Pixels.erase(id);
         unassignedIDs.push_back(id);
         spatialGrid.remove(id, oldPosition);
-        // updateNeighborForID(id);
         return id;
     }
     
-    size_t removeID(Vec2 pos) {
-        size_t id = getPositionVec(pos);
-        Positions.remove(id);
-        Colors.erase(id);
-        Sizes.erase(id);
-        unassignedIDs.push_back(id);
-        spatialGrid.remove(id, pos);
-        // updateNeighborForID(id);
-        return id;
-    }
-
     //bulk update positions
     void bulkUpdatePositions(const std::unordered_map<size_t, Vec2>& newPositions) {
         TIME_FUNCTION;
-        //#pragma omp parallel for
         for (const auto& [id, newPos] : newPositions) {
             Vec2 oldPosition = Positions.at(id);
             Positions.at(id).move(newPos);
+            Pixels.at(id).move(newPos);
             spatialGrid.update(id, oldPosition, newPos);
         }
-        // updateNeighborMap();
     }
     
-    // Bulk update colors
-    void bulkUpdateColors(const std::unordered_map<size_t, Vec4>& newColors) {
-        TIME_FUNCTION;
-        //#pragma omp parallel for
-        for (const auto& [id, newColor] : newColors) {
-            auto it = Colors.find(id);
-            if (it != Colors.end()) {
-                it->second = newColor;
-            }
-        }
-    }
-    
-    // Bulk update sizes
-    void bulkUpdateSizes(const std::unordered_map<size_t, float>& newSizes) {
-        TIME_FUNCTION;
-        //#pragma omp parallel for
-        for (const auto& [id, newSize] : newSizes) {
-            auto it = Sizes.find(id);
-            if (it != Sizes.end()) {
-                it->second = newSize;
-            }
-        }
-    }
-
-    std::vector<size_t> bulkAddObjects(const std::vector<Vec2> poses, std::vector<Vec4> colors, std::vector<float>& sizes) {
+    std::vector<size_t> bulkAddObjects(const std::vector<Vec2> poses, std::vector<Vec4> colors) {
         TIME_FUNCTION;
         std::vector<size_t> ids;
         ids.reserve(poses.size());
@@ -1042,28 +749,25 @@ public:
         // Reserve space in maps to avoid rehashing
         if (Positions.bucket_count() < Positions.size() + poses.size()) {
             Positions.reserve(Positions.size() + poses.size());
-            Colors.reserve(Colors.size() + colors.size());
-            Sizes.reserve(Sizes.size() + sizes.size());
+            Pixels.reserve(Positions.size() + poses.size());
         }
         
         // Batch insertion
         std::vector<size_t> newids;
         for (size_t i = 0; i < poses.size(); ++i) {
             size_t id = Positions.set(poses[i]);
-            Colors[id] = colors[i];
-            Sizes[id] = sizes[i];
+            Pixels.emplace(id, GenericPixel(id, colors[i], poses[i]));
             spatialGrid.insert(id,poses[i]);
             newids.push_back(id);
         }
         
         shrinkIfNeeded();
-        // updateNeighborMap();
         
         usable = true;
         return newids;
     }
 
-    std::vector<size_t> bulkAddObjects(const std::vector<Vec2> poses, std::vector<Vec4> colors, std::vector<float>& sizes, std::vector<float>& temps) {
+    std::vector<size_t> bulkAddObjects(const std::vector<Vec2> poses, std::vector<Vec4> colors, std::vector<float>& temps) {
         TIME_FUNCTION;
         std::vector<size_t> ids;
         ids.reserve(poses.size());
@@ -1071,8 +775,7 @@ public:
         // Reserve space in maps to avoid rehashing
         if (Positions.bucket_count() < Positions.size() + poses.size()) {
             Positions.reserve(Positions.size() + poses.size());
-            Colors.reserve(Colors.size() + colors.size());
-            Sizes.reserve(Sizes.size() + sizes.size());
+            Pixels.reserve(Positions.size() + poses.size());
             tempMap.reserve(tempMap.size() + temps.size());
         }
         
@@ -1080,8 +783,7 @@ public:
         std::vector<size_t> newids;
         for (size_t i = 0; i < poses.size(); ++i) {
             size_t id = Positions.set(poses[i]);
-            Colors[id] = colors[i];
-            Sizes[id] = sizes[i];
+            Pixels.emplace(id, GenericPixel(id, colors[i], poses[i]));
             Temp temptemp = Temp(temps[i]);
             tempMap.insert({id, temptemp});
             spatialGrid.insert(id,poses[i]);
@@ -1101,14 +803,9 @@ public:
     //clear
     void clear() {
         Positions.clear();
-        Colors.clear();
-        Sizes.clear();
+        Pixels.clear();
         spatialGrid.clear();
-        //neighborMap.clear();
-        Colors.rehash(0);
-        Sizes.rehash(0);
-        // neighborMap.rehash(0);
-        // Reset to default background color
+        Pixels.rehash(0);
         defaultBackgroundColor = Vec4(0.0f, 0.0f, 0.0f, 0.0f);
     }
 
@@ -1168,7 +865,6 @@ public:
                 << " max: " << maxChance << " gen colors: " << color << std::endl;
         std::vector<Vec2> poses;
         std::vector<Vec4> colors;
-        std::vector<float> sizes;
         std::vector<float> temps;
         int callnumber = 0;
         for (int x = minx; x < maxx; x++) {
@@ -1186,21 +882,19 @@ public:
                         Vec4 newc = Vec4(red,green,blue,1.0);
                         colors.push_back(newc);
                         poses.push_back(Vec2(x,y));
-                        sizes.push_back(1.0f);
                         temps.push_back(temp * 100);
                         //std::cout << "temp: " << temp << std::endl;
                     } else {
                         Vec4 newc = Vec4(alpha,alpha,alpha,1.0);
                         colors.push_back(newc);
                         poses.push_back(Vec2(x,y));
-                        sizes.push_back(1.0f);
                         temps.push_back(temp * 100);
                     }
                 }
             }
         }
         std::cout << "noise generated" << std::endl;
-        bulkAddObjects(poses, colors, sizes, temps);
+        bulkAddObjects(poses, colors, temps);
         return *this;
     }
 
@@ -1228,7 +922,6 @@ public:
         getBoundingBox(Min, Max);
         std::vector<Vec2> newPos;
         std::vector<Vec4> newColors;
-        std::vector<float> newSizes;
         for (size_t x = Min.x; x < Max.x; x++) {
             for (size_t y = Min.y; y < Max.y; x++) {
                 Vec2 pos = Vec2(x,y);
@@ -1237,10 +930,9 @@ public:
                 float size = 0.1;
                 newPos.push_back(pos);
                 newColors.push_back(color);
-                newSizes.push_back(size);
             }
         }
-        bulkAddObjects(newPos, newColors, newSizes);
+        bulkAddObjects(newPos, newColors);
         gradTemps();
         return *this;
     }
