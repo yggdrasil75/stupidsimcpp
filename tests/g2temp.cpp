@@ -286,7 +286,7 @@ void mainLogic(const AnimationConfig& config, Shared& state, int gradnoise) {
             }
             
             //expandPixel(grid,config,seeds);
-            grid.diffuseTempsOptimized(100);
+            grid.diffuseTemps(100);
             
             std::lock_guard<std::mutex> lock(state.mutex);
             state.grid = grid;

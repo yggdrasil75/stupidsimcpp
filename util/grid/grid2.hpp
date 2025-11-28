@@ -977,25 +977,25 @@ public:
         }
     }
 
-    void diffuseTemps(int timestep) {
-        TIME_FUNCTION;
-        std::cout << "diffusing temps with a timestep of " << timestep << std::endl;
-        if (tempMap.empty() || timestep < 1) return;
-        #pragma omp parallel for
-        for (const auto& [id, pos] : Positions) {
-            auto tempIT = tempMap.find(id);
-            if (tempIT != tempMap.end()) {
-                Temp oldtemp = tempIT->second;
-                tempMap.erase(id);
-                float newtemp = Temp::calGrad(pos, getTemps(id));
-                float newtempMult = (newtemp-oldtemp.temp) * timestep;
-                oldtemp.temp = newtempMult;
-                tempMap.emplace(id, oldtemp);
-            }
-        }
-    }
+    // void diffuseTemps(int timestep) {
+    //     TIME_FUNCTION;
+    //     std::cout << "diffusing temps with a timestep of " << timestep << std::endl;
+    //     if (tempMap.empty() || timestep < 1) return;
+    //     #pragma omp parallel for
+    //     for (const auto& [id, pos] : Positions) {
+    //         auto tempIT = tempMap.find(id);
+    //         if (tempIT != tempMap.end()) {
+    //             Temp oldtemp = tempIT->second;
+    //             tempMap.erase(id);
+    //             float newtemp = Temp::calGrad(pos, getTemps(id));
+    //             float newtempMult = (newtemp-oldtemp.temp) * timestep;
+    //             oldtemp.temp = newtempMult;
+    //             tempMap.emplace(id, oldtemp);
+    //         }
+    //     }
+    // }
 
-    void diffuseTempsOptimized(float deltaTime) {
+    void diffuseTemps(float deltaTime) {
         TIME_FUNCTION;
         if (tempMap.empty() || deltaTime <= 0) return;
         
@@ -1003,33 +1003,27 @@ public:
         tempUpdates.reserve(tempMap.size());
         
         // Process in spatial order for better cache performance
-        for (const auto& [id, tempObj] : tempMap) {
+        for (auto& [id, tempObj] : tempMap) {
             Vec2 pos = Positions.at(id);
-            
+            float oldtemp = tempObj.temp;
             // Use smaller query radius for diffusion
             auto nearbyIds = spatialGrid.queryRange(pos, neighborRadius * tempObj.conductivity);
             
             float heatTransfer = 0.0f;
             int validNeighbors = 0;
-            
+            std::unordered_map<Vec2, Temp> neighborTemps;
             for (size_t neighborId : nearbyIds) {
                 if (neighborId != id && tempMap.find(neighborId) != tempMap.end()) {
-                    float tempDiff = tempMap.at(neighborId).temp - tempObj.temp;
-                    float distance = pos.distance(Positions.at(neighborId));
-                    
-                    if (distance > EPSILON) {
-                        // Basic heat conduction formula
-                        float conductivity = tempObj.conductivity * (tempObj.diffusivity + tempMap.at(neighborId).diffusivity);
-                        heatTransfer += conductivity * tempDiff / distance;
-                        validNeighbors++;
-                    }
+                    neighborTemps.emplace(Positions.at(neighborId), tempMap.at(neighborId));
                 }
             }
-            
-            if (validNeighbors > 0) {
-                float newTemp = tempObj.temp + heatTransfer * deltaTime / validNeighbors;
-                tempUpdates.emplace_back(id, newTemp);
-            }
+            tempObj.calGrad(pos, neighborTemps);
+            float newtemp = tempObj.temp;
+            float tempdiff = (oldtemp - newtemp) * (deltaTime / 1000);
+            // if (std::abs(newtemp) < EPSILON) {
+            //     std::cout << "new temp is: " << newtemp << " old temp is: " << oldtemp << " diff*delta: " << tempdiff << std::endl;
+            // }
+            tempObj.temp = oldtemp - tempdiff;
         }
         
         // Batch update temperatures

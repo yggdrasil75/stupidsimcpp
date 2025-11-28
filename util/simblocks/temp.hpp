@@ -78,46 +78,52 @@ public:
         return num / den;
     }
     
-    static float calGrad(const Vec2& testPos, const std::unordered_map<Vec2, Temp>& others) {
+    void calGrad(const Vec2& testPos, const std::unordered_map<Vec2, Temp>& others) {
+        int meh;
+        //std::cout << meh++ <<  std::endl;
         std::vector<std::pair<Vec2, float>> nearbyPoints;
-        for (const auto& [point, temp] : others) {
+        for (const auto& [point, ctemp] : others) {
             if (point.distance(testPos) <= 25) {
-                nearbyPoints.emplace_back(point, temp.temp);
+                nearbyPoints.emplace_back(point, ctemp.temp);
             }
         }
-        float sumX, sumY, sumT, sumX2, sumY2, sumXY, sumXT, sumYT = 0;
+        //std::cout << meh++ <<  std::endl;
+        float sumX = 0,sumY = 0,sumT = 0,sumX2 = 0,sumY2 = 0,sumXY = 0,sumXT = 0, sumYT = 0;
         int n = nearbyPoints.size();
-        for (const auto& [point, temp] : nearbyPoints) {
+        //std::cout << meh++ <<  std::endl;
+        for (const auto& [point, ctemp] : nearbyPoints) {
             float x = point.x - testPos.x;
             float y = point.y - testPos.y;
 
             sumX += x;
             sumY += y;
-            sumT += temp;
+            sumT += ctemp;
             sumX2 += x * x;
             sumY2 += y * y;
             sumXY += x * y;
-            sumXT += x * temp;
-            sumYT += y * temp;
+            sumXT += x * ctemp;
+            sumYT += y * ctemp;
         }
 
+        //std::cout << meh++ <<  std::endl;
         float det = sumX2 * sumY2 - sumXY * sumXY;
-
+    
+        Vec2 calpoint;
         if (std::abs(det) < 1e-10) {
-            Vec2 calpoint = Vec2(0, 0); // Singular matrix, cannot solve
+            calpoint = Vec2(0, 0); // Singular matrix, cannot solve
         }
-        
-        float a = (sumXT * sumY2 - sumYT * sumXY) / det;
-        float b = (sumX2 * sumYT - sumXY * sumXT) / det;
-        
-        Vec2 calpoint =  Vec2(a, b); // ∇T = (∂T/∂x, ∂T/∂y)
-
+        else {
+            float a = (sumXT * sumY2 - sumYT * sumXY) / det;
+            float b = (sumX2 * sumYT - sumXY * sumXT) / det;
+            calpoint =  Vec2(a, b); // ∇T = (∂T/∂x, ∂T/∂y)
+        }
+        //std::cout << meh++ <<  std::endl;
         Vec2 closest = findClosestPoint(testPos, others);
         Vec2 displacement = testPos - closest;
 
-        float refTemp = others.at(closest).temp;
-        float estimatedTemp = refTemp + (calpoint.x * displacement.x + calpoint.y * displacement.y);
-        return estimatedTemp;
+        float estimatedTemp = temp + (calpoint.x * displacement.x + calpoint.y * displacement.y);
+        temp = estimatedTemp;
+        
     }
     
 };
