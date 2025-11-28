@@ -400,9 +400,9 @@ int main() {
     bool show_another_window = false;
     ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
     static float f = 30.0f;
-    static int i1 = 1024;
-    static int i2 = 1024;
-    static int i3 = 480;
+    static int i1 = 256;
+    static int i2 = 256;
+    static int i3 = 4800;
     static int i4 = 8;
     static int noisemod = 42;
     static float fs = 1.0;

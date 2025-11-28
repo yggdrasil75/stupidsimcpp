@@ -394,7 +394,7 @@ public:
     }
 
     size_t getOrCreatePositionVec(const Vec2& pos, float radius = 0.0f, bool create = true) {
-        TIME_FUNCTION;
+        //TIME_FUNCTION; //called too many times and average time is less than 0.0000001 so ignore it.
         if (radius == 0.0f) {
             Vec2 gridPos = spatialGrid.worldToGrid(pos);
             auto cellIt = spatialGrid.grid.find(gridPos);
@@ -423,7 +423,7 @@ public:
     }
 
     std::vector<size_t> getPositionVecRegion(const Vec2& pos, float radius = 1.0f) const {
-        TIME_FUNCTION;
+        //TIME_FUNCTION;
         float searchRadius = (radius == 0.0f) ? std::numeric_limits<float>::epsilon() : radius;
         
         // Get candidates from spatial grid
@@ -987,7 +987,7 @@ public:
     //         if (tempIT != tempMap.end()) {
     //             Temp oldtemp = tempIT->second;
     //             tempMap.erase(id);
-    //             float newtemp = Temp::calGrad(pos, getTemps(id));
+    //             float newtemp = Temp::calLapl(pos, getTemps(id));
     //             float newtempMult = (newtemp-oldtemp.temp) * timestep;
     //             oldtemp.temp = newtempMult;
     //             tempMap.emplace(id, oldtemp);
@@ -1017,7 +1017,7 @@ public:
                     neighborTemps.emplace(Positions.at(neighborId), tempMap.at(neighborId));
                 }
             }
-            tempObj.calGrad(pos, neighborTemps);
+            tempObj.calLapl(pos, neighborTemps);
             float newtemp = tempObj.temp;
             float tempdiff = (oldtemp - newtemp) * (deltaTime / 1000);
             // if (std::abs(newtemp) < EPSILON) {

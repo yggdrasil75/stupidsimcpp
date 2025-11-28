@@ -11,7 +11,7 @@ CXXFLAGS = -std=c++23 -I$(IMGUI_DIR) -I$(IMGUI_DIR)/backends -I$(STB_DIR)
 CXXFLAGS += `pkg-config --cflags glfw3`
 CFLAGS = $(CXXFLAGS)
 LDFLAGS := -L./imgui -limgui -lGL
-LINUX_GL_LIBS = -lGL
+LINUX_GL_LIBS = -lGL -ltbb
 PKG_FLAGS := $(LINUX_GL_LIBS) `pkg-config --static --cflags --libs glfw3`
 CXXFLAGS += $(PKG_FLAGS)
 

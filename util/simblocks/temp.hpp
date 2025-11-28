@@ -78,52 +78,33 @@ public:
         return num / den;
     }
     
-    void calGrad(const Vec2& testPos, const std::unordered_map<Vec2, Temp>& others) {
-        int meh;
-        //std::cout << meh++ <<  std::endl;
-        std::vector<std::pair<Vec2, float>> nearbyPoints;
-        for (const auto& [point, ctemp] : others) {
-            if (point.distance(testPos) <= 25) {
-                nearbyPoints.emplace_back(point, ctemp.temp);
-            }
-        }
-        //std::cout << meh++ <<  std::endl;
-        float sumX = 0,sumY = 0,sumT = 0,sumX2 = 0,sumY2 = 0,sumXY = 0,sumXT = 0, sumYT = 0;
-        int n = nearbyPoints.size();
-        //std::cout << meh++ <<  std::endl;
-        for (const auto& [point, ctemp] : nearbyPoints) {
-            float x = point.x - testPos.x;
-            float y = point.y - testPos.y;
+    void calLapl(const Vec2& testPos, const std::unordered_map<Vec2, Temp>& others) {
+        //TIME_FUNCTION;
+        float dt = 0.032;
+        float sumWeights = 0.0f;
+        float sumTempWeights = 0.0f;
+        float searchRadius = 25.0f;
 
-            sumX += x;
-            sumY += y;
-            sumT += ctemp;
-            sumX2 += x * x;
-            sumY2 += y * y;
-            sumXY += x * y;
-            sumXT += x * ctemp;
-            sumYT += y * ctemp;
+        for (const auto& [point, tempObj] : others) {
+            float dist = testPos.distance(point);
+            
+            if (dist < 0.001f || dist > searchRadius) continue;
+
+            float weight = 1.0f / (dist * dist);
+
+            sumTempWeights += weight * tempObj.temp;
+            sumWeights += weight;
         }
 
-        //std::cout << meh++ <<  std::endl;
-        float det = sumX2 * sumY2 - sumXY * sumXY;
-    
-        Vec2 calpoint;
-        if (std::abs(det) < 1e-10) {
-            calpoint = Vec2(0, 0); // Singular matrix, cannot solve
-        }
-        else {
-            float a = (sumXT * sumY2 - sumYT * sumXY) / det;
-            float b = (sumX2 * sumYT - sumXY * sumXT) / det;
-            calpoint =  Vec2(a, b); // ∇T = (∂T/∂x, ∂T/∂y)
-        }
-        //std::cout << meh++ <<  std::endl;
-        Vec2 closest = findClosestPoint(testPos, others);
-        Vec2 displacement = testPos - closest;
+        if (sumWeights < 1e-10f) return;
 
-        float estimatedTemp = temp + (calpoint.x * displacement.x + calpoint.y * displacement.y);
-        temp = estimatedTemp;
+        float equilibriumTemp = sumTempWeights / sumWeights;
+
+        float rate = this->diffusivity * 0.01f;
         
+        float lerpFactor = 1.0f - std::exp(-rate * dt);
+
+        this->temp += (equilibriumTemp - this->temp) * lerpFactor;
     }
     
 };
