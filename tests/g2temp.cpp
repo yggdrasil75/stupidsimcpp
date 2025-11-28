@@ -85,25 +85,25 @@ void Preview(Grid2& grid) {
 }
 
 void livePreview(Grid2& grid, AnimationConfig config) {
-    std::lock_guard<std::mutex> lock(previewMutex);
+    // std::lock_guard<std::mutex> lock(previewMutex);
     
-    currentPreviewFrame = grid.getTempAsFrame(Vec2(0,0), Vec2(config.height,config.width), Vec2(256,256),frame::colormap::RGBA);
-    // Vec2 min;
-    // Vec2 max;
-    // grid.getBoundingBox(min, max);
-    //currentPreviewFrame = grid.getTempAsFrame(min,max, Vec2(1024,1024));
+    // currentPreviewFrame = grid.getTempAsFrame(Vec2(0,0), Vec2(config.height,config.width), Vec2(256,256),frame::colormap::RGBA);
+    // // Vec2 min;
+    // // Vec2 max;
+    // // grid.getBoundingBox(min, max);
+    // //currentPreviewFrame = grid.getTempAsFrame(min,max, Vec2(1024,1024));
 
-    glGenTextures(1, &textu);
-    glBindTexture(GL_TEXTURE_2D, textu);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    // glGenTextures(1, &textu);
+    // glBindTexture(GL_TEXTURE_2D, textu);
+    // glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    // glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    // glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
     
-    glBindTexture(GL_TEXTURE_2D, textu);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, currentPreviewFrame.getWidth(), currentPreviewFrame.getHeight(), 
-                 0, GL_RGBA, GL_UNSIGNED_BYTE, currentPreviewFrame.getData().data());
+    // glBindTexture(GL_TEXTURE_2D, textu);
+    // glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, currentPreviewFrame.getWidth(), currentPreviewFrame.getHeight(), 
+    //              0, GL_RGBA, GL_UNSIGNED_BYTE, currentPreviewFrame.getData().data());
     
-    updatePreview = true;
+    // updatePreview = true;
 }
 
 std::vector<std::tuple<size_t, Vec2, Vec4>> pickSeeds(Grid2 grid, AnimationConfig config) {
@@ -286,7 +286,7 @@ void mainLogic(const AnimationConfig& config, Shared& state, int gradnoise) {
             }
             
             //expandPixel(grid,config,seeds);
-            grid.diffuseTemps(100);
+            grid.diffuseTempsOptimized(100);
             
             std::lock_guard<std::mutex> lock(state.mutex);
             state.grid = grid;

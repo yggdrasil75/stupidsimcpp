@@ -12,6 +12,8 @@
 #include "../simblocks/temp.hpp"
 #include <vector>
 #include <unordered_set>
+#include <execution>
+#include <algorithm>
 
 const float EPSILON = 0.0000000000000000000000001;
 
@@ -305,15 +307,13 @@ public:
         return addObject(pos,newc,1.0);
     }
 
-    //add pixel (default color and default size provided)
     size_t addObject(const Vec2& pos, const Vec4& color, float size = 1.0f) {
         size_t id = Positions.set(pos);
-        Pixels.insert({id, GenericPixel(id, color, pos)});
+        Pixels.emplace(id, GenericPixel(id, color, pos));
         spatialGrid.insert(id, pos);
         return id;
     }
 
-    // Set default background color for empty spaces
     void setDefault(const Vec4& color) {
         defaultBackgroundColor = color;
     }
@@ -406,6 +406,7 @@ public:
                 }
             }
             if (create) {
+
                 return addObject(pos, defaultBackgroundColor, 1.0f);
             }
             throw std::out_of_range("Position not found");
@@ -818,13 +819,11 @@ public:
         Vec2 pos = Positions.at(id);
         std::vector<size_t> candidates = spatialGrid.queryRange(pos, neighborRadius);
         
-        // Filter out self and apply exact distance check
         std::vector<size_t> neighbors;
         float radiusSq = neighborRadius * neighborRadius;
         
         for (size_t candidateId : candidates) {
-            if (candidateId != id && 
-                pos.distanceSquared(Positions.at(candidateId)) <= radiusSq) {
+            if (candidateId != id && pos.distanceSquared(Positions.at(candidateId)) <= radiusSq) {
                 neighbors.push_back(candidateId);
             }
         }
@@ -836,7 +835,6 @@ public:
         Vec2 pos = Positions.at(id);
         std::vector<size_t> candidates = spatialGrid.queryRange(pos, neighborRadius);
         
-        // Filter out self and apply exact distance check
         std::vector<size_t> neighbors;
         float radiusSq = dist * dist;
         
@@ -981,15 +979,62 @@ public:
 
     void diffuseTemps(int timestep) {
         TIME_FUNCTION;
+        std::cout << "diffusing temps with a timestep of " << timestep << std::endl;
         if (tempMap.empty() || timestep < 1) return;
-        std::unordered_map<size_t, float> cTemps;
-        cTemps.reserve(tempMap.size());
+        #pragma omp parallel for
         for (const auto& [id, pos] : Positions) {
-            float oldtemp = getTemp(id);
-            tempMap.erase(id);
-            float newtemp = Temp::calGrad(pos, getTemps(id));
-            float newtempMult = (newtemp-oldtemp) * timestep;
-            setTemp(id, newtempMult);
+            auto tempIT = tempMap.find(id);
+            if (tempIT != tempMap.end()) {
+                Temp oldtemp = tempIT->second;
+                tempMap.erase(id);
+                float newtemp = Temp::calGrad(pos, getTemps(id));
+                float newtempMult = (newtemp-oldtemp.temp) * timestep;
+                oldtemp.temp = newtempMult;
+                tempMap.emplace(id, oldtemp);
+            }
+        }
+    }
+
+    void diffuseTempsOptimized(float deltaTime) {
+        TIME_FUNCTION;
+        if (tempMap.empty() || deltaTime <= 0) return;
+        
+        std::vector<std::pair<size_t, float>> tempUpdates;
+        tempUpdates.reserve(tempMap.size());
+        
+        // Process in spatial order for better cache performance
+        for (const auto& [id, tempObj] : tempMap) {
+            Vec2 pos = Positions.at(id);
+            
+            // Use smaller query radius for diffusion
+            auto nearbyIds = spatialGrid.queryRange(pos, neighborRadius * tempObj.conductivity);
+            
+            float heatTransfer = 0.0f;
+            int validNeighbors = 0;
+            
+            for (size_t neighborId : nearbyIds) {
+                if (neighborId != id && tempMap.find(neighborId) != tempMap.end()) {
+                    float tempDiff = tempMap.at(neighborId).temp - tempObj.temp;
+                    float distance = pos.distance(Positions.at(neighborId));
+                    
+                    if (distance > EPSILON) {
+                        // Basic heat conduction formula
+                        float conductivity = tempObj.conductivity * (tempObj.diffusivity + tempMap.at(neighborId).diffusivity);
+                        heatTransfer += conductivity * tempDiff / distance;
+                        validNeighbors++;
+                    }
+                }
+            }
+            
+            if (validNeighbors > 0) {
+                float newTemp = tempObj.temp + heatTransfer * deltaTime / validNeighbors;
+                tempUpdates.emplace_back(id, newTemp);
+            }
+        }
+        
+        // Batch update temperatures
+        for (const auto& [id, newTemp] : tempUpdates) {
+            tempMap.at(id).temp = newTemp;
         }
     }
 };
