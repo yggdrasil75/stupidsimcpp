@@ -999,37 +999,36 @@ public:
         TIME_FUNCTION;
         if (tempMap.empty() || deltaTime <= 0) return;
         
-        std::vector<std::pair<size_t, float>> tempUpdates;
-        tempUpdates.reserve(tempMap.size());
+        std::vector<std::pair<size_t, Temp*>> tempEntries;
+        tempEntries.reserve(tempMap.size());
         
-        // Process in spatial order for better cache performance
         for (auto& [id, tempObj] : tempMap) {
-            Vec2 pos = Positions.at(id);
-            float oldtemp = tempObj.temp;
-            // Use smaller query radius for diffusion
-            auto nearbyIds = spatialGrid.queryRange(pos, neighborRadius * tempObj.conductivity);
-            
-            float heatTransfer = 0.0f;
-            int validNeighbors = 0;
-            std::unordered_map<Vec2, Temp> neighborTemps;
-            for (size_t neighborId : nearbyIds) {
-                if (neighborId != id && tempMap.find(neighborId) != tempMap.end()) {
-                    neighborTemps.emplace(Positions.at(neighborId), tempMap.at(neighborId));
-                }
-            }
-            tempObj.calLapl(pos, neighborTemps);
-            float newtemp = tempObj.temp;
-            float tempdiff = (oldtemp - newtemp) * (deltaTime / 1000);
-            // if (std::abs(newtemp) < EPSILON) {
-            //     std::cout << "new temp is: " << newtemp << " old temp is: " << oldtemp << " diff*delta: " << tempdiff << std::endl;
-            // }
-            tempObj.temp = oldtemp - tempdiff;
+            tempEntries.emplace_back(id, &tempObj);
         }
         
-        // Batch update temperatures
-        for (const auto& [id, newTemp] : tempUpdates) {
-            tempMap.at(id).temp = newTemp;
-        }
+        std::for_each(std::execution::par_unseq, tempEntries.begin(), tempEntries.end(),
+            [&](const std::pair<size_t, Temp*>& entry) {
+                size_t id = entry.first;
+                Temp* tempObj = entry.second;
+                Vec2 pos = Positions.at(id);
+                float oldtemp = tempObj->temp;
+                
+                // Use smaller query radius for diffusion
+                auto nearbyIds = spatialGrid.queryRange(pos, neighborRadius * tempObj->conductivity);
+                
+                std::unordered_map<Vec2, Temp> neighborTemps;
+                for (size_t neighborId : nearbyIds) {
+                    if (neighborId != id && tempMap.find(neighborId) != tempMap.end()) {
+                        neighborTemps.emplace(Positions.at(neighborId), tempMap.at(neighborId));
+                    }
+                }
+                
+                tempObj->calLapl(pos, neighborTemps);
+                float newtemp = tempObj->temp;
+                float tempdiff = (oldtemp - newtemp) * (deltaTime / 1000);
+                tempObj->temp = oldtemp - tempdiff;
+            }
+        );
     }
 };
 
