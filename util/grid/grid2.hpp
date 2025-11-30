@@ -17,26 +17,36 @@
 
 const float EPSILON = 0.0000000000000000000000001;
 
+/// @brief A bidirectional lookup helper to map internal IDs to 2D positions and vice-versa.
+/// @details Maintains two hashmaps to allow O(1) lookup in either direction.
 class reverselookupassistant {
 private:
     std::unordered_map<size_t, Vec2> Positions;
+    /// "Positions" reversed - stores the reverse mapping from Vec2 to ID.
     std::unordered_map<Vec2, size_t, Vec2::Hash> ƨnoiƚiƨoꟼ;
     size_t next_id;
 public:
+    /// @brief Get the Position associated with a specific ID.
+    /// @throws std::out_of_range if the ID does not exist.
     Vec2 at(size_t id) const {
         auto it = Positions.at(id);
         return it;
     }
 
+    /// @brief Get the ID associated with a specific Position.
+    /// @throws std::out_of_range if the Position does not exist.
     size_t at(const Vec2& pos) const {
         size_t id = ƨnoiƚiƨoꟼ.at(pos);
         return id;
     }
 
+    /// @brief Finds a position by ID (Wrapper for at).
     Vec2 find(size_t id) {
         return Positions.at(id);
     }
 
+    /// @brief Registers a new position and assigns it a unique ID.
+    /// @return The newly generated ID.
     size_t set(const Vec2& pos) {
         size_t id = next_id++;
         Positions[id] = pos;
@@ -44,6 +54,7 @@ public:
         return id;
     }
 
+    /// @brief Removes an entry by ID.
     size_t remove(size_t id) {
         Vec2& pos = Positions[id];
         Positions.erase(id);
@@ -51,6 +62,7 @@ public:
         return id;
     }
 
+    /// @brief Removes an entry by Position.
     size_t remove(const Vec2& pos) {
         size_t id = ƨnoiƚiƨoꟼ[pos];
         Positions.erase(id);
@@ -119,22 +131,29 @@ public:
     
 };
 
+/// @brief Accelerates spatial queries by bucketizing positions into a grid.
 class SpatialGrid {
 private:
     float cellSize;
 public:
     std::unordered_map<Vec2, std::unordered_set<size_t>, Vec2::Hash> grid;
+    
+    /// @brief Initializes the spatial grid.
+    /// @param cellSize The dimension of the spatial buckets. Larger cells mean more items per bucket but fewer buckets.
     SpatialGrid(float cellSize = 2.0f) : cellSize(cellSize) {}
     
+    /// @brief Converts world coordinates to spatial grid coordinates.
     Vec2 worldToGrid(const Vec2& worldPos) const {
         return (worldPos / cellSize).floor();
     }
     
+    /// @brief Adds an object ID to the spatial index at the given position.
     void insert(size_t id, const Vec2& pos) {
         Vec2 gridPos = worldToGrid(pos);
         grid[gridPos].insert(id);
     }
     
+    /// @brief Removes an object ID from the spatial index.
     void remove(size_t id, const Vec2& pos) {
         Vec2 gridPos = worldToGrid(pos);
         auto cellIt = grid.find(gridPos);
@@ -146,6 +165,7 @@ public:
         }
     }
     
+    /// @brief Moves an object within the spatial index (removes from old cell, adds to new if changed).
     void update(size_t id, const Vec2& oldPos, const Vec2& newPos) {
         Vec2 oldGridPos = worldToGrid(oldPos);
         Vec2 newGridPos = worldToGrid(newPos);
@@ -156,6 +176,7 @@ public:
         }
     }
     
+    /// @brief Returns all IDs located in the specific grid cell containing 'center'.
     std::unordered_set<size_t> find(const Vec2& center) const {
         //Vec2 g2pos = worldToGrid(center);
         auto cellIt = grid.find(worldToGrid(center));
@@ -165,6 +186,10 @@ public:
         return std::unordered_set<size_t>();
     }
 
+    /// @brief Finds all object IDs within a square area around the center.
+    /// @param center The world position center.
+    /// @param radius The search radius (defines the bounds of grid cells to check).
+    /// @return A vector of candidate IDs (Note: this returns objects in valid grid cells, further distance checks may be required).
     std::vector<size_t> queryRange(const Vec2& center, float radius) const {
         std::vector<size_t> results;
         float radiusSq = radius * radius;
@@ -195,6 +220,7 @@ public:
     }
 };
 
+/// @brief Represents a single point in the grid with an ID, color, and position.
 class GenericPixel {
 protected:
     size_t id;
@@ -224,6 +250,7 @@ public:
     
 };
 
+/// @brief The main simulation grid class managing positions, visual data (pixels), and physical properties (temperature, noise).
 class Grid2 { 
 protected:
     //all positions
@@ -248,6 +275,16 @@ protected:
     std::unordered_map<size_t, Temp> tempMap;
     bool regenpreventer = false;
 public:
+    /// @brief Populates the grid with Perlin noise-based pixels.
+    /// @param minx Start X index.
+    /// @param miny Start Y index.
+    /// @param maxx End X index.
+    /// @param maxy End Y index.
+    /// @param minChance Minimum noise threshold to spawn a pixel.
+    /// @param maxChance Maximum noise threshold to spawn a pixel.
+    /// @param color If true, generates RGB noise. If false, generates grayscale based on alpha.
+    /// @param noisemod Seed offset for the noise generator.
+    /// @return Reference to self for chaining.
     Grid2 noiseGenGrid(size_t minx,size_t miny, size_t maxx, size_t maxy, float minChance = 0.1f
                         , float maxChance = 1.0f, bool color = true, int noisemod = 42) {
         TIME_FUNCTION;
@@ -284,12 +321,14 @@ public:
         return *this;
     }
 
+    /// @brief Generates a grayscale point at the given position based on noise.
     size_t NoiseGenPointB(const Vec2& pos) {
         float grayc = noisegen.permute(pos);
         Vec4 newc = Vec4(grayc,grayc,grayc,grayc);
         return addObject(pos,newc,1.0);
     }
     
+    /// @brief Generates an RGB point at the given position based on noise.
     size_t NoiseGenPointRGB(const Vec2& pos) {
         float red = noisegen.permute(pos);
         float green = noisegen.permute(pos);
@@ -298,6 +337,7 @@ public:
         return addObject(pos,newc,1.0);
     }
 
+    /// @brief Generates an RGBA point at the given position based on noise.
     size_t NoiseGenPointRGBA(const Vec2& pos) {
         float red = noisegen.permute(pos);
         float green = noisegen.permute(pos);
@@ -307,6 +347,11 @@ public:
         return addObject(pos,newc,1.0);
     }
 
+    /// @brief Adds a new object to the grid.
+    /// @param pos The 2D world position.
+    /// @param color The color vector.
+    /// @param size The size (currently unused/informational).
+    /// @return The unique ID assigned to the new object.
     size_t addObject(const Vec2& pos, const Vec4& color, float size = 1.0f) {
         size_t id = Positions.set(pos);
         Pixels.emplace(id, GenericPixel(id, color, pos));
@@ -314,14 +359,17 @@ public:
         return id;
     }
 
+    /// @brief Sets the default background color.
     void setDefault(const Vec4& color) {
         defaultBackgroundColor = color;
     }
     
+    /// @brief Sets the default background color components.
     void setDefault(float r, float g, float b, float a = 0.0f) {
         defaultBackgroundColor = Vec4(r, g, b, a);
     }
     
+    /// @brief Configures thermal properties for a specific object ID.
     void setMaterialProperties(size_t id, double conductivity, double specific_heat, double density = 1.0) {
         auto it = tempMap.at(id);
         it.conductivity = conductivity;
@@ -329,7 +377,7 @@ public:
         it.diffusivity = conductivity / (density * specific_heat);
     }
     
-    //set position by id
+    /// @brief Moves an object to a new position and updates spatial indexing.
     void setPosition(size_t id, const Vec2& newPosition) {
         Vec2 oldPosition = Positions.at(id);
         Pixels.at(id).move(newPosition);
@@ -342,18 +390,21 @@ public:
         Pixels.at(id).recolor(color);
     }
     
-    // Set neighbor search radius
+    /// @brief Sets the radius used for neighbor queries.
+    /// @details Triggers an optimization of the spatial grid cell size.
     void setNeighborRadius(float radius) {
         neighborRadius = radius;
         // updateNeighborMap(); // Recompute all neighbors
         optimizeSpatialGrid();
     }
     
+    /// @brief Sets the temperature at a specific position (creates point if missing).
     void setTemp(const Vec2 pos, double temp) {
         size_t id = getOrCreatePositionVec(pos, 0.0, true);
         setTemp(id, temp);
     }
 
+    /// @brief Sets the temperature for a specific object ID.
     void setTemp(size_t id, double temp) {
         Temp tval = Temp(temp);
         tempMap.emplace(id, tval);
@@ -370,6 +421,11 @@ public:
         return it;
     }
 
+    /// @brief Finds the ID of an object at a given position.
+    /// @param pos The position to query.
+    /// @param radius If 0.0, performs an exact match. If > 0.0, returns the first object found within the radius.
+    /// @return The ID of the found object.
+    /// @throws std::out_of_range If no object is found.
     size_t getPositionVec(const Vec2& pos, float radius = 0.0f) const {
         TIME_FUNCTION;
         if (radius == 0.0f) {
@@ -393,6 +449,11 @@ public:
         }
     }
 
+    /// @brief Finds an object ID or creates a new one at the given position.
+    /// @param pos Target position.
+    /// @param radius Search radius for existing objects.
+    /// @param create If true, creates a new object if none is found.
+    /// @return The ID of the existing or newly created object.
     size_t getOrCreatePositionVec(const Vec2& pos, float radius = 0.0f, bool create = true) {
         //TIME_FUNCTION; //called too many times and average time is less than 0.0000001 so ignore it.
         if (radius == 0.0f) {
@@ -422,6 +483,7 @@ public:
         }
     }
 
+    /// @brief Returns a list of all object IDs within a specified radius of a position.
     std::vector<size_t> getPositionVecRegion(const Vec2& pos, float radius = 1.0f) const {
         //TIME_FUNCTION;
         float searchRadius = (radius == 0.0f) ? std::numeric_limits<float>::epsilon() : radius;
@@ -446,6 +508,7 @@ public:
         return Pixels.at(id).getColor();
     }
     
+    /// @brief Gets the temperature of a specific ID. Lazily initializes temperature if missing.
     float getTemp(size_t id) {
         if (tempMap.find(id) != tempMap.end()) {
             Temp temp = Temp(getPositionID(id), getTemps());
@@ -457,6 +520,7 @@ public:
         return tempMap.at(id).temp;
     }
     
+    /// @brief Gets the temperature at a position. Interpolates (IDW) if necessary.
     double getTemp(const Vec2 pos) {
         size_t id = getOrCreatePositionVec(pos, 0.01f, true);
         if (tempMap.find(id) == tempMap.end()) {
@@ -468,6 +532,7 @@ public:
         else return tempMap.at(id).temp;
     }
 
+    /// @brief Retrieves all temperatures in the grid mapped by position.
     std::unordered_map<Vec2, Temp> getTemps() const {
         std::unordered_map<Vec2, Temp> out;
         for (const auto& [id, temp] : tempMap) {
@@ -476,6 +541,7 @@ public:
         return out;
     }
 
+    /// @brief Retrieves temperatures of neighbors around a specific ID.
     std::unordered_map<Vec2, Temp> getTemps(size_t id) const {
         std::unordered_map<Vec2, Temp> out;
         std::vector<size_t> tval = spatialGrid.queryRange(Positions.at(id), 10);
@@ -489,7 +555,7 @@ public:
         return out;
     }
 
-    //get bounding box
+    /// @brief Calculates the axis-aligned bounding box of all objects in the grid.
     void getBoundingBox(Vec2& minCorner, Vec2& maxCorner) const {
         TIME_FUNCTION;
         if (Positions.empty()) {
@@ -514,6 +580,12 @@ public:
         
     }
 
+    /// @brief Renders a specific region of the grid into a Frame object.
+    /// @param minCorner Top-left coordinate of the region.
+    /// @param maxCorner Bottom-right coordinate of the region.
+    /// @param res The output resolution (width, height) in pixels.
+    /// @param outChannels Color format (RGB, RGBA, BGR).
+    /// @return A Frame object containing the rendered image.
     frame getGridRegionAsFrame(const Vec2& minCorner, const Vec2& maxCorner,
                        Vec2& res, frame::colormap outChannels = frame::colormap::RGB)  {
         TIME_FUNCTION;
@@ -628,6 +700,7 @@ public:
         }
     }
 
+    /// @brief Renders the entire grid into a Frame. Auto-calculates bounds.
     frame getGridAsFrame(frame::colormap outchannel = frame::colormap::RGB) {
         Vec2 min;
         Vec2 max;
@@ -637,6 +710,7 @@ public:
         return getGridRegionAsFrame(min, max, res, outchannel);
     }
 
+    /// @brief Generates a heatmap visualization of the grid temperatures.
     frame getTempAsFrame(Vec2 minCorner, Vec2 maxCorner, Vec2 res, frame::colormap outcolor = frame::colormap::RGB)  {
         TIME_FUNCTION;
         if (regenpreventer) return frame();
@@ -717,6 +791,7 @@ public:
         }
     }
 
+    /// @brief Removes an object from the grid entirely.
     size_t removeID(size_t id) {
         Vec2 oldPosition = Positions.at(id);
         Positions.remove(id);
@@ -726,7 +801,7 @@ public:
         return id;
     }
     
-    //bulk update positions
+    /// @brief Updates multiple positions simultaneously.
     void bulkUpdatePositions(const std::unordered_map<size_t, Vec2>& newPositions) {
         TIME_FUNCTION;
         for (const auto& [id, newPos] : newPositions) {
@@ -737,6 +812,7 @@ public:
         }
     }
     
+    /// @brief Batch insertion of objects for efficiency.
     std::vector<size_t> bulkAddObjects(const std::vector<Vec2> poses, std::vector<Vec4> colors) {
         TIME_FUNCTION;
         std::vector<size_t> ids;
@@ -762,6 +838,7 @@ public:
         return newids;
     }
 
+    /// @brief Batch insertion of objects including temperature data.
     std::vector<size_t> bulkAddObjects(const std::vector<Vec2> poses, std::vector<Vec4> colors, std::vector<float>& temps) {
         TIME_FUNCTION;
         std::vector<size_t> ids;
@@ -803,6 +880,7 @@ public:
         defaultBackgroundColor = Vec4(0.0f, 0.0f, 0.0f, 0.0f);
     }
 
+    /// @brief Rebuilds the spatial hashing grid based on the current neighbor radius.
     void optimizeSpatialGrid() {
         //std::cout << "optimizeSpatialGrid()" << std::endl;
         spatialCellSize = neighborRadius * neighborRadius;
@@ -815,6 +893,7 @@ public:
         }
     }
 
+    /// @brief Gets IDs of objects within `neighborRadius` of the given ID.
     std::vector<size_t> getNeighbors(size_t id) const {
         Vec2 pos = Positions.at(id);
         std::vector<size_t> candidates = spatialGrid.queryRange(pos, neighborRadius);
@@ -831,6 +910,7 @@ public:
         return neighbors;
     }
     
+    /// @brief Gets IDs of objects within a custom distance of the given ID.
     std::vector<size_t> getNeighborsRange(size_t id, float dist) const {
         Vec2 pos = Positions.at(id);
         std::vector<size_t> candidates = spatialGrid.queryRange(pos, neighborRadius);
@@ -848,6 +928,7 @@ public:
         return neighbors;
     }
     
+    /// @brief Generates a noise grid that includes temperature data.
     Grid2 noiseGenGridTemps(size_t minx,size_t miny, size_t maxx, size_t maxy, float minChance = 0.1f
                         , float maxChance = 1.0f, bool color = true, int noisemod = 42) {
         TIME_FUNCTION;
@@ -890,6 +971,7 @@ public:
         return *this;
     }
 
+    /// @brief Finds temperature objects within a region.
     std::unordered_map<size_t, Temp*> findTempsInRegion(const Vec2& center, float radius) {
         std::unordered_map<size_t, Temp*> results;
         
@@ -908,6 +990,7 @@ public:
         return results;
     }
 
+    /// @brief Fills empty spots in the bounding box with default background pixels and gradients temps.
     Grid2 backfillGrid() {
         Vec2 Min;
         Vec2 Max;
@@ -929,6 +1012,7 @@ public:
         return *this;
     }
 
+    /// @brief Smoothes temperatures across the grid using Inverse Distance Weighting from existing samples.
     void gradTemps() {
         //run this at the start. it generates temps for the grid from a sampling
         std::vector<Vec2> toProcess;
@@ -977,24 +1061,9 @@ public:
         }
     }
 
-    // void diffuseTemps(int timestep) {
-    //     TIME_FUNCTION;
-    //     std::cout << "diffusing temps with a timestep of " << timestep << std::endl;
-    //     if (tempMap.empty() || timestep < 1) return;
-    //     #pragma omp parallel for
-    //     for (const auto& [id, pos] : Positions) {
-    //         auto tempIT = tempMap.find(id);
-    //         if (tempIT != tempMap.end()) {
-    //             Temp oldtemp = tempIT->second;
-    //             tempMap.erase(id);
-    //             float newtemp = Temp::calLapl(pos, getTemps(id));
-    //             float newtempMult = (newtemp-oldtemp.temp) * timestep;
-    //             oldtemp.temp = newtempMult;
-    //             tempMap.emplace(id, oldtemp);
-    //         }
-    //     }
-    // }
 
+    /// @brief Simulates heat diffusion across the grid over a time step.
+    /// @param deltaTime Time elapsed (in milliseconds) since last update.
     void diffuseTemps(float deltaTime) {
         TIME_FUNCTION;
         if (tempMap.empty() || deltaTime <= 0) return;
@@ -1008,26 +1077,25 @@ public:
         
         std::for_each(std::execution::par_unseq, tempEntries.begin(), tempEntries.end(),
             [&](const std::pair<size_t, Temp*>& entry) {
-                size_t id = entry.first;
-                Temp* tempObj = entry.second;
-                Vec2 pos = Positions.at(id);
-                float oldtemp = tempObj->temp;
+            size_t id = entry.first;
+            Temp* tempObj = entry.second;
+            Vec2 pos = Positions.at(id);
+            float oldtemp = tempObj->temp;
                 
-                // Use smaller query radius for diffusion
-                auto nearbyIds = spatialGrid.queryRange(pos, neighborRadius * tempObj->conductivity);
-                
-                std::unordered_map<Vec2, Temp> neighborTemps;
-                for (size_t neighborId : nearbyIds) {
-                    if (neighborId != id && tempMap.find(neighborId) != tempMap.end()) {
-                        neighborTemps.emplace(Positions.at(neighborId), tempMap.at(neighborId));
-                    }
+            auto nearbyIds = spatialGrid.queryRange(pos, neighborRadius * tempObj->conductivity);
+            
+            std::unordered_map<Vec2, Temp> neighborTemps;
+            for (size_t neighborId : nearbyIds) {
+                if (neighborId != id && tempMap.find(neighborId) != tempMap.end()) {
+                    neighborTemps.emplace(Positions.at(neighborId), tempMap.at(neighborId));
                 }
-                
-                tempObj->calLapl(pos, neighborTemps);
-                float newtemp = tempObj->temp;
-                float tempdiff = (oldtemp - newtemp) * (deltaTime / 1000);
-                tempObj->temp = oldtemp - tempdiff;
             }
+                
+            tempObj->calLapl(pos, neighborTemps);
+            float newtemp = tempObj->temp;
+            float tempdiff = (oldtemp - newtemp) * (deltaTime / 1000);
+            tempObj->temp = oldtemp - tempdiff;
+        }
         );
     }
 };
