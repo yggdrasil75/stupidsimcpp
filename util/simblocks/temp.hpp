@@ -36,9 +36,8 @@ public:
     float specific_heat = 900.0;
     float diffusivity = 2000.0;
     
-    Temp(float temp) : temp(temp) {
-
-    };
+    Temp() : temp(0.0) {};
+    Temp(float temp) : temp(temp) {};
     
     Temp(const Vec2& testPos, const std::unordered_map<Vec2, Temp>& others) {
         TIME_FUNCTION;
@@ -78,9 +77,9 @@ public:
         return num / den;
     }
     
-    void calLapl(const Vec2& testPos, const std::unordered_map<Vec2, Temp>& others) {
+    void calLapl(const Vec2& testPos, const std::unordered_map<Vec2, Temp>& others, float deltaTime) {
         //TIME_FUNCTION;
-        float dt = 0.032;
+        float dt = deltaTime;
         float sumWeights = 0.0f;
         float sumTempWeights = 0.0f;
         float searchRadius = 25.0f;
