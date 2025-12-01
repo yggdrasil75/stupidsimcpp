@@ -15,7 +15,7 @@
 #include <execution>
 #include <algorithm>
 
-const float EPSILON = 0.0000000000000000000000001;
+constexpr float EPSILON = 0.0000000000000000000000001;
 
 /// @brief A bidirectional lookup helper to map internal IDs to 2D positions and vice-versa.
 /// @details Maintains two hashmaps to allow O(1) lookup in either direction.
@@ -998,7 +998,7 @@ public:
         std::vector<Vec2> newPos;
         std::vector<Vec4> newColors;
         for (size_t x = Min.x; x < Max.x; x++) {
-            for (size_t y = Min.y; y < Max.y; x++) {
+            for (size_t y = Min.y; y < Max.y; y++) {
                 Vec2 pos = Vec2(x,y);
                 if (Positions.contains(pos)) continue;
                 Vec4 color = defaultBackgroundColor;
@@ -1091,10 +1091,10 @@ public:
                 }
             }
                 
-            tempObj->calLapl(pos, neighborTemps);
+            tempObj->calLapl(pos, neighborTemps, deltaTime);
             float newtemp = tempObj->temp;
-            float tempdiff = (oldtemp - newtemp) * (deltaTime / 1000);
-            tempObj->temp = oldtemp - tempdiff;
+            //float tempdiff = (oldtemp - newtemp) * (deltaTime / 1000);
+            //tempObj->temp = oldtemp - tempdiff;
         }
         );
     }

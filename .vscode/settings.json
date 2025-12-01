@@ -96,7 +96,8 @@
         "resumable": "cpp",
         "set": "cpp",
         "shared_mutex": "cpp",
-        "cfenv": "cpp"
+        "cfenv": "cpp",
+        "execution": "cpp"
     },
     "files.exclude": {
         "**/*.rpyc": true,

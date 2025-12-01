@@ -15,7 +15,14 @@ public:
     Vec3(float scalar) : x(scalar), y(scalar), z(scalar) {}
 
     Vec3(const class Vec2& vec2, float z = 0.0f);
-    
+
+    Vec3& move(const Vec3 newpos) {
+        x = newpos.x;
+        y = newpos.y;
+        z = newpos.z;
+        return *this;
+    }
+
     // Arithmetic operations
     Vec3 operator+(const Vec3& other) const {
         return Vec3(x + other.x, y + other.y, z + other.z);
@@ -303,6 +310,12 @@ public:
     std::string toString() const {
         return "(" + std::to_string(x) + ", " + std::to_string(y) + ", " + std::to_string(z) + ")";
     }
+
+    struct Hash {
+        std::size_t operator()(const Vec3& v) const {
+            return std::hash<float>()(v.x) ^ (std::hash<float>()(v.y) << 1) ^ (std::hash<float>()(v.z) << 2);
+        }
+    };
 };
 
 inline std::ostream& operator<<(std::ostream& os, const Vec3& vec) {
