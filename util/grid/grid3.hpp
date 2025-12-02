@@ -357,13 +357,13 @@ public:
                     }
                 }
             }
-            throw std::out_of_range("Position not found");
+            return -1;
         } else {
             auto results = getPositionVecRegion(pos, radius);
             if (!results.empty()) {
                 return results[0]; // Return first found
             }
-            throw std::out_of_range("No positions found in radius");
+            return -1;
         }
     }
 
@@ -441,7 +441,7 @@ public:
             maxCorner.y = std::max(maxCorner.y, pos.y);
             maxCorner.z = std::max(maxCorner.z, pos.z);
         }
-        std::cout << "bounding box: " << minCorner << ", " << maxCorner << std::endl;
+        // std::cout << "bounding box: " << minCorner << ", " << maxCorner << std::endl;
         return std::make_pair(minCorner, maxCorner);
     }
 
@@ -472,8 +472,8 @@ public:
         
         // regenpreventer = true;
         
-        std::cout << "Rendering 3D region: " << minCorner << " to " << maxCorner 
-                << " at resolution: " << res << " with view: " << View.origin << std::endl;
+        // std::cout << "Rendering 3D region: " << minCorner << " to " << maxCorner 
+        //         << " at resolution: " << res << " with view: " << View.origin << std::endl;
         
         // Create output frame
         frame outframe(outputWidth, outputHeight, outChannels);
@@ -491,7 +491,7 @@ public:
         countBuffer.reserve(bufferSize);
         depthBuffer.reserve(bufferSize);
         
-        std::cout << "Built buffers for " << bufferSize << " pixels" << std::endl;
+        // std::cout << "Built buffers for " << bufferSize << " pixels" << std::endl;
         
         // Pre-calculate view parameters
         Vec3 viewDirection = View.direction;
@@ -508,7 +508,7 @@ public:
         float xScale = outputWidth / width;
         float yScale = outputHeight / height;
         
-        std::cout << "Processing voxels..." << std::endl;
+        // std::cout << "Processing voxels..." << std::endl;
         size_t voxelCount = 0;
         
         // Process all voxels in the region
@@ -586,8 +586,8 @@ public:
             }
         }
         
-        std::cout << "Processed " << voxelCount << " voxels" << std::endl;
-        std::cout << "Blending colors..." << std::endl;
+        // std::cout << "Processed " << voxelCount << " voxels" << std::endl;
+        // std::cout << "Blending colors..." << std::endl;
         
         // Prepare output buffer based on color format
         switch (outChannels) {
@@ -685,7 +685,7 @@ public:
             }
         }
         
-        std::cout << "Rendering complete" << std::endl;
+        // std::cout << "Rendering complete" << std::endl;
         // regenpreventer = false;
         
         return outframe;

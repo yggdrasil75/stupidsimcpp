@@ -75,11 +75,11 @@ Grid3 setup(AnimationConfig config) {
 
 void Preview(AnimationConfig config, Grid3& grid) {
     TIME_FUNCTION;
-
+    
     frame rgbData = grid.getGridAsFrame(Vec2(config.width, config.height), Ray3(Vec3(config.width + 10,config.height + 10,config.depth + 10), Vec3(0)), frame::colormap::RGB);
     std::cout << "Frame looks like: " << rgbData << std::endl;
     bool success = BMPWriter::saveBMP("output/grayscalesource3d.bmp", rgbData);
-    if (!success) {
+        if (!success) {
         std::cout << "yo! this failed in Preview" << std::endl;
     }
 }
@@ -117,10 +117,16 @@ std::vector<std::tuple<size_t, Vec3, Vec4>> pickSeeds(Grid3& grid, AnimationConf
     for (int i = 0; i < config.numSeeds; ++i) {
         Vec3 point(xDist(gen), yDist(gen), zDist(gen));
         Vec4 color(colorDist(gen), colorDist(gen), colorDist(gen), 255);
-        size_t id = grid.getPositionVec(point, 0.5);
-        //size_t id = grid.getOrCreatePositionVec(point, 0.0, true);
-        grid.setColor(id, color);
-        seeds.push_back(std::make_tuple(id,point, color));
+        bool foundValidPos;
+        int maxTries = 0;
+        while (!foundValidPos && maxTries < 10) {
+            maxTries++;
+            size_t id = grid.getPositionVec(point, 0.5);
+            if (id > 0) foundValidPos = true;
+            //size_t id = grid.getOrCreatePositionVec(point, 0.0, true);
+            grid.setColor(id, color);
+            seeds.push_back(std::make_tuple(id,point, color));
+        }
     }
     std::cout << "picked seeds" << std::endl;
     return seeds;
@@ -260,7 +266,7 @@ void mainLogic(const AnimationConfig& config, Shared& state, int gradnoise) {
         }
         grid.setDefault(Vec4(0,0,0,0));
         {
-            std:: lock_guard<std::mutex> lock(state.mutex);
+            std::lock_guard<std::mutex> lock(state.mutex);
             state.grid = grid;
             state.hasNewFrame = true;
             state.currentFrame = 0;
@@ -278,20 +284,20 @@ void mainLogic(const AnimationConfig& config, Shared& state, int gradnoise) {
                 return;
             }
             
-            expandPixel(grid,config,seeds);
+            //expandPixel(grid,config,seeds);
             
-            std::lock_guard<std::mutex> lock(state.mutex);
-            state.grid = grid;
-            state.hasNewFrame = true;
-            state.currentFrame = i;
-
+                std::lock_guard<std::mutex> lock(state.mutex);
+                state.grid = grid;
+                state.hasNewFrame = true;
+                state.currentFrame = i;
+                
             //if (i % 10 == 0 ) {
-                frame bgrframe;
-                std::cout << "Processing frame " << i + 1 << "/" << config.totalFrames << std::endl;
+            frame bgrframe;
+            std::cout << "Processing frame " << i + 1 << "/" << config.totalFrames << std::endl;
                 bgrframe = grid.getGridAsFrame(Vec2(config.width,config.height), Ray3(Vec3(config.width + 10,config.height + 10,config.depth + 10), Vec3(0)), frame::colormap::BGR);
-                frames.push_back(bgrframe);
+            frames.push_back(bgrframe);
                 // BMPWriter::saveBMP(std::format("output/grayscalesource3d.{}.bmp", i), bgrframe);
-                bgrframe.compressFrameLZ78();
+            bgrframe.compressFrameLZ78();
                 //bgrframe.printCompressionStats();
             //}
         }
