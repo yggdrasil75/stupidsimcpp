@@ -159,7 +159,7 @@ public:
 
         float retval = lerp(w, y1, y2);
 
-        std::cout << "returning: " << retval << std::endl;
+        //std::cout << "returning: " << retval << std::endl;
         return retval;
     }
 

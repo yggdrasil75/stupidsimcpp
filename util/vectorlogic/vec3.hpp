@@ -294,11 +294,38 @@ public:
         float sinA = std::sin(angle);
         return Vec3(x * cosA - y * sinA, x * sinA + y * cosA, z);
     }
-    
+
+    float angle() const {
+        float r = length();
+        if (r == 0) return 0;
+        float θ = std::acos(z / r);
+        return θ;
+    }
+
+    float azimuth() const {
+        float φ = std::atan2(y, x);
+        return φ;
+    }
+
+    std::pair<float, float> sphericalAngles() const {
+        float r = length();
+        if (r == 0) return {0, 0};
+        
+        float θ = std::acos(z / r);
+        float φ = std::atan2(y, x);
+        
+        return {θ, φ};
+    }
+
     float angleTo(const Vec3& other) const {
         return std::acos(this->dot(other) / (this->length() * other.length()));
     }
     
+    float directionTo(const Vec3& other) const {
+        Vec3 direction = other - *this;
+        return direction.angleTo(other);
+    }
+
     float& operator[](int index) {
         return (&x)[index];
     }

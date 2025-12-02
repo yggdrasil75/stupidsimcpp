@@ -286,9 +286,9 @@ public:
                     float alpha = noisegen.permute(pos);
                     if (alpha > minChance && alpha < maxChance) {
                         if (color) {
-                            float red = noisegen.permute(Vec3(nx*0.3,ny*0.3, nz*0.3));
-                            float green = noisegen.permute(Vec3(nx*0.6,ny*0.6, nz*0.6));
-                            float blue = noisegen.permute(Vec3(nx*0.9,ny*0.9, nz*0.9));
+                            float red = noisegen.permute(Vec3(nx, ny, nz)*0.3);
+                            float green = noisegen.permute(Vec3(nx, ny, nz)*0.6);
+                            float blue = noisegen.permute(Vec3(nx, ny, nz)*0.9);
                             Vec4 newc = Vec4(red,green,blue,1.0);
                             colors.push_back(newc);
                             poses.push_back(Vec3(x,y,z));
@@ -332,7 +332,7 @@ public:
     
     void setNeighborRadius(float radius) {
         neighborRadius = radius;
-        optimizeSpatialGrid();
+        //optimizeSpatialGrid();
     }
     
     Vec4 getDefaultBackgroundColor() const {
@@ -419,12 +419,12 @@ public:
         return Pixels.at(id).getColor();
     }
 
-    void getBoundingBox(Vec3& minCorner, Vec3& maxCorner) const {
+    std::pair<Vec3,Vec3> getBoundingBox(Vec3& minCorner, Vec3& maxCorner) const {
         TIME_FUNCTION;
         if (Positions.empty()) {
+            std::cout << "empty" << std::endl;
             minCorner = Vec3(0, 0, 0);
             maxCorner = Vec3(0, 0, 0);
-            return;
         }
         
         // Initialize with first position
@@ -433,19 +433,270 @@ public:
         maxCorner = it->second;
         
         // Find min and max coordinates
-        //#pragma omp parallel for
         for (const auto& [id, pos] : Positions) {
             minCorner.x = std::min(minCorner.x, pos.x);
             minCorner.y = std::min(minCorner.y, pos.y);
+            minCorner.z = std::min(minCorner.z, pos.z);
             maxCorner.x = std::max(maxCorner.x, pos.x);
             maxCorner.y = std::max(maxCorner.y, pos.y);
+            maxCorner.z = std::max(maxCorner.z, pos.z);
         }
+        std::cout << "bounding box: " << minCorner << ", " << maxCorner << std::endl;
+        return std::make_pair(minCorner, maxCorner);
     }
 
-    frame getGridRegionAsFrame(const Vec3& minCorner, const Vec3& maxCorner, Vec3& res,
-                                const Ray3& View, frame::colormap outChannels = frame::colormap::RGB)  {
+    frame getGridRegionAsFrame(const Vec3& minCorner, const Vec3& maxCorner, const Vec2& res,
+                            const Ray3& View, frame::colormap outChannels = frame::colormap::RGB) const {
         TIME_FUNCTION;
-        //TODO: need to implement this.
+        
+        // Calculate volume dimensions
+        float width = maxCorner.x - minCorner.x;
+        float height = maxCorner.y - minCorner.y;
+        float depth = maxCorner.z - minCorner.z;
+        
+        size_t outputWidth = static_cast<int>(res.x);
+        size_t outputHeight = static_cast<int>(res.y);
+        
+        // Validate dimensions
+        if (width <= 0 || height <= 0 || depth <= 0 || outputWidth <= 0 || outputHeight <= 0) {
+            frame outframe = frame();
+            outframe.colorFormat = outChannels;
+            return outframe;
+        }
+        
+        // if (regenpreventer) {
+        //     frame outframe = frame();
+        //     outframe.colorFormat = outChannels;
+        //     return outframe;
+        // }
+        
+        // regenpreventer = true;
+        
+        std::cout << "Rendering 3D region: " << minCorner << " to " << maxCorner 
+                << " at resolution: " << res << " with view: " << View.origin << std::endl;
+        
+        // Create output frame
+        frame outframe(outputWidth, outputHeight, outChannels);
+        
+        // Create buffers for accumulation
+        std::unordered_map<Vec2, Vec4> colorBuffer;           // Final blended colors per pixel
+        std::unordered_map<Vec2, Vec4> colorAccumBuffer;      // Accumulated colors per pixel
+        std::unordered_map<Vec2, int> countBuffer;            // Count of voxels per pixel
+        std::unordered_map<Vec2, float> depthBuffer;          // Depth buffer for visibility
+        
+        // Reserve memory for better performance
+        size_t bufferSize = outputWidth * outputHeight;
+        colorBuffer.reserve(bufferSize);
+        colorAccumBuffer.reserve(bufferSize);
+        countBuffer.reserve(bufferSize);
+        depthBuffer.reserve(bufferSize);
+        
+        std::cout << "Built buffers for " << bufferSize << " pixels" << std::endl;
+        
+        // Pre-calculate view parameters
+        Vec3 viewDirection = View.direction;
+        Vec3 viewOrigin = View.origin;
+        
+        // Define view plane axes (simplified orthographic projection)
+        Vec3 viewRight = Vec3(1, 0, 0);
+        Vec3 viewUp = Vec3(0, 1, 0);
+        
+        // If we want perspective projection, we can use the ray direction
+        // For now, using orthographic projection aligned with view direction
+        
+        // Calculate scaling factors for projection
+        float xScale = outputWidth / width;
+        float yScale = outputHeight / height;
+        
+        std::cout << "Processing voxels..." << std::endl;
+        size_t voxelCount = 0;
+        
+        // Process all voxels in the region
+        for (const auto& [id, pos] : Positions) {
+            // Check if voxel is within the region
+            if (pos.x >= minCorner.x && pos.x <= maxCorner.x &&
+                pos.y >= minCorner.y && pos.y <= maxCorner.y &&
+                pos.z >= minCorner.z && pos.z <= maxCorner.z) {
+                
+                voxelCount++;
+                
+                // Project 3D position to 2D screen coordinates
+                // Simple orthographic projection: ignore Z for position, use Z for depth sorting
+                
+                // Calculate relative position within region
+                float relX = pos.x - minCorner.x;
+                float relY = pos.y - minCorner.y;
+                float relZ = pos.z - minCorner.z;
+                
+                // Project to 2D pixel coordinates
+                // Using perspective projection based on view direction
+                Vec3 toVoxel = pos - viewOrigin;
+                float distance = toVoxel.length();
+                
+                // Simple projection: parallel to view direction
+                // For proper perspective, we'd need to calculate intersection with view plane
+                // Here's a simplified approach:
+                Vec3 viewPlanePos = pos - (toVoxel.dot(viewDirection)) * viewDirection;
+                
+                // Transform to screen coordinates
+                float screenX = viewPlanePos.dot(viewRight);
+                float screenY = viewPlanePos.dot(viewUp);
+                
+                // Convert to pixel coordinates
+                int pixX = static_cast<int>((screenX - minCorner.x) * xScale);
+                int pixY = static_cast<int>((screenY - minCorner.y) * yScale);
+                
+                // Clamp to output bounds
+                pixX = std::max(0, std::min(pixX, static_cast<int>(outputWidth) - 1));
+                pixY = std::max(0, std::min(pixY, static_cast<int>(outputHeight) - 1));
+                
+                Vec2 pixelPos(pixX, pixY);
+                
+                // Get voxel color and opacity
+                Vec4 voxelColor = Pixels.at(id).getColor();
+                
+                // Use depth for visibility (simplified: use Z coordinate)
+                float depth = relZ; // Or use distance for perspective
+                
+                // Check if this voxel is closer than previous ones at this pixel
+                bool shouldRender = true;
+                auto depthIt = depthBuffer.find(pixelPos);
+                if (depthIt != depthBuffer.end()) {
+                    // Existing voxel at this pixel - check if new one is closer
+                    if (depth > depthIt->second) {
+                        // New voxel is behind existing one
+                        shouldRender = false;
+                    } else {
+                        // New voxel is in front, update depth
+                        depthBuffer[pixelPos] = depth;
+                    }
+                } else {
+                    // First voxel at this pixel
+                    depthBuffer[pixelPos] = depth;
+                }
+                
+                if (shouldRender) {
+                    // Accumulate color (we'll average later)
+                    colorAccumBuffer[pixelPos] += voxelColor;
+                    countBuffer[pixelPos]++;
+                    
+                    // For depth-based rendering, we could store the closest color
+                    colorBuffer[pixelPos] = voxelColor; // Simple: overwrite with closest
+                }
+            }
+        }
+        
+        std::cout << "Processed " << voxelCount << " voxels" << std::endl;
+        std::cout << "Blending colors..." << std::endl;
+        
+        // Prepare output buffer based on color format
+        switch (outChannels) {
+            case frame::colormap::RGBA: {
+                std::vector<uint8_t> pixelBuffer(outputWidth * outputHeight * 4, 0);
+                
+                // Fill buffer with blended colors or background
+                for (size_t y = 0; y < outputHeight; ++y) {
+                    for (size_t x = 0; x < outputWidth; ++x) {
+                        Vec2 pixelPos(x, y);
+                        size_t index = (y * outputWidth + x) * 4;
+                        
+                        Vec4 finalColor;
+                        auto countIt = countBuffer.find(pixelPos);
+                        
+                        if (countIt != countBuffer.end() && countIt->second > 0) {
+                            // Average accumulated colors
+                            finalColor = colorAccumBuffer[pixelPos] / static_cast<float>(countIt->second);
+                            // Apply gamma correction and clamp
+                            finalColor = finalColor.clamp(0.0f, 1.0f);
+                            finalColor = finalColor * 255.0f;
+                        } else {
+                            // Use background color
+                            finalColor = defaultBackgroundColor * 255.0f;
+                        }
+                        
+                        pixelBuffer[index + 0] = static_cast<uint8_t>(finalColor.r);
+                        pixelBuffer[index + 1] = static_cast<uint8_t>(finalColor.g);
+                        pixelBuffer[index + 2] = static_cast<uint8_t>(finalColor.b);
+                        pixelBuffer[index + 3] = static_cast<uint8_t>(finalColor.a);
+                    }
+                }
+                
+                outframe.setData(pixelBuffer);
+                break;
+            }
+                
+            case frame::colormap::BGR: {
+                std::vector<uint8_t> pixelBuffer(outputWidth * outputHeight * 3, 0);
+                
+                for (size_t y = 0; y < outputHeight; ++y) {
+                    for (size_t x = 0; x < outputWidth; ++x) {
+                        Vec2 pixelPos(x, y);
+                        size_t index = (y * outputWidth + x) * 3;
+                        
+                        Vec4 finalColor;
+                        auto countIt = countBuffer.find(pixelPos);
+                        
+                        if (countIt != countBuffer.end() && countIt->second > 0) {
+                            finalColor = colorAccumBuffer[pixelPos] / static_cast<float>(countIt->second);
+                            finalColor = finalColor.clamp(0.0f, 1.0f);
+                            finalColor = finalColor * 255.0f;
+                        } else {
+                            finalColor = defaultBackgroundColor * 255.0f;
+                        }
+                        
+                        pixelBuffer[index + 2] = static_cast<uint8_t>(finalColor.r); // BGR swap
+                        pixelBuffer[index + 1] = static_cast<uint8_t>(finalColor.g);
+                        pixelBuffer[index + 0] = static_cast<uint8_t>(finalColor.b);
+                    }
+                }
+                
+                outframe.setData(pixelBuffer);
+                break;
+            }
+                
+            case frame::colormap::RGB:
+            default: {
+                std::vector<uint8_t> pixelBuffer(outputWidth * outputHeight * 3, 0);
+                
+                for (size_t y = 0; y < outputHeight; ++y) {
+                    for (size_t x = 0; x < outputWidth; ++x) {
+                        Vec2 pixelPos(x, y);
+                        size_t index = (y * outputWidth + x) * 3;
+                        
+                        Vec4 finalColor;
+                        auto countIt = countBuffer.find(pixelPos);
+                        
+                        if (countIt != countBuffer.end() && countIt->second > 0) {
+                            finalColor = colorAccumBuffer[pixelPos] / static_cast<float>(countIt->second);
+                            finalColor = finalColor.clamp(0.0f, 1.0f);
+                            finalColor = finalColor * 255.0f;
+                        } else {
+                            finalColor = defaultBackgroundColor * 255.0f;
+                        }
+                        
+                        pixelBuffer[index + 0] = static_cast<uint8_t>(finalColor.r);
+                        pixelBuffer[index + 1] = static_cast<uint8_t>(finalColor.g);
+                        pixelBuffer[index + 2] = static_cast<uint8_t>(finalColor.b);
+                    }
+                }
+                
+                outframe.setData(pixelBuffer);
+                break;
+            }
+        }
+        
+        std::cout << "Rendering complete" << std::endl;
+        // regenpreventer = false;
+        
+        return outframe;
+    }
+
+    frame getGridAsFrame(const Vec2& res, const Ray3& View, frame::colormap outChannels = frame::colormap::RGB) const {
+        Vec3 Min;
+        Vec3 Max;
+        auto a = getBoundingBox(Min, Max);
+        
+        return getGridRegionAsFrame(a.first, a.second, res, View, outChannels);
     }
 
     size_t removeID(size_t id) {
@@ -505,6 +756,7 @@ public:
     }
 
     void optimizeSpatialGrid() {
+        TIME_FUNCTION;
         //std::cout << "optimizeSpatialGrid()" << std::endl;
         spatialCellSize = neighborRadius * neighborRadius;
         spatialGrid = SpatialGrid3(spatialCellSize);
@@ -518,17 +770,26 @@ public:
 
     std::vector<size_t> getNeighbors(size_t id) const {
         Vec3 pos = Positions.at(id);
+        // std::cout << "something something neighbors blah blah" << std::endl;
         std::vector<size_t> candidates = spatialGrid.queryRange(pos, neighborRadius);
-        
+        // std::cout << "something something neighbors blah blah got em" << std::endl;
         std::vector<size_t> neighbors;
         float radiusSq = neighborRadius * neighborRadius;
         
         for (size_t candidateId : candidates) {
-            if (candidateId != id && pos.distanceSquared(Positions.at(candidateId)) <= radiusSq) {
+            if (candidateId == id) continue;
+            if (!Positions.contains(candidateId)) continue;
+
+            // std::cout << "something something neighbors blah blah validating" << std::endl;
+            if (pos.distanceSquared(Positions.at(candidateId)) <= radiusSq) {
+                if (Pixels.find(candidateId) != Pixels.end()) {
+                    std::cerr << "NOT IN PIXELS! ERROR! ERROR!" <<std::endl;
+                    continue;
+                }
                 neighbors.push_back(candidateId);
             }
         }
-        
+        // std::cout << "something something neighbors blah blah done" << std::endl;
         return neighbors;
     }
 
@@ -550,6 +811,7 @@ public:
     }
 
     Grid3 backfillGrid() {
+        TIME_FUNCTION;
         Vec3 Min;
         Vec3 Max;
         getBoundingBox(Min, Max);
@@ -570,7 +832,32 @@ public:
         bulkAddObjects(newPos, newColors);
         return *this;
     }
-
+    
+    bool checkConsistency() const {
+        std::cout << "=== Consistency Check ===" << std::endl;
+        std::cout << "Positions size: " << Positions.size() << std::endl;
+        std::cout << "Pixels size: " << Pixels.size() << std::endl;
+        
+        // Check 1: All Pixels should have corresponding Positions
+        for (const auto& [id, voxel] : Pixels) {
+            if (!Positions.contains(id)) {
+                std::cout << "ERROR: Pixel ID " << id << " not in Positions!" << std::endl;
+                return false;
+            }
+        }
+        
+        // Check 2: All Positions should have corresponding Pixels (maybe not always true?)
+        for (const auto& [id, pos] : Positions) {
+            if (Pixels.find(id) == Pixels.end()) {
+                std::cout << "ERROR: Position ID " << id << " not in Pixels!" << std::endl;
+                std::cout << "  Position: " << pos << std::endl;
+                return false;
+            }
+        }
+        
+        std::cout << "Consistency check passed!" << std::endl;
+        return true;
+    }
 
 
 };
