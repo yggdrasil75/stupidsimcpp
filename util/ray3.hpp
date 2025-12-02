@@ -1,7 +1,7 @@
 #ifndef RAY3_HPP
 #define RAY3_HPP
 
-#include "Vec3.hpp"
+#include "vectorlogic/vec3.hpp"
 
 class Ray3 {
 public:

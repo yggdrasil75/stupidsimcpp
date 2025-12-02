@@ -11,6 +11,7 @@
 #include <unordered_set>
 #include <execution>
 #include <algorithm>
+#include "../ray3.hpp"
 
 constexpr float EPSILON = 0.0000000000000000000000001;
 
@@ -257,7 +258,6 @@ protected:
     
     float neighborRadius = 1.0f;
     
-    //TODO: spatial map
     SpatialGrid3 spatialGrid;
     float spatialCellSize = neighborRadius * 1.5f;
 
@@ -442,8 +442,8 @@ public:
         }
     }
 
-    frame getGridRegionAsFrame(const Vec3& minCorner, const Vec3& maxCorner,
-                       Vec3& res, frame::colormap outChannels = frame::colormap::RGB)  {
+    frame getGridRegionAsFrame(const Vec3& minCorner, const Vec3& maxCorner, Vec3& res,
+                                const Ray3& View, frame::colormap outChannels = frame::colormap::RGB)  {
         TIME_FUNCTION;
         //TODO: need to implement this.
     }
