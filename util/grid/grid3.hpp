@@ -14,7 +14,50 @@
 #include "../ray3.hpp"
 
 constexpr float EPSILON = 0.0000000000000000000000001;
-constexpr int CHUNK_SIZE = 64;
+constexpr int CHUNK_SIZE = 16;
+
+/// @brief Represents a single point in the grid with an ID, color, and position.
+class GenericVoxel {
+protected:
+    size_t id;
+    Vec4 color;
+    Vec3 pos;
+public:
+    //constructors
+    GenericVoxel(size_t id, Vec4 color, Vec3 pos) : id(id), color(color), pos(pos) {};
+    GenericVoxel() : id(0), color(Vec4()), pos(Vec3()) {};
+
+    //getters
+    size_t getId() const { 
+        return id; 
+    }
+    Vec3 getPos() const { 
+        return pos; 
+    }
+
+    Vec4 getColor() const {
+        return color;
+    }
+
+    //setters
+    void setColor(Vec4 newColor) { 
+        color = newColor; 
+    }    
+    void setPos(Vec3 newPos) { 
+        pos = newPos; 
+    }
+    void setId(size_t newId) { 
+        id = newId; 
+    }
+
+    void move(Vec3 newPos) {
+        pos = newPos;
+    }
+    
+    void recolor(Vec4 newColor) {
+        color.recolor(newColor);
+    }
+};
 
 /// @brief A bidirectional lookup helper to map internal IDs to 2D positions and vice-versa.
 /// @details Maintains two hashmaps to allow O(1) lookup in either direction.
@@ -129,10 +172,14 @@ public:
     }
 };
 
-class Chunk3 {
+class Chunk3 : GenericVoxel {
 private:
     Vec3 chunkCoord;
     std::unordered_set<size_t> voxelIDs;
+    std::vector<GenericVoxel> storedValues;
+    bool isCompressed = false;
+    int detailLevel;
+    std::vector<GenericVoxel> fullVoxels;
 public:
     Chunk3(const Vec3& coord) : chunkCoord(coord) {}
 
@@ -155,6 +202,13 @@ public:
     Vec3 worldToChunkPos(const Vec3& worldPos) const {
         auto [minBound, _] = getBounds();
         return worldPos - minBound;
+    }
+
+    std::vector<uint8_t> compress() {
+        for (auto value : storedValues) {
+            Vec4 sc = value.getColor() / CHUNK_SIZE;
+            
+        }
     }
 };
 
@@ -248,36 +302,6 @@ public:
     }
 };
 
-/// @brief Represents a single point in the grid with an ID, color, and position.
-class GenericVoxel {
-protected:
-    size_t id;
-    Vec4 color;
-    Vec3 pos;
-public:
-    //constructors
-    GenericVoxel(size_t id, Vec4 color, Vec3 pos) : id(id), color(color), pos(pos) {};
-
-    //getters
-    Vec4 getColor() const {
-        return color;
-    }
-
-    //setters
-    void setColor(Vec4 newColor) {
-        color = newColor;
-    }
-
-    void move(Vec3 newPos) {
-        pos = newPos;
-    }
-    
-    void recolor(Vec4 newColor) {
-        color.recolor(newColor);
-    }
-    
-};
-
 class Grid3 {
 protected:
     //all positions
@@ -298,7 +322,7 @@ protected:
     bool regenpreventer = false;
 public:
 
-    Grid3 noiseGenGrid(Vec3 min, Vec3 max, float minChance = 0.1f
+    Grid3& noiseGenGrid(Vec3 min, Vec3 max, float minChance = 0.1f
                         , float maxChance = 1.0f, bool color = true, int noisemod = 42) {
         TIME_FUNCTION;
         noisegen = PNoise2(noisemod);
@@ -778,7 +802,7 @@ public:
         return neighbors;
     }
 
-    Grid3 backfillGrid() {
+    Grid3& backfillGrid() {
         TIME_FUNCTION;
         Vec3 Min;
         Vec3 Max;
