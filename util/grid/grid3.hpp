@@ -14,6 +14,7 @@
 #include "../ray3.hpp"
 
 constexpr float EPSILON = 0.0000000000000000000000001;
+constexpr int CHUNK_SIZE = 64;
 
 /// @brief A bidirectional lookup helper to map internal IDs to 2D positions and vice-versa.
 /// @details Maintains two hashmaps to allow O(1) lookup in either direction.
@@ -125,6 +126,35 @@ public:
 
     bool contains(const Vec3& pos) const {
         return (ƨnoiƚiƨoꟼ.find(pos) != ƨnoiƚiƨoꟼ.end());
+    }
+};
+
+class Chunk3 {
+private:
+    Vec3 chunkCoord;
+    std::unordered_set<size_t> voxelIDs;
+public:
+    Chunk3(const Vec3& coord) : chunkCoord(coord) {}
+
+    Vec3 getCoord() const { return chunkCoord; }
+
+    std::pair<Vec3, Vec3> getBounds() const {
+        Vec3 minBound(
+            chunkCoord.x*CHUNK_SIZE,
+            chunkCoord.y*CHUNK_SIZE,
+            chunkCoord.z*CHUNK_SIZE
+        );
+        Vec3 maxBound(
+            minBound.x+CHUNK_SIZE,
+            minBound.y+CHUNK_SIZE,
+            minBound.z+CHUNK_SIZE
+        );
+        return {minBound, maxBound};
+    }
+    
+    Vec3 worldToChunkPos(const Vec3& worldPos) const {
+        auto [minBound, _] = getBounds();
+        return worldPos - minBound;
     }
 };
 
@@ -464,137 +494,86 @@ public:
             return outframe;
         }
         
-        // if (regenpreventer) {
-        //     frame outframe = frame();
-        //     outframe.colorFormat = outChannels;
-        //     return outframe;
-        // }
-        
-        // regenpreventer = true;
-        
-        // std::cout << "Rendering 3D region: " << minCorner << " to " << maxCorner 
-        //         << " at resolution: " << res << " with view: " << View.origin << std::endl;
-        
-        // Create output frame
         frame outframe(outputWidth, outputHeight, outChannels);
         
-        // Create buffers for accumulation
-        std::unordered_map<Vec2, Vec4> colorBuffer;           // Final blended colors per pixel
-        std::unordered_map<Vec2, Vec4> colorAccumBuffer;      // Accumulated colors per pixel
-        std::unordered_map<Vec2, int> countBuffer;            // Count of voxels per pixel
-        std::unordered_map<Vec2, float> depthBuffer;          // Depth buffer for visibility
+        std::unordered_map<Vec2, Vec4> colorBuffer;
+        std::unordered_map<Vec2, Vec4> colorAccumBuffer;
+        std::unordered_map<Vec2, int> countBuffer;
+        std::unordered_map<Vec2, float> depthBuffer;
         
-        // Reserve memory for better performance
         size_t bufferSize = outputWidth * outputHeight;
         colorBuffer.reserve(bufferSize);
         colorAccumBuffer.reserve(bufferSize);
         countBuffer.reserve(bufferSize);
         depthBuffer.reserve(bufferSize);
         
-        // std::cout << "Built buffers for " << bufferSize << " pixels" << std::endl;
-        
-        // Pre-calculate view parameters
         Vec3 viewDirection = View.direction;
         Vec3 viewOrigin = View.origin;
         
-        // Define view plane axes (simplified orthographic projection)
         Vec3 viewRight = Vec3(1, 0, 0);
         Vec3 viewUp = Vec3(0, 1, 0);
         
-        // If we want perspective projection, we can use the ray direction
-        // For now, using orthographic projection aligned with view direction
-        
-        // Calculate scaling factors for projection
         float xScale = outputWidth / width;
         float yScale = outputHeight / height;
         
-        // std::cout << "Processing voxels..." << std::endl;
         size_t voxelCount = 0;
         
-        // Process all voxels in the region
         for (const auto& [id, pos] : Positions) {
-            // Check if voxel is within the region
             if (pos.x >= minCorner.x && pos.x <= maxCorner.x &&
                 pos.y >= minCorner.y && pos.y <= maxCorner.y &&
                 pos.z >= minCorner.z && pos.z <= maxCorner.z) {
                 
                 voxelCount++;
                 
-                // Project 3D position to 2D screen coordinates
-                // Simple orthographic projection: ignore Z for position, use Z for depth sorting
-                
-                // Calculate relative position within region
                 float relX = pos.x - minCorner.x;
                 float relY = pos.y - minCorner.y;
                 float relZ = pos.z - minCorner.z;
                 
-                // Project to 2D pixel coordinates
-                // Using perspective projection based on view direction
                 Vec3 toVoxel = pos - viewOrigin;
                 float distance = toVoxel.length();
                 
-                // Simple projection: parallel to view direction
-                // For proper perspective, we'd need to calculate intersection with view plane
-                // Here's a simplified approach:
                 Vec3 viewPlanePos = pos - (toVoxel.dot(viewDirection)) * viewDirection;
                 
-                // Transform to screen coordinates
                 float screenX = viewPlanePos.dot(viewRight);
                 float screenY = viewPlanePos.dot(viewUp);
                 
-                // Convert to pixel coordinates
                 int pixX = static_cast<int>((screenX - minCorner.x) * xScale);
                 int pixY = static_cast<int>((screenY - minCorner.y) * yScale);
                 
-                // Clamp to output bounds
                 pixX = std::max(0, std::min(pixX, static_cast<int>(outputWidth) - 1));
                 pixY = std::max(0, std::min(pixY, static_cast<int>(outputHeight) - 1));
                 
                 Vec2 pixelPos(pixX, pixY);
-                
-                // Get voxel color and opacity
+        
                 Vec4 voxelColor = Pixels.at(id).getColor();
                 
-                // Use depth for visibility (simplified: use Z coordinate)
-                float depth = relZ; // Or use distance for perspective
+                float depth = relZ;
                 
-                // Check if this voxel is closer than previous ones at this pixel
+                
                 bool shouldRender = true;
                 auto depthIt = depthBuffer.find(pixelPos);
                 if (depthIt != depthBuffer.end()) {
-                    // Existing voxel at this pixel - check if new one is closer
                     if (depth > depthIt->second) {
-                        // New voxel is behind existing one
                         shouldRender = false;
                     } else {
-                        // New voxel is in front, update depth
                         depthBuffer[pixelPos] = depth;
                     }
                 } else {
-                    // First voxel at this pixel
                     depthBuffer[pixelPos] = depth;
                 }
                 
                 if (shouldRender) {
-                    // Accumulate color (we'll average later)
                     colorAccumBuffer[pixelPos] += voxelColor;
                     countBuffer[pixelPos]++;
                     
-                    // For depth-based rendering, we could store the closest color
-                    colorBuffer[pixelPos] = voxelColor; // Simple: overwrite with closest
+                    colorBuffer[pixelPos] = voxelColor;
                 }
             }
         }
         
-        // std::cout << "Processed " << voxelCount << " voxels" << std::endl;
-        // std::cout << "Blending colors..." << std::endl;
-        
-        // Prepare output buffer based on color format
         switch (outChannels) {
             case frame::colormap::RGBA: {
-                std::vector<uint8_t> pixelBuffer(outputWidth * outputHeight * 4, 0);
-                
-                // Fill buffer with blended colors or background
+                std::vector<uint8_t> pixelBuffer(outputWidth * outputHeight * 4, 0);        
                 for (size_t y = 0; y < outputHeight; ++y) {
                     for (size_t x = 0; x < outputWidth; ++x) {
                         Vec2 pixelPos(x, y);
@@ -604,13 +583,10 @@ public:
                         auto countIt = countBuffer.find(pixelPos);
                         
                         if (countIt != countBuffer.end() && countIt->second > 0) {
-                            // Average accumulated colors
                             finalColor = colorAccumBuffer[pixelPos] / static_cast<float>(countIt->second);
-                            // Apply gamma correction and clamp
                             finalColor = finalColor.clamp(0.0f, 1.0f);
                             finalColor = finalColor * 255.0f;
                         } else {
-                            // Use background color
                             finalColor = defaultBackgroundColor * 255.0f;
                         }
                         
@@ -644,7 +620,7 @@ public:
                             finalColor = defaultBackgroundColor * 255.0f;
                         }
                         
-                        pixelBuffer[index + 2] = static_cast<uint8_t>(finalColor.r); // BGR swap
+                        pixelBuffer[index + 2] = static_cast<uint8_t>(finalColor.r);
                         pixelBuffer[index + 1] = static_cast<uint8_t>(finalColor.g);
                         pixelBuffer[index + 0] = static_cast<uint8_t>(finalColor.b);
                     }
@@ -684,9 +660,6 @@ public:
                 break;
             }
         }
-        
-        // std::cout << "Rendering complete" << std::endl;
-        // regenpreventer = false;
         
         return outframe;
     }
@@ -770,9 +743,7 @@ public:
 
     std::vector<size_t> getNeighbors(size_t id) const {
         Vec3 pos = Positions.at(id);
-        // std::cout << "something something neighbors blah blah" << std::endl;
         std::vector<size_t> candidates = spatialGrid.queryRange(pos, neighborRadius);
-        // std::cout << "something something neighbors blah blah got em" << std::endl;
         std::vector<size_t> neighbors;
         float radiusSq = neighborRadius * neighborRadius;
         
@@ -780,7 +751,6 @@ public:
             if (candidateId == id) continue;
             if (!Positions.contains(candidateId)) continue;
 
-            // std::cout << "something something neighbors blah blah validating" << std::endl;
             if (pos.distanceSquared(Positions.at(candidateId)) <= radiusSq) {
                 if (Pixels.find(candidateId) != Pixels.end()) {
                     std::cerr << "NOT IN PIXELS! ERROR! ERROR!" <<std::endl;
@@ -789,7 +759,6 @@ public:
                 neighbors.push_back(candidateId);
             }
         }
-        // std::cout << "something something neighbors blah blah done" << std::endl;
         return neighbors;
     }
 
@@ -801,8 +770,7 @@ public:
         float radiusSq = dist * dist;
         
         for (size_t candidateId : candidates) {
-            if (candidateId != id && 
-                pos.distanceSquared(Positions.at(candidateId)) <= radiusSq) {
+            if (candidateId != id && pos.distanceSquared(Positions.at(candidateId)) <= radiusSq) {
                 neighbors.push_back(candidateId);
             }
         }
