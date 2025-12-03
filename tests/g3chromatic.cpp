@@ -121,9 +121,9 @@ std::vector<std::tuple<size_t, Vec3, Vec4>> pickSeeds(Grid3& grid, AnimationConf
         int maxTries = 0;
         while (!foundValidPos && maxTries < 10) {
             maxTries++;
-            size_t id = grid.getPositionVec(point, 0.5);
+            //size_t id = grid.getPositionVec(point, 0.5);
+            size_t id = grid.getOrCreatePositionVec(point, 0.0, true);
             if (id > 0) foundValidPos = true;
-            //size_t id = grid.getOrCreatePositionVec(point, 0.0, true);
             grid.setColor(id, color);
             seeds.push_back(std::make_tuple(id,point, color));
         }

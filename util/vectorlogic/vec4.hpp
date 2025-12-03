@@ -375,6 +375,12 @@ public:
         return "RGBA(" + std::to_string(r) + ", " + std::to_string(g) + ", " + 
                std::to_string(b) + ", " + std::to_string(a) + ")";
     }
+    
+    struct Hash {
+        std::size_t operator()(const Vec4& v) const {
+            return std::hash<float>()(v.x) ^ (std::hash<float>()(v.y) << 1) ^ (std::hash<float>()(v.z) << 2) ^ (std::hash<float>()(v.w) << 3);
+        }
+    };
 };
 
 inline std::ostream& operator<<(std::ostream& os, const Vec4& vec) {
