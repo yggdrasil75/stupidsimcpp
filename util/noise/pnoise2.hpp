@@ -7,7 +7,7 @@
 #include <functional>
 #include <random>
 #include "../vectorlogic/vec2.hpp"
-#include "../vectorlogic/vec3.hpp"
+#include "../vectorlogic/Vec3.hpp"
 #include "../timing_decorator.hpp"
 
 class PNoise2 {
@@ -31,16 +31,16 @@ private:
         else return Vec2(1,-1);
     }
 
-    Vec3 GetConstantVector3(int v) {
+    Vec3ui8 GetConstantVector3(int v) {
         int h = v & 7;
-        if (h == 0) return Vec3(1,1,1);
-        else if (h == 1) return Vec3(-1,1, 1);
-        else if (h == 2) return Vec3(-1,-1, 1);
-        else if (h == 3) return Vec3(-1,-1, 1);
-        else if (h == 4) return Vec3(-1,-1,-1);
-        else if (h == 5) return Vec3(-1,-1, -1);
-        else if (h == 6) return Vec3(-1,-1, -1);
-        else return Vec3(1,-1, -1);
+        if (h == 0) return Vec3ui8(1,1,1);
+        else if (h == 1) return Vec3ui8(-1,1, 1);
+        else if (h == 2) return Vec3ui8(-1,-1, 1);
+        else if (h == 3) return Vec3ui8(-1,-1, 1);
+        else if (h == 4) return Vec3ui8(-1,-1,-1);
+        else if (h == 5) return Vec3ui8(-1,-1, -1);
+        else if (h == 6) return Vec3ui8(-1,-1, -1);
+        else return Vec3ui8(1,-1, -1);
     }
 
     static double grad(int hash, double x, double y, double z = 0.0) {
@@ -106,7 +106,8 @@ public:
         return retval;
     }
 
-    float permute(Vec3 point) {
+    template<typename T>
+    float permute(Vec3<T> point) {
         TIME_FUNCTION;
         int X = (int)floor(point.x) & 255;
         int Y = (int)floor(point.y) & 255;
@@ -115,15 +116,15 @@ public:
         float yf = point.y - Y;
         float zf = point.z - Z;
 
-        Vec3 FBL = Vec3(xf-0, yf-0, zf-0);
-        Vec3 FBR = Vec3(xf-1, yf-0, zf-0);
-        Vec3 FTL = Vec3(xf-0, yf-1, zf-0);
-        Vec3 FTR = Vec3(xf-1, yf-1, zf-0);
+        Vec3ui8 FBL = Vec3ui8(xf-0, yf-0, zf-0);
+        Vec3ui8 FBR = Vec3ui8(xf-1, yf-0, zf-0);
+        Vec3ui8 FTL = Vec3ui8(xf-0, yf-1, zf-0);
+        Vec3ui8 FTR = Vec3ui8(xf-1, yf-1, zf-0);
 
-        Vec3 RBL = Vec3(xf-0, yf-0, zf-1);
-        Vec3 RBR = Vec3(xf-1, yf-0, zf-1);
-        Vec3 RTL = Vec3(xf-0, yf-1, zf-1);
-        Vec3 RTR = Vec3(xf-1, yf-1, zf-1);
+        Vec3ui8 RBL = Vec3ui8(xf-0, yf-0, zf-1);
+        Vec3ui8 RBR = Vec3ui8(xf-1, yf-0, zf-1);
+        Vec3ui8 RTL = Vec3ui8(xf-0, yf-1, zf-1);
+        Vec3ui8 RTR = Vec3ui8(xf-1, yf-1, zf-1);
 
         int vFBL = permutation[permutation[permutation[Z+0]+X+0]+Y+0];
         int vFBR = permutation[permutation[permutation[Z+0]+X+1]+Y+0];
@@ -166,4 +167,3 @@ public:
 };
 
 #endif
-//https://rtouti.github.io/graphics/perlin-noise-algorithm

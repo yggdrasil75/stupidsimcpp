@@ -7,7 +7,7 @@
 #include <string>
 #include <algorithm>
 #include <filesystem>
-#include "../vectorlogic/vec3.hpp"
+#include "../vectorlogic/Vec3.hpp"
 #include "frame.hpp"
 
 class BMPWriter {
@@ -49,9 +49,9 @@ private:
     }
 
 public:
-    // Save a 2D vector of Vec3 (RGB) colors as BMP
-    // Vec3 components: x = red, y = green, z = blue (values in range [0,1])
-    static bool saveBMP(const std::string& filename, const std::vector<std::vector<Vec3>>& pixels) {
+    // Save a 2D vector of Vec3ui8 (RGB) colors as BMP
+    // Vec3ui8 components: x = red, y = green, z = blue (values in range [0,1])
+    static bool saveBMP(const std::string& filename, const std::vector<std::vector<Vec3ui8>>& pixels) {
         if (pixels.empty() || pixels[0].empty()) {
             return false;
         }
@@ -70,13 +70,13 @@ public:
     }
     
     // Alternative interface with width/height and flat vector (row-major order)
-    static bool saveBMP(const std::string& filename, const std::vector<Vec3>& pixels, int width, int height) {
+    static bool saveBMP(const std::string& filename, const std::vector<Vec3ui8>& pixels, int width, int height) {
         if (pixels.size() != width * height) {
             return false;
         }
         
         // Convert to 2D vector format
-        std::vector<std::vector<Vec3>> pixels2D(height, std::vector<Vec3>(width));
+        std::vector<std::vector<Vec3ui8>> pixels2D(height, std::vector<Vec3ui8>(width));
         for (int y = 0; y < height; ++y) {
             for (int x = 0; x < width; ++x) {
                 pixels2D[y][x] = pixels[y * width + x];
@@ -157,7 +157,7 @@ public:
     }
 
 private:
-    static bool saveBMP(const std::string& filename, const std::vector<std::vector<Vec3>>& pixels, int width, int height) {
+    static bool saveBMP(const std::string& filename, const std::vector<std::vector<Vec3ui8>>& pixels, int width, int height) {
         // Create directory if needed
         if (!createDirectoryIfNeeded(filename)) {
             return false;
@@ -186,7 +186,7 @@ private:
         std::vector<uint8_t> row(rowSize, 0);
         for (int y = height - 1; y >= 0; --y) {
             for (int x = 0; x < width; ++x) {
-                const Vec3& color = pixels[y][x];
+                const Vec3ui8& color = pixels[y][x];
                 
                 // Convert from [0,1] float to [0,255] uint8_t
                 uint8_t r = static_cast<uint8_t>(std::clamp(color.x * 255.0f, 0.0f, 255.0f));

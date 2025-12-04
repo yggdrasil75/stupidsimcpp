@@ -1,31 +1,32 @@
 #ifndef RAY3_HPP
 #define RAY3_HPP
 
-#include "vectorlogic/vec3.hpp"
+#include "vectorlogic/Vec3.hpp"
 
+template<typename T>
 class Ray3 {
 public:
-    Vec3 origin;
-    Vec3 direction;
+    Vec3<T> origin;
+    Vec3<T> direction;
     
-    Ray3() : origin(Vec3()), direction(Vec3(1, 0, 0)) {}
-    Ray3(const Vec3& origin, const Vec3& direction) 
+    Ray3() : origin(Vec3<T>()), direction(Vec3<T>(1, 0, 0)) {}
+    Ray3(const Vec3<T>& origin, const Vec3<T>& direction) 
         : origin(origin), direction(direction.normalized()) {}
     
     // Get point at parameter t along the ray
-    Vec3 at(float t) const {
+    Vec3<T> at(float t) const {
         return origin + direction * t;
     }
     
     // Reflect ray off a surface with given normal
-    Ray3 reflect(const Vec3& point, const Vec3& normal) const {
-        Vec3 reflectedDir = direction.reflect(normal);
+    Ray3 reflect(const Vec3<T>& point, const Vec3<T>& normal) const {
+        Vec3<T> reflectedDir = direction.reflect(normal);
         return Ray3(point, reflectedDir);
     }
     
     // Check if ray intersects with a sphere
-    bool intersectsSphere(const Vec3& center, float radius, float& t1, float& t2) const {
-        Vec3 oc = origin - center;
+    bool intersectsSphere(const Vec3<T>& center, T radius, T& t1, T& t2) const {
+        Vec3<T> oc = origin - center;
         float a = direction.dot(direction);
         float b = 2.0f * oc.dot(direction);
         float c = oc.dot(oc) - radius * radius;
@@ -44,7 +45,7 @@ public:
     }
     
     // Check if ray intersects with a plane (defined by point and normal)
-    bool intersectsPlane(const Vec3& planePoint, const Vec3& planeNormal, float& t) const {
+    bool intersectsPlane(const Vec3<T>& planePoint, const Vec3<T>& planeNormal, T& t) const {
         float denom = planeNormal.dot(direction);
         
         if (std::abs(denom) < 1e-10f) {
@@ -56,9 +57,9 @@ public:
     }
     
     // Get the distance from a point to this ray
-    float distanceToPoint(const Vec3& point) const {
-        Vec3 pointToOrigin = point - origin;
-        Vec3 crossProduct = direction.cross(pointToOrigin);
+    float distanceToPoint(const Vec3<T>& point) const {
+        Vec3<T> pointToOrigin = point - origin;
+        Vec3<T> crossProduct = direction.cross(pointToOrigin);
         return crossProduct.length() / direction.length();
     }
     

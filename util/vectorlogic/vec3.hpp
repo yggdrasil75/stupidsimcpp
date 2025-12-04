@@ -6,17 +6,18 @@
 #include <string>
 #include <ostream>
 
+template<typename T>
 class Vec3 {
 public:
-    float x, y, z;
+    T x, y, z;
     
     Vec3() : x(0), y(0), z(0) {}
-    Vec3(float x, float y, float z) : x(x), y(y), z(z) {}
-    Vec3(float scalar) : x(scalar), y(scalar), z(scalar) {}
+    Vec3(T x, T y, T z) : x(x), y(y), z(z) {}
+    Vec3(T scalar) : x(scalar), y(scalar), z(scalar) {}
 
-    Vec3(const class Vec2& vec2, float z = 0.0f);
+    Vec3(const class Vec2& vec2, T z = 0);
 
-    Vec3& move(const Vec3 newpos) {
+    Vec3& move(const Vec3& newpos) {
         x = newpos.x;
         y = newpos.y;
         z = newpos.z;
@@ -40,11 +41,11 @@ public:
         return Vec3(x / other.x, y / other.y, z / other.z);
     }
 
-    Vec3 operator+(float scalar) const {
+    Vec3 operator+(T scalar) const {
         return Vec3(x + scalar, y + scalar, z + scalar);
     }
 
-    Vec3 operator-(float scalar) const {
+    Vec3 operator-(T scalar) const {
         return Vec3(x - scalar, y - scalar, z - scalar);
     }
     
@@ -52,15 +53,15 @@ public:
         return Vec3(-x, -y, -z);
     }
 
-    Vec3 operator*(float scalar) const {
+    Vec3 operator*(T scalar) const {
         return Vec3(x * scalar, y * scalar, z * scalar);
     }
 
-    Vec3 operator/(float scalar) const {
+    Vec3 operator/(T scalar) const {
         return Vec3(x / scalar, y / scalar, z / scalar);
     }
 
-    Vec3& operator=(float scalar) {
+    Vec3& operator=(T scalar) {
         x = y = z = scalar;
         return *this;
     }
@@ -93,28 +94,28 @@ public:
         return *this;
     }
     
-    Vec3& operator+=(float scalar) {
+    Vec3& operator+=(T scalar) {
         x += scalar;
         y += scalar;
         z += scalar;
         return *this;
     }
     
-    Vec3& operator-=(float scalar) {
+    Vec3& operator-=(T scalar) {
         x -= scalar;
         y -= scalar;
         z -= scalar;
         return *this;
     }
     
-    Vec3& operator*=(float scalar) {
+    Vec3& operator*=(T scalar) {
         x *= scalar;
         y *= scalar;
         z *= scalar;
         return *this;
     }
     
-    Vec3& operator/=(float scalar) {
+    Vec3& operator/=(T scalar) {
         x /= scalar;
         y /= scalar;
         z /= scalar;
@@ -125,7 +126,7 @@ public:
         return x * other.x + y * other.y + z * other.z;
     }
     
-    Vec3 cross(const Vec3& other) const {
+    Vec3& cross(const Vec3& other) const {
         return Vec3(
             y * other.z - z * other.y,
             z * other.x - x * other.z,
@@ -133,25 +134,25 @@ public:
         );
     }
 
-    float length() const {
-        return std::sqrt(x * x + y * y + z * z);
+    T length() const {
+        return static_cast<T>(std::sqrt(static_cast<double>(x * x + y * y + z * z)));
     }
     
-    float lengthSquared() const {
+    T lengthSquared() const {
         return x * x + y * y + z * z;
     }
     
-    float distance(const Vec3& other) const {
+    T distance(const Vec3& other) const {
         return (*this - other).length();
     }
     
-    float distanceSquared(const Vec3& other) const {
+    T distanceSquared(const Vec3& other) const {
         Vec3 diff = *this - other;
         return diff.x * diff.x + diff.y * diff.y + diff.z * diff.z;
     }
 
     Vec3 normalized() const {
-        float len = length();
+        T len = length();
         if (len > 0) {
             return *this / len;
         }
@@ -222,7 +223,7 @@ public:
         );
     }
     
-    Vec3 clamp(float minVal, float maxVal) const {
+    Vec3 clamp(T minVal, T maxVal) const {
         return Vec3(
             std::clamp(x, minVal, maxVal),
             std::clamp(y, minVal, maxVal),
@@ -240,19 +241,19 @@ public:
                std::abs(z - other.z) < epsilon;
     }
     
-    friend Vec3 operator+(float scalar, const Vec3& vec) {
+    friend Vec3 operator+(T scalar, const Vec3& vec) {
         return Vec3(scalar + vec.x, scalar + vec.y, scalar + vec.z);
     }
     
-    friend Vec3 operator-(float scalar, const Vec3& vec) {
+    friend Vec3 operator-(T scalar, const Vec3& vec) {
         return Vec3(scalar - vec.x, scalar - vec.y, scalar - vec.z);
     }
     
-    friend Vec3 operator*(float scalar, const Vec3& vec) {
+    friend Vec3 operator*(T scalar, const Vec3& vec) {
         return Vec3(scalar * vec.x, scalar * vec.y, scalar * vec.z);
     }
     
-    friend Vec3 operator/(float scalar, const Vec3& vec) {
+    friend Vec3 operator/(T scalar, const Vec3& vec) {
         return Vec3(scalar / vec.x, scalar / vec.y, scalar / vec.z);
     }
 
@@ -260,17 +261,17 @@ public:
         return *this - 2.0f * this->dot(normal) * normal;
     }
     
-    Vec3 lerp(const Vec3& other, float t) const {
+    Vec3 lerp(const Vec3& other, T t) const {
         t = std::clamp(t, 0.0f, 1.0f);
         return *this + (other - *this) * t;
     }
     
-    Vec3 slerp(const Vec3& other, float t) const {
+    Vec3 slerp(const Vec3& other, T t) const {
         t = std::clamp(t, 0.0f, 1.0f);
-        float dot = this->dot(other);
+        T dot = this->dot(other);
         dot = std::clamp(dot, -1.0f, 1.0f);
         
-        float theta = std::acos(dot) * t;
+        T theta = std::acos(dot) * t;
         Vec3 relative = other - *this * dot;
         relative = relative.normalized();
         
@@ -326,11 +327,11 @@ public:
         return direction.angleTo(other);
     }
 
-    float& operator[](int index) {
+    T& operator[](int index) {
         return (&x)[index];
     }
     
-    const float& operator[](int index) const {
+    const T& operator[](int index) const {
         return (&x)[index];
     }
     
@@ -345,16 +346,22 @@ public:
     };
 };
 
-inline std::ostream& operator<<(std::ostream& os, const Vec3& vec) {
+using Vec3f = Vec3<float>;
+using Vec3d = Vec3<double>;
+using Vec3i = Vec3<int>;
+using Vec3ui8 = Vec3<uint8_t>;
+
+template<typename T>
+inline std::ostream& operator<<(std::ostream& os, const Vec3<T>& vec) {
     os << vec.toString();
     return os;
 }
 
 namespace std {
-    template<>
-    struct hash<Vec3> {
-        size_t operator()(const Vec3& v) const {
-            return hash<float>()(v.x) ^ (hash<float>()(v.y) << 1) ^ (hash<float>()(v.z) << 2);
+    template<typename T>
+    struct hash<Vec3<T>> {
+        size_t operator()(const Vec3<T>& v) const {
+            return hash<T>()(v.x) ^ (hash<T>()(v.y) << 1) ^ (hash<T>()(v.z) << 2);
         }
     };
 }

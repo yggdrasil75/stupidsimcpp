@@ -56,16 +56,16 @@ struct AnimationConfig {
 Grid3 setup(AnimationConfig config) {
     TIME_FUNCTION;
     Grid3 grid;
-    std::vector<Vec3> pos;
-    std::vector<Vec4> colors;
+    std::vector<Vec3f> pos;
+    std::vector<Vec4ui8> colors;
     for (int x = 0; x < config.height; ++x) {
         float r = (x / config.height) * 255;
         for (int y = 0; y < config.width; ++y) {
             float g = (y / config.height) * 255;
             for (int z = 0; z < config.depth; ++z) {
                 float b = (z / config.height) * 255;
-                pos.push_back(Vec3(x,y,z));
-                colors.push_back(Vec4(r, g, b, 1.0f));
+                pos.push_back(Vec3f(x,y,z));
+                colors.push_back(Vec4ui8(r, g, b, 1.0f));
             }
         }
     }
@@ -76,7 +76,7 @@ Grid3 setup(AnimationConfig config) {
 void Preview(AnimationConfig config, Grid3& grid) {
     TIME_FUNCTION;
     
-    frame rgbData = grid.getGridAsFrame(Vec2(config.width, config.height), Ray3(Vec3(config.width + 10,config.height + 10,config.depth + 10), Vec3(0)), frame::colormap::RGB);
+    frame rgbData = grid.getGridAsFrame(Vec2(config.width, config.height), Ray3(Vec3f(config.width + 10,config.height + 10,config.depth + 10), Vec3f(0)), frame::colormap::RGB);
     std::cout << "Frame looks like: " << rgbData << std::endl;
     bool success = BMPWriter::saveBMP("output/grayscalesource3d.bmp", rgbData);
         if (!success) {
@@ -87,7 +87,7 @@ void Preview(AnimationConfig config, Grid3& grid) {
 void livePreview(const Grid3& grid, AnimationConfig config) {
     // std::lock_guard<std::mutex> lock(previewMutex);
     
-    // currentPreviewFrame = grid.getGridAsFrame(Vec2(config.width, config.height), Ray3(Vec3(config.width + 10,config.height + 10,config.depth + 10), Vec3(0)), frame::colormap::RGBA);
+    // currentPreviewFrame = grid.getGridAsFrame(Vec2(config.width, config.height), Ray3(Vec3f(config.width + 10,config.height + 10,config.depth + 10), Vec3f(0)), frame::colormap::RGBA);
 
     // glGenTextures(1, &textu);
     // glBindTexture(GL_TEXTURE_2D, textu);
@@ -102,7 +102,7 @@ void livePreview(const Grid3& grid, AnimationConfig config) {
     // updatePreview = true;
 }
 
-std::vector<std::tuple<size_t, Vec3, Vec4>> pickSeeds(Grid3& grid, AnimationConfig config) {
+std::vector<std::tuple<size_t, Vec3f, Vec4ui8>> pickSeeds(Grid3& grid, AnimationConfig config) {
     TIME_FUNCTION;
     // std::cout << "picking seeds" << std::endl;
     std::random_device rd;
@@ -112,11 +112,11 @@ std::vector<std::tuple<size_t, Vec3, Vec4>> pickSeeds(Grid3& grid, AnimationConf
     std::uniform_int_distribution<> zDist(0, config.depth - 1);
     std::uniform_real_distribution<> colorDist(0.2f, 0.8f);
 
-    std::vector<std::tuple<size_t, Vec3, Vec4>> seeds;
+    std::vector<std::tuple<size_t, Vec3f, Vec4ui8>> seeds;
 
     for (int i = 0; i < config.numSeeds; ++i) {
-        Vec3 point(xDist(gen), yDist(gen), zDist(gen));
-        Vec4 color(colorDist(gen), colorDist(gen), colorDist(gen), 255);
+        Vec3f point(xDist(gen), yDist(gen), zDist(gen));
+        Vec4ui8 color(colorDist(gen), colorDist(gen), colorDist(gen), 255);
         bool foundValidPos;
         int maxTries = 0;
         while (!foundValidPos && maxTries < 10) {
@@ -132,10 +132,10 @@ std::vector<std::tuple<size_t, Vec3, Vec4>> pickSeeds(Grid3& grid, AnimationConf
     return seeds;
 }
 
-void expandPixel(Grid3& grid, AnimationConfig config, std::vector<std::tuple<size_t, Vec3, Vec4>>& seeds) {
+void expandPixel(Grid3& grid, AnimationConfig config, std::vector<std::tuple<size_t, Vec3f, Vec4ui8>>& seeds) {
     TIME_FUNCTION;
     std::cout << "expanding pixel" << std::endl;
-    std::vector<std::tuple<size_t, Vec3, Vec4>> newseeds; 
+    std::vector<std::tuple<size_t, Vec3f, Vec4ui8>> newseeds; 
 
     int counter = 0;
     std::unordered_set<size_t> visitedThisFrame; 
@@ -144,10 +144,10 @@ void expandPixel(Grid3& grid, AnimationConfig config, std::vector<std::tuple<siz
     }
 
     //std::cout << "counter at: " << counter++ << std::endl;
-    for (const std::tuple<size_t, Vec3, Vec4>& seed : seeds) {
+    for (const std::tuple<size_t, Vec3f, Vec4ui8>& seed : seeds) {
         size_t id = std::get<0>(seed);
-        Vec3 seedPOS = std::get<1>(seed);
-        Vec4 seedColor = std::get<2>(seed);
+        Vec3f seedPOS = std::get<1>(seed);
+        Vec4ui8 seedColor = std::get<2>(seed);
         std::vector<size_t> neighbors = grid.getNeighbors(id);
         for (size_t neighbor : neighbors) {
             std::cout << "counter at 1: " << counter++ << std::endl;
@@ -155,13 +155,13 @@ void expandPixel(Grid3& grid, AnimationConfig config, std::vector<std::tuple<siz
                 continue;
             }
             
-            Vec3 neipos;
+            Vec3f neipos;
             try {
                 neipos = grid.getPositionID(neighbor);
             } catch (const std::out_of_range& e) {
                 continue;
             }
-            Vec4 neighborColor;
+            Vec4ui8 neighborColor;
             try {
                 neighborColor = grid.getColor(neighbor);
             } catch (const std::out_of_range& e) {
@@ -170,7 +170,7 @@ void expandPixel(Grid3& grid, AnimationConfig config, std::vector<std::tuple<siz
             }
             visitedThisFrame.insert(neighbor);
 
-            // Vec3 neipos = grid.getPositionID(neighbor);
+            // Vec3f neipos = grid.getPositionID(neighbor);
             // Vec4 neighborColor = grid.getColor(neighbor);
             float distance = seedPOS.distance(neipos);
             float angle = seedPOS.directionTo(neipos);
@@ -179,7 +179,7 @@ void expandPixel(Grid3& grid, AnimationConfig config, std::vector<std::tuple<siz
             float blendFactor = 0.3f + 0.4f * std::sin(normalizedAngle * 2.0f * M_PI);
             blendFactor = std::clamp(blendFactor, 0.1f, 0.9f);
             //std::cout << "counter at 2: " << counter++ << std::endl;
-            Vec4 newcolor = Vec4(
+            Vec4ui8 newcolor = Vec4ui8(
                 seedColor.r * blendFactor + neighborColor.r * (1.0f - blendFactor),
                 seedColor.g * (1.0f - blendFactor) + neighborColor.g * blendFactor,
                 seedColor.b * (0.5f + 0.5f * std::sin(normalizedAngle * 4.0f * M_PI)),
@@ -262,9 +262,9 @@ void mainLogic(const AnimationConfig& config, Shared& state, int gradnoise) {
         if (gradnoise == 0) {
             grid = setup(config);
         } else if (gradnoise == 1) {
-            grid = grid.noiseGenGrid(Vec3(0, 0, 0), Vec3(config.height, config.width, config.depth), 0.01, 1.0, true, config.noisemod);
+            grid = grid.noiseGenGrid(Vec3f(0, 0, 0), Vec3f(config.height, config.width, config.depth), 0.01, 1.0, true, config.noisemod);
         }
-        grid.setDefault(Vec4(0,0,0,0));
+        grid.setDefault(Vec4ui8(0,0,0,0));
         {
             std::lock_guard<std::mutex> lock(state.mutex);
             state.grid = grid;
@@ -274,7 +274,7 @@ void mainLogic(const AnimationConfig& config, Shared& state, int gradnoise) {
         std::cout << "generated grid" << std::endl;
         Preview(config, grid);
         std::cout << "generated preview" << std::endl;
-        std::vector<std::tuple<size_t, Vec3, Vec4>> seeds = pickSeeds(grid, config);
+        std::vector<std::tuple<size_t, Vec3f, Vec4ui8>> seeds = pickSeeds(grid, config);
         std::vector<frame> frames;
 
         for (int i = 0; i < config.totalFrames; ++i){
@@ -294,7 +294,7 @@ void mainLogic(const AnimationConfig& config, Shared& state, int gradnoise) {
             //if (i % 10 == 0 ) {
             frame bgrframe;
             std::cout << "Processing frame " << i + 1 << "/" << config.totalFrames << std::endl;
-                bgrframe = grid.getGridAsFrame(Vec2(config.width,config.height), Ray3(Vec3(config.width + 10,config.height + 10,config.depth + 10), Vec3(0)), frame::colormap::BGR);
+                bgrframe = grid.getGridAsFrame(Vec2(config.width,config.height), Ray3(Vec3f(config.width + 10,config.height + 10,config.depth + 10), Vec3f(0)), frame::colormap::BGR);
             frames.push_back(bgrframe);
                 // BMPWriter::saveBMP(std::format("output/grayscalesource3d.{}.bmp", i), bgrframe);
             bgrframe.compressFrameLZ78();
