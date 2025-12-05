@@ -7,7 +7,7 @@
 #include <functional>
 #include <random>
 #include "../vectorlogic/vec2.hpp"
-#include "../vectorlogic/Vec3.hpp"
+#include "../vectorlogic/vec3.hpp"
 #include "../timing_decorator.hpp"
 
 class PNoise2 {

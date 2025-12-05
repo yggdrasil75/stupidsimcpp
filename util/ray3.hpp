@@ -1,7 +1,7 @@
 #ifndef RAY3_HPP
 #define RAY3_HPP
 
-#include "vectorlogic/Vec3.hpp"
+#include "vectorlogic/vec3.hpp"
 
 template<typename T>
 class Ray3 {
