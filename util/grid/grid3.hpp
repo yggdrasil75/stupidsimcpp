@@ -2,7 +2,7 @@
 #define GRID3_HPP
 
 #include <unordered_map>
-#include "../vectorlogic/Vec3.hpp"
+#include "../vectorlogic/vec3.hpp"
 #include "../vectorlogic/vec4.hpp"
 #include "../timing_decorator.hpp"
 #include "../output/frame.hpp"
@@ -350,13 +350,16 @@ public:
                 << " max: " << maxChance << " gen colors: " << color << std::endl;
         std::vector<Vec3f> poses;
         std::vector<Vec4ui8> colors;
+        #pragma omp parallel for
         for (int x = min.x; x < max.x; x++) {
+            #pragma omp parallel for
             for (int y = min.y; y < max.y; y++) {
+                #pragma omp parallel for
                 for (int z = min.z; z < max.z; z++) {
                     float nx = (x+noisemod)/(max.x+EPSILON)/0.1;
                     float ny = (y+noisemod)/(max.y+EPSILON)/0.1;
                     float nz = (z+noisemod)/(max.z+EPSILON)/0.1;
-                    Vec3f pos = Vec3f(nx,ny,nz);
+                    Vec3 pos = Vec3f(nx,ny,nz);
                     float alpha = noisegen.permute(pos);
                     if (alpha > minChance && alpha < maxChance) {
                         if (color) {
@@ -364,14 +367,18 @@ public:
                             float green = noisegen.permute(Vec3f(nx, ny, nz)*0.6);
                             float blue = noisegen.permute(Vec3f(nx, ny, nz)*0.9);
                             Vec4 newc = Vec4ui8(red,green,blue,1.0);
+                            #pragma omp critical
                             colors.push_back(newc);
+                            #pragma omp critical
                             poses.push_back(Vec3f(x,y,z));
                         } else {
                             Vec4 newc = Vec4ui8(alpha,alpha,alpha,1.0);
+                            #pragma omp critical
                             colors.push_back(newc);
+                            #pragma omp critical
                             poses.push_back(Vec3f(x,y,z));
                         }
-                   }
+                    }
                 }
             }
         }
