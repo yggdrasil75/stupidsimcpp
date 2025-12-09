@@ -242,20 +242,33 @@ public:
                std::abs(z - other.z) < epsilon;
     }
     
-    friend Vec3 operator+(T scalar, const Vec3& vec) {
-        return Vec3(scalar + vec.x, scalar + vec.y, scalar + vec.z);
+    // Template friend operators to allow different scalar types
+    template<typename S>
+    friend Vec3<T> operator+(S scalar, const Vec3<T>& vec) {
+        return Vec3<T>(static_cast<T>(scalar) + vec.x, 
+                      static_cast<T>(scalar) + vec.y, 
+                      static_cast<T>(scalar) + vec.z);
     }
     
-    friend Vec3 operator-(T scalar, const Vec3& vec) {
-        return Vec3(scalar - vec.x, scalar - vec.y, scalar - vec.z);
+    template<typename S>
+    friend Vec3<T> operator-(S scalar, const Vec3<T>& vec) {
+        return Vec3<T>(static_cast<T>(scalar) - vec.x, 
+                      static_cast<T>(scalar) - vec.y, 
+                      static_cast<T>(scalar) - vec.z);
     }
     
-    friend Vec3 operator*(T scalar, const Vec3& vec) {
-        return Vec3(scalar * vec.x, scalar * vec.y, scalar * vec.z);
+    template<typename S>
+    friend Vec3<T> operator*(S scalar, const Vec3<T>& vec) {
+        return Vec3<T>(static_cast<T>(scalar) * vec.x, 
+                      static_cast<T>(scalar) * vec.y, 
+                      static_cast<T>(scalar) * vec.z);
     }
     
-    friend Vec3 operator/(T scalar, const Vec3& vec) {
-        return Vec3(scalar / vec.x, scalar / vec.y, scalar / vec.z);
+    template<typename S>
+    friend Vec3<T> operator/(S scalar, const Vec3<T>& vec) {
+        return Vec3<T>(static_cast<T>(scalar) / vec.x, 
+                      static_cast<T>(scalar) / vec.y, 
+                      static_cast<T>(scalar) / vec.z);
     }
 
     Vec3 reflect(const Vec3& normal) const {
@@ -336,6 +349,30 @@ public:
         return (&x)[index];
     }
     
+    Vec3 safeInverse(float epsilon = 1e-10f) const {
+        return Vec3(
+            1 / (std::abs(x) < epsilon ? std::copysign(epsilon, x) : x),
+            1 / (std::abs(y) < epsilon ? std::copysign(epsilon, y) : y),
+            1 / (std::abs(z) < epsilon ? std::copysign(epsilon, z) : z)
+        );
+    }
+
+    uint8_t calculateOctantMask() const {
+        uint8_t mask = 0;
+        if (x > 0.0f) mask |= 1;
+        if (y > 0.0f) mask |= 2;
+        if (z > 0.0f) mask |= 4;
+        return mask;
+    }
+    
+    float maxComp() const { 
+        return std::max({x, y, z}); 
+    }
+    
+    float minComp() const { 
+        return std::min({x, y, z}); 
+    }
+
     std::string toString() const {
         return "(" + std::to_string(x) + ", " + std::to_string(y) + ", " + std::to_string(z) + ")";
     }

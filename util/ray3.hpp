@@ -71,4 +71,6 @@ public:
     }
 };
 
+using Ray3f = Ray3<float>;
+
 #endif
