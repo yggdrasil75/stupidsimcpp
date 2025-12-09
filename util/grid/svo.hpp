@@ -15,6 +15,25 @@
 
 class VoxelData;
 
+static const uint32_t BitCount[] = {
+    0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4,
+    1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+    1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+    2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+    1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+    2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+    2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+    3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+    1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+    2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+    2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+    3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+    2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+    3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+    3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+    4, 5, 5, 6, 5, 6, 6, 7, 5, 6, 6, 7, 6, 7, 7, 8
+};
+
 constexpr float EPSILON = 0.0000000000000000000000001;
 static const size_t CompressionBlockSize = 64*1024*1024;
 
@@ -150,7 +169,7 @@ public:
             throw std::runtime_error(std::string("failed to write: ") + path);
         }
 
-        float cd[3] = _center;
+        float cd[3] = {_center.x,_center.y, _center.z};
 
         file.write(reinterpret_cast<const char*>(cd), sizeof(float) * 3);
 
@@ -203,6 +222,115 @@ public:
         if (centerT.x > minT) { idx ^= 1; pos.x = 1.5f; }
         if (centerT.y > minT) { idx ^= 2; pos.y = 1.5f; }
         if (centerT.z > minT) { idx ^= 4; pos.z = 1.5f; }
+
+        int scale = MaxScale - 1;
+        float scaleExp2 = 0.5f;
+
+        while (scale < MaxScale) {
+            if (curr == 0) curr = _octree[par];
+
+            Vec3 cornerT = pos * invAbsD - bT;
+            float maxTC = cornerT.minComp();
+
+            int childShift = idx ^ octantMask;
+            uint32_t childMasks = curr << childShift;
+            if ((childMasks & 0x8000) && minT <= maxT) {
+                if (maxTC * rayScale >= scaleExp2) {
+                    t = maxTC;
+                    return true;
+                }
+
+                float maxTV = std::min(maxTC, maxT);
+                float half = scaleExp2 * 0.5f;
+                Vec3f centerT = Vec3(half) * invAbsD + cornerT;
+
+                if (minT <= maxTV) {
+                    uint64_t childOffset = curr >> 18;
+                    if (curr & 0x20000) childOffset = (childOffset << 32) | static_cast<uint64_t>(_octree[par+1]);
+                    if (!(childMasks & 0x80)) {
+                        uint32_t maskIndex = ((childMasks >> (8 + childShift)) << childShift) & 127;
+                        normal = _octree[childOffset + par + BitCount[maskIndex]];
+                        break;
+                    }
+                    rayStack[scale].offset = par;
+                    rayStack[scale].maxT = maxT;
+                    uint32_t siblingCount = BitCount[childMasks & 127];
+
+                    par += childOffset + siblingCount;
+                    if (curr & 0x10000) par += siblingCount;
+                    idx = 0;
+
+                    --scale;
+                    scaleExp2 = half;
+                    if (centerT.x > minT) {
+                        idx ^= 1;
+                        pos.x += scaleExp2;
+                    }
+                    if (centerT.y > minT) {
+                        idx ^= 1;
+                        pos.y += scaleExp2;
+                    }
+                    if (centerT.z > minT) {
+                        idx ^= 1;
+                        pos.z += scaleExp2;
+                    }
+
+                    maxT = maxTV;
+                    curr = 0;
+                    continue;
+                }
+            }
+
+            int stepMask = 0;
+            if (cornerT.x <= maxTC) {
+                stepMask ^= 1;
+                pos.x -= scaleExp2;
+            }
+            if (cornerT.y <= maxTC) {
+                stepMask ^= 1;
+                pos.y -= scaleExp2;
+            }
+            if (cornerT.z <= maxTC) {
+                stepMask ^= 1;
+                pos.z -= scaleExp2;
+            }
+
+            minT = maxTC;
+            idx ^= stepMask;
+
+            if ((idx & stepMask) != 0) {
+                uint32_t differingBits = 0;
+                if (stepMask & 1) {
+                    differingBits |= std::bit_cast<uint32_t>(pos.x) ^ std::bit_cast<uint32_t>(pos.x + scaleExp2);
+                }
+                if (stepMask & 2) {
+                    differingBits |= std::bit_cast<uint32_t>(pos.y) ^ std::bit_cast<uint32_t>(pos.y + scaleExp2);
+                }
+                if (stepMask & 4) {
+                    differingBits |= std::bit_cast<uint32_t>(pos.z) ^ std::bit_cast<uint32_t>(pos.z + scaleExp2);
+                }
+
+                scale = (differingBits >> 23) - 127;
+                scale = std::bit_cast<float>(static_cast<uint32_t>((scale - MaxScale + 127) << 23));
+
+                par = rayStack[scale].offset;
+                maxT = rayStack[scale].maxT;
+
+                int shX = std::bit_cast<uint32_t>(pos.x) >> scale;
+                int shY = std::bit_cast<uint32_t>(pos.y) >> scale;
+                int shZ = std::bit_cast<uint32_t>(pos.z) >> scale;
+
+                pos.x = std::bit_cast<float>(shX << scale);
+                pos.y = std::bit_cast<float>(shY << scale);
+                pos.z = std::bit_cast<float>(shZ << scale);
+                
+                idx = (shX & 1) | ((shY & 1) << 1) | ((shZ & 1) << 2);
+                curr = 0;
+            }
+        }
+        if (scale >=MaxScale) return false;
+        t = minT;
+        return true;
     }
 
     Vec3f center() const {
