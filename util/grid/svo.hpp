@@ -3,6 +3,8 @@
 
 #include "../vectorlogic/vec3.hpp"
 #include "../compression/zstd.hpp"
+#include "../inttypes.hpp"
+#include "../utils.hpp"
 #include <memory>
 #include <vector>
 #include <iostream>
@@ -12,8 +14,12 @@
 #include <cstdint>
 #include <cmath>
 #include <bit>
+#include <stdio.h>
 
-class VoxelData;
+
+class VoxelData {
+private:
+};
 
 static const uint32_t BitCount[] = {
     0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4,
