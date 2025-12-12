@@ -16,8 +16,8 @@ PKG_FLAGS := $(LINUX_GL_LIBS) `pkg-config --static --cflags --libs glfw3`
 CXXFLAGS += $(PKG_FLAGS)
 
 # Source files
-SRC := $(SRC_DIR)/g3chromatic.cpp
-#SRC := $(SRC_DIR)/g2chromatic2.cpp
+#SRC := $(SRC_DIR)/g3chromatic.cpp
+SRC := $(SRC_DIR)/g2atomic.cpp
 SRC += $(IMGUI_DIR)/imgui.cpp $(IMGUI_DIR)/imgui_demo.cpp $(IMGUI_DIR)/imgui_draw.cpp $(IMGUI_DIR)/imgui_tables.cpp $(IMGUI_DIR)/imgui_widgets.cpp
 SRC += $(IMGUI_DIR)/backends/imgui_impl_glfw.cpp $(IMGUI_DIR)/backends/imgui_impl_opengl3.cpp
 SRC += $(SRC_DIR)/stb_image.cpp

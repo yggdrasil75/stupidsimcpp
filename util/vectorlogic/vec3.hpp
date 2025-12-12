@@ -14,7 +14,7 @@ public:
     Vec3() : x(0), y(0), z(0) {}
     Vec3(T x, T y, T z) : x(x), y(y), z(z) {}
     Vec3(T scalar) : x(scalar), y(scalar), z(scalar) {}
-    Vec3(float[3] acd) : x(acd[0]), y(acd[1]), z(acd[2]) {}
+    Vec3(const T acd[3]) : x(acd[0]), y(acd[1]), z(acd[2]) {}
 
     Vec3(const class Vec2& vec2, T z = 0);
     

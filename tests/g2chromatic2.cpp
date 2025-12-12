@@ -56,13 +56,13 @@ Grid2 setup(AnimationConfig config) {
     TIME_FUNCTION;
     Grid2 grid;
     std::vector<Vec2> pos;
-    std::vector<Vec4> colors;
+    std::vector<Vec4f> colors;
     std::vector<float> sizes;
     for (int y = 0; y < config.height; ++y) {
         for (int x = 0; x < config.width; ++x) {
             float gradient = (x + y) / float(config.width + config.height - 2);
             pos.push_back(Vec2(x,y));
-            colors.push_back(Vec4(gradient, gradient, gradient, 1.0f));
+            colors.push_back(Vec4f(gradient, gradient, gradient, 1.0f));
             sizes.push_back(1.0f);
         }
     }
@@ -102,7 +102,7 @@ void livePreview(const Grid2& grid) {
     updatePreview = true;
 }
 
-std::vector<std::tuple<size_t, Vec2, Vec4>> pickSeeds(Grid2 grid, AnimationConfig config) {
+std::vector<std::tuple<size_t, Vec2, Vec4f>> pickSeeds(Grid2 grid, AnimationConfig config) {
     TIME_FUNCTION;
     std::random_device rd;
     std::mt19937 gen(rd());
@@ -110,11 +110,11 @@ std::vector<std::tuple<size_t, Vec2, Vec4>> pickSeeds(Grid2 grid, AnimationConfi
     std::uniform_int_distribution<> yDist(0, config.height - 1);
     std::uniform_real_distribution<> colorDist(0.2f, 0.8f);
 
-    std::vector<std::tuple<size_t, Vec2, Vec4>> seeds;
+    std::vector<std::tuple<size_t, Vec2, Vec4f>> seeds;
 
     for (int i = 0; i < config.numSeeds; ++i) {
         Vec2 point(xDist(gen), yDist(gen));
-        Vec4 color(colorDist(gen), colorDist(gen), colorDist(gen), 255);
+        Vec4f color(colorDist(gen), colorDist(gen), colorDist(gen), 255);
         size_t id = grid.getOrCreatePositionVec(point, 0.0, true);
         grid.setColor(id, color);
         seeds.push_back(std::make_tuple(id,point, color));
@@ -122,9 +122,9 @@ std::vector<std::tuple<size_t, Vec2, Vec4>> pickSeeds(Grid2 grid, AnimationConfi
     return seeds;
 }
 
-void expandPixel(Grid2& grid, AnimationConfig config, std::vector<std::tuple<size_t, Vec2, Vec4>>& seeds) {
+void expandPixel(Grid2& grid, AnimationConfig config, std::vector<std::tuple<size_t, Vec2, Vec4f>>& seeds) {
     TIME_FUNCTION;
-    std::vector<std::tuple<size_t, Vec2, Vec4>> newseeds; 
+    std::vector<std::tuple<size_t, Vec2, Vec4f>> newseeds; 
 
     std::unordered_set<size_t> visitedThisFrame; 
     for (const auto& seed : seeds) {
@@ -132,10 +132,10 @@ void expandPixel(Grid2& grid, AnimationConfig config, std::vector<std::tuple<siz
     }
 
     //#pragma omp parallel for
-    for (const std::tuple<size_t, Vec2, Vec4>& seed : seeds) {
+    for (const std::tuple<size_t, Vec2, Vec4f>& seed : seeds) {
         size_t id = std::get<0>(seed);
         Vec2 seedPOS = std::get<1>(seed);
-        Vec4 seedColor = std::get<2>(seed);
+        Vec4f seedColor = std::get<2>(seed);
         std::vector<size_t> neighbors = grid.getNeighbors(id);
         //grid.setSize(id, grid.getSize(id)+4);
         for (size_t neighbor : neighbors) {
@@ -145,7 +145,7 @@ void expandPixel(Grid2& grid, AnimationConfig config, std::vector<std::tuple<siz
             visitedThisFrame.insert(neighbor);
 
             Vec2 neipos = grid.getPositionID(neighbor);
-            Vec4 neighborColor = grid.getColor(neighbor);
+            Vec4f neighborColor = grid.getColor(neighbor);
             float distance = seedPOS.distance(neipos);
             float angle = seedPOS.directionTo(neipos);
 
@@ -153,7 +153,7 @@ void expandPixel(Grid2& grid, AnimationConfig config, std::vector<std::tuple<siz
             float blendFactor = 0.3f + 0.4f * std::sin(normalizedAngle * 2.0f * M_PI);
             blendFactor = std::clamp(blendFactor, 0.1f, 0.9f);
             
-            Vec4 newcolor = Vec4(
+            Vec4f newcolor = Vec4f(
                 seedColor.r * blendFactor + neighborColor.r * (1.0f - blendFactor),
                 seedColor.g * (1.0f - blendFactor) + neighborColor.g * blendFactor,
                 seedColor.b * (0.5f + 0.5f * std::sin(normalizedAngle * 4.0f * M_PI)),
@@ -236,7 +236,7 @@ void mainLogic(const AnimationConfig& config, Shared& state, int gradnoise) {
         } else if (gradnoise == 1) {
             grid = grid.noiseGenGrid(0,0,config.height, config.width, 0.01, 1.0, true, config.noisemod);
         }
-        grid.setDefault(Vec4(0,0,0,0));
+        grid.setDefault(Vec4f(0,0,0,0));
         {
             std:: lock_guard<std::mutex> lock(state.mutex);
             state.grid = grid;
@@ -246,7 +246,7 @@ void mainLogic(const AnimationConfig& config, Shared& state, int gradnoise) {
         std::cout << "generated grid" << std::endl;
         Preview(grid);
         std::cout << "generated preview" << std::endl;
-        std::vector<std::tuple<size_t, Vec2, Vec4>> seeds = pickSeeds(grid, config);
+        std::vector<std::tuple<size_t, Vec2, Vec4f>> seeds = pickSeeds(grid, config);
         std::vector<frame> frames;
 
         for (int i = 0; i < config.totalFrames; ++i){

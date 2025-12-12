@@ -8,14 +8,341 @@
 #include "../timing_decorator.hpp"
 #include "../output/frame.hpp"
 #include "../noise/pnoise2.hpp"
-#include "../simblocks/water.hpp"
-#include "../simblocks/temp.hpp"
 #include <vector>
 #include <unordered_set>
 #include <execution>
 #include <algorithm>
+#include <random>
 
 constexpr float EPSILON = 0.0000000000000000000000001;
+constexpr float ELEMENTARY_CHARGE = 1.602176634e-19f;  // Coulomb
+constexpr float COULOMB_CONSTANT = 8.9875517923e9f;    // N·m²/C²
+constexpr float ELECTRON_MASS = 9.1093837015e-31f;     // kg (relative units)
+constexpr float PROTON_MASS = 1.67262192369e-27f;      // kg (relative units)
+constexpr float NEUTRON_MASS = 1.67492749804e-27f;     // kg (relative units)
+
+/// @brief Represents different types of atoms/elements
+enum class ElementType {
+    HYDROGEN,    // 1 proton, 1 electron
+    HELIUM,      // 2 protons, 2 neutrons, 2 electrons
+    LITHIUM,     // 3 protons, 4 neutrons, 3 electrons
+    CARBON,      // 6 protons, 6 neutrons, 6 electrons
+    OXYGEN,      // 8 protons, 8 neutrons, 8 electrons
+    IRON,        // 26 protons, 30 neutrons, 26 electrons
+    URANIUM,     // 92 protons, 146 neutrons, 92 electrons
+    CUSTOM       // User-defined composition
+};
+
+/// @brief Represents a single atom with subatomic particle composition
+class AtomicPixel {
+protected:
+    size_t id;
+    Vec4f color;
+    Vec2 pos;
+    Vec2 velocity;
+    Vec2 acceleration;
+    
+    // Atomic composition
+    int protons;
+    int neutrons;
+    int electrons;
+    
+    // Physical properties
+    float mass;           // Total mass in relative units
+    float charge;         // Net charge in elementary charge units
+    float radius;         // Atomic radius (for collision/repulsion)
+    ElementType element;
+    
+    // State properties
+    bool ionized;
+    float excitation;
+    float temperature;
+    
+public:
+    // Constructors
+    AtomicPixel(size_t id, Vec4f color, Vec2 pos) 
+        : id(id), color(color), pos(pos), velocity(Vec2(0, 0)), acceleration(Vec2(0, 0)),
+          protons(1), neutrons(0), electrons(1), 
+          mass(PROTON_MASS + ELECTRON_MASS),
+          charge(0.0f),
+          radius(1.0f),
+          element(ElementType::HYDROGEN),
+          ionized(false),
+          excitation(0.0f),
+          temperature(300.0f) {
+        updateProperties();
+    }
+    
+    AtomicPixel(size_t id, Vec4f color, Vec2 pos, ElementType element)
+        : id(id), color(color), pos(pos), velocity(Vec2(0, 0)), acceleration(Vec2(0, 0)),
+          element(element),
+          ionized(false),
+          excitation(0.0f),
+          temperature(300.0f) {
+        setElement(element);
+    }
+    
+    AtomicPixel(size_t id, Vec4f color, Vec2 pos, int p, int n, int e)
+        : id(id), color(color), pos(pos), velocity(Vec2(0, 0)), acceleration(Vec2(0, 0)),
+          protons(p), neutrons(n), electrons(e),
+          element(ElementType::CUSTOM),
+          ionized(false),
+          excitation(0.0f),
+          temperature(300.0f) {
+        updateProperties();
+    }
+
+    // Getters
+    Vec4f getColor() const { return color; }
+    Vec2 getPosition() const { return pos; }
+    Vec2 getVelocity() const { return velocity; }
+    Vec2 getAcceleration() const { return acceleration; }
+    
+    int getProtons() const { return protons; }
+    int getNeutrons() const { return neutrons; }
+    int getElectrons() const { return electrons; }
+    int getAtomicNumber() const { return protons; }
+    int getMassNumber() const { return protons + neutrons; }
+    
+    float getMass() const { return mass; }
+    float getCharge() const { return charge; }
+    float getRadius() const { return radius; }
+    ElementType getElement() const { return element; }
+    
+    bool isIonized() const { return ionized; }
+    float getExcitation() const { return excitation; }
+    float getTemperature() const { return temperature; }
+    
+    // Setters
+    void setColor(Vec4f newColor) { color = newColor; }
+    void setPosition(Vec2 newPos) { pos = newPos; }
+    void setVelocity(Vec2 newVel) { velocity = newVel; }
+    void setAcceleration(Vec2 newAcc) { acceleration = newAcc; }
+    
+    void setProtons(int p) { 
+        protons = p; 
+        updateProperties(); 
+    }
+    
+    void setNeutrons(int n) { 
+        neutrons = n; 
+        updateProperties(); 
+    }
+    
+    void setElectrons(int e) { 
+        electrons = e; 
+        updateProperties(); 
+    }
+    
+    void setElement(ElementType elem) {
+        element = elem;
+        switch (element) {
+            case ElementType::HYDROGEN:
+                protons = 1; neutrons = 0; electrons = 1;
+                break;
+            case ElementType::HELIUM:
+                protons = 2; neutrons = 2; electrons = 2;
+                break;
+            case ElementType::LITHIUM:
+                protons = 3; neutrons = 4; electrons = 3;
+                break;
+            case ElementType::CARBON:
+                protons = 6; neutrons = 6; electrons = 6;
+                break;
+            case ElementType::OXYGEN:
+                protons = 8; neutrons = 8; electrons = 8;
+                break;
+            case ElementType::IRON:
+                protons = 26; neutrons = 30; electrons = 26;
+                break;
+            case ElementType::URANIUM:
+                protons = 92; neutrons = 146; electrons = 92;
+                break;
+            case ElementType::CUSTOM:
+                // Keep existing values
+                break;
+        }
+        updateProperties();
+    }
+    
+    void setIonized(bool ion) { ionized = ion; }
+    void setExcitation(float exc) { excitation = exc; }
+    void setTemperature(float temp) { temperature = temp; }
+    
+    // Movement
+    void move(Vec2 newPos) { pos = newPos; }
+    
+    void applyForce(Vec2 force, float deltaTime) {
+        acceleration = force / mass;
+        velocity += acceleration * deltaTime;
+        pos += velocity * deltaTime;
+    }
+    
+    // Atomic operations
+    void addProton() { 
+        protons++; 
+        updateProperties(); 
+    }
+    
+    void removeProton() { 
+        if (protons > 0) protons--; 
+        updateProperties(); 
+    }
+    
+    void addNeutron() { 
+        neutrons++; 
+        updateProperties(); 
+    }
+    
+    void removeNeutron() { 
+        if (neutrons > 0) neutrons--; 
+        updateProperties(); 
+    }
+    
+    void addElectron() { 
+        electrons++; 
+        updateProperties(); 
+    }
+    
+    void removeElectron() { 
+        if (electrons > 0) electrons--; 
+        updateProperties(); 
+    }
+    
+    void ionize() {
+        if (electrons > 0) {
+            electrons--;
+            ionized = true;
+            updateProperties();
+        }
+    }
+    
+    void recombine() {
+        electrons = protons;  // Neutral state
+        ionized = false;
+        updateProperties();
+    }
+    
+    // Update derived properties
+    void updateProperties() {
+        // Calculate net charge (in elementary charge units)
+        charge = static_cast<float>(protons - electrons);
+        
+        // Calculate mass (simplified relative units)
+        mass = protons * PROTON_MASS + neutrons * NEUTRON_MASS + electrons * ELECTRON_MASS;
+        
+        // Calculate approximate atomic radius (empirical)
+        // Rough scaling: radius ~ (mass number)^(1/3) * Bohr radius scale
+        radius = 0.1f * std::pow(static_cast<float>(protons + neutrons), 1.0f/3.0f);
+        
+        // Update ionization state
+        ionized = (electrons != protons);
+        
+        // Update color based on element/charge (simplified visualization)
+        updateColorFromProperties();
+    }
+    
+    // Update visualization color based on atomic properties
+    void updateColorFromProperties() {
+        // Base color from element type
+        switch (element) {
+            case ElementType::HYDROGEN:
+                color = Vec4f(1.0f, 0.5f, 0.5f, 1.0f);  // Pinkish
+                break;
+            case ElementType::HELIUM:
+                color = Vec4f(0.8f, 0.9f, 1.0f, 1.0f);  // Light blue
+                break;
+            case ElementType::LITHIUM:
+                color = Vec4f(0.8f, 0.5f, 0.2f, 1.0f);  // Bronze
+                break;
+            case ElementType::CARBON:
+                color = Vec4f(0.2f, 0.2f, 0.2f, 1.0f);  // Dark gray
+                break;
+            case ElementType::OXYGEN:
+                color = Vec4f(0.9f, 0.1f, 0.1f, 1.0f);  // Red
+                break;
+            case ElementType::IRON:
+                color = Vec4f(0.7f, 0.4f, 0.1f, 1.0f);  // Rust orange
+                break;
+            case ElementType::URANIUM:
+                color = Vec4f(0.0f, 0.8f, 0.0f, 1.0f);  // Green
+                break;
+            case ElementType::CUSTOM:
+                // Keep existing or calculate from composition
+                break;
+        }
+        
+        // Modify based on charge
+        if (charge > 0) {
+            // Positive charge - shift toward red
+            color.r = std::min(1.0f, color.r + charge * 0.3f);
+            color.g = std::max(0.0f, color.g - charge * 0.2f);
+            color.b = std::max(0.0f, color.b - charge * 0.2f);
+        } else if (charge < 0) {
+            // Negative charge - shift toward blue
+            float absCharge = std::abs(charge);
+            color.r = std::max(0.0f, color.r - absCharge * 0.2f);
+            color.g = std::max(0.0f, color.g - absCharge * 0.2f);
+            color.b = std::min(1.0f, color.b + absCharge * 0.3f);
+        }
+        
+        // Modify based on temperature (simplified blackbody)
+        float tempFactor = temperature / 1000.0f;
+        color.r = std::min(1.0f, color.r * (1.0f + tempFactor * 0.5f));
+        color.g = std::min(1.0f, color.g * (1.0f + tempFactor * 0.3f));
+        color.b = std::max(0.0f, color.b * (1.0f - tempFactor * 0.2f));
+    }
+    
+    // Calculate Coulomb force from another atom
+    Vec2 calculateCoulombForce(const AtomicPixel& other, float distance) const {
+        if (distance < EPSILON) return Vec2(0, 0);
+        
+        // Coulomb's law: F = k * q1 * q2 / r²
+        float forceMagnitude = COULOMB_CONSTANT * charge * other.charge * 
+                              (ELEMENTARY_CHARGE * ELEMENTARY_CHARGE) / (distance * distance);
+        
+        // Direction vector (from this to other)
+        Vec2 direction = other.pos - pos;
+        direction.normalized();
+        
+        return direction * forceMagnitude;
+    }
+    
+    // Calculate gravitational force (mass-based, simplified)
+    Vec2 calculateGravitationalForce(const AtomicPixel& other, float distance, float G = 6.67430e-11f) const {
+        if (distance < EPSILON) return Vec2(0, 0);
+        
+        // Newton's law of universal gravitation: F = G * m1 * m2 / r²
+        float forceMagnitude = G * mass * other.mass / (distance * distance);
+        
+        // Direction vector (from this to other)
+        Vec2 direction = other.pos - pos;
+        direction.normalized();
+        
+        return direction * forceMagnitude;
+    }
+    
+    // Calculate Lennard-Jones potential (for short-range repulsion/attraction)
+    Vec2 calculateLennardJonesForce(const AtomicPixel& other, float distance) const {
+        if (distance < EPSILON) return Vec2(0, 0);
+        
+        // Simplified Lennard-Jones parameters
+        float sigma = (radius + other.radius) * 0.5f;
+        float epsilon = 1.0e-3f;  // Interaction strength
+        
+        float r = distance;
+        float r6 = std::pow(sigma / r, 6);
+        float r12 = r6 * r6;
+        
+        // LJ force: F = 24 * epsilon * (2*(sigma/r)^12 - (sigma/r)^6) / r
+        float forceMagnitude = 24.0f * epsilon * (2.0f * r12 - r6) / r;
+        
+        Vec2 direction = other.pos - pos;
+        direction.normalized();
+        
+        return direction * forceMagnitude;
+    }
+};
 
 /// @brief A bidirectional lookup helper to map internal IDs to 2D positions and vice-versa.
 /// @details Maintains two hashmaps to allow O(1) lookup in either direction.
@@ -220,212 +547,387 @@ public:
     }
 };
 
-/// @brief Represents a single point in the grid with an ID, color, and position.
-class GenericPixel {
-protected:
-    size_t id;
-    Vec4 color;
-    Vec2 pos;
-public:
-    //constructors
-    GenericPixel(size_t id, Vec4 color, Vec2 pos) : id(id), color(color), pos(pos) {};
-
-    //getters
-    Vec4 getColor() const {
-        return color;
-    }
-
-    //setters
-    void setColor(Vec4 newColor) {
-        color = newColor;
-    }
-
-    void move(Vec2 newPos) {
-        pos = newPos;
-    }
-    
-    void recolor(Vec4 newColor) {
-        color.recolor(newColor);
-    }
-    
-};
-
-/// @brief The main simulation grid class managing positions, visual data (pixels), and physical properties (temperature, noise).
+/// @brief The main simulation grid class managing atomic interactions
 class Grid2 { 
 protected:
     //all positions
     reverselookupassistant Positions;
-    std::unordered_map<size_t, GenericPixel> Pixels;
+    std::unordered_map<size_t, AtomicPixel> Atoms;
     
     std::vector<size_t> unassignedIDs;
     
-    float neighborRadius = 1.0f;
+    float neighborRadius = 10.0f;  // Increased for atomic interactions
     
     //TODO: spatial map
     SpatialGrid spatialGrid;
     float spatialCellSize = neighborRadius * 1.5f;
 
     // Default background color for empty spaces
-    Vec4 defaultBackgroundColor = Vec4(0.0f, 0.0f, 0.0f, 0.0f);
+    Vec4f defaultBackgroundColor = Vec4f(0.0f, 0.0f, 0.0f, 0.0f);
     PNoise2 noisegen;
 
-    //water
-    std::unordered_map<size_t, WaterParticle> water;
-
-    std::unordered_map<size_t, Temp> tempMap;
     bool regenpreventer = false;
+    
+    // Physics simulation parameters
+    float timeStep = 0.016f;  // ~60 FPS
+    float coulombStrength = 1.0f;  // Scaling factor for Coulomb force
+    float gravityStrength = 1.0e-6f;  // Scaling factor for gravitational force
+    float dampingFactor = 0.99f;  // Velocity damping
+    float boundaryRepulsion = 100.0f;  // Force at boundaries
+    
+    // Simulation bounds
+    Vec2 simulationBoundsMin = Vec2(-100.0f, -100.0f);
+    Vec2 simulationBoundsMax = Vec2(100.0f, 100.0f);
+    
+    // Random number generator for atomic variations
+    std::mt19937 rng;
+    std::uniform_real_distribution<float> randomDist;
+    
 public:
-    /// @brief Populates the grid with Perlin noise-based pixels.
+    Grid2() : rng(std::random_device{}()), randomDist(0.0f, 1.0f) {
+        optimizeSpatialGrid();
+    }
+    
+    /// @brief Populates the grid with random atoms of various elements.
     /// @param minx Start X index.
     /// @param miny Start Y index.
     /// @param maxx End X index.
     /// @param maxy End Y index.
-    /// @param minChance Minimum noise threshold to spawn a pixel.
-    /// @param maxChance Maximum noise threshold to spawn a pixel.
-    /// @param color If true, generates RGB noise. If false, generates grayscale based on alpha.
-    /// @param noisemod Seed offset for the noise generator.
+    /// @param density Probability of placing an atom at each position.
     /// @return Reference to self for chaining.
-    Grid2 noiseGenGrid(size_t minx,size_t miny, size_t maxx, size_t maxy, float minChance = 0.1f
-                        , float maxChance = 1.0f, bool color = true, int noisemod = 42) {
+    Grid2 generateRandomAtoms(size_t minx, size_t miny, size_t maxx, size_t maxy, float density = 0.3f) {
         TIME_FUNCTION;
-        noisegen = PNoise2(noisemod);
-        std::cout << "generating a noise grid with the following: (" << minx << ", " << miny 
-                << ") by (" << maxx << ", " << maxy << ") " << "chance: " << minChance 
-                << " max: " << maxChance << " gen colors: " << color << std::endl;
+        std::cout << "Generating random atoms in region: (" << minx << ", " << miny 
+                << ") to (" << maxx << ", " << maxy << ") with density: " << density << std::endl;
+        
         std::vector<Vec2> poses;
-        std::vector<Vec4> colors;
+        std::vector<Vec4f> colors;
+        std::vector<ElementType> elements;
+        
+        // Common elements with probabilities
+        std::vector<std::pair<ElementType, float>> elementProbs = {
+            {ElementType::HYDROGEN, 0.4f},
+            {ElementType::HELIUM, 0.2f},
+            {ElementType::CARBON, 0.15f},
+            {ElementType::OXYGEN, 0.15f},
+            {ElementType::IRON, 0.1f}
+        };
+        
+        #pragma omp parallel for
         for (int x = minx; x < maxx; x++) {
+            #pragma omp parallel for
             for (int y = miny; y < maxy; y++) {
-                float nx = (x+noisemod)/(maxx+EPSILON)/0.1;
-                float ny = (y+noisemod)/(maxy+EPSILON)/0.1;
-                Vec2 pos = Vec2(nx,ny);
-                float alpha = noisegen.permute(pos);
-                if (alpha > minChance && alpha < maxChance) {
-                    if (color) {
-                        float red = noisegen.permute(Vec2(nx*0.3,ny*0.3));
-                        float green = noisegen.permute(Vec2(nx*0.6,ny*.06));
-                        float blue = noisegen.permute(Vec2(nx*0.9,ny*0.9));
-                        Vec4 newc = Vec4(red,green,blue,1.0);
-                        colors.push_back(newc);
-                        poses.push_back(Vec2(x,y));
-                    } else {
-                        Vec4 newc = Vec4(alpha,alpha,alpha,1.0);
-                        colors.push_back(newc);
-                        poses.push_back(Vec2(x,y));
+                if (randomDist(rng) < density) {
+                    // Choose random element
+                    float rand = randomDist(rng);
+                    float accum = 0.0f;
+                    ElementType chosenElement = ElementType::HYDROGEN;
+                    
+                    for (const auto& [elem, prob] : elementProbs) {
+                        accum += prob;
+                        if (rand <= accum) {
+                            chosenElement = elem;
+                            break;
+                        }
                     }
+                    
+                    #pragma omp critical
+                    poses.push_back(Vec2(x, y));
+                    #pragma omp critical
+                    elements.push_back(chosenElement);
+                    
+                    // Create placeholder color (will be set by AtomicPixel constructor)
+                    #pragma omp critical
+                    colors.push_back(Vec4f(1.0f, 1.0f, 1.0f, 1.0f));
                 }
             }
         }
-        std::cout << "noise generated" << std::endl;
-        bulkAddObjects(poses,colors);
+        
+        bulkAddAtoms(poses, colors, elements);
         return *this;
     }
-
-    /// @brief Generates a grayscale point at the given position based on noise.
-    size_t NoiseGenPointB(const Vec2& pos) {
-        float grayc = noisegen.permute(pos);
-        Vec4 newc = Vec4(grayc,grayc,grayc,grayc);
-        return addObject(pos,newc,1.0);
-    }
     
-    /// @brief Generates an RGB point at the given position based on noise.
-    size_t NoiseGenPointRGB(const Vec2& pos) {
-        float red = noisegen.permute(pos);
-        float green = noisegen.permute(pos);
-        float blue = noisegen.permute(pos);
-        Vec4 newc = Vec4(red,green,blue,1);
-        return addObject(pos,newc,1.0);
-    }
-
-    /// @brief Generates an RGBA point at the given position based on noise.
-    size_t NoiseGenPointRGBA(const Vec2& pos) {
-        float red = noisegen.permute(pos);
-        float green = noisegen.permute(pos);
-        float blue = noisegen.permute(pos);
-        float alpha = noisegen.permute(pos);
-        Vec4 newc = Vec4(red,green,blue,alpha);
-        return addObject(pos,newc,1.0);
-    }
-
-    /// @brief Adds a new object to the grid.
+    /// @brief Adds a new atom to the grid.
     /// @param pos The 2D world position.
     /// @param color The color vector.
-    /// @param size The size (currently unused/informational).
-    /// @return The unique ID assigned to the new object.
-    size_t addObject(const Vec2& pos, const Vec4& color, float size = 1.0f) {
+    /// @param element The type of atom/element.
+    /// @return The unique ID assigned to the new atom.
+    size_t addAtom(const Vec2& pos, const Vec4f& color, ElementType element = ElementType::HYDROGEN) {
         size_t id = Positions.set(pos);
-        Pixels.emplace(id, GenericPixel(id, color, pos));
+        Atoms.emplace(id, AtomicPixel(id, color, pos, element));
+        spatialGrid.insert(id, pos);
+        return id;
+    }
+    
+    /// @brief Adds a new custom atom with specific proton/neutron/electron counts.
+    size_t addCustomAtom(const Vec2& pos, const Vec4f& color, int protons, int neutrons, int electrons) {
+        size_t id = Positions.set(pos);
+        Atoms.emplace(id, AtomicPixel(id, color, pos, protons, neutrons, electrons));
         spatialGrid.insert(id, pos);
         return id;
     }
 
+    /// @brief Batch insertion of atoms for efficiency.
+    std::vector<size_t> bulkAddAtoms(const std::vector<Vec2> poses, 
+                                     const std::vector<Vec4f> colors,
+                                     const std::vector<ElementType> elements) {
+        TIME_FUNCTION;
+        
+        if (poses.size() != colors.size() || poses.size() != elements.size()) {
+            throw std::invalid_argument("Vector sizes must match");
+        }
+        
+        // Reserve space in maps to avoid rehashing
+        if (Positions.bucket_count() < Positions.size() + poses.size()) {
+            Positions.reserve(Positions.size() + poses.size());
+            Atoms.reserve(Atoms.size() + poses.size());
+        }
+        
+        // Batch insertion
+        std::vector<size_t> newids;
+        newids.reserve(poses.size());
+        
+        for (size_t i = 0; i < poses.size(); ++i) {
+            size_t id = Positions.set(poses[i]);
+            Atoms.emplace(id, AtomicPixel(id, colors[i], poses[i], elements[i]));
+            spatialGrid.insert(id, poses[i]);
+            newids.push_back(id);
+        }
+        
+        shrinkIfNeeded();
+        
+        return newids;
+    }
+    
+    /// @brief Updates the physics simulation for all atoms.
+    /// @param deltaTime Time step for integration (if 0, uses internal timeStep).
+    void updatePhysics(float deltaTime = 0.0f) {
+        TIME_FUNCTION;
+        
+        float dt = (deltaTime == 0.0f) ? timeStep : deltaTime;
+        
+        // Calculate forces between all atoms
+        std::unordered_map<size_t, Vec2> forces;
+        
+        // For each atom, calculate forces from neighbors
+        #pragma omp parallel for
+        for (const auto& [id1, atom1] : Atoms) {
+            Vec2 totalForce(0, 0);
+            Vec2 pos1 = atom1.getPosition();
+            
+            // Get neighbors within interaction radius
+            auto neighbors = getNeighbors(id1);
+            
+            #pragma omp parallel for
+            for (size_t id2 : neighbors) {
+                auto& atom2 = Atoms.at(id2);
+                Vec2 pos2 = atom2.getPosition();
+                float distance = pos1.distance(pos2);
+                
+                if (distance > EPSILON) {
+                    // Coulomb force (charge-based "gravity")
+                    Vec2 coulombForce = atom1.calculateCoulombForce(atom2, distance);
+                    totalForce += coulombForce * coulombStrength;
+                    
+                    // Gravitational force (mass-based)
+                    Vec2 gravityForce = atom1.calculateGravitationalForce(atom2, distance);
+                    totalForce += gravityForce * gravityStrength;
+                    
+                    // Short-range repulsion (Lennard-Jones)
+                    if (distance < (atom1.getRadius() + atom2.getRadius()) * 2.0f) {
+                        Vec2 ljForce = atom1.calculateLennardJonesForce(atom2, distance);
+                        totalForce += ljForce;
+                    }
+                }
+            }
+            
+            // Boundary forces (keep atoms within simulation bounds)
+            if (pos1.x < simulationBoundsMin.x) {
+                totalForce.x += boundaryRepulsion;
+            } else if (pos1.x > simulationBoundsMax.x) {
+                totalForce.x -= boundaryRepulsion;
+            }
+            
+            if (pos1.y < simulationBoundsMin.y) {
+                totalForce.y += boundaryRepulsion;
+            } else if (pos1.y > simulationBoundsMax.y) {
+                totalForce.y -= boundaryRepulsion;
+            }
+            
+            // Damping
+            Vec2 velocity = atom1.getVelocity();
+            totalForce -= velocity * (1.0f - dampingFactor) * atom1.getMass() / dt;
+            
+            // Apply force
+            #pragma omp critical
+            Atoms.at(id1).applyForce(totalForce, dt);
+            
+            // Update spatial grid if position changed significantly
+            Vec2 newPos = Atoms.at(id1).getPosition();
+            if (pos1.distanceSquared(newPos) > 0.01f) {
+                spatialGrid.update(id1, pos1, newPos);
+                Positions.at(id1) = newPos;
+            }
+        }
+    }
+    
+    /// @brief Simulates atomic interactions and reactions.
+    void simulateAtomicInteractions() {
+        TIME_FUNCTION;
+        
+        // Check for collisions and possible reactions
+        #pragma omp parallel for
+        for (const auto& [id1, atom1] : Atoms) {
+            Vec2 pos1 = atom1.getPosition();
+            float radius1 = atom1.getRadius();
+            
+            auto neighbors = getNeighbors(id1);
+            
+            #pragma omp parallel for
+            for (size_t id2 : neighbors) {
+                if (id1 >= id2) continue;  // Avoid duplicate checks
+                
+                auto& atom2 = Atoms.at(id2);
+                Vec2 pos2 = atom2.getPosition();
+                float distance = pos1.distance(pos2);
+                float combinedRadius = radius1 + atom2.getRadius();
+                
+                // If atoms are very close, they might interact
+                if (distance < combinedRadius * 0.5f) {
+                    // Simple fusion reaction (for demonstration)
+                    if (randomDist(rng) < 0.01f) {  // 1% chance per collision
+                        simulateFusion(id1, id2);
+                    }
+                    
+                    // Electron transfer (ionization/recombination)
+                    if (randomDist(rng) < 0.05f) {
+                        simulateElectronTransfer(id1, id2);
+                    }
+                }
+            }
+        }
+    }
+    
+    /// @brief Simulates a simple fusion reaction between two atoms.
+    void simulateFusion(size_t id1, size_t id2) {
+        auto& atom1 = Atoms.at(id1);
+        auto& atom2 = Atoms.at(id2);
+        
+        // Simple hydrogen fusion: H + H → He (simplified)
+        if (atom1.getElement() == ElementType::HYDROGEN && 
+            atom2.getElement() == ElementType::HYDROGEN) {
+            
+            // Create a helium atom at midpoint
+            Vec2 midPoint = (atom1.getPosition() + atom2.getPosition()) * 0.5f;
+            Vec4f heColor = Vec4f(0.8f, 0.9f, 1.0f, 1.0f);
+            
+            // Remove original atoms
+            removeID(id1);
+            removeID(id2);
+            
+            // Add helium atom
+            addAtom(midPoint, heColor, ElementType::HELIUM);
+            
+            // Add energy release (velocity boost to nearby atoms)
+            auto neighbors = getPositionVecRegion(midPoint, 5.0f);
+            #pragma omp parallel for
+            for (size_t neighborId : neighbors) {
+                if (Atoms.find(neighborId) != Atoms.end()) {
+                    Vec2 dir = Atoms.at(neighborId).getPosition() - midPoint;
+                    if (dir.length() > EPSILON) {
+                        dir.normalized();
+                        Atoms.at(neighborId).setVelocity(
+                            Atoms.at(neighborId).getVelocity() + dir * 10.0f
+                        );
+                    }
+                }
+            }
+        }
+    }
+    
+    /// @brief Simulates electron transfer between atoms.
+    void simulateElectronTransfer(size_t id1, size_t id2) {
+        auto& atom1 = Atoms.at(id1);
+        auto& atom2 = Atoms.at(id2);
+        
+        // Atom with higher electron affinity gains an electron
+        float affinity1 = atom1.getProtons() / static_cast<float>(atom1.getRadius());
+        float affinity2 = atom2.getProtons() / static_cast<float>(atom2.getRadius());
+        
+        if (affinity1 > affinity2 && atom2.getElectrons() > 0) {
+            // atom1 gains electron from atom2
+            atom1.addElectron();
+            atom2.removeElectron();
+        } else if (affinity2 > affinity1 && atom1.getElectrons() > 0) {
+            // atom2 gains electron from atom1
+            atom2.addElectron();
+            atom1.removeElectron();
+        }
+    }
+    
     /// @brief Sets the default background color.
-    void setDefault(const Vec4& color) {
+    void setDefault(const Vec4f& color) {
         defaultBackgroundColor = color;
     }
     
     /// @brief Sets the default background color components.
     void setDefault(float r, float g, float b, float a = 0.0f) {
-        defaultBackgroundColor = Vec4(r, g, b, a);
-    }
-    
-    /// @brief Configures thermal properties for a specific object ID.
-    void setMaterialProperties(size_t id, double conductivity, double specific_heat, double density = 1.0) {
-        auto it = tempMap.at(id);
-        it.conductivity = conductivity;
-        it.specific_heat = specific_heat;
-        it.diffusivity = conductivity / (density * specific_heat);
-    }
-    
-    /// @brief Moves an object to a new position and updates spatial indexing.
-    void setPosition(size_t id, const Vec2& newPosition) {
-        Vec2 oldPosition = Positions.at(id);
-        Pixels.at(id).move(newPosition);
-        spatialGrid.update(id, oldPosition, newPosition);
-        Positions.at(id).move(newPosition);
+        defaultBackgroundColor = Vec4f(r, g, b, a);
     }
         
-    //set color by id (by pos same as get color)
-    void setColor(size_t id, const Vec4 color) {
-        Pixels.at(id).recolor(color);
+    /// @brief Moves an atom to a new position and updates spatial indexing.
+    void setPosition(size_t id, const Vec2& newPosition) {
+        Vec2 oldPosition = Positions.at(id);
+        Atoms.at(id).setPosition(newPosition);
+        spatialGrid.update(id, oldPosition, newPosition);
+        Positions.at(id) = newPosition;
+    }
+        
+    // Set color by id
+    void setColor(size_t id, const Vec4f color) {
+        Atoms.at(id).setColor(color);
     }
     
     /// @brief Sets the radius used for neighbor queries.
     /// @details Triggers an optimization of the spatial grid cell size.
     void setNeighborRadius(float radius) {
         neighborRadius = radius;
-        // updateNeighborMap(); // Recompute all neighbors
         optimizeSpatialGrid();
     }
     
-    /// @brief Sets the temperature at a specific position (creates point if missing).
-    void setTemp(const Vec2 pos, double temp) {
-        size_t id = getOrCreatePositionVec(pos, 0.0, true);
-        setTemp(id, temp);
-    }
-
-    /// @brief Sets the temperature for a specific object ID.
-    void setTemp(size_t id, double temp) {
-        Temp tval = Temp(temp);
-        tempMap.emplace(id, tval);
+    /// @brief Sets physics simulation parameters.
+    void setPhysicsParameters(float newTimeStep = 0.016f, 
+                             float newCoulombStrength = 1.0f,
+                             float newGravityStrength = 1.0e-6f,
+                             float newDamping = 0.99f) {
+        timeStep = newTimeStep;
+        coulombStrength = newCoulombStrength;
+        gravityStrength = newGravityStrength;
+        dampingFactor = newDamping;
     }
     
+    /// @brief Sets simulation boundaries.
+    void setSimulationBounds(const Vec2& min, const Vec2& max) {
+        simulationBoundsMin = min;
+        simulationBoundsMax = max;
+    }
+
     // Get current default background color
-    Vec4 getDefaultBackgroundColor() const {
+    Vec4f getDefaultBackgroundColor() const {
         return defaultBackgroundColor;
     }
 
-    //get position from id
+    // Get position from id
     Vec2 getPositionID(size_t id) const {
         Vec2 it = Positions.at(id);
         return it;
     }
 
-    /// @brief Finds the ID of an object at a given position.
+    /// @brief Finds the ID of an atom at a given position.
     /// @param pos The position to query.
-    /// @param radius If 0.0, performs an exact match. If > 0.0, returns the first object found within the radius.
-    /// @return The ID of the found object.
-    /// @throws std::out_of_range If no object is found.
+    /// @param radius If 0.0, performs an exact match. If > 0.0, returns the first atom found within the radius.
+    /// @return The ID of the found atom.
+    /// @throws std::out_of_range If no atom is found.
     size_t getPositionVec(const Vec2& pos, float radius = 0.0f) const {
         TIME_FUNCTION;
         if (radius == 0.0f) {
@@ -449,11 +951,11 @@ public:
         }
     }
 
-    /// @brief Finds an object ID or creates a new one at the given position.
+    /// @brief Finds an atom ID or creates a new one at the given position.
     /// @param pos Target position.
-    /// @param radius Search radius for existing objects.
-    /// @param create If true, creates a new object if none is found.
-    /// @return The ID of the existing or newly created object.
+    /// @param radius Search radius for existing atoms.
+    /// @param create If true, creates a new atom if none is found.
+    /// @return The ID of the existing or newly created atom.
     size_t getOrCreatePositionVec(const Vec2& pos, float radius = 0.0f, bool create = true) {
         //TIME_FUNCTION; //called too many times and average time is less than 0.0000001 so ignore it.
         if (radius == 0.0f) {
@@ -467,8 +969,7 @@ public:
                 }
             }
             if (create) {
-
-                return addObject(pos, defaultBackgroundColor, 1.0f);
+                return addAtom(pos, defaultBackgroundColor, ElementType::HYDROGEN);
             }
             throw std::out_of_range("Position not found");
         } else {
@@ -477,13 +978,13 @@ public:
                 return results[0];
             }
             if (create) {
-                return addObject(pos, defaultBackgroundColor, 1.0f);
+                return addAtom(pos, defaultBackgroundColor, ElementType::HYDROGEN);
             }
             throw std::out_of_range("No positions found in radius");
         }
     }
 
-    /// @brief Returns a list of all object IDs within a specified radius of a position.
+    /// @brief Returns a list of all atom IDs within a specified radius of a position.
     std::vector<size_t> getPositionVecRegion(const Vec2& pos, float radius = 1.0f) const {
         //TIME_FUNCTION;
         float searchRadius = (radius == 0.0f) ? std::numeric_limits<float>::epsilon() : radius;
@@ -504,58 +1005,43 @@ public:
         return results;
     }
     
-    Vec4 getColor(size_t id) {
-        return Pixels.at(id).getColor();
+    Vec4f getColor(size_t id) {
+        return Atoms.at(id).getColor();
     }
     
-    /// @brief Gets the temperature of a specific ID. Lazily initializes temperature if missing.
-    float getTemp(size_t id) {
-        if (tempMap.find(id) != tempMap.end()) {
-            Temp temp = Temp(getPositionID(id), getTemps());
-            tempMap.emplace(id, temp);
-        }
-        else {
-            std::cout << "found a temp: " << tempMap.at(id).temp << std::endl;
-        }
-        return tempMap.at(id).temp;
+    /// @brief Gets the atomic properties of an atom.
+    AtomicPixel& getAtom(size_t id) {
+        return Atoms.at(id);
     }
     
-    /// @brief Gets the temperature at a position. Interpolates (IDW) if necessary.
-    double getTemp(const Vec2 pos) {
-        size_t id = getOrCreatePositionVec(pos, 0.01f, true);
-        if (tempMap.find(id) == tempMap.end()) {
-            //std::cout << "missing a temp at: " << pos << std::endl;
-            double dtemp = Temp::calTempIDW(pos, getTemps(id));
-            setTemp(id, dtemp);
-            return dtemp;
-        }
-        else return tempMap.at(id).temp;
-    }
-
-    /// @brief Retrieves all temperatures in the grid mapped by position.
-    std::unordered_map<Vec2, Temp> getTemps() const {
-        std::unordered_map<Vec2, Temp> out;
-        for (const auto& [id, temp] : tempMap) {
-            out.emplace(getPositionID(id), temp);
-        }
-        return out;
-    }
-
-    /// @brief Retrieves temperatures of neighbors around a specific ID.
-    std::unordered_map<Vec2, Temp> getTemps(size_t id) const {
-        std::unordered_map<Vec2, Temp> out;
-        std::vector<size_t> tval = spatialGrid.queryRange(Positions.at(id), 10);
-        for (size_t tempid : tval) {
-            Vec2 pos = Positions.at(tempid);
-            if (tempMap.find(id) != tempMap.end()) {
-                Temp temp = tempMap.at(tempid);
-                out.insert({pos, temp});
+    /// @brief Gets all atoms of a specific element type.
+    std::vector<size_t> getAtomsByElement(ElementType element) const {
+        std::vector<size_t> result;
+        #pragma omp parallel for
+        for (const auto& [id, atom] : Atoms) {
+            if (atom.getElement() == element) {
+                #pragma omp critical
+                result.push_back(id);
             }
         }
-        return out;
+        return result;
+    }
+    
+    /// @brief Gets atoms with a specific charge.
+    std::vector<size_t> getAtomsByCharge(float minCharge, float maxCharge) const {
+        std::vector<size_t> result;
+        #pragma omp parallel for
+        for (const auto& [id, atom] : Atoms) {
+            float charge = atom.getCharge();
+            if (charge >= minCharge && charge <= maxCharge) {
+                #pragma omp critical
+                result.push_back(id);
+            }
+        }
+        return result;
     }
 
-    /// @brief Calculates the axis-aligned bounding box of all objects in the grid.
+    /// @brief Calculates the axis-aligned bounding box of all atoms in the grid.
     void getBoundingBox(Vec2& minCorner, Vec2& maxCorner) const {
         TIME_FUNCTION;
         if (Positions.empty()) {
@@ -587,7 +1073,7 @@ public:
     /// @param outChannels Color format (RGB, RGBA, BGR).
     /// @return A Frame object containing the rendered image.
     frame getGridRegionAsFrame(const Vec2& minCorner, const Vec2& maxCorner,
-                       Vec2& res, frame::colormap outChannels = frame::colormap::RGB)  {
+                       Vec2& res, frame::colormap outChannels = frame::colormap::RGB)  const {
         TIME_FUNCTION;
         size_t width = static_cast<int>(maxCorner.x - minCorner.x);
         size_t height = static_cast<int>(maxCorner.y - minCorner.y);
@@ -603,16 +1089,16 @@ public:
             width = height = 0;
             return outframe;
         }
-        if (regenpreventer) return outframe;
-        else regenpreventer = true;
+        // if (regenpreventer) return outframe;
+        // else regenpreventer = true;
 
         std::cout << "Rendering region: " << minCorner << " to " << maxCorner 
                 << " at resolution: " << res << std::endl;
         std::cout << "Scale factors: " << widthScale << " x " << heightScale << std::endl;
         
-        std::unordered_map<Vec2,Vec4> colorBuffer;
+        std::unordered_map<Vec2,Vec4f> colorBuffer;
         colorBuffer.reserve(outputHeight*outputWidth);
-        std::unordered_map<Vec2,Vec4> colorTempBuffer;
+        std::unordered_map<Vec2,Vec4f> colorTempBuffer;
         colorTempBuffer.reserve(outputHeight * outputWidth);
         std::unordered_map<Vec2,int> countBuffer;
         countBuffer.reserve(outputHeight * outputWidth);
@@ -627,7 +1113,7 @@ public:
                 int pixy = static_cast<int>(rely * heightScale);
                 Vec2 pix = Vec2(pixx,pixy);
                 
-                colorTempBuffer[pix] += Pixels.at(id).getColor();
+                colorTempBuffer[pix] += Atoms.at(id).getColor();
                 countBuffer[pix]++;
             }
         }
@@ -656,7 +1142,7 @@ public:
                 frame result = frame(res.x,res.y, frame::colormap::RGBA);
                 result.setData(colorBuffer2);
                 std::cout << "returning result" << std::endl;
-                regenpreventer = false;
+                //regenpreventer = false;
                 return result;
                 break;
             }
@@ -674,7 +1160,7 @@ public:
                 frame result = frame(res.x,res.y, frame::colormap::BGR);
                 result.setData(colorBuffer2);
                 std::cout << "returning result" << std::endl;
-                regenpreventer = false;
+                //regenpreventer = false;
                 return result;
                 break;
             }
@@ -693,7 +1179,7 @@ public:
                 frame result = frame(res.x,res.y, frame::colormap::RGB);
                 result.setData(colorBuffer2);
                 std::cout << "returning result" << std::endl;
-                regenpreventer = false;
+                //regenpreventer = false;
                 return result;
                 break;
             }
@@ -701,7 +1187,7 @@ public:
     }
 
     /// @brief Renders the entire grid into a Frame. Auto-calculates bounds.
-    frame getGridAsFrame(frame::colormap outchannel = frame::colormap::RGB) {
+    frame getGridAsFrame(frame::colormap outchannel = frame::colormap::RGB) const {
         Vec2 min;
         Vec2 max;
         getBoundingBox(min,max);
@@ -710,92 +1196,11 @@ public:
         return getGridRegionAsFrame(min, max, res, outchannel);
     }
 
-    /// @brief Generates a heatmap visualization of the grid temperatures.
-    frame getTempAsFrame(Vec2 minCorner, Vec2 maxCorner, Vec2 res, frame::colormap outcolor = frame::colormap::RGB)  {
-        TIME_FUNCTION;
-        if (regenpreventer) return frame();
-        else regenpreventer = true;
-        int pcount = 0;
-        size_t sheight = maxCorner.x - minCorner.x;
-        size_t swidth = maxCorner.y - minCorner.y;
-        
-        int width = static_cast<int>(res.x);
-        int height = static_cast<int>(res.y);
-        std::unordered_map<Vec2, double> tempBuffer;
-        tempBuffer.reserve(res.x * res.y);
-        double maxTemp = 0.0;
-        double minTemp = 0.0;
-        float xdiff = (maxCorner.x - minCorner.x);
-        float ydiff = (maxCorner.y - minCorner.y);
-        for (int x = 0; x < res.x; x++) {
-            for (int y = 0; y < res.y; y++) {
-                Vec2 cposout = Vec2(x,y);
-                Vec2 cposin = Vec2(minCorner.x + (x * xdiff / res.x),minCorner.y + (y * ydiff / res.y));
-                double ctemp = getTemp(cposin);
-                
-                tempBuffer[Vec2(x,y)] = ctemp;
-                if (ctemp > maxTemp) maxTemp = ctemp;
-                else if (ctemp < minTemp) minTemp = ctemp;
-            }
-        }
-        std::cout << "max temp: " << maxTemp << " min temp: " << minTemp << std::endl;
-        
-        switch (outcolor) {
-            case frame::colormap::RGBA: {
-                std::vector<uint8_t> rgbaBuffer(width*height*4, 0);
-                for (const auto& [v2, temp] : tempBuffer) {
-                    size_t index = (v2.y * width + v2.x) * 4;
-                    uint8_t atemp  = static_cast<unsigned char>((((temp-minTemp)) / (maxTemp-minTemp)) * 255);
-                    rgbaBuffer[index+0] = atemp;
-                    rgbaBuffer[index+1] = atemp;
-                    rgbaBuffer[index+2] = atemp;
-                    rgbaBuffer[index+3] = 255;
-                }
-                frame result = frame(res.x,res.y, frame::colormap::RGBA);
-                result.setData(rgbaBuffer);
-                regenpreventer = false;
-                return result;
-                break;
-            }
-            case frame::colormap::BGR: {
-                std::vector<uint8_t> rgbaBuffer(width*height*3, 0);
-                for (const auto& [v2, temp] : tempBuffer) {
-                    size_t index = (v2.y * width + v2.x) * 3;
-                    uint8_t atemp  = static_cast<unsigned char>((((temp-minTemp)) / (maxTemp-minTemp)) * 255);
-                    rgbaBuffer[index+2] = atemp;
-                    rgbaBuffer[index+1] = atemp;
-                    rgbaBuffer[index+0] = atemp;
-                }
-                frame result = frame(res.x,res.y, frame::colormap::BGR);
-                result.setData(rgbaBuffer);
-                regenpreventer = false;
-                return result;
-                break;
-            }
-            case frame::colormap::RGB: 
-            default: {
-                std::vector<uint8_t> rgbaBuffer(width*height*3, 0);
-                for (const auto& [v2, temp] : tempBuffer) {
-                    size_t index = (v2.y * width + v2.x) * 3;
-                    uint8_t atemp  = static_cast<unsigned char>((((temp-minTemp)) / (maxTemp-minTemp)) * 255);
-                    rgbaBuffer[index+0] = atemp;
-                    rgbaBuffer[index+1] = atemp;
-                    rgbaBuffer[index+2] = atemp;
-                }
-                frame result = frame(res.x,res.y, frame::colormap::RGB);
-                result.setData(rgbaBuffer);
-                regenpreventer = false;
-                return result;
-                break;
-            }
-        }
-    }
-
-    /// @brief Removes an object from the grid entirely.
+    /// @brief Removes an atom from the grid entirely.
     size_t removeID(size_t id) {
         Vec2 oldPosition = Positions.at(id);
         Positions.remove(id);
-        Pixels.erase(id);
+        Atoms.erase(id);
         unassignedIDs.push_back(id);
         spatialGrid.remove(id, oldPosition);
         return id;
@@ -806,67 +1211,12 @@ public:
         TIME_FUNCTION;
         for (const auto& [id, newPos] : newPositions) {
             Vec2 oldPosition = Positions.at(id);
-            Positions.at(id).move(newPos);
-            Pixels.at(id).move(newPos);
+            Positions.at(id) = newPos;
+            Atoms.at(id).setPosition(newPos);
             spatialGrid.update(id, oldPosition, newPos);
         }
     }
     
-    /// @brief Batch insertion of objects for efficiency.
-    std::vector<size_t> bulkAddObjects(const std::vector<Vec2> poses, std::vector<Vec4> colors) {
-        TIME_FUNCTION;
-        std::vector<size_t> ids;
-        ids.reserve(poses.size());
-        
-        // Reserve space in maps to avoid rehashing
-        if (Positions.bucket_count() < Positions.size() + poses.size()) {
-            Positions.reserve(Positions.size() + poses.size());
-            Pixels.reserve(Positions.size() + poses.size());
-        }
-        
-        // Batch insertion
-        std::vector<size_t> newids;
-        for (size_t i = 0; i < poses.size(); ++i) {
-            size_t id = Positions.set(poses[i]);
-            Pixels.emplace(id, GenericPixel(id, colors[i], poses[i]));
-            spatialGrid.insert(id,poses[i]);
-            newids.push_back(id);
-        }
-        
-        shrinkIfNeeded();
-        
-        return newids;
-    }
-
-    /// @brief Batch insertion of objects including temperature data.
-    std::vector<size_t> bulkAddObjects(const std::vector<Vec2> poses, std::vector<Vec4> colors, std::vector<float>& temps) {
-        TIME_FUNCTION;
-        std::vector<size_t> ids;
-        ids.reserve(poses.size());
-        
-        // Reserve space in maps to avoid rehashing
-        if (Positions.bucket_count() < Positions.size() + poses.size()) {
-            Positions.reserve(Positions.size() + poses.size());
-            Pixels.reserve(Positions.size() + poses.size());
-            tempMap.reserve(tempMap.size() + temps.size());
-        }
-        
-        // Batch insertion
-        std::vector<size_t> newids;
-        for (size_t i = 0; i < poses.size(); ++i) {
-            size_t id = Positions.set(poses[i]);
-            Pixels.emplace(id, GenericPixel(id, colors[i], poses[i]));
-            Temp temptemp = Temp(temps[i]);
-            tempMap.insert({id, temptemp});
-            spatialGrid.insert(id,poses[i]);
-            newids.push_back(id);
-        }
-        
-        shrinkIfNeeded();
-        
-        return newids;
-    }
-
     void shrinkIfNeeded() {
         //TODO: garbage collector
     }
@@ -874,16 +1224,16 @@ public:
     //clear
     void clear() {
         Positions.clear();
-        Pixels.clear();
+        Atoms.clear();
         spatialGrid.clear();
-        Pixels.rehash(0);
-        defaultBackgroundColor = Vec4(0.0f, 0.0f, 0.0f, 0.0f);
+        Atoms.rehash(0);
+        defaultBackgroundColor = Vec4f(0.0f, 0.0f, 0.0f, 0.0f);
     }
 
     /// @brief Rebuilds the spatial hashing grid based on the current neighbor radius.
     void optimizeSpatialGrid() {
         //std::cout << "optimizeSpatialGrid()" << std::endl;
-        spatialCellSize = neighborRadius * neighborRadius;
+        spatialCellSize = neighborRadius * 1.5f;
         spatialGrid = SpatialGrid(spatialCellSize);
         
         // Rebuild spatial grid
@@ -893,7 +1243,7 @@ public:
         }
     }
 
-    /// @brief Gets IDs of objects within `neighborRadius` of the given ID.
+    /// @brief Gets IDs of atoms within `neighborRadius` of the given ID.
     std::vector<size_t> getNeighbors(size_t id) const {
         Vec2 pos = Positions.at(id);
         std::vector<size_t> candidates = spatialGrid.queryRange(pos, neighborRadius);
@@ -910,10 +1260,10 @@ public:
         return neighbors;
     }
     
-    /// @brief Gets IDs of objects within a custom distance of the given ID.
+    /// @brief Gets IDs of atoms within a custom distance of the given ID.
     std::vector<size_t> getNeighborsRange(size_t id, float dist) const {
         Vec2 pos = Positions.at(id);
-        std::vector<size_t> candidates = spatialGrid.queryRange(pos, neighborRadius);
+        std::vector<size_t> candidates = spatialGrid.queryRange(pos, dist);
         
         std::vector<size_t> neighbors;
         float radiusSq = dist * dist;
@@ -927,176 +1277,49 @@ public:
         
         return neighbors;
     }
-    
-    /// @brief Generates a noise grid that includes temperature data.
-    Grid2 noiseGenGridTemps(size_t minx,size_t miny, size_t maxx, size_t maxy, float minChance = 0.1f
-                        , float maxChance = 1.0f, bool color = true, int noisemod = 42) {
-        TIME_FUNCTION;
-        noisegen = PNoise2(noisemod);
-        std::cout << "generating a noise grid with the following: (" << minx << ", " << miny 
-                << ") by (" << maxx << ", " << maxy << ") " << "chance: " << minChance 
-                << " max: " << maxChance << " gen colors: " << color << std::endl;
-        std::vector<Vec2> poses;
-        std::vector<Vec4> colors;
-        std::vector<float> temps;
-        int callnumber = 0;
-        for (int x = minx; x < maxx; x++) {
-            for (int y = miny; y < maxy; y++) {
-                float nx = (x+noisemod)/(maxx+EPSILON)/0.1;
-                float ny = (y+noisemod)/(maxy+EPSILON)/0.1;
-                Vec2 pos = Vec2(nx,ny);
-                float temp = noisegen.permute(Vec2(nx*0.2+1,ny*0.1+2));
-                float alpha = noisegen.permute(pos);
-                if (alpha > minChance && alpha < maxChance) {
-                    if (color) {
-                        float red = noisegen.permute(Vec2(nx*0.3,ny*0.3));
-                        float green = noisegen.permute(Vec2(nx*0.6,ny*.06));
-                        float blue = noisegen.permute(Vec2(nx*0.9,ny*0.9));
-                        Vec4 newc = Vec4(red,green,blue,1.0);
-                        colors.push_back(newc);
-                        poses.push_back(Vec2(x,y));
-                        temps.push_back(temp * 100);
-                        //std::cout << "temp: " << temp << std::endl;
-                    } else {
-                        Vec4 newc = Vec4(alpha,alpha,alpha,1.0);
-                        colors.push_back(newc);
-                        poses.push_back(Vec2(x,y));
-                        temps.push_back(temp * 100);
-                    }
-                }
-            }
-        }
-        std::cout << "noise generated" << std::endl;
-        bulkAddObjects(poses, colors, temps);
-        return *this;
-    }
 
-    /// @brief Finds temperature objects within a region.
-    std::unordered_map<size_t, Temp*> findTempsInRegion(const Vec2& center, float radius) {
-        std::unordered_map<size_t, Temp*> results;
-        
-        // Get all IDs in the region
-        auto idsInRegion = spatialGrid.queryRange(center, radius);
-        results.reserve(idsInRegion.size());
-        
-        // Filter for ones that have temperature data
-        for (size_t id : idsInRegion) {
-            auto tempIt = tempMap.find(id);
-            if (tempIt != tempMap.end()) {
-                results.emplace(id, &tempIt->second);
-            }
-        }
-        
-        return results;
-    }
-
-    /// @brief Fills empty spots in the bounding box with default background pixels and gradients temps.
+    /// @brief Fills empty spots in the bounding box with default background atoms.
     Grid2 backfillGrid() {
         Vec2 Min;
         Vec2 Max;
         getBoundingBox(Min, Max);
         std::vector<Vec2> newPos;
-        std::vector<Vec4> newColors;
+        std::vector<Vec4f> newColors;
         for (size_t x = Min.x; x < Max.x; x++) {
             for (size_t y = Min.y; y < Max.y; y++) {
                 Vec2 pos = Vec2(x,y);
                 if (Positions.contains(pos)) continue;
-                Vec4 color = defaultBackgroundColor;
-                float size = 0.1;
                 newPos.push_back(pos);
-                newColors.push_back(color);
+                newColors.push_back(defaultBackgroundColor);
             }
         }
-        bulkAddObjects(newPos, newColors);
-        gradTemps();
+        // Create hydrogen atoms for backfill
+        std::vector<ElementType> elements(newPos.size(), ElementType::HYDROGEN);
+        bulkAddAtoms(newPos, newColors, elements);
         return *this;
     }
-
-    /// @brief Smoothes temperatures across the grid using Inverse Distance Weighting from existing samples.
-    void gradTemps() {
-        //run this at the start. it generates temps for the grid from a sampling
-        std::vector<Vec2> toProcess;
+    
+    /// @brief Gets statistical information about the atomic system.
+    void getStatistics(size_t& totalAtoms, 
+                      size_t& totalProtons,
+                      size_t& totalNeutrons,
+                      size_t& totalElectrons,
+                      float& totalCharge,
+                      float& totalMass) const {
+        totalAtoms = Atoms.size();
+        totalProtons = 0;
+        totalNeutrons = 0;
+        totalElectrons = 0;
+        totalCharge = 0.0f;
+        totalMass = 0.0f;
         
-        Vec2 Min, Max;
-        getBoundingBox(Min, Max);
-        
-        std::cout << "min: " << Min << std::endl;
-        std::cout << "max: " << Max << std::endl;
-        for (size_t x = Min.x; x < Max.x; x++) {
-            for (size_t y = Min.y; y < Max.y; y++) {
-                Vec2 pasdfjlkasdfasdfjlkasdfjlk = Vec2(x,y);
-                toProcess.emplace_back(pasdfjlkasdfasdfjlkasdfjlk);
-            }
+        for (const auto& [id, atom] : Atoms) {
+            totalProtons += atom.getProtons();
+            totalNeutrons += atom.getNeutrons();
+            totalElectrons += atom.getElectrons();
+            totalCharge += atom.getCharge();
+            totalMass += atom.getMass();
         }
-
-        while (toProcess.size() > 0) {
-            std::cout << "setting temp on " << toProcess.size() << " values" << std::endl;
-            for (size_t iter = 0; iter < toProcess.size(); iter++) {
-                Vec2 cpos = toProcess[iter];
-                size_t id = getPositionVec(cpos);
-                if (tempMap.find(id) != tempMap.end()) {
-                    toProcess.erase(toProcess.begin()+iter);
-                }
-            }
-            for (auto [id, temp] : tempMap) {
-                std::vector<size_t> neighbors = spatialGrid.queryRange(getPositionID(id), 35);
-                std::unordered_map<Vec2, Temp> neighbortemps;
-                for (size_t id : neighbors) {
-                    auto tempIt = tempMap.find(id);
-                    if (tempIt != tempMap.end()) {
-                        neighbortemps.insert({getPositionID(id), tempIt->second});
-                    }
-                }
-                Vec2 pos = getPositionID(id);
-
-                for (size_t neighbor : neighbors) {
-                    // if (tempMap.find(neighbor) != tempMap.end()) {
-                        Vec2 npos = getPositionID(neighbor);
-                        float newtemp = Temp::calTempIDW(npos, neighbortemps);
-                        Temp newTempT = Temp(newtemp);
-                        tempMap.insert({neighbor, newTempT});
-                    // }
-                }
-            }
-        }
-    }
-
-
-    /// @brief Simulates heat diffusion across the grid over a time step.
-    /// @param deltaTime Time elapsed (in milliseconds) since last update.
-    void diffuseTemps(float deltaTime) {
-        TIME_FUNCTION;
-        if (tempMap.empty() || deltaTime <= 0) return;
-        
-        std::vector<std::pair<size_t, Temp*>> tempEntries;
-        tempEntries.reserve(tempMap.size());
-        
-        for (auto& [id, tempObj] : tempMap) {
-            tempEntries.emplace_back(id, &tempObj);
-        }
-        
-        std::for_each(std::execution::par_unseq, tempEntries.begin(), tempEntries.end(),
-            [&](const std::pair<size_t, Temp*>& entry) {
-            size_t id = entry.first;
-            Temp* tempObj = entry.second;
-            Vec2 pos = Positions.at(id);
-            float oldtemp = tempObj->temp;
-                
-            auto nearbyIds = spatialGrid.queryRange(pos, neighborRadius * tempObj->conductivity);
-            
-            std::unordered_map<Vec2, Temp> neighborTemps;
-            for (size_t neighborId : nearbyIds) {
-                if (neighborId != id && tempMap.find(neighborId) != tempMap.end()) {
-                    neighborTemps.emplace(Positions.at(neighborId), tempMap.at(neighborId));
-                }
-            }
-                
-            tempObj->calLapl(pos, neighborTemps, deltaTime);
-            float newtemp = tempObj->temp;
-            //float tempdiff = (oldtemp - newtemp) * (deltaTime / 1000);
-            //tempObj->temp = oldtemp - tempdiff;
-        }
-        );
     }
 };
 
