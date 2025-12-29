@@ -48,11 +48,11 @@ public:
     colormap colorFormat = colormap::RGB;
     compresstype cformat = compresstype::RAW;
 
-    const size_t& getWidth() {
+    const size_t& getWidth() const {
         return width;
     }
     
-    const size_t& getHeight() {
+    const size_t& getHeight() const {
         return height;
     }
     frame() {};

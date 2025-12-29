@@ -143,7 +143,7 @@ public:
         return true;
     }
     
-    static bool saveBMP(const std::string& filename, frame& frame) {
+    static bool saveBMP(const std::string& filename, const frame& frame) {
         if (frame.colorFormat == frame::colormap::RGB) {
             return saveBMP(filename, frame.getData(), frame.getWidth(), frame.getHeight());
         } else if (frame.colorFormat == frame::colormap::RGBA) {
