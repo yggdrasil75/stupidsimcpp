@@ -404,4 +404,14 @@ namespace std {
     };
 }
 
+template<typename T>
+Vec3<T> max(Vec3<T> a, Vec3<T> b) {
+    return a.max(b);
+}
+
+template<typename T>
+Vec3<T> min(Vec3<T> a, Vec3<T> b) {
+    return a.min(b);
+}
+
 #endif

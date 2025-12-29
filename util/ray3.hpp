@@ -63,8 +63,11 @@ public:
         return crossProduct.length() / direction.length();
     }
     
-    // Transform ray by a 4x4 matrix (for perspective/affine transformations)
-    Ray3 transform(const class Mat4& matrix) const;
+    Ray3 transform(const class Mat4<T>& matrix) const {
+        Vec3<T> transformedOrigin = matrix.transformPoint(origin);
+        Vec3<T> transformedDirection = matrix.transformDirection(direction);
+        return Ray3<T>(transformedOrigin, transformedDirection.normalized());
+    }
     
     std::string toString() const {
         return "Ray3(origin: " + origin.toString() + ", direction: " + direction.toString() + ")";
