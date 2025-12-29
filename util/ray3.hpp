@@ -63,11 +63,11 @@ public:
         return crossProduct.length() / direction.length();
     }
     
-    Ray3 transform(const class Mat4<T>& matrix) const {
-        Vec3<T> transformedOrigin = matrix.transformPoint(origin);
-        Vec3<T> transformedDirection = matrix.transformDirection(direction);
-        return Ray3<T>(transformedOrigin, transformedDirection.normalized());
-    }
+    // Ray3 transform(const Mat4<T>& matrix) const {
+    //     Vec3<T> transformedOrigin = matrix.transformPoint(origin);
+    //     Vec3<T> transformedDirection = matrix.transformDirection(direction);
+    //     return Ray3<T>(transformedOrigin, transformedDirection.normalized());
+    // }
     
     std::string toString() const {
         return "Ray3(origin: " + origin.toString() + ", direction: " + direction.toString() + ")";

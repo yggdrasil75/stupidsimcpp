@@ -5,7 +5,7 @@
 #include <vector>
 #include <iostream>
 #include <algorithm>
-#include <corecrt_math_defines.h>
+#include "../output/frame.hpp"
 
 struct Voxel {
     bool active;
@@ -14,10 +14,10 @@ struct Voxel {
 
 class VoxelGrid {
 private:
-    int width, height, depth;
-    std::vector<Voxel> voxels;
     
 public:
+    int width, height, depth;
+    std::vector<Voxel> voxels;
     VoxelGrid(int w, int h, int d) : width(w), height(h), depth(d) {
         voxels.resize(w * h * d);
         // Initialize all voxels as inactive
@@ -70,7 +70,7 @@ public:
                  Vec3f& hitPos, Vec3f& hitNormal, Vec3f& hitColor) const {
         
         // Initialize step directions
-        Vec3i step;
+        Vec3f step;
         Vec3f tMax, tDelta;
         
         // Current voxel coordinates
@@ -203,21 +203,35 @@ public:
 // Simple renderer using ray casting
 class VoxelRenderer {
 private:
-    VoxelGrid grid;
-    Camera camera;
     
 public:
+    VoxelGrid grid;
+    Camera camera;
     VoxelRenderer() : grid(20, 20, 20) {
         grid.createTestPattern();
     }
     
-    void render(int screenWidth, int screenHeight) {
+    // Render to a frame object
+    frame renderToFrame(int screenWidth, int screenHeight) {
+        
+        // Create a frame with RGBA format for color + potential transparency
+        frame renderedFrame(screenWidth, screenHeight, frame::colormap::RGBA);
+        
         float aspectRatio = float(screenWidth) / float(screenHeight);
         
         // Get matrices
         Mat4f projection = camera.getProjectionMatrix(aspectRatio);
         Mat4f view = camera.getViewMatrix();
         Mat4f invViewProj = (projection * view).inverse();
+        
+        // Get reference to frame data for direct pixel writing
+        std::vector<uint8_t>& frameData = const_cast<std::vector<uint8_t>&>(renderedFrame.getData());
+        
+        // Background color (dark gray)
+        Vec3f backgroundColor(0.1f, 0.1f, 0.1f);
+        
+        // Simple light direction
+        Vec3f lightDir = Vec3f(1, 1, -1).normalized();
         
         for (int y = 0; y < screenHeight; y++) {
             for (int x = 0; x < screenWidth; x++) {
@@ -242,21 +256,58 @@ public:
                 Vec3f rayEnd = Vec3f(rayEndWorld.x, rayEndWorld.y, rayEndWorld.z);
                 Vec3f rayDir = (rayEnd - rayStart).normalized();
                 
-                // Perform ray casting (use camera position as ray origin)
+                // Perform ray casting
                 Vec3f hitPos, hitNormal, hitColor;
-                if (grid.rayCast(camera.position, rayDir, 100.0f, hitPos, hitNormal, hitColor)) {
+                bool hit = grid.rayCast(camera.position, rayDir, 100.0f, hitPos, hitNormal, hitColor);
+                
+                // Calculate pixel index in frame data
+                int pixelIndex = (y * screenWidth + x) * 4; // 4 channels for RGBA
+                
+                if (hit) {
                     // Simple lighting
-                    Vec3f lightDir = Vec3f(1, 1, -1).normalized();
-                    float diffuse = std::max(static_cast<float>(hitNormal.dot(lightDir)), 0.2f);
+                    float diffuse = std::max(hitNormal.dot(lightDir), 0.2f);
                     
-                    // Output pixel (simplified - in real OpenGL, set pixel color)
+                    // Apply lighting to color
+                    Vec3f finalColor = hitColor * diffuse;
+                    
+                    // Clamp color values to [0, 1]
+                    finalColor.x = std::max(0.0f, std::min(1.0f, finalColor.x));
+                    finalColor.y = std::max(0.0f, std::min(1.0f, finalColor.y));
+                    finalColor.z = std::max(0.0f, std::min(1.0f, finalColor.z));
+                    
+                    // Convert to 8-bit RGB and set pixel
+                    frameData[pixelIndex]     = static_cast<uint8_t>(finalColor.x * 255); // R
+                    frameData[pixelIndex + 1] = static_cast<uint8_t>(finalColor.y * 255); // G
+                    frameData[pixelIndex + 2] = static_cast<uint8_t>(finalColor.z * 255); // B
+                    frameData[pixelIndex + 3] = 255; // A (fully opaque)
+                    
+                    // Debug: mark center pixel with a crosshair
                     if (x == screenWidth/2 && y == screenHeight/2) {
+                        // White crosshair for center
+                        frameData[pixelIndex]     = 255;
+                        frameData[pixelIndex + 1] = 255;
+                        frameData[pixelIndex + 2] = 255;
                         std::cout << "Center ray hit at: " << hitPos.x << ", " 
                                 << hitPos.y << ", " << hitPos.z << std::endl;
                     }
+                } else {
+                    // Background color
+                    frameData[pixelIndex]     = static_cast<uint8_t>(backgroundColor.x * 255);
+                    frameData[pixelIndex + 1] = static_cast<uint8_t>(backgroundColor.y * 255);
+                    frameData[pixelIndex + 2] = static_cast<uint8_t>(backgroundColor.z * 255);
+                    frameData[pixelIndex + 3] = 255; // A
                 }
             }
         }
+        
+        return renderedFrame;
+    }
+    
+    // Overload for backward compatibility (calls the new method and discards frame)
+    void render(int screenWidth, int screenHeight) {
+        frame tempFrame = renderToFrame(screenWidth, screenHeight);
+        // Optional: print info about the rendered frame
+        std::cout << "Rendered frame: " << tempFrame << std::endl;
     }
     
     void rotateCamera(float yaw, float pitch) {
@@ -268,4 +319,7 @@ public:
     }
     
     Camera& getCamera() { return camera; }
+    
+    // Get reference to the voxel grid (for testing/debugging)
+    VoxelGrid& getGrid() { return grid; }
 };
