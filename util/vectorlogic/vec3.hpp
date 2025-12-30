@@ -200,6 +200,10 @@ public:
     Vec3 floor() const {
         return Vec3(std::floor(x), std::floor(y), std::floor(z));
     }
+
+    Vec3i floorToI() const {
+        return Vec3i(static_cast<int>(std::floor(x)), static_cast<int>(std::floor(x)), static_cast<int>(std::floor(z)))
+    }
     
     Vec3 ceil() const {
         return Vec3(std::ceil(x), std::ceil(y), std::ceil(z));

@@ -1,11 +1,15 @@
-
 #include "../vectorlogic/vec3.hpp"
 #include "../vectorlogic/vec4.hpp"
 #include "../vecmat/mat4.hpp"
 #include <vector>
 #include <iostream>
 #include <algorithm>
+#include <cmath>
 #include "../output/frame.hpp"
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846f
+#endif
 
 struct Voxel {
     bool active;
@@ -43,28 +47,6 @@ public:
         }
     }
     
-    // Create a simple test pattern
-    void createTestPattern() {
-        // Create a hollow cube
-        for (int x = 0; x < width; x++) {
-            for (int y = 0; y < height; y++) {
-                for (int z = 0; z < depth; z++) {
-                    if (x == 0 || x == width-1 || y == 0 || y == height-1 || z == 0 || z == depth-1) {
-                        float r = float(x) / width;
-                        float g = float(y) / height;
-                        float b = float(z) / depth;
-                        set(x, y, z, true, Vec3f(r, g, b));
-                    }
-                }
-            }
-        }
-        
-        // Add some interior voxels
-        for (int i = 5; i < 10; i++) {
-            set(i, i, i, true, Vec3f(1.0f, 0.0f, 0.0f));
-        }
-    }
-    
     // Amanatides & Woo ray-grid traversal algorithm
     bool rayCast(const Vec3f& rayOrigin, const Vec3f& rayDirection, float maxDistance, 
                  Vec3f& hitPos, Vec3f& hitNormal, Vec3f& hitColor) const {
@@ -87,7 +69,7 @@ public:
                 if (rayDirection[i] >= 0) {
                     t0[i] = (0 - rayOrigin[i]) / rayDirection[i];
                     t1[i] = (width - rayOrigin[i]) / rayDirection[i];
-                } else {
+        } else {
                     t0[i] = (width - rayOrigin[i]) / rayDirection[i];
                     t1[i] = (0 - rayOrigin[i]) / rayDirection[i];
                 }
@@ -102,7 +84,7 @@ public:
             
             if (tEnter > 0) {
                 voxel = Vec3f((rayOrigin + rayDirection * tEnter).floor());
-            }
+        }
         }
         
         // Initialize step and tMax based on ray direction
@@ -111,7 +93,7 @@ public:
                 step[i] = -1;
                 tMax[i] = ((float)voxel[i] - rayOrigin[i]) / rayDirection[i];
                 tDelta[i] = -1.0f / rayDirection[i];
-            } else {
+        } else {
                 step[i] = 1;
                 tMax[i] = ((float)(voxel[i] + 1) - rayOrigin[i]) / rayDirection[i];
                 tDelta[i] = 1.0f / rayDirection[i];
@@ -120,7 +102,10 @@ public:
         
         // Main traversal loop
         float distance = 0;
-        while (distance < maxDistance) {
+        int maxSteps = width + height + depth;
+        int steps = 0;
+        while (distance < maxDistance && steps < maxSteps) {
+            steps++;
             // Check current voxel
             if (voxel.x >= 0 && voxel.x < width && 
                 voxel.y >= 0 && voxel.y < height && 
@@ -146,18 +131,26 @@ public:
             }
             
             // Move to next voxel
-            if (tMax.x < tMax.y && tMax.x < tMax.z) {
-                distance = tMax.x;
-                tMax.x += tDelta.x;
-                voxel.x += step.x;
-            } else if (tMax.y < tMax.z) {
-                distance = tMax.y;
-                tMax.y += tDelta.y;
-                voxel.y += step.y;
+            if (tMax.x < tMax.y) {
+                if (tMax.x < tMax.z) {
+                    distance = tMax.x;
+                    tMax.x += tDelta.x;
+                    voxel.x += step.x;
+                } else {
+                    distance = tMax.z;
+                    tMax.z += tDelta.z;
+                    voxel.z += step.z;
+                }
             } else {
-                distance = tMax.z;
-                tMax.z += tDelta.z;
-                voxel.z += step.z;
+                if (tMax.y < tMax.z) {
+                    distance = tMax.y;
+                    tMax.y += tDelta.y;
+                    voxel.y += step.y;
+                } else {
+                    distance = tMax.z;
+                    tMax.z += tDelta.z;
+                    voxel.z += step.z;
+                }
             }
         }
         
@@ -192,11 +185,14 @@ public:
     }
     
     void rotate(float yaw, float pitch) {
-        forward = (Vec3f(
+        // Clamp pitch to avoid gimbal lock
+        pitch = std::clamp(pitch, -89.0f * (static_cast<float>(M_PI) / 180.0f), 89.0f * (static_cast<float>(M_PI) / 180.0f));
+        
+        forward = Vec3f(
             cos(yaw) * cos(pitch),
             sin(pitch),
             sin(yaw) * cos(pitch)
-        ).normalized());
+        ).normalized();
     }
 };
 
@@ -207,9 +203,7 @@ private:
 public:
     VoxelGrid grid;
     Camera camera;
-    VoxelRenderer() : grid(20, 20, 20) {
-        grid.createTestPattern();
-    }
+    VoxelRenderer() : grid(20, 20, 20) { }
     
     // Render to a frame object
     frame renderToFrame(int screenWidth, int screenHeight) {
