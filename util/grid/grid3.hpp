@@ -7,878 +7,149 @@
 #include "../timing_decorator.hpp"
 #include "../output/frame.hpp"
 #include "../noise/pnoise2.hpp"
+#include "../vecmat/mat4.hpp"
 #include <vector>
-#include <unordered_set>
-#include <execution>
 #include <algorithm>
-#include "../ray3.hpp"
+#include "../basicdefines.hpp"
 
-constexpr float EPSILON = 0.0000000000000000000000001;
-constexpr int CHUNK_SIZE = 16;
-
-/// @brief Represents a single point in the grid with an ID, color, and position.
-class GenericVoxel {
-protected:
-    size_t id;
-    Vec4ui8 color;
-    Vec3f pos;
-public:
-    //constructors
-    GenericVoxel(size_t id, Vec4ui8 color, Vec3f pos) : id(id), color(color), pos(pos) {};
-    GenericVoxel() : id(0), color(Vec4ui8()), pos(Vec3f()) {};
-
-    //getters
-    size_t getId() const { 
-        return id; 
-    }
-    Vec3f getPos() const { 
-        return pos; 
-    }
-
-    Vec4ui8 getColor() const {
-        return color;
-    }
-
-    //setters
-    void setColor(Vec4ui8 newColor) { 
-        color = newColor; 
-    }    
-    void setPos(Vec3f newPos) { 
-        pos = newPos; 
-    }
-    void setId(size_t newId) { 
-        id = newId; 
-    }
-
-    void move(Vec3f newPos) {
-        pos = newPos;
-    }
-    
-    void recolor(Vec4ui8 newColor) {
-        color.recolor(newColor);
-    }
+struct Voxel {
+    float active;
+    //Vec3f position;
+    Vec3ui8 color;
 };
 
-/// @brief A bidirectional lookup helper to map internal IDs to 2D positions and vice-versa.
-/// @details Maintains two hashmaps to allow O(1) lookup in either direction.
-class reverselookupassistant3 {
+class VoxelGrid {
 private:
-    std::unordered_map<size_t, Vec3f> Positions;
-    /// "Positions" reversed - stores the reverse mapping from Vec3f to ID.
-    std::unordered_map<Vec3f, size_t, Vec3f::Hash> ƨnoiƚiƨoꟼ;
-    size_t next_id;
+    size_t width, height, depth;
+    std::vector<Voxel> voxels;
 public:
-    /// @brief Get the Position associated with a specific ID.
-    /// @throws std::out_of_range if the ID does not exist.
-    Vec3f at(size_t id) const {
-        auto it = Positions.at(id);
-        return it;
+    VoxelGrid(size_t w, size_t h, size_t d) : width(w), height(h), depth(d) {
+        voxels.resize(w * h * d);
     }
 
-    /// @brief Get the ID associated with a specific Position.
-    /// @throws std::out_of_range if the Position does not exist.
-    size_t at(const Vec3f& pos) const {
-        size_t id = ƨnoiƚiƨoꟼ.at(pos);
-        return id;
+    Voxel& get(size_t x, size_t y, size_t z) {
+        return voxels[z * width * height + y * width + x];
     }
 
-    /// @brief Finds a position by ID (Wrapper for at).
-    Vec3f find(size_t id) {
-        return Positions.at(id);
+    const Voxel& get(size_t x, size_t y, size_t z) const {
+        return voxels[z * width * height + y * width + x];
     }
 
-    /// @brief Registers a new position and assigns it a unique ID.
-    /// @return The newly generated ID.
-    size_t set(const Vec3f& pos) {
-        size_t id = next_id++;
-        Positions[id] = pos;
-        ƨnoiƚiƨoꟼ[pos] = id;
-        return id;
+    void set(size_t x, size_t y, size_t z, float active, Vec3ui8 color) {
+        //expand grid if needed. 
+        if (x >= 0 || y >= 0 || z >= 0) {
+            if (!(x < width)) {
+                width = x;
+                voxels.resize(width*height*depth);
+            }
+            else if (!(y < height)) {
+                height = y;
+                voxels.resize(width*height*depth);
+            }
+            else if (!(z < depth)) {
+                depth = z;
+                voxels.resize(width*height*depth);
+            }
+
+            Voxel& v = get(x, y, z);
+            v.active = std::clamp(active, 0.0f, 1.0f);
+            v.color = color;
+        }
     }
 
-    /// @brief Removes an entry by ID.
-    size_t remove(size_t id) {
-        Vec3f& pos = Positions[id];
-        Positions.erase(id);
-        ƨnoiƚiƨoꟼ.erase(pos);
-        return id;
+    bool inGrid(Vec3T voxl) {
+        return (voxl > 0 && voxl.x < width && voxl.y < height && voxl.z < depth);
     }
 
-    /// @brief Removes an entry by Position.
-    size_t remove(const Vec3f& pos) {
-        size_t id = ƨnoiƚiƨoꟼ[pos];
-        Positions.erase(id);
-        ƨnoiƚiƨoꟼ.erase(pos);
-        return id;
-    }
+    bool rayCast(const Ray3f& ray, float maxDistance, Vec3f hitPos, Vec3f hitNormal, Vec3f& hitColor) {
+        hitColor = Vec3f(0,0,0);
+        Vec3f rayDir = ray.direction;
+        Vec3f rayOrigin = ray.origin;
+        Vec3T currentVoxel = rayOrigin.floorToT();
 
-    void reserve(size_t size) {
-        Positions.reserve(size);
-        ƨnoiƚiƨoꟼ.reserve(size);
-    }
 
-    size_t size() const {
-        return Positions.size();
-    }
+        //important note: voxels store a float of "active" which is to be between 0 and 1, with <epsilon being inactive and <1 being transparent.
+        //as progression occurs, add to hitColor all passed voxels multiplied by active. once active reaches 1, stop progression.
+        //if active doesnt reach 1 before the edge of the grid is reached, then return the total.
+        //always return true if any active voxels are hit
+        //Ray3T and Vec3T are size_t.
+        Vec3f step;
+        Vec3f tMax;
+        Vec3f tDelta;
+        Vec3T cvoxel = ray.origin.floor();
+        //initialization
+        if (!inGrid(cvoxel)) {
+            /*
+            The initialization phase begins by identifying the voxel in which the ray origin, →
+            u, is found. If the ray origin is outside the grid, we find the point in which the ray enters the grid and take the adjacent voxel. The integer
+            variables X and Y are initialized to the starting voxel coordinates. In addition, the variables stepX and
+            stepY are initialized to either 1 or -1 indicating whether X and Y are incremented or decremented as the
+            ray crosses voxel boundaries (this is determined by the sign of the x and y components of →
+            v).
+            Next, we determine the value of t at which the ray crosses the first vertical voxel boundary and
+            store it in variable tMaxX. We perform a similar computation in y and store the result in tMaxY. The
+            minimum of these two values will indicate how much we can travel along the ray and still remain in the
+            current voxel.
+            */
 
-    size_t getNext_id() {
-        return next_id + 1;
-    }
-    
-    size_t bucket_count() {
-        return Positions.bucket_count();
-    }
+            //update to also include z in this
+        }
 
-    bool empty() const {
-        return Positions.empty();
-    }
-    
-    void clear() {
-        Positions.clear();
-        Positions.rehash(0);
-        ƨnoiƚiƨoꟼ.clear();
-        ƨnoiƚiƨoꟼ.rehash(0);
-        next_id = 0;
-    }
-    
-    using iterator = typename std::unordered_map<size_t, Vec3f>::iterator;
-    using const_iterator = typename std::unordered_map<size_t, Vec3f>::const_iterator;
+        /*
+        Finally, we compute tDeltaX and tDeltaY. TDeltaX indicates how far along the ray we must move
+        (in units of t) for the horizontal component of such a movement to equal the width of a voxel. Similarly,
+        we store in tDeltaY the amount of movement along the ray which has a vertical component equal to the
+        height of a voxel.
+        */
 
-    iterator begin() { 
-        return Positions.begin(); 
-    }
-    iterator end() { 
-        return Positions.end(); 
-    }
-    const_iterator begin() const { 
-        return Positions.begin(); 
-    }
-    const_iterator end() const { 
-        return Positions.end(); 
-    }
-    const_iterator cbegin() const { 
-        return Positions.cbegin(); 
-    }
-    const_iterator cend() const { 
-        return Positions.cend(); 
-    }
+        //also include tDeltaZ in this.
 
-    bool contains(size_t id) const {
-        return (Positions.find(id) != Positions.end());
-    }
-
-    bool contains(const Vec3f& pos) const {
-        return (ƨnoiƚiƨoꟼ.find(pos) != ƨnoiƚiƨoꟼ.end());
-    }
-};
-
-class Chunk3 : public GenericVoxel {
-private:
-    Vec3f chunkCoord;
-    std::unordered_set<size_t> voxelIDs;
-    bool isCompressed = false;
-    int detailLevel;
-    std::vector<GenericVoxel> fullVoxels;
-    std::vector<uint16_t> compressedVoxels;
-public:
-    //overload GenericVoxel
-    Vec4ui8 getColor() {
-        if (isCompressed) {
-            return color;
+        /*loop {
+        if(tMaxX < tMaxY) {
+        tMaxX= tMaxX + tDeltaX;
+        X= X + stepX;
         } else {
-            if (fullVoxels.empty()) {
-                return Vec4ui8();
-            }
-            
-            Vec4ui8 accumulatedColor(0, 0, 0, 0);
-            
-            for (const auto& voxel : fullVoxels) {
-                accumulatedColor = accumulatedColor + voxel.getColor();
-            }
-            
-            float count = static_cast<float>(fullVoxels.size());
-            return accumulatedColor / count;
+        tMaxY= tMaxY + tDeltaY;
+        Y= Y + stepY;
         }
-    }
+        NextVoxel(X,Y);
+        }*/
 
-    Chunk3(const Vec3f& coord) : chunkCoord(coord) {}
-
-    Vec3f getCoord() const { return chunkCoord; }
-
-    std::pair<Vec3f, Vec3f> getBounds() const {
-        Vec3f minBound(
-            chunkCoord.x*CHUNK_SIZE,
-            chunkCoord.y*CHUNK_SIZE,
-            chunkCoord.z*CHUNK_SIZE
-        );
-        Vec3f maxBound(
-            minBound.x+CHUNK_SIZE,
-            minBound.y+CHUNK_SIZE,
-            minBound.z+CHUNK_SIZE
-        );
-        return {minBound, maxBound};
-    }
-    
-    Vec3f worldToChunkPos(const Vec3f& worldPos) const {
-        auto [minBound, _] = getBounds();
-        return worldPos - minBound;
-    }
-
-    std::vector<uint8_t> compress() {
-        for (auto value : fullVoxels) {
-            
-            
-        }
-    }
-};
-
-/// @brief Accelerates spatial queries by bucketizing positions into a grid.
-class SpatialGrid3 {
-private:
-    float cellSize;
-public:
-    std::unordered_map<Vec3f, std::unordered_set<size_t>, Vec3f::Hash> grid;
-    
-    /// @brief Initializes the spatial grid.
-    /// @param cellSize The dimension of the spatial buckets. Larger cells mean more items per bucket but fewer buckets.
-    SpatialGrid3(float cellSize = 2.0f) : cellSize(cellSize) {}
-    
-    /// @brief Converts world coordinates to spatial grid coordinates.
-    Vec3f worldToGrid(const Vec3f& worldPos) const {
-        return (worldPos / cellSize).floor();
-    }
-    
-    /// @brief Adds an object ID to the spatial index at the given position.
-    void insert(size_t id, const Vec3f& pos) {
-        Vec3f gridPos = worldToGrid(pos);
-        grid[gridPos].insert(id);
-    }
-    
-    /// @brief Removes an object ID from the spatial index.
-    void remove(size_t id, const Vec3f& pos) {
-        Vec3f gridPos = worldToGrid(pos);
-        auto cellIt = grid.find(gridPos);
-        if (cellIt != grid.end()) {
-            cellIt->second.erase(id);
-            if (cellIt->second.empty()) {
-                grid.erase(cellIt);
-            }
-        }
-    }
-    
-    /// @brief Moves an object within the spatial index (removes from old cell, adds to new if changed).
-    void update(size_t id, const Vec3f& oldPos, const Vec3f& newPos) {
-        Vec3f oldGridPos = worldToGrid(oldPos);
-        Vec3f newGridPos = worldToGrid(newPos);
-        
-        if (oldGridPos != newGridPos) {
-            remove(id, oldPos);
-            insert(id, newPos);
-        }
-    }
-    
-    /// @brief Returns all IDs located in the specific grid cell containing 'center'.
-    std::unordered_set<size_t> find(const Vec3f& center) const {
-        auto cellIt = grid.find(worldToGrid(center));
-        if (cellIt != grid.end()) {
-            return cellIt->second;
-        }
-        return std::unordered_set<size_t>();
-    }
-
-    /// @brief Finds all object IDs within a square area around the center.
-    /// @param center The world position center.
-    /// @param radius The search radius (defines the bounds of grid cells to check).
-    /// @return A vector of candidate IDs (Note: this returns objects in valid grid cells, further distance checks may be required).
-    std::vector<size_t> queryRange(const Vec3f& center, float radius) const {
-        std::vector<size_t> results;
-        float radiusSq = radius * radius;
-        
-        // Calculate grid bounds for the query
-        Vec3f minGrid = worldToGrid(center - Vec3f(radius, radius, radius));
-        Vec3f maxGrid = worldToGrid(center + Vec3f(radius, radius, radius));
-        
-        size_t estimatedSize = (maxGrid.x - minGrid.x + 1) * (maxGrid.y - minGrid.y + 1) * (maxGrid.z - minGrid.z + 1) * 10;
-        results.reserve(estimatedSize);
-
-        // Check all relevant grid cells
-        for (int x = minGrid.x; x <= maxGrid.x; ++x) {
-            for (int y = minGrid.y; y <= maxGrid.y; ++y) {
-                for (int z = minGrid.z; z <= minGrid.z; ++z) {
-                    auto cellIt = grid.find(Vec3f(x, y, z));
-                    if (cellIt != grid.end()) {
-                        results.insert(results.end(), cellIt->second.begin(), cellIt->second.end());
-                    }
-                }
-            }
-        }
-        
-        return results;
-    }
-    
-    void clear() {
-        grid.clear();
-        grid.rehash(0);
-    }
-};
-
-class Grid3 {
-protected:
-    //all positions
-    reverselookupassistant3 Positions;
-    std::unordered_map<size_t, GenericVoxel> Pixels;
-    
-    std::vector<size_t> unassignedIDs;
-    
-    float neighborRadius = 1.0f;
-    
-    SpatialGrid3 spatialGrid;
-    float spatialCellSize = neighborRadius * 1.5f;
-
-    // Default background color for empty spaces
-    Vec4ui8 defaultBackgroundColor = Vec4ui8(0, 0, 0, 0);
-    PNoise2 noisegen;
-
-    bool regenpreventer = false;
-public:
-
-    Grid3& noiseGenGrid(Vec3f min, Vec3f max, float minChance = 0.1f
-                        , float maxChance = 1.0f, bool color = true, int noisemod = 42) {
-        TIME_FUNCTION;
-        noisegen = PNoise2(noisemod);
-        std::cout << "generating a noise grid with the following: "<< min << " by  " << max << "chance min: " << minChance 
-                << " max: " << maxChance << " gen colors: " << color << std::endl;
-        std::vector<Vec3f> poses;
-        std::vector<Vec4ui8> colors;
-        #pragma omp parallel for
-        for (int x = min.x; x < max.x; x++) {
-            #pragma omp parallel for
-            for (int y = min.y; y < max.y; y++) {
-                #pragma omp parallel for
-                for (int z = min.z; z < max.z; z++) {
-                    float nx = (x+noisemod)/(max.x+EPSILON)/0.1;
-                    float ny = (y+noisemod)/(max.y+EPSILON)/0.1;
-                    float nz = (z+noisemod)/(max.z+EPSILON)/0.1;
-                    Vec3 pos = Vec3f(nx,ny,nz);
-                    float alpha = noisegen.permute(pos);
-                    if (alpha > minChance && alpha < maxChance) {
-                        if (color) {
-                            float red = noisegen.permute(Vec3f(nx, ny, nz)*0.3);
-                            float green = noisegen.permute(Vec3f(nx, ny, nz)*0.6);
-                            float blue = noisegen.permute(Vec3f(nx, ny, nz)*0.9);
-                            Vec4 newc = Vec4ui8(red,green,blue,1.0);
-                            #pragma omp critical
-                            colors.push_back(newc);
-                            #pragma omp critical
-                            poses.push_back(Vec3f(x,y,z));
-                        } else {
-                            Vec4 newc = Vec4ui8(alpha,alpha,alpha,1.0);
-                            #pragma omp critical
-                            colors.push_back(newc);
-                            #pragma omp critical
-                            poses.push_back(Vec3f(x,y,z));
-                        }
-                    }
-                }
-            }
-        }
-        std::cout << "noise generated" << std::endl;
-        bulkAddObjects(poses,colors);
-        return *this;
-    }
-
-    size_t addObject(const Vec3f& pos, const Vec4ui8& color, float size = 1.0f) {
-        size_t id = Positions.set(pos);
-        Pixels.emplace(id, GenericVoxel(id, color, pos));
-        spatialGrid.insert(id, pos);
-        return id;
-    }
-
-    /// @brief Sets the default background color.
-    void setDefault(const Vec4ui8& color) {
-        defaultBackgroundColor = color;
-    }
-    
-    /// @brief Moves an object to a new position and updates spatial indexing.
-    void setPosition(size_t id, const Vec3f& newPosition) {
-        Vec3f oldPosition = Positions.at(id);
-        Pixels.at(id).move(newPosition);
-        spatialGrid.update(id, oldPosition, newPosition);
-        Positions.at(id).move(newPosition);
-    }
-    
-    void setColor(size_t id, const Vec4ui8 color) {
-        Pixels.at(id).recolor(color);
-    }
-    
-    void setNeighborRadius(float radius) {
-        neighborRadius = radius;
-        //optimizeSpatialGrid();
-    }
-    
-    Vec4ui8 getDefaultBackgroundColor() const {
-        return defaultBackgroundColor;
-    }
-
-    Vec3f getPositionID(size_t id) const {
-        Vec3f it = Positions.at(id);
-        return it;
-    }
-
-    size_t getPositionVec(const Vec3f& pos, float radius = 0.0f) const {
-        TIME_FUNCTION;
-        if (radius == 0.0f) {
-            // Exact match - use spatial grid to find the cell
-            Vec3f gridPos = spatialGrid.worldToGrid(pos);
-            auto cellIt = spatialGrid.grid.find(gridPos);
-            if (cellIt != spatialGrid.grid.end()) {
-                for (size_t id : cellIt->second) {
-                    if (Positions.at(id) == pos) {
-                        return id;
-                    }
-                }
-            }
-            return -1;
+        /*
+        We loop until either we find a voxel with a non-empty object list or we fall out of the end of the grid.
+        Extending the algorithm to three dimensions simply requires that we add the appropriate z variables and
+        find the minimum of tMaxX, tMaxY and tMaxZ during each iteration. This results in:
+        list= NIL;
+        do {
+        if(tMaxX < tMaxY) {
+        if(tMaxX < tMaxZ) {
+        X= X + stepX;
+        if(X == justOutX)
+        return(NIL); 
+        tMaxX= tMaxX + tDeltaX;
         } else {
-            auto results = getPositionVecRegion(pos, radius);
-            if (!results.empty()) {
-                return results[0]; // Return first found
-            }
-            return -1;
+        Z= Z + stepZ;
+        if(Z == justOutZ)
+        return(NIL);
+        tMaxZ= tMaxZ + tDeltaZ;
         }
-    }
-
-    size_t getOrCreatePositionVec(const Vec3f& pos, float radius = 0.0f, bool create = true) {
-        //TIME_FUNCTION; //called too many times and average time is less than 0.0000001 so ignore it.
-        if (radius == 0.0f) {
-            Vec3f gridPos = spatialGrid.worldToGrid(pos);
-            auto cellIt = spatialGrid.grid.find(gridPos);
-            if (cellIt != spatialGrid.grid.end()) {
-                for (size_t id : cellIt->second) {
-                    if (Positions.at(id) == pos) {
-                        return id;
-                    }
-                }
-            }
-            if (create) {
-                return addObject(pos, defaultBackgroundColor, 1.0f);
-            }
-            throw std::out_of_range("Position not found");
         } else {
-            auto results = getPositionVecRegion(pos, radius);
-            if (!results.empty()) {
-                return results[0];
-            }
-            if (create) {
-                return addObject(pos, defaultBackgroundColor, 1.0f);
-            }
-            throw std::out_of_range("No positions found in radius");
+        if(tMaxY < tMaxZ) {
+        Y= Y + stepY;
+        if(Y == justOutY)
+        return(NIL);
+        tMaxY= tMaxY + tDeltaY;
+        } else {
+        Z= Z + stepZ;
+        if(Z == justOutZ)
+        return(NIL);
+        tMaxZ= tMaxZ + tDeltaZ;
         }
-    }
-
-    std::vector<size_t> getPositionVecRegion(const Vec3f& pos, float radius = 1.0f) const {
-        //TIME_FUNCTION;
-        float searchRadius = (radius == 0.0f) ? std::numeric_limits<float>::epsilon() : radius;
-        
-        // Get candidates from spatial grid
-        std::vector<size_t> candidates = spatialGrid.queryRange(pos, searchRadius);
-        
-        // Fine-filter by exact distance
-        std::vector<size_t> results;
-        float radiusSq = searchRadius * searchRadius;
-        
-        for (size_t id : candidates) {
-            if (Positions.at(id).distanceSquared(pos) <= radiusSq) {
-                results.push_back(id);
-            }
         }
-        
-        return results;
+        list= ObjectList[X][Y][Z];
+        } while(list == NIL);
+        return(list);*/
     }
-
-    Vec4ui8 getColor(size_t id) {
-        return Pixels.at(id).getColor();
-    }
-
-    std::pair<Vec3f,Vec3f> getBoundingBox(Vec3f& minCorner, Vec3f& maxCorner) const {
-        TIME_FUNCTION;
-        if (Positions.empty()) {
-            std::cout << "empty" << std::endl;
-            minCorner = Vec3f(0, 0, 0);
-            maxCorner = Vec3f(0, 0, 0);
-        }
-        
-        // Initialize with first position
-        auto it = Positions.begin();
-        minCorner = it->second;
-        maxCorner = it->second;
-        
-        // Find min and max coordinates
-        for (const auto& [id, pos] : Positions) {
-            minCorner.x = std::min(minCorner.x, pos.x);
-            minCorner.y = std::min(minCorner.y, pos.y);
-            minCorner.z = std::min(minCorner.z, pos.z);
-            maxCorner.x = std::max(maxCorner.x, pos.x);
-            maxCorner.y = std::max(maxCorner.y, pos.y);
-            maxCorner.z = std::max(maxCorner.z, pos.z);
-        }
-        // std::cout << "bounding box: " << minCorner << ", " << maxCorner << std::endl;
-        return std::make_pair(minCorner, maxCorner);
-    }
-
-    frame getGridRegionAsFrame(const Vec3f& minCorner, const Vec3f& maxCorner, const Vec2& res,
-                            const Ray3<float>& View, frame::colormap outChannels = frame::colormap::RGB) const {
-        TIME_FUNCTION;
-        
-        // Calculate volume dimensions
-        float width = maxCorner.x - minCorner.x;
-        float height = maxCorner.y - minCorner.y;
-        float depth = maxCorner.z - minCorner.z;
-        
-        size_t outputWidth = static_cast<int>(res.x);
-        size_t outputHeight = static_cast<int>(res.y);
-        
-        // Validate dimensions
-        if (width <= 0 || height <= 0 || depth <= 0 || outputWidth <= 0 || outputHeight <= 0) {
-            frame outframe = frame();
-            outframe.colorFormat = outChannels;
-            return outframe;
-        }
-        
-        frame outframe(outputWidth, outputHeight, outChannels);
-        
-        std::unordered_map<Vec2, Vec4ui8> colorBuffer;
-        std::unordered_map<Vec2, Vec4ui8> colorAccumBuffer;
-        std::unordered_map<Vec2, int> countBuffer;
-        std::unordered_map<Vec2, float> depthBuffer;
-        
-        size_t bufferSize = outputWidth * outputHeight;
-        colorBuffer.reserve(bufferSize);
-        colorAccumBuffer.reserve(bufferSize);
-        countBuffer.reserve(bufferSize);
-        depthBuffer.reserve(bufferSize);
-        
-        Vec3f viewDirection = View.direction;
-        Vec3f viewOrigin = View.origin;
-        
-        Vec3f viewRight = Vec3f(1, 0, 0);
-        Vec3f viewUp = Vec3f(0, 1, 0);
-        
-        float xScale = outputWidth / width;
-        float yScale = outputHeight / height;
-        
-        size_t voxelCount = 0;
-        
-        for (const auto& [id, pos] : Positions) {
-            if (pos.x >= minCorner.x && pos.x <= maxCorner.x &&
-                pos.y >= minCorner.y && pos.y <= maxCorner.y &&
-                pos.z >= minCorner.z && pos.z <= maxCorner.z) {
-                
-                voxelCount++;
-                
-                float relX = pos.x - minCorner.x;
-                float relY = pos.y - minCorner.y;
-                float relZ = pos.z - minCorner.z;
-                
-                Vec3f toVoxel = pos - viewOrigin;
-                float distance = toVoxel.length();
-                
-                Vec3f viewPlanePos = pos - (toVoxel.dot(viewDirection)) * viewDirection;
-                
-                float screenX = viewPlanePos.dot(viewRight);
-                float screenY = viewPlanePos.dot(viewUp);
-                
-                int pixX = static_cast<int>((screenX - minCorner.x) * xScale);
-                int pixY = static_cast<int>((screenY - minCorner.y) * yScale);
-                
-                pixX = std::max(0, std::min(pixX, static_cast<int>(outputWidth) - 1));
-                pixY = std::max(0, std::min(pixY, static_cast<int>(outputHeight) - 1));
-                
-                Vec2 pixelPos(pixX, pixY);
-        
-                Vec4ui8 voxelColor = Pixels.at(id).getColor();
-                
-                float depth = relZ;
-                
-                
-                bool shouldRender = true;
-                auto depthIt = depthBuffer.find(pixelPos);
-                if (depthIt != depthBuffer.end()) {
-                    if (depth > depthIt->second) {
-                        shouldRender = false;
-                    } else {
-                        depthBuffer[pixelPos] = depth;
-                    }
-                } else {
-                    depthBuffer[pixelPos] = depth;
-                }
-                
-                if (shouldRender) {
-                    colorAccumBuffer[pixelPos] += voxelColor;
-                    countBuffer[pixelPos]++;
-                    
-                    colorBuffer[pixelPos] = voxelColor;
-                }
-            }
-        }
-        
-        switch (outChannels) {
-            case frame::colormap::RGBA: {
-                std::vector<uint8_t> pixelBuffer(outputWidth * outputHeight * 4, 0);        
-                for (size_t y = 0; y < outputHeight; ++y) {
-                    for (size_t x = 0; x < outputWidth; ++x) {
-                        Vec2 pixelPos(x, y);
-                        size_t index = (y * outputWidth + x) * 4;
-                        
-                        Vec4ui8 finalColor;
-                        auto countIt = countBuffer.find(pixelPos);
-                        
-                        if (countIt != countBuffer.end() && countIt->second > 0) {
-                            finalColor = colorAccumBuffer[pixelPos] / static_cast<float>(countIt->second);
-                            finalColor = finalColor.clamp(0.0f, 1.0f);
-                            finalColor = finalColor * 255.0f;
-                        } else {
-                            finalColor = defaultBackgroundColor * 255.0f;
-                        }
-                        
-                        pixelBuffer[index + 0] = static_cast<uint8_t>(finalColor.r);
-                        pixelBuffer[index + 1] = static_cast<uint8_t>(finalColor.g);
-                        pixelBuffer[index + 2] = static_cast<uint8_t>(finalColor.b);
-                        pixelBuffer[index + 3] = static_cast<uint8_t>(finalColor.a);
-                    }
-                }
-                
-                outframe.setData(pixelBuffer);
-                break;
-            }
-                
-            case frame::colormap::BGR: {
-                std::vector<uint8_t> pixelBuffer(outputWidth * outputHeight * 3, 0);
-                
-                for (size_t y = 0; y < outputHeight; ++y) {
-                    for (size_t x = 0; x < outputWidth; ++x) {
-                        Vec2 pixelPos(x, y);
-                        size_t index = (y * outputWidth + x) * 3;
-                        
-                        Vec4ui8 finalColor;
-                        auto countIt = countBuffer.find(pixelPos);
-                        
-                        if (countIt != countBuffer.end() && countIt->second > 0) {
-                            finalColor = colorAccumBuffer[pixelPos] / static_cast<float>(countIt->second);
-                            finalColor = finalColor.clamp(0.0f, 1.0f);
-                            finalColor = finalColor * 255.0f;
-                        } else {
-                            finalColor = defaultBackgroundColor * 255.0f;
-                        }
-                        
-                        pixelBuffer[index + 2] = static_cast<uint8_t>(finalColor.r);
-                        pixelBuffer[index + 1] = static_cast<uint8_t>(finalColor.g);
-                        pixelBuffer[index + 0] = static_cast<uint8_t>(finalColor.b);
-                    }
-                }
-                
-                outframe.setData(pixelBuffer);
-                break;
-            }
-                
-            case frame::colormap::RGB:
-            default: {
-                std::vector<uint8_t> pixelBuffer(outputWidth * outputHeight * 3, 0);
-                
-                for (size_t y = 0; y < outputHeight; ++y) {
-                    for (size_t x = 0; x < outputWidth; ++x) {
-                        Vec2 pixelPos(x, y);
-                        size_t index = (y * outputWidth + x) * 3;
-                        
-                        Vec4ui8 finalColor;
-                        auto countIt = countBuffer.find(pixelPos);
-                        
-                        if (countIt != countBuffer.end() && countIt->second > 0) {
-                            finalColor = colorAccumBuffer[pixelPos] / static_cast<float>(countIt->second);
-                            finalColor = finalColor.clamp(0.0f, 1.0f);
-                            finalColor = finalColor * 255.0f;
-                        } else {
-                            finalColor = defaultBackgroundColor * 255.0f;
-                        }
-                        
-                        pixelBuffer[index + 0] = static_cast<uint8_t>(finalColor.r);
-                        pixelBuffer[index + 1] = static_cast<uint8_t>(finalColor.g);
-                        pixelBuffer[index + 2] = static_cast<uint8_t>(finalColor.b);
-                    }
-                }
-                
-                outframe.setData(pixelBuffer);
-                break;
-            }
-        }
-        
-        return outframe;
-    }
-
-    frame getGridAsFrame(const Vec2& res, const Ray3<float>& View, frame::colormap outChannels = frame::colormap::RGB) const {
-        Vec3f Min;
-        Vec3f Max;
-        auto a = getBoundingBox(Min, Max);
-        
-        return getGridRegionAsFrame(a.first, a.second, res, View, outChannels);
-    }
-
-    size_t removeID(size_t id) {
-        Vec3f oldPosition = Positions.at(id);
-        Positions.remove(id);
-        Pixels.erase(id);
-        unassignedIDs.push_back(id);
-        spatialGrid.remove(id, oldPosition);
-        return id;
-    }
-
-    void bulkUpdatePositions(const std::unordered_map<size_t, Vec3f>& newPositions) {
-        TIME_FUNCTION;
-        for (const auto& [id, newPos] : newPositions) {
-            Vec3f oldPosition = Positions.at(id);
-            Positions.at(id).move(newPos);
-            Pixels.at(id).move(newPos);
-            spatialGrid.update(id, oldPosition, newPos);
-        }
-    }
-
-    std::vector<size_t> bulkAddObjects(const std::vector<Vec3f> poses, std::vector<Vec4ui8> colors) {
-        TIME_FUNCTION;
-        std::vector<size_t> ids;
-        ids.reserve(poses.size());
-        
-        // Reserve space in maps to avoid rehashing
-        if (Positions.bucket_count() < Positions.size() + poses.size()) {
-            Positions.reserve(Positions.size() + poses.size());
-            Pixels.reserve(Positions.size() + poses.size());
-        }
-        
-        // Batch insertion
-        std::vector<size_t> newids;
-        for (size_t i = 0; i < poses.size(); ++i) {
-            size_t id = Positions.set(poses[i]);
-            Pixels.emplace(id, GenericVoxel(id, colors[i], poses[i]));
-            spatialGrid.insert(id,poses[i]);
-            newids.push_back(id);
-        }
-        
-        shrinkIfNeeded();
-        
-        return newids;
-    }
-
-    void shrinkIfNeeded() {
-        //TODO: garbage collector
-    }
-
-    void clear() {
-        Positions.clear();
-        Pixels.clear();
-        spatialGrid.clear();
-        Pixels.rehash(0);
-        defaultBackgroundColor = Vec4ui8(0, 0, 0, 0);
-    }
-
-    void optimizeSpatialGrid() {
-        TIME_FUNCTION;
-        //std::cout << "optimizeSpatialGrid()" << std::endl;
-        spatialCellSize = neighborRadius * neighborRadius;
-        spatialGrid = SpatialGrid3(spatialCellSize);
-        
-        // Rebuild spatial grid
-        spatialGrid.clear();
-        for (const auto& [id, pos] : Positions) {
-            spatialGrid.insert(id, pos);
-        }
-    }
-
-    std::vector<size_t> getNeighbors(size_t id) const {
-        Vec3f pos = Positions.at(id);
-        std::vector<size_t> candidates = spatialGrid.queryRange(pos, neighborRadius);
-        std::vector<size_t> neighbors;
-        float radiusSq = neighborRadius * neighborRadius;
-        
-        for (size_t candidateId : candidates) {
-            if (candidateId == id) continue;
-            if (!Positions.contains(candidateId)) continue;
-
-            if (pos.distanceSquared(Positions.at(candidateId)) <= radiusSq) {
-                if (Pixels.find(candidateId) != Pixels.end()) {
-                    std::cerr << "NOT IN PIXELS! ERROR! ERROR!" <<std::endl;
-                    continue;
-                }
-                neighbors.push_back(candidateId);
-            }
-        }
-        return neighbors;
-    }
-
-    std::vector<size_t> getNeighborsRange(size_t id, float dist) const {
-        Vec3f pos = Positions.at(id);
-        std::vector<size_t> candidates = spatialGrid.queryRange(pos, neighborRadius);
-        
-        std::vector<size_t> neighbors;
-        float radiusSq = dist * dist;
-        
-        for (size_t candidateId : candidates) {
-            if (candidateId != id && pos.distanceSquared(Positions.at(candidateId)) <= radiusSq) {
-                neighbors.push_back(candidateId);
-            }
-        }
-        
-        return neighbors;
-    }
-
-    Grid3& backfillGrid() {
-        TIME_FUNCTION;
-        Vec3f Min;
-        Vec3f Max;
-        getBoundingBox(Min, Max);
-        std::vector<Vec3f> newPos;
-        std::vector<Vec4ui8> newColors;
-        for (size_t x = Min.x; x < Max.x; x++) {
-            for (size_t y = Min.y; y < Max.y; y++) {
-                for (size_t z = Min.z; z < Max.z; z++) {
-                    Vec3f pos = Vec3f(x,y,z);
-                    if (Positions.contains(pos)) continue;
-                    Vec4ui8 color = defaultBackgroundColor;
-                    float size = 0.1;
-                    newPos.push_back(pos);
-                    newColors.push_back(color);
-                }
-            }
-        }
-        bulkAddObjects(newPos, newColors);
-        return *this;
-    }
-    
-    bool checkConsistency() const {
-        std::cout << "=== Consistency Check ===" << std::endl;
-        std::cout << "Positions size: " << Positions.size() << std::endl;
-        std::cout << "Pixels size: " << Pixels.size() << std::endl;
-        
-        // Check 1: All Pixels should have corresponding Positions
-        for (const auto& [id, voxel] : Pixels) {
-            if (!Positions.contains(id)) {
-                std::cout << "ERROR: Pixel ID " << id << " not in Positions!" << std::endl;
-                return false;
-            }
-        }
-        
-        // Check 2: All Positions should have corresponding Pixels (maybe not always true?)
-        for (const auto& [id, pos] : Positions) {
-            if (Pixels.find(id) == Pixels.end()) {
-                std::cout << "ERROR: Position ID " << id << " not in Pixels!" << std::endl;
-                std::cout << "  Position: " << pos << std::endl;
-                return false;
-            }
-        }
-        
-        std::cout << "Consistency check passed!" << std::endl;
-        return true;
-    }
-
-
 };
 
 #endif

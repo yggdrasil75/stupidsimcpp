@@ -69,7 +69,7 @@ public:
                 if (rayDirection[i] >= 0) {
                     t0[i] = (0 - rayOrigin[i]) / rayDirection[i];
                     t1[i] = (width - rayOrigin[i]) / rayDirection[i];
-        } else {
+                } else {
                     t0[i] = (width - rayOrigin[i]) / rayDirection[i];
                     t1[i] = (0 - rayOrigin[i]) / rayDirection[i];
                 }
@@ -84,7 +84,7 @@ public:
             
             if (tEnter > 0) {
                 voxel = Vec3f((rayOrigin + rayDirection * tEnter).floor());
-        }
+            }
         }
         
         // Initialize step and tMax based on ray direction
@@ -93,7 +93,7 @@ public:
                 step[i] = -1;
                 tMax[i] = ((float)voxel[i] - rayOrigin[i]) / rayDirection[i];
                 tDelta[i] = -1.0f / rayDirection[i];
-        } else {
+            } else {
                 step[i] = 1;
                 tMax[i] = ((float)(voxel[i] + 1) - rayOrigin[i]) / rayDirection[i];
                 tDelta[i] = 1.0f / rayDirection[i];
@@ -174,7 +174,7 @@ public:
     Vec3f up;
     float fov;
     
-    Camera() : position(0, 0, -10), forward(0, 0, 1), up(0, 1, 0), fov(45.0f) {}
+    Camera() : position(0, 0, -10), forward(0, 0, 1), up(0, 1, 0), fov(80.0f) {}
     
     Mat4f getViewMatrix() const {
         return lookAt(position, position + forward, up);

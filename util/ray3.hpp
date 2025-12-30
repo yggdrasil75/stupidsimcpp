@@ -75,5 +75,6 @@ public:
 };
 
 using Ray3f = Ray3<float>;
+using Ray3T = Ray3<size_t>;
 
 #endif

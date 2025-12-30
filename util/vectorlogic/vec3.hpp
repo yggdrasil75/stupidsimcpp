@@ -186,6 +186,10 @@ public:
                (x == other.x && y > other.y) || 
                (x == other.x && y == other.y && z > other.z);
     }
+
+    bool operator>(size_t scalar) const {
+        return (x > scalar && y > scalar && z > scalar);
+    }
     
     bool operator>=(const Vec3& other) const {
         return (x > other.x) || 
@@ -201,8 +205,12 @@ public:
         return Vec3(std::floor(x), std::floor(y), std::floor(z));
     }
 
-    Vec3i floorToI() const {
-        return Vec3i(static_cast<int>(std::floor(x)), static_cast<int>(std::floor(x)), static_cast<int>(std::floor(z)))
+    Vec3<int> floorToI() const {
+        return Vec3<int>(static_cast<int>(std::floor(x)), static_cast<int>(std::floor(x)), static_cast<int>(std::floor(z)));
+    }
+    
+    Vec3<size_t> floorToT() const {
+        return Vec3<size_t>(static_cast<size_t>(std::floor(x)), static_cast<size_t>(std::floor(x)), static_cast<size_t>(std::floor(z)));
     }
     
     Vec3 ceil() const {
@@ -393,6 +401,7 @@ using Vec3f = Vec3<float>;
 using Vec3d = Vec3<double>;
 using Vec3i = Vec3<int>;
 using Vec3ui8 = Vec3<uint8_t>;
+using Vec3T = Vec3<size_t>;
 
 template<typename T>
 inline std::ostream& operator<<(std::ostream& os, const Vec3<T>& vec) {
