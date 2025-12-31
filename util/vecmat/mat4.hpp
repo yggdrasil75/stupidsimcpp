@@ -320,36 +320,5 @@ inline Mat4<T> operator*(T scalar, const Mat4<T>& mat) {
 using Mat4f = Mat4<float>;
 using Mat4d = Mat4<double>;
 
-Mat4f lookAt(Vec3f const& eye, Vec3f const& center, Vec3f const& up) {
-    Vec3f const f = (center - eye).normalized();
-    Vec3f const s = f.cross(up).normalized();
-    Vec3f const u = s.cross(f);
-
-    Mat4f Result = Mat4f::identity();
-    Result(0, 0) = s.x;
-    Result(1, 0) = s.y;
-    Result(2, 0) = s.z;
-    Result(3, 0) = -s.dot(eye);
-    Result(0, 1) = u.x;
-    Result(1, 1) = u.y;
-    Result(2, 1) = u.z;
-    Result(3, 1) = -u.dot(eye);
-    Result(0, 2) = -f.x;
-    Result(1, 2) = -f.y;
-    Result(2, 2) = -f.z;
-    Result(3, 2) = f.dot(eye);
-    return Result;
-}
-
-Mat4f perspective(float fovy, float aspect, float zNear, float zfar) {
-    float const tanhalfF = tan(fovy / 2);
-    Mat4f Result = 0;
-    Result(0,0) = 1 / (aspect * tanhalfF);
-    Result(1,1) = 1 / tanhalfF;
-    Result(2,2) = zfar / (zNear - zfar);
-    Result(2,3) = -1;
-    Result(3,2) = -(zfar * zNear) / (zfar - zNear);
-    return Result;
-}
 
 #endif

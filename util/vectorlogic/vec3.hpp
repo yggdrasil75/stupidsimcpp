@@ -471,22 +471,7 @@ Vec3<T> mix(const Vec3<T>& a, const Vec3<T>& b, const Vec3<bool>& mask) {
         mask.x ? b.x : a.x,
         mask.y ? b.y : a.y,
         mask.z ? b.z : a.z
-    )
-}
-
-
-template<typename T>
-std::pair<Vec3<T>, Vec3<T>> multiMix(const Vec3<T>& a, const Vec3<T>& b, const Vec3<T>& c, const Vec3<T>& d, const Vec3<bool>& mask) {
-    outa = Vec3<T>(
-        mask.x ? b.x : a.x,
-        mask.y ? b.y : a.y,
-        mask.z ? b.z : a.z
-    )
-    outb = Vec3<T>(
-        mask.x ? d.x : c.x,
-        mask.y ? d.y : c.y,
-        mask.z ? d.z : c.z
-    )
+    );
 }
 
 #endif

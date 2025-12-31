@@ -18,10 +18,49 @@ struct Voxel {
     Vec3ui8 color;
 };
 
+struct Camera {
+    Ray3f posfor;
+    Vec3f up;
+    float fov;
+    Camera(Vec3f pos, Vec3f viewdir, Vec3f up, float fov = 80) : posfor(Ray3f(pos, viewdir)), up(up), fov(fov) {}
+};
+
 class VoxelGrid {
 private:
     size_t width, height, depth;
     std::vector<Voxel> voxels;
+    
+    static Mat4f lookAt(Vec3f const& eye, Vec3f const& center, Vec3f const& up) {
+        Vec3f const f = (center - eye).normalized();
+        Vec3f const s = f.cross(up).normalized();
+        Vec3f const u = s.cross(f);
+
+        Mat4f Result = Mat4f::identity();
+        Result(0, 0) = s.x;
+        Result(1, 0) = s.y;
+        Result(2, 0) = s.z;
+        Result(3, 0) = -s.dot(eye);
+        Result(0, 1) = u.x;
+        Result(1, 1) = u.y;
+        Result(2, 1) = u.z;
+        Result(3, 1) = -u.dot(eye);
+        Result(0, 2) = -f.x;
+        Result(1, 2) = -f.y;
+        Result(2, 2) = -f.z;
+        Result(3, 2) = f.dot(eye);
+        return Result;
+    }
+
+    static Mat4f perspective(float fovy, float aspect, float zNear, float zfar) {
+        float const tanhalfF = tan(fovy / 2);
+        Mat4f Result = 0;
+        Result(0,0) = 1 / (aspect * tanhalfF);
+        Result(1,1) = 1 / tanhalfF;
+        Result(2,2) = zfar / (zNear - zfar);
+        Result(2,3) = -1;
+        Result(3,2) = -(zfar * zNear) / (zfar - zNear);
+        return Result;
+    }
 public:
     VoxelGrid(size_t w, size_t h, size_t d) : width(w), height(h), depth(d) {
         voxels.resize(w * h * d);
@@ -76,6 +115,22 @@ public:
         return (voxl >= 0 && voxl.x < width && voxl.y < height && voxl.z < depth);
     }
 
+    Vec3f perPixelRayDir(size_t x, size_t y, size_t imgWidth, size_t imgHeight, const Camera& cam) const {
+        float normedX = (x + 0.5) / imgWidth * 2 - 1;
+        float normedY = 1 - (y+0.5) / imgHeight * 2;
+        float aspect = imgWidth / imgHeight;
+
+        float fovRad = cam.fov * M_PI / 180;
+        float scale = tan(fovRad * 0.5);
+        Vec3f rayDirCam = Vec3f(normedX * aspect * scale, normedY * scale, -1).normalized();
+        Vec3f eye = cam.posfor.origin;
+        Vec3f center = eye + cam.posfor.direction;
+        Mat4f viewMat = lookAt(eye, center, cam.up);
+        Mat4f invViewMat = viewMat.inverse();
+        Vec3f rayDirWorld = invViewMat.transformDirection(rayDirCam);
+        return rayDirWorld.normalized();
+    }
+
     bool rayCast(const Ray3f& ray, float maxDistance, Vec3f hitPos, Vec3f hitNormal, Vec3f& hitColor) {
         hitColor = Vec3f(0,0,0);
         Vec3f rayDir = ray.direction;
@@ -107,7 +162,6 @@ public:
             current voxel.
             */
 
-            float tEntry = 0.0;
             Vec3f tBMin;
             Vec3f tBMax;
             tBMin.x = (0.0 - rayOrigin.x) / rayDir.x;
@@ -185,6 +239,46 @@ public:
             }
         }
         return hit;
+    }
+
+    size_t getWidth() const {
+        return width;
+    }
+    size_t getHeight() const {
+        return height;
+    }
+    size_t getDepth() const {
+        return depth;
+    }
+
+    void renderOut(std::vector<uint8_t>& output, size_t& outwidth, size_t& outheight, const Camera& cam) {
+        output.resize(outwidth * outheight * 3);
+        Vec3f backgroundColor(0.1f, 0.1f, 0.1f);
+        float maxDistance = std::sqrt(width*width + height*height + depth*depth) * 2.0f;
+        
+        for (size_t y = 0; y < outheight; y++) {
+            for (size_t x = 0; x < outwidth; x++) {
+                Vec3f rayDir = perPixelRayDir(x, y, outwidth, outheight, cam);
+                Ray3f ray(cam.posfor.origin, rayDir);
+                Vec3f hitPos;
+                Vec3f hitNorm;
+                Vec3f hitColor;
+                bool hit = rayCast(ray, maxDistance, hitPos, hitNorm, hitColor);
+
+                Vec3f finalColor;
+                if (!hit) {
+                    finalColor = backgroundColor;
+                } else {
+                    finalColor = hitColor;
+                }
+
+                finalColor = finalColor.clamp(0, 1);
+                size_t pixelIndex = (y * outwidth + x) * 3;
+                output[pixelIndex + 0] = static_cast<uint8_t>(finalColor.x * 255);
+                output[pixelIndex + 1] = static_cast<uint8_t>(finalColor.y * 255);
+                output[pixelIndex + 2] = static_cast<uint8_t>(finalColor.z * 255);
+            }
+        }
     }
 };
 
