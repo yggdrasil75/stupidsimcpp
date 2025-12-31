@@ -170,33 +170,69 @@ public:
     }
     
     bool operator<(const Vec3& other) const {
-        return (x < other.x && y == other.y && z == other.z) || 
-               (x == other.x && y < other.y && z == other.z) || 
-               (x == other.x && y == other.y && z < other.z);
+        return (lengthSquared() < other.lengthSquared());
+    }
+
+    bool operator<(T scalar) const {
+        return (x < scalar && y < scalar && z < scalar);
     }
     
     bool operator<=(const Vec3& other) const {
-        return (x <= other.x) && (y <= other.y) && (z <= other.z);
+        return (lengthSquared() <= other.lengthSquared());
+    }
+    
+    bool operator<=(T scalar) const {
+        return (x <= scalar && y <= scalar && z <= scalar);
     }
     
     bool operator>(const Vec3& other) const {
-        return (x > other.x && y == other.y && z == other.z) || 
-               (x == other.x && y > other.y && z == other.z) || 
-               (x == other.x && y == other.y && z > other.z);
+        return (lengthSquared() > other.lengthSquared());
     }
 
-    bool operator>(size_t scalar) const {
+    bool operator>(T scalar) const {
         return (x > scalar && y > scalar && z > scalar);
     }
     
     bool operator>=(const Vec3& other) const {
-        return (x >= other.x) && (y >= other.y) && (z >= other.z);
+        return (lengthSquared() >= other.lengthSquared());
     }
     
-    bool operator>=(size_t scalar) const {
+    bool operator>=(T scalar) const {
         return (x >= scalar && y >= scalar && z >= scalar);
     }
     
+    bool AllLT(const Vec3& other) {
+        return x < other.x && y < other.y && z < other.z;
+    }
+    
+    bool AllGT(const Vec3& other) {
+        return x > other.x && y > other.y && z > other.z;
+    }
+    
+    bool AllLTE(const Vec3& other) {
+        return x <= other.x && y <= other.y && z <= other.z;
+    }
+    
+    bool AllGTE(const Vec3& other) {
+        return x >= other.x && y >= other.y && z >= other.z;
+    }
+    
+    bool AnyLT(const Vec3& other) {
+        return x < other.x || y < other.y || z < other.z;
+    }
+    
+    bool AnyGT(const Vec3& other) {
+        return x > other.x || y > other.y || z > other.z;
+    }
+    
+    bool AnyLTE(const Vec3& other) {
+        return x <= other.x || y <= other.y || z <= other.z;
+    }
+    
+    bool AnyGTE(const Vec3& other) {
+        return x >= other.x || y >= other.y || z >= other.z;
+    }
+
     Vec3 abs() const {
         return Vec3(std::abs(x), std::abs(y), std::abs(z));
     }
