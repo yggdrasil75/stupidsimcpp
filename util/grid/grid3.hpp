@@ -35,20 +35,34 @@ public:
         return voxels[z * width * height + y * width + x];
     }
 
+    Voxel& get(const Vec3T& xyz) {
+        return voxels[xyz.z*width*height+xyz.y*width+xyz.x];
+    }
+
+    void resize() {
+        //TODO: proper resizing
+    }
+
     void set(size_t x, size_t y, size_t z, float active, Vec3ui8 color) {
         //expand grid if needed. 
         if (x >= 0 || y >= 0 || z >= 0) {
             if (!(x < width)) {
+                //until resizing added:
+                return;
                 width = x;
-                voxels.resize(width*height*depth);
+                resize();
             }
             else if (!(y < height)) {
+                //until resizing added:
+                return;
                 height = y;
-                voxels.resize(width*height*depth);
+                resize();
             }
             else if (!(z < depth)) {
+                //until resizing added:
+                return;
                 depth = z;
-                voxels.resize(width*height*depth);
+                resize();
             }
 
             Voxel& v = get(x, y, z);
@@ -57,8 +71,9 @@ public:
         }
     }
 
-    bool inGrid(Vec3T voxl) {
-        return (voxl > 0 && voxl.x < width && voxl.y < height && voxl.z < depth);
+    template<typename T>
+    bool inGrid(Vec3<T> voxl) {
+        return (voxl >= 0 && voxl.x < width && voxl.y < height && voxl.z < depth);
     }
 
     bool rayCast(const Ray3f& ray, float maxDistance, Vec3f hitPos, Vec3f hitNormal, Vec3f& hitColor) {
@@ -66,19 +81,19 @@ public:
         Vec3f rayDir = ray.direction;
         Vec3f rayOrigin = ray.origin;
         Vec3T currentVoxel = rayOrigin.floorToT();
-
-
-        //important note: voxels store a float of "active" which is to be between 0 and 1, with <epsilon being inactive and <1 being transparent.
-        //as progression occurs, add to hitColor all passed voxels multiplied by active. once active reaches 1, stop progression.
-        //if active doesnt reach 1 before the edge of the grid is reached, then return the total.
-        //always return true if any active voxels are hit
-        //Ray3T and Vec3T are size_t.
-        Vec3f step;
+        Vec3i step;
+        step.x = (rayDir.x > 0) ? 1 : -1;
+        step.y = (rayDir.y > 0) ? 1 : -1;
+        step.z = (rayDir.z > 0) ? 1 : -1;
         Vec3f tMax;
         Vec3f tDelta;
-        Vec3T cvoxel = ray.origin.floor();
+
         //initialization
-        if (!inGrid(cvoxel)) {
+        tDelta.x = std::abs(1.0 / rayDir.x);
+        tDelta.y = std::abs(1.0 / rayDir.y);
+        tDelta.z = std::abs(1.0 / rayDir.z);
+        tMax = mix((rayOrigin - currentVoxel) / -rayDir, ((currentVoxel + 1) - rayOrigin) / rayDir, rayDir > 0);
+        if (!inGrid(rayOrigin)) {
             /*
             The initialization phase begins by identifying the voxel in which the ray origin, →
             u, is found. If the ray origin is outside the grid, we find the point in which the ray enters the grid and take the adjacent voxel. The integer
@@ -92,8 +107,33 @@ public:
             current voxel.
             */
 
-            //update to also include z in this
+            float tEntry = 0.0;
+            Vec3f tBMin;
+            Vec3f tBMax;
+            tBMin.x = (0.0 - rayOrigin.x) / rayDir.x;
+            tBMax.x = (width - rayOrigin.x) / rayDir.x;
+            if (tBMin.x > tBMax.x) std::swap(tBMin.x, tBMax.x);
+            tBMin.y = (0.0 - rayOrigin.y) / rayDir.y;
+            tBMax.y = (height - rayOrigin.y) / rayDir.y;
+            if (tBMin.y > tBMax.y) std::swap(tBMin.y, tBMax.y);
+            tBMin.z = (0.0 - rayOrigin.z) / rayDir.z;
+            tBMax.z = (depth - rayOrigin.z) / rayDir.z;
+            if (tBMin.z > tBMax.z) std::swap(tBMin.z, tBMax.z);
+            float tEntry = tBMin.maxComp();
+            float tExit = tBMax.minComp();
+            if (tEntry > tExit || tExit < 0.0) return false;
+            if (tEntry < 0.0) tEntry = 0.0;
+
+            if (tEntry > 0.0) {
+                rayOrigin = rayOrigin + rayDir + tEntry;
+                currentVoxel = rayOrigin.floorToT();
+                tMax = mix(((currentVoxel + 1) - rayOrigin) / rayDir, (rayOrigin - currentVoxel) / -rayDir, rayDir > 0 );
+            }
         }
+
+        float aalpha = 0.0;
+        bool hit = false;
+        float tDist = 0.0;
 
         /*
         Finally, we compute tDeltaX and tDeltaY. TDeltaX indicates how far along the ray we must move
@@ -101,54 +141,50 @@ public:
         we store in tDeltaY the amount of movement along the ray which has a vertical component equal to the
         height of a voxel.
         */
+        while (inGrid(currentVoxel) && tDist < maxDistance) {
+            Voxel& voxel = get(currentVoxel);
 
-        //also include tDeltaZ in this.
+            if (voxel.active > EPSILON) {
+                Vec3f voxelColor(static_cast<float>(voxel.color.x / 255.0), static_cast<float>(voxel.color.y / 255.0), static_cast<float>(voxel.color.z / 255.0));
+                float contribution = voxel.active * (1.0 - aalpha);
+                hitColor = hitColor + voxelColor * contribution;
+                aalpha += contribution;
+                hitPos = rayOrigin + rayDir * tDist;
+                if (tMax.x <= tMax.y && tMax.x <= tMax.z) {
+                    hitNormal = Vec3f(-step.x, 0.0, 0.0);
+                } else if (tMax.y <= tMax.x && tMax.y <= tMax.z) {
+                    hitNormal = Vec3f(0.0, -step.y, 0.0);
+                } else {
+                    hitNormal = Vec3f(0.0, 0.0, -step.z);
+                }
+            }
+            if (aalpha > EPSILON) {
+                hit = true;
+            }
 
-        /*loop {
-        if(tMaxX < tMaxY) {
-        tMaxX= tMaxX + tDeltaX;
-        X= X + stepX;
-        } else {
-        tMaxY= tMaxY + tDeltaY;
-        Y= Y + stepY;
+            if (tMax.x < tMax.y) {
+                if (tMax.x < tMax.z) {
+                    tDist = tMax.x;
+                    tMax.x += tDelta.x;
+                    currentVoxel.x += step.x;
+                } else {
+                    tDist = tMax.z;
+                    tMax.z += tDelta.z;
+                    currentVoxel.z += step.z;
+                }
+            } else {
+                if (tMax.y < tMax.z) {
+                    tDist = tMax.y;
+                    tMax.y += tDelta.y;
+                    currentVoxel.y += step.y;
+                } else {
+                    tDist = tMax.z;
+                    tMax.z += tDelta.z;
+                    currentVoxel.z += step.z;
+                }
+            }
         }
-        NextVoxel(X,Y);
-        }*/
-
-        /*
-        We loop until either we find a voxel with a non-empty object list or we fall out of the end of the grid.
-        Extending the algorithm to three dimensions simply requires that we add the appropriate z variables and
-        find the minimum of tMaxX, tMaxY and tMaxZ during each iteration. This results in:
-        list= NIL;
-        do {
-        if(tMaxX < tMaxY) {
-        if(tMaxX < tMaxZ) {
-        X= X + stepX;
-        if(X == justOutX)
-        return(NIL); 
-        tMaxX= tMaxX + tDeltaX;
-        } else {
-        Z= Z + stepZ;
-        if(Z == justOutZ)
-        return(NIL);
-        tMaxZ= tMaxZ + tDeltaZ;
-        }
-        } else {
-        if(tMaxY < tMaxZ) {
-        Y= Y + stepY;
-        if(Y == justOutY)
-        return(NIL);
-        tMaxY= tMaxY + tDeltaY;
-        } else {
-        Z= Z + stepZ;
-        if(Z == justOutZ)
-        return(NIL);
-        tMaxZ= tMaxZ + tDeltaZ;
-        }
-        }
-        list= ObjectList[X][Y][Z];
-        } while(list == NIL);
-        return(list);*/
+        return hit;
     }
 };
 

@@ -170,20 +170,18 @@ public:
     }
     
     bool operator<(const Vec3& other) const {
-        return (x < other.x) || 
-               (x == other.x && y < other.y) || 
+        return (x < other.x && y == other.y && z == other.z) || 
+               (x == other.x && y < other.y && z == other.z) || 
                (x == other.x && y == other.y && z < other.z);
     }
     
     bool operator<=(const Vec3& other) const {
-        return (x < other.x) || 
-               (x == other.x && y < other.y) || 
-               (x == other.x && y == other.y && z <= other.z);
+        return (x <= other.x) && (y <= other.y) && (z <= other.z);
     }
     
     bool operator>(const Vec3& other) const {
-        return (x > other.x) || 
-               (x == other.x && y > other.y) || 
+        return (x > other.x && y == other.y && z == other.z) || 
+               (x == other.x && y > other.y && z == other.z) || 
                (x == other.x && y == other.y && z > other.z);
     }
 
@@ -192,9 +190,11 @@ public:
     }
     
     bool operator>=(const Vec3& other) const {
-        return (x > other.x) || 
-               (x == other.x && y > other.y) || 
-               (x == other.x && y == other.y && z >= other.z);
+        return (x >= other.x) && (y >= other.y) && (z >= other.z);
+    }
+    
+    bool operator>=(size_t scalar) const {
+        return (x >= scalar && y >= scalar && z >= scalar);
     }
     
     Vec3 abs() const {
@@ -400,6 +400,7 @@ public:
 using Vec3f = Vec3<float>;
 using Vec3d = Vec3<double>;
 using Vec3i = Vec3<int>;
+using Vec3i8 = Vec3<int8_t>;
 using Vec3ui8 = Vec3<uint8_t>;
 using Vec3T = Vec3<size_t>;
 
@@ -426,6 +427,30 @@ Vec3<T> max(Vec3<T> a, Vec3<T> b) {
 template<typename T>
 Vec3<T> min(Vec3<T> a, Vec3<T> b) {
     return a.min(b);
+}
+
+template<typename T>
+Vec3<T> mix(const Vec3<T>& a, const Vec3<T>& b, const Vec3<bool>& mask) {
+    return Vec3<T>(
+        mask.x ? b.x : a.x,
+        mask.y ? b.y : a.y,
+        mask.z ? b.z : a.z
+    )
+}
+
+
+template<typename T>
+std::pair<Vec3<T>, Vec3<T>> multiMix(const Vec3<T>& a, const Vec3<T>& b, const Vec3<T>& c, const Vec3<T>& d, const Vec3<bool>& mask) {
+    outa = Vec3<T>(
+        mask.x ? b.x : a.x,
+        mask.y ? b.y : a.y,
+        mask.z ? b.z : a.z
+    )
+    outb = Vec3<T>(
+        mask.x ? d.x : c.x,
+        mask.y ? d.y : c.y,
+        mask.z ? d.z : c.z
+    )
 }
 
 #endif
