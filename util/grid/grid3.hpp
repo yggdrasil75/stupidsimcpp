@@ -147,7 +147,7 @@ public:
         tDelta.x = std::abs(1.0 / rayDir.x);
         tDelta.y = std::abs(1.0 / rayDir.y);
         tDelta.z = std::abs(1.0 / rayDir.z);
-        tMax = mix((rayOrigin - currentVoxel) / -rayDir, ((currentVoxel + 1) - rayOrigin) / rayDir, rayDir > 0);
+        tMax = mix(((rayOrigin - currentVoxel.toFloat()) / -rayDir).toFloat(), (((currentVoxel.toFloat() + 1) - rayOrigin) / rayDir).toFloat(), rayDir.mask([](float x, float value) { return x > 0; }, 0));
         if (!inGrid(rayOrigin)) {
             /*
             The initialization phase begins by identifying the voxel in which the ray origin, →
@@ -179,9 +179,9 @@ public:
             if (tEntry < 0.0) tEntry = 0.0;
 
             if (tEntry > 0.0) {
-                rayOrigin = rayOrigin + rayDir + tEntry;
+                rayOrigin = rayOrigin + rayDir * tEntry;
                 currentVoxel = rayOrigin.floorToT();
-                tMax = mix(((currentVoxel + 1) - rayOrigin) / rayDir, (rayOrigin - currentVoxel) / -rayDir, rayDir > 0 );
+                tMax = mix(((currentVoxel.toFloat() + 1) - rayOrigin) / rayDir, (rayOrigin - currentVoxel) / -rayDir, rayDir.mask([](float x, float value) { return x > 0; }, 0) );
             }
         }
 
@@ -237,6 +237,9 @@ public:
                     currentVoxel.z += step.z;
                 }
             }
+        }
+        if (aalpha > EPSILON) {
+            std::cout << "hit at: " << currentVoxel << " with value of " << aalpha << std::endl;
         }
         return hit;
     }

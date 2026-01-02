@@ -5,23 +5,28 @@
 #include "../util/grid/grid3.hpp"
 #include "../util/output/bmpwriter.hpp"
 #include "../util/noise/pnoise2.hpp"
+#include "../util/timing_decorator.cpp"
 
 // Constants
-const size_t GRID_SIZE = 1024;
+const size_t GRID_SIZE = 128;
 const size_t RENDER_WIDTH = 512;
 const size_t RENDER_HEIGHT = 512;
 
 // Function to generate grayscale noise grid
 void generateNoiseGrid(VoxelGrid& grid, PNoise2& noise) {
+    TIME_FUNCTION;
     std::cout << "Generating 1024x1024x1024 noise grid..." << std::endl;
     
     // Generate Perlin noise in the grid
+    #pragma omp parallel for
     for (size_t z = 0; z < GRID_SIZE; ++z) {
         if (z % 64 == 0) {
             std::cout << "Processing layer " << z << " of " << GRID_SIZE << std::endl;
         }
         
+        #pragma omp parallel for
         for (size_t y = 0; y < GRID_SIZE; ++y) {
+            #pragma omp parallel for
             for (size_t x = 0; x < GRID_SIZE; ++x) {
                 // Create 3D noise coordinates (scaled for better frequency)
                 float scale = 0.05f; // Controls noise frequency
@@ -34,12 +39,16 @@ void generateNoiseGrid(VoxelGrid& grid, PNoise2& noise) {
                 // Higher threshold = sparser voxels
                 float threshold = 0.3f;
                 float active = (normalizedNoise > threshold) ? normalizedNoise : 0.0f;
+                //float active = 1;
                 
                 // Create grayscale color based on noise value
                 uint8_t grayValue = static_cast<uint8_t>(normalizedNoise * 255);
                 Vec3ui8 color(grayValue, grayValue, grayValue);
-                
-                grid.set(x, y, z, active, color);
+                #pragma omp critical
+                if (active > threshold) {
+                    grid.set(x, y, z, active, color);
+                    //std::cout << "setting a voxel to color: " << color << " with alpha of " << active << std::endl;
+                }
             }
         }
     }
@@ -50,7 +59,7 @@ void generateNoiseGrid(VoxelGrid& grid, PNoise2& noise) {
 // Function to render grid from a specific viewpoint
 bool renderView(const std::string& filename, VoxelGrid& grid, const Vec3f& position, 
                 const Vec3f& direction, const Vec3f& up = Vec3f(0, 1, 0)) {
-    
+    TIME_FUNCTION;
     Camera cam(position, direction, up);
     
     std::vector<uint8_t> renderBuffer;
@@ -92,45 +101,46 @@ int main() {
         
         // Camera distance from center (outside the grid)
         float cameraDistance = GRID_SIZE * 2.0f;
+        float cameraDir = GRID_SIZE * 0.5f;
         
         // Render from 4 cardinal directions (looking at center)
         std::cout << "\nRendering cardinal views..." << std::endl;
         
         // North view (looking from positive Z towards center)
-        renderView("north_view.bmp", grid, 
+        renderView("output/north_view.bmp", grid, 
                    gridCenter + Vec3f(0, 0, cameraDistance),
                    Vec3f(0, 0, -1));  // Look towards negative Z
         
         // South view (looking from negative Z towards center)
-        renderView("south_view.bmp", grid,
+        renderView("output/south_view.bmp", grid,
                    gridCenter + Vec3f(0, 0, -cameraDistance),
                    Vec3f(0, 0, 1));   // Look towards positive Z
         
         // East view (looking from positive X towards center)
-        renderView("east_view.bmp", grid,
+        renderView("output/east_view.bmp", grid,
                    gridCenter + Vec3f(cameraDistance, 0, 0),
                    Vec3f(-1, 0, 0));  // Look towards negative X
         
         // West view (looking from negative X towards center)
-        renderView("west_view.bmp", grid,
+        renderView("output/west_view.bmp", grid,
                    gridCenter + Vec3f(-cameraDistance, 0, 0),
                    Vec3f(1, 0, 0));   // Look towards positive X
         
         // Zenith view (looking from above)
         std::cout << "\nRendering zenith and nadir views..." << std::endl;
-        renderView("zenith_view.bmp", grid,
+        renderView("output/zenith_view.bmp", grid,
                    gridCenter + Vec3f(0, cameraDistance, 0),
                    Vec3f(0, -1, 0),   // Look down
                    Vec3f(0, 0, -1));  // Adjust up vector for proper orientation
         
         // Nadir view (looking from below)
-        renderView("nadir_view.bmp", grid,
+        renderView("output/nadir_view.bmp", grid,
                    gridCenter + Vec3f(0, -cameraDistance, 0),
                    Vec3f(0, 1, 0),    // Look up
                    Vec3f(0, 0, 1));   // Adjust up vector
         
         // Optional: Create a front view (alternative to north)
-        renderView("front_view.bmp", grid,
+        renderView("output/front_view.bmp", grid,
                    gridCenter + Vec3f(0, 0, cameraDistance),
                    Vec3f(0, 0, -1),
                    Vec3f(0, 1, 0));
@@ -151,4 +161,5 @@ int main() {
         std::cerr << "Error: " << e.what() << std::endl;
         return 1;
     }
+    FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
 }

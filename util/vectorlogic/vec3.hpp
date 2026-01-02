@@ -27,19 +27,23 @@ public:
     }
 
     // Arithmetic operations
-    Vec3 operator+(const Vec3& other) const {
+    template<typename U>
+    Vec3 operator+(const Vec3<U>& other) const {
         return Vec3(x + other.x, y + other.y, z + other.z);
     }
     
-    Vec3 operator-(const Vec3& other) const {
+    template<typename U>
+    Vec3 operator-(const Vec3<U>& other) const {
         return Vec3(x - other.x, y - other.y, z - other.z);
     }
     
-    Vec3 operator*(const Vec3& other) const {
+    template<typename U>
+    Vec3 operator*(const Vec3<U>& other) const {
         return Vec3(x * other.x, y * other.y, z * other.z);
     }
     
-    Vec3 operator/(const Vec3& other) const {
+    template<typename U>
+    Vec3 operator/(const Vec3<U>& other) const {
         return Vec3(x / other.x, y / other.y, z / other.z);
     }
 
@@ -233,6 +237,17 @@ public:
         return x >= other.x || y >= other.y || z >= other.z;
     }
 
+    template<typename CompareFunc>
+    Vec3<bool> mask(CompareFunc comp, T value) const {
+        return Vec3<bool>(comp(x, value), comp(y, value), comp(z, value));
+    }
+
+    template<typename CompareFunc>
+    Vec3<bool> mask(CompareFunc comp, const Vec3& other) const {
+        return Vec3<bool>(comp(x, other.x), comp(y, other.y), comp(z, other.z));
+    }
+
+
     Vec3 abs() const {
         return Vec3(std::abs(x), std::abs(y), std::abs(z));
     }
@@ -247,6 +262,10 @@ public:
     
     Vec3<size_t> floorToT() const {
         return Vec3<size_t>(static_cast<size_t>(std::floor(x)), static_cast<size_t>(std::floor(x)), static_cast<size_t>(std::floor(z)));
+    }
+
+    Vec3<float> toFloat() const {
+        return Vec3<float>(static_cast<float>(x), static_cast<float>(y), static_cast<float>(z));
     }
     
     Vec3 ceil() const {
@@ -292,33 +311,33 @@ public:
     }
     
     // Template friend operators to allow different scalar types
-    template<typename S>
-    friend Vec3<T> operator+(S scalar, const Vec3<T>& vec) {
-        return Vec3<T>(static_cast<T>(scalar + vec.x), 
-                      static_cast<T>(scalar + vec.y), 
-                      static_cast<T>(scalar + vec.z));
-    }
+    // template<typename S>
+    // friend Vec3<T> operator+(S scalar, const Vec3<T>& vec) {
+    //     return Vec3<T>(static_cast<T>(scalar + vec.x), 
+    //                   static_cast<T>(scalar + vec.y), 
+    //                   static_cast<T>(scalar + vec.z));
+    // }
     
-    template<typename S>
-    friend Vec3<T> operator-(S scalar, const Vec3<T>& vec) {
-        return Vec3<T>(static_cast<T>(scalar - vec.x), 
-                      static_cast<T>(scalar - vec.y), 
-                      static_cast<T>(scalar - vec.z));
-    }
+    // template<typename S>
+    // friend Vec3<T> operator-(S scalar, const Vec3<T>& vec) {
+    //     return Vec3<T>(static_cast<T>(scalar - static_cast<S>(vec.x)),
+    //                   static_cast<T>(scalar - static_cast<S>(vec.y)),
+    //                   static_cast<T>(scalar - static_cast<S>(vec.z)));
+    // }
     
-    template<typename S>
-    friend Vec3<T> operator*(S scalar, const Vec3<T>& vec) {
-        return Vec3<T>(static_cast<T>(scalar * vec.x), 
-                      static_cast<T>(scalar * vec.y), 
-                      static_cast<T>(scalar * vec.z));
-    }
+    // template<typename S>
+    // friend Vec3<T> operator*(S scalar, const Vec3<T>& vec) {
+    //     return Vec3<T>(static_cast<T>(scalar * vec.x), 
+    //                   static_cast<T>(scalar * vec.y), 
+    //                   static_cast<T>(scalar * vec.z));
+    // }
     
-    template<typename S>
-    friend Vec3<T> operator/(S scalar, const Vec3<T>& vec) {
-        return Vec3<T>(static_cast<T>(scalar / vec.x), 
-                      static_cast<T>(scalar / vec.y), 
-                      static_cast<T>(scalar / vec.z));
-    }
+    // template<typename S>
+    // friend Vec3<T> operator/(S scalar, const Vec3<T>& vec) {
+    //     return Vec3<T>(static_cast<T>(scalar / vec.x), 
+    //                   static_cast<T>(scalar / vec.y), 
+    //                   static_cast<T>(scalar / vec.z));
+    // }
 
     Vec3 reflect(const Vec3& normal) const {
         return *this - 2.0f * this->dot(normal) * normal;
