@@ -209,28 +209,28 @@ public:
     }
 
     bool rayCast(const Vec3f& origin, const Vec3f& direction, float maxDist, Vec3f& hitColor) {
-        direction.normalized();
-        if (abs(direction.length()) < EPSILON) return false;
+        Vec3f dir = direction.normalized();
+        if (abs(dir.length()) < EPSILON) return false;
 
-        Vec3f invDir = direction.safeInverse();
+        Vec3f invDir = dir.safeInverse();
         Vec3T currentVoxel = origin.floorToT();
 
-        if (direction.x == 0 || direction.y == 0 || direction.z == 0) {
-            return specialCases(origin, direction, maxDist, hitColor);
+        if (dir.x == 0 || dir.y == 0 || dir.z == 0) {
+            return specialCases(origin, dir, maxDist, hitColor);
         }
 
         if (!inGrid(currentVoxel)) {
-            std::pair<float,float> re = rayBoxIntersect(origin, direction);
+            std::pair<float,float> re = rayBoxIntersect(origin, dir);
             float tEntry = re.first;
             float tExit = re.second;
             if (tEntry < EPSILON || tExit < EPSILON) return false;
             float tStart = std::max(0.0f, tEntry);
             if (tStart > maxDist) return false;
-            Vec3f gridOrig = origin + direction * tStart;
+            Vec3f gridOrig = origin + dir * tStart;
             currentVoxel = gridOrig.floorToT();
         }
 
-        Vec3i8 step = Vec3i8(direction.x >= 0 ? 1 : -1, direction.y >= 0 ? 1 : -1, direction.z >= 0 ? 1 : -1);
+        Vec3i8 step = Vec3i8(dir.x >= 0 ? 1 : -1, dir.y >= 0 ? 1 : -1, dir.z >= 0 ? 1 : -1);
         Vec3f tMax;
         for (int i = 0; i < 3; i++) {
             if (step[i] > 0) {
