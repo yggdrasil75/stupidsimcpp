@@ -38,7 +38,7 @@ void generateNoiseGrid(VoxelGrid& grid, PNoise2& noise) {
                 
                 // Apply threshold to make some voxels "active"
                 // Higher threshold = sparser voxels
-                float threshold = 0.3f;
+                float threshold = 0.01;
                 float active = (noiseVal > threshold) ? noiseVal : 0.0f;
                 
                 // Create grayscale color based on noise value
@@ -80,7 +80,17 @@ bool renderView(const std::string& filename, VoxelGrid& grid, const Vec3f& posit
     return success;
 }
 
-// Function to rotate a vector around the Y axis
+Vec3f rotateX(const Vec3f& vec, float angle) {
+    TIME_FUNCTION;
+    float cosA = cos(angle);
+    float sinA = sin(angle);
+    return Vec3f(
+        vec.x,
+        vec.y * cosA - vec.z * sinA,
+        vec.y * sinA + vec.z * cosA
+    );
+}
+
 Vec3f rotateY(const Vec3f& vec, float angle) {
     TIME_FUNCTION;
     float cosA = cos(angle);
@@ -89,6 +99,17 @@ Vec3f rotateY(const Vec3f& vec, float angle) {
         vec.x * cosA + vec.z * sinA,
         vec.y,
         -vec.x * sinA + vec.z * cosA
+    );
+}
+
+Vec3f rotateZ(const Vec3f& vec, float angle) {
+    TIME_FUNCTION;
+    float cosA = cos(angle);
+    float sinA = sin(angle);
+    return Vec3f(
+        vec.x * cosA - vec.y * sinA,
+        vec.x * sinA + vec.y * cosA,
+        vec.z
     );
 }
 
@@ -113,8 +134,7 @@ int main() {
     // Camera distance from center (outside the grid)
     float cameraDistance = GRID_SIZE * 2.0f;
     
-    // Create 180-degree rotation around the Y axis
-    int numFrames = 2;
+    int numFrames = 360;
     
     // Base camera position (looking from front)
     Vec3f basePosition(0, 0, cameraDistance);
@@ -133,7 +153,45 @@ int main() {
         
         // Create filename with frame number
         char filename[256];
-        snprintf(filename, sizeof(filename), "output/frame_%03d.bmp", i);
+        snprintf(filename, sizeof(filename), "output/framey_%03d.bmp", i);
+        
+        std::cout << "Rendering frame " << i << "/" << numFrames 
+                    << " (angle: " << (angle * 360.0f / M_PI) << " degrees)" << std::endl;
+        
+        renderView(filename, grid, finalPos, rotatedDir, up);
+    }
+    
+    for (int i = 0; i <= numFrames; i++) {
+        float angle = (float)i / numFrames * M_PI;  // 0 to π (180 degrees)
+        
+        // Rotate camera position around Y axis
+        Vec3f rotatedPos = rotateZ(basePosition, angle);
+        Vec3f finalPos = gridCenter + rotatedPos;
+        //Vec3f rotatedDir = rotateY(baseDirection, angle);
+        Vec3f rotatedDir = (gridCenter - finalPos).normalized();
+        
+        // Create filename with frame number
+        char filename[256];
+        snprintf(filename, sizeof(filename), "output/framez_%03d.bmp", i);
+        
+        std::cout << "Rendering frame " << i << "/" << numFrames 
+                    << " (angle: " << (angle * 360.0f / M_PI) << " degrees)" << std::endl;
+        
+        renderView(filename, grid, finalPos, rotatedDir, up);
+    }
+    
+    for (int i = 0; i <= numFrames; i++) {
+        float angle = (float)i / numFrames * M_PI;  // 0 to π (180 degrees)
+        
+        // Rotate camera position around Y axis
+        Vec3f rotatedPos = rotateX(basePosition, angle);
+        Vec3f finalPos = gridCenter + rotatedPos;
+        //Vec3f rotatedDir = rotateY(baseDirection, angle);
+        Vec3f rotatedDir = (gridCenter - finalPos).normalized();
+        
+        // Create filename with frame number
+        char filename[256];
+        snprintf(filename, sizeof(filename), "output/framex_%03d.bmp", i);
         
         std::cout << "Rendering frame " << i << "/" << numFrames 
                     << " (angle: " << (angle * 360.0f / M_PI) << " degrees)" << std::endl;

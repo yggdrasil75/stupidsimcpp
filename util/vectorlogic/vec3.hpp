@@ -458,6 +458,7 @@ using Vec3i = Vec3<int>;
 using Vec3i8 = Vec3<int8_t>;
 using Vec3ui8 = Vec3<uint8_t>;
 using Vec3T = Vec3<size_t>;
+using Vec3b = Vec3<bool>;
 
 template<typename T>
 inline std::ostream& operator<<(std::ostream& os, const Vec3<T>& vec) {
