@@ -33,7 +33,7 @@ private:
         return rads * (M_PI / 180);
     }
 
-    static Mat4f lookAt(Vec3f const& eye, Vec3f const& center, Vec3f const& up) {
+    static Mat4f lookAt(const Vec3f& eye, const Vec3f& center, const Vec3f& up) {
         Vec3f const f = (center - eye).normalized();
         Vec3f const s = f.cross(up).normalized();
         Vec3f const u = s.cross(f);
@@ -65,7 +65,7 @@ private:
         return Result;
     }
 
-    std::pair<float,float> rayBoxIntersect(Vec3f origin, Vec3f direction) {
+    std::pair<float,float> rayBoxIntersect(const Vec3f& origin, const Vec3f& direction) {
         Vec3f tBMin = Vec3f(0,0,0);
         Vec3f tBMax = Vec3f(width, height, depth);
         float tmin = 0;
@@ -86,7 +86,7 @@ private:
     }
     
     //used to prevent division by 0 issues
-    bool specialCases(Vec3f origin, Vec3f direction, float maxDist, Vec3f hitColor) {
+    bool specialCases(const Vec3f& origin, const Vec3f& direction, float maxDist, Vec3f& hitColor) {
         float stepSize = 0.5;
         int maxSteps = maxDist/stepSize;
         for (int step = 0; step < maxSteps; ++step) {
@@ -159,7 +159,7 @@ public:
         return (voxl >= 0 && voxl.x < width && voxl.y < height && voxl.z < depth);
     }
 
-    std::vector<Vec3f> genPixelDirs(Vec3f pos, Vec3f dir, size_t imgWidth, size_t imgHeight, float fov) {
+    std::vector<Vec3f> genPixelDirs(const Vec3f& pos, const Vec3f& dir, size_t imgWidth, size_t imgHeight, float fov) {
         std::vector<Vec3f> dirs(imgWidth * imgHeight);
         float fovRad = radians(fov);
         float tanFov = tan(fovRad * 0.5);
@@ -168,14 +168,18 @@ public:
         Vec3f camRight = worldUp.cross(dir).normalized();
         Vec3f camUp = dir.cross(camRight).normalized();
         
-        for (int y = 0; y < height; ++y) {
-            float ndcY = 1 - (2 * y / (height - 1));
+        float imgWidthInv = 1 / (imgWidth - 1);
+        float imgHeightInv = 1 / (imgHeight - 1);
+        float aspectTanFov = aspect * tanFov;
+
+        for (int y = 0; y < imgHeight; ++y) {
+            float ndcY = 1 - (2 * y * imgHeightInv);
             float screenY = ndcY * tanFov;
-            for (int x = 0; x < width; ++x) {
-                float ndcX = (2 * x / (width - 1)) - 1;
-                float screenX = ndcX * aspect*tanFov;
+            for (int x = 0; x < imgWidth; ++x) {
+                float ndcX = (2 * x * imgWidthInv) - 1;
+                float screenX = ndcX * aspectTanFov;
                 Vec3f dir = (camRight * screenX + camUp * screenY + dir).normalized();
-                dirs[y*width+x] = dir;
+                dirs[y*imgWidth+x] = dir;
             }
         }
         return dirs;
@@ -197,8 +201,7 @@ public:
         return rayDirWorld.normalized();
     }
 
-    bool rayCast(Vec3f origin, Vec3f direction, float maxDist, Vec3f hitColor) {
-        TIME_FUNCTION;
+    bool rayCast(const Vec3f& origin, const Vec3f& direction, float maxDist, Vec3f& hitColor) {
         direction.normalized();
         if (abs(direction.length()) < EPSILON) return false;
 
@@ -216,41 +219,43 @@ public:
             if (tEntry < EPSILON || tExit < EPSILON) return false;
             float tStart = std::max(0.0f, tEntry);
             if (tStart > maxDist) return false;
-            Vec3f gridOrig = Vec3f(origin+direction*tStart);
+            Vec3f gridOrig = origin + direction * tStart;
             currentVoxel = gridOrig.floorToT();
         }
 
         Vec3i8 step = Vec3i8(direction.x >= 0 ? 1 : -1, direction.y >= 0 ? 1 : -1, direction.z >= 0 ? 1 : -1);
-        Vec3f nextVoxel = Vec3f(currentVoxel.x + (step.x>0 ? 1 : 0) - origin.x,
-                                currentVoxel.y + (step.y>0 ? 1 : 0) - origin.y,
-                                currentVoxel.z + (step.z>0 ? 1 : 0) - origin.z);
-        Vec3f tMax = nextVoxel*invDir;
+        Vec3f tMax;
+        for (int i = 0; i < 3; i++) {
+            if (step[i] > 0) {
+                tMax[i] = ((currentVoxel[i] + 1) - origin[i]) * invDir[i];
+            } else {
+                tMax[i] = (currentVoxel[i] - origin[i]) * invDir[i];
+            }
+        }
         Vec3f tDelta = invDir.abs();
         
         float aalpha = 0;
 
-        while (inGrid(currentVoxel)) {
+        while (inGrid(currentVoxel) && aalpha < 1) {
             Voxel cv = get(currentVoxel);
             if (cv.active > EPSILON) {
-                hitColor = (hitColor * aalpha) + (cv.color * cv.active);
+                float alpha = cv.active * (1.0f - aalpha);
+                Vec3f voxelColor = cv.color.toFloat() / 255.0f;
+                hitColor = hitColor + voxelColor * alpha;
                 aalpha += cv.active;
-            }
-            if (aalpha >= 1 ) {
-                //std::cout << "hit in normal case at: " << currentVoxel << " due to alpha overload" << std::endl;
-                return true;
             }
             
             if (tMax.x < tMax.y && tMax.x < tMax.z) {
                 if (tMax.x > maxDist) break;
-                currentVoxel = (currentVoxel.x + step.x, currentVoxel.y, currentVoxel.z);
+                currentVoxel.x += step.x;
                 tMax.x += tDelta.x;
             } else if (tMax.y < tMax.z) 
             {
-                currentVoxel = (currentVoxel.x, currentVoxel.y + step.y, currentVoxel.z);
+                currentVoxel.y += step.y;
                 tMax.y += tDelta.y;
             }
             else {
-                currentVoxel = (currentVoxel.x, currentVoxel.y, currentVoxel.z + step.z);
+                currentVoxel.z += step.z;
                 tMax.z += tDelta.z;
             }
         }
@@ -271,12 +276,17 @@ public:
     }
 
     void renderOut(std::vector<uint8_t>& output, size_t& outwidth, size_t& outheight, const Camera& cam) {
+        TIME_FUNCTION; 
         output.resize(outwidth * outheight * 3);
         Vec3f backgroundColor(0.1f, 0.1f, 1.0f);
         float maxDistance = std::sqrt(width*width + height*height + depth*depth) * 2.0f;
-        std::vector<Vec3f> dirs = genPixelDirs(cam.posfor.origin, cam.posfor.direction, outwidth, outheight, cam.fov);
-        for (size_t y = 0; y < outheight; y++) {
+        // std::vector<Vec3f> dirs = genPixelDirs(cam.posfor.origin, cam.posfor.direction, outwidth, outheight, cam.fov);
+
+        for (size_t y = 0; y < outheight; y++) {        
+            float yout = y * outwidth;
             for (size_t x = 0; x < outwidth; x++) {
+                // Vec3f rayDir = dirs[y*outwidth + x];
+                // Vec3f hitColor = Vec3f(0,0,0);
                 Vec3f rayDir = perPixelRayDir(x, y, outwidth, outheight, cam);
                 Ray3f ray(cam.posfor.origin, rayDir);
                 Vec3f hitPos;
@@ -292,7 +302,7 @@ public:
                 }
 
                 finalColor = finalColor.clamp(0, 1);
-                size_t pixelIndex = (y * outwidth + x) * 3;
+                size_t pixelIndex = (yout + x) * 3;
                 output[pixelIndex + 0] = static_cast<uint8_t>(finalColor.x * 255);
                 output[pixelIndex + 1] = static_cast<uint8_t>(finalColor.y * 255);
                 output[pixelIndex + 2] = static_cast<uint8_t>(finalColor.z * 255);

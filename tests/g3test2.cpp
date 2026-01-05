@@ -38,7 +38,7 @@ void generateNoiseGrid(VoxelGrid& grid, PNoise2& noise) {
                 
                 // Apply threshold to make some voxels "active"
                 // Higher threshold = sparser voxels
-                float threshold = 0.01;
+                float threshold = 0.3;
                 float active = (noiseVal > threshold) ? noiseVal : 0.0f;
                 
                 // Create grayscale color based on noise value
@@ -155,12 +155,16 @@ int main() {
         char filename[256];
         snprintf(filename, sizeof(filename), "output/framey_%03d.bmp", i);
         
-        std::cout << "Rendering frame " << i << "/" << numFrames 
-                    << " (angle: " << (angle * 360.0f / M_PI) << " degrees)" << std::endl;
+        // std::cout << "Rendering frame " << i << "/" << numFrames 
+        //             << " (angle: " << (angle * 360.0f / M_PI) << " degrees)" << std::endl;
         
         renderView(filename, grid, finalPos, rotatedDir, up);
     }
     
+    basePosition = Vec3f(0, 0, cameraDistance);
+    baseDirection = Vec3f(0, 0, -1);
+    up = Vec3f(0, 1, 0);
+
     for (int i = 0; i <= numFrames; i++) {
         float angle = (float)i / numFrames * M_PI;  // 0 to π (180 degrees)
         
@@ -174,12 +178,16 @@ int main() {
         char filename[256];
         snprintf(filename, sizeof(filename), "output/framez_%03d.bmp", i);
         
-        std::cout << "Rendering frame " << i << "/" << numFrames 
-                    << " (angle: " << (angle * 360.0f / M_PI) << " degrees)" << std::endl;
+        // std::cout << "Rendering frame " << i << "/" << numFrames 
+        //             << " (angle: " << (angle * 360.0f / M_PI) << " degrees)" << std::endl;
         
         renderView(filename, grid, finalPos, rotatedDir, up);
     }
     
+    basePosition = Vec3f(0, 0, cameraDistance);
+    baseDirection = Vec3f(0, 0, -1);
+    up = Vec3f(0, 1, 0);
+
     for (int i = 0; i <= numFrames; i++) {
         float angle = (float)i / numFrames * M_PI;  // 0 to π (180 degrees)
         
@@ -193,8 +201,8 @@ int main() {
         char filename[256];
         snprintf(filename, sizeof(filename), "output/framex_%03d.bmp", i);
         
-        std::cout << "Rendering frame " << i << "/" << numFrames 
-                    << " (angle: " << (angle * 360.0f / M_PI) << " degrees)" << std::endl;
+        // std::cout << "Rendering frame " << i << "/" << numFrames 
+        //             << " (angle: " << (angle * 360.0f / M_PI) << " degrees)" << std::endl;
         
         renderView(filename, grid, finalPos, rotatedDir, up);
     }
