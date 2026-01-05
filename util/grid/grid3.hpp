@@ -72,7 +72,7 @@ private:
         float tmax = INF;
         Vec3f invDir = direction.safeInverse();
         for (int i = 0; i < 3; ++i) {
-            if (abs(direction[i] < EPSILON)) {
+            if (abs(direction[i]) < EPSILON) {
                 if (origin[i] < tBMin[i] || origin[i] > tBMax[i]) return std::make_pair(0.0f, 0.0f);
                 float t1 = tBMin[i] - origin[i] * invDir[i];
                 float t2 = tBMax[i] - origin[i] * invDir[i];
@@ -127,31 +127,38 @@ public:
     }
 
     void set(size_t x, size_t y, size_t z, float active, Vec3ui8 color) {
-        //expand grid if needed. 
-        if (x >= 0 || y >= 0 || z >= 0) {
-            if (!(x < width)) {
+        set(Vec3T(x,y,z), active, color);
+    }
+
+    void set(Vec3T pos, float active, Vec3ui8 color) {
+        if (pos.x >= 0 || pos.y >= 0 || pos.z >= 0) {
+            if (!(pos.x < width)) {
                 //until resizing added:
                 return;
-                width = x;
+                width = pos.x;
                 resize();
             }
-            else if (!(y < height)) {
+            else if (!(pos.y < height)) {
                 //until resizing added:
                 return;
-                height = y;
+                height = pos.y;
                 resize();
             }
-            else if (!(z < depth)) {
+            else if (!(pos.z < depth)) {
                 //until resizing added:
                 return;
-                depth = z;
+                depth = pos.z;
                 resize();
             }
 
-            Voxel& v = get(x, y, z);
+            Voxel& v = get(pos);
             v.active = std::clamp(active, 0.0f, 1.0f);
             v.color = color;
         }
+    }
+
+    void set(Vec3T pos, Vec4ui8 rgbaval) {
+        set(pos, static_cast<float>(rgbaval.a / 255), rgbaval.toVec3());
     }
 
     template<typename T>
@@ -233,6 +240,42 @@ public:
             }
         }
         Vec3f tDelta = invDir.abs();
+        // Vec3f dir = direction.normalized();
+        // if (abs(dir.length()) < EPSILON) return false;
+
+        // Vec3f invDir = dir.safeInverse();
+        // Vec3T currentVoxel = origin.floorToT();
+
+        // if (dir.x == 0 || dir.y == 0 || dir.z == 0) {
+        //     return specialCases(origin, dir, maxDist, hitColor);
+        // }
+
+        // //if (!inGrid(currentVoxel)) {
+        //     std::pair<float,float> re = rayBoxIntersect(origin, dir);
+        //     float tEntry = re.first;
+        //     float tExit = re.second;
+        //     float tStart = std::max(0.0f, tEntry);
+        //     if (tEntry < EPSILON || tExit < EPSILON || tStart > maxDist) return false;
+        //     Vec3f gridOrig = origin + dir * tStart;
+        //     currentVoxel = gridOrig.floorToT();
+        // //}
+
+        // Vec3i8 step = Vec3i8(direction.x >= 0 ? 1 : -1, direction.y >= 0 ? 1 : -1, direction.z >= 0 ? 1 : -1);
+        // Vec3f tMax;
+        // Vec3f tDelta = invDir.abs();
+        // for (int i = 0; i < 3; i++) {
+        //     //if (step[i] != 0) {
+        //         if (step[i] > 0) {
+        //             tMax[i] = ((currentVoxel[i] + 1) - origin[i]) * invDir[i];
+        //         } else {
+        //             tMax[i] = (currentVoxel[i] - origin[i]) * invDir[i];
+        //         }
+        //         //tDelta[i] = fabs(1.0f / dir[i]);
+        //     //} else {
+        //         //tMax[i] = INF;
+        //         //tDelta[i] = INF;
+        //     //}
+        // }
         
         float aalpha = 0;
 

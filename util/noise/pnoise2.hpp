@@ -166,7 +166,6 @@ public:
 
     Vec4ui8 permuteColor(const Vec3<float>& point) {
         TIME_FUNCTION;
-        
         float noiseR = permute(point);
         float noiseG = permute(point + Vec3<float>(100.0f, 100.0f, 100.0f));
         float noiseB = permute(point + Vec3<float>(200.0f, 200.0f, 200.0f));
