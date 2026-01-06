@@ -222,25 +222,25 @@ public:
     bool castRay(const Vec3f& origin, const Vec3f& direction, float maxDist, Vec3f& hitColor) {
         Vec3f dir = direction.normalized();
         Vec3T pos = origin.floorToT();
-        Vec3i step = Vec3i(dir.x > 0 ? -1 : 1, dir.y > 0 ? -1 : 1, dir.z > 0 ? -1 : 1);
+        Vec3i8 step = Vec3i(dir.x > 0 ? 1 : -1, dir.y > 0 ? 1 : -1, dir.z > 0 ? 1 : -1);
         Vec3f tMax;
         Vec3f tDelta;
         if (abs(dir.x) > EPSILON) {
-            tMax.x = (static_cast<size_t>(pos.x) + (step.x > 0 ? 1 : 0) - pos.x) / dir.x;
+            tMax.x = static_cast<float>(static_cast<size_t>(pos.x) + (step.x > 0 ? 1 : 0) - pos.x) / dir.x;
             tDelta.x = step.x / dir.x;
         } else {
             tMax.x = INF;
             tDelta.x = INF;
         }
         if (abs(dir.y) > EPSILON) {
-            tMax.y = (static_cast<size_t>(pos.y) + (step.y > 0 ? 1 : 0) - pos.y) / dir.y;
+            tMax.y = static_cast<float>(static_cast<size_t>(pos.y) + (step.y > 0 ? 1 : 0) - pos.y) / dir.y;
             tDelta.y = step.y / dir.y;
         } else {
             tMax.y = INF;
             tDelta.y = INF;
         }
         if (abs(dir.z) > EPSILON) {
-            tMax.z = (static_cast<size_t>(pos.z) + (step.z > 0 ? 1 : 0) - pos.z) / dir.z;
+            tMax.z = static_cast<float>(static_cast<size_t>(pos.z) + (step.z > 0 ? 1 : 0) - pos.z) / dir.z;
             tDelta.z = step.z / dir.z;
         } else {
             tMax.z = INF;
@@ -368,7 +368,7 @@ public:
         Vec3f forward = (lookAt - CamPos).normalized();
         Vec3f right = forward.cross(up).normalized();
         Vec3f upCor = right.cross(forward).normalized();
-        float aspect = outW / outH;
+        float aspect = static_cast<float>(outW) / outH;
         float fovRad = radians(fov);
         float viewH = 2 * tan(fovRad / 2);
         float viewW = viewH * aspect;
@@ -380,10 +380,10 @@ public:
             float v = (y + 0.5) / outH - 0.5;
             for (size_t x = 0; x < outW; x++) {
                 float u = (x + 0.5) / outW - 0.5;
-                Vec3f rayDir = (forward + right * (u + viewW) + upCor * (v * viewH)).normalized();
+                Vec3f rayDir = (forward + right * (u * viewW) + upCor * (v * viewH)).normalized();
                 Vec3f hitColor = Vec3f(0,0,0);
                 bool hit = castRay(CamPos, rayDir, maxDist, hitColor);
-                size_t idx = y*outW+x;
+                size_t idx = (y*outH+x) * 3;
                 if (!hit) {
                     hitColor = Vec3f(0.1,0.1,1.0f);
                 } else {
@@ -413,13 +413,13 @@ public:
         std::vector<uint8_t> colorBuffer(outwidth * outheight * 3);
         #pragma omp parallel for
         for (size_t y = 0; y < outheight; y++) {
-            float v = (y + 0.5) / outheight - 0.5;
+            float v = y * outheight;
             for (size_t x = 0; x < outwidth; x++) {
-                float u = (x + 0.5) / outwidth - 0.5;
+                float u = x * outwidth;
                 Vec3f rayDir = (forward + right * (u + viewW) + upCor * (v * viewH)).normalized();
                 Vec3f hitColor = Vec3f(0,0,0);
                 bool hit = castRay(cam.posfor.origin, rayDir, maxDist, hitColor);
-                size_t idx = y*outwidth+x;
+                size_t idx = (y*outheight+x) * 3;
                 if (!hit) {
                     hitColor = Vec3f(0.1,0.1,1.0f);
                 } else {
