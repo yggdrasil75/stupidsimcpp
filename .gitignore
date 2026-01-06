@@ -2,3 +2,6 @@
 /bin/
 /web/output/
 imgui.ini
+#prototyping in python below
+*.py
+/venv/

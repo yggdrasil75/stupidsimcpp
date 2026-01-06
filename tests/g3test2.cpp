@@ -43,10 +43,10 @@ void generateNoiseGrid(VoxelGrid& grid, PNoise2& noise) {
                 
                 // Create grayscale color based on noise value
                 uint8_t grayValue = static_cast<uint8_t>(noiseVal * 255);
-                Vec3ui8 color(grayValue, grayValue, grayValue);
+                Vec3ui8 color(grayValue, grayValue, 0);
                 #pragma omp critical
                 if (active > threshold) {
-                    grid.set(x, y, z, active, color);
+                    grid.set(x, y, z, true, color);
                 }
             }
         }
@@ -66,16 +66,18 @@ bool renderView(const std::string& filename, VoxelGrid& grid, const Vec3f& posit
     size_t height = RENDER_HEIGHT;
     
     // Render the view
+    //frame output = grid.renderFrame(position, direction, up, 40, RENDER_WIDTH, RENDER_HEIGHT);
     grid.renderOut(renderBuffer, width, height, cam);
     
     // Save to BMP
+    //bool success = BMPWriter::saveBMP(filename, output);
     bool success = BMPWriter::saveBMP(filename, renderBuffer, width, height);
     
-    if (success) {
-        std::cout << "Saved: " << filename << std::endl;
-    } else {
-        std::cout << "Failed to save: " << filename << std::endl;
-    }
+    // if (success) {
+    //     std::cout << "Saved: " << filename << std::endl;
+    // } else {
+    //     std::cout << "Failed to save: " << filename << std::endl;
+    // }
     
     return success;
 }
