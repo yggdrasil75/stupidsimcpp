@@ -66,12 +66,12 @@ bool renderView(const std::string& filename, VoxelGrid& grid, const Vec3f& posit
     size_t height = RENDER_HEIGHT;
     
     // Render the view
-    //frame output = grid.renderFrame(position, direction, up, 40, RENDER_WIDTH, RENDER_HEIGHT);
-    grid.renderOut(renderBuffer, width, height, cam);
+    frame output = grid.renderFrame(position, direction, up, 40, RENDER_WIDTH, RENDER_HEIGHT);
+    //grid.renderOut(renderBuffer, width, height, cam);
     
     // Save to BMP
-    //bool success = BMPWriter::saveBMP(filename, output);
-    bool success = BMPWriter::saveBMP(filename, renderBuffer, width, height);
+    bool success = BMPWriter::saveBMP(filename, output);
+    //bool success = BMPWriter::saveBMP(filename, renderBuffer, width, height);
     
     // if (success) {
     //     std::cout << "Saved: " << filename << std::endl;
@@ -143,52 +143,52 @@ int main() {
     Vec3f baseDirection(0, 0, -1);  // Looking towards negative Z (towards center)
     Vec3f up(0, 1, 0);
     
-    // Render frames around 180 degrees
-    for (int i = 0; i <= numFrames; i++) {
-        float angle = (float)i / numFrames * M_PI;  // 0 to π (180 degrees)
+    // // Render frames around 180 degrees
+    // for (int i = 0; i <= numFrames; i++) {
+    //     float angle = (float)i / numFrames * M_PI;  // 0 to π (180 degrees)
         
-        // Rotate camera position around Y axis
-        Vec3f rotatedPos = rotateY(basePosition, angle);
-        Vec3f finalPos = gridCenter + rotatedPos;
-        //Vec3f rotatedDir = rotateY(baseDirection, angle);
-        Vec3f rotatedDir = (gridCenter - finalPos).normalized();
+    //     // Rotate camera position around Y axis
+    //     Vec3f rotatedPos = rotateY(basePosition, angle);
+    //     Vec3f finalPos = gridCenter + rotatedPos;
+    //     //Vec3f rotatedDir = rotateY(baseDirection, angle);
+    //     Vec3f rotatedDir = (gridCenter - finalPos).normalized();
         
-        // Create filename with frame number
-        char filename[256];
-        snprintf(filename, sizeof(filename), "output/framey_%03d.bmp", i);
+    //     // Create filename with frame number
+    //     char filename[256];
+    //     snprintf(filename, sizeof(filename), "output/framey_%03d.bmp", i);
         
-        // std::cout << "Rendering frame " << i << "/" << numFrames 
-        //             << " (angle: " << (angle * 360.0f / M_PI) << " degrees)" << std::endl;
+    //     // std::cout << "Rendering frame " << i << "/" << numFrames 
+    //     //             << " (angle: " << (angle * 360.0f / M_PI) << " degrees)" << std::endl;
         
-        renderView(filename, grid, finalPos, rotatedDir, up);
-    }
+    //     renderView(filename, grid, finalPos, rotatedDir, up);
+    // }
     
-    basePosition = Vec3f(0, 0, cameraDistance);
-    baseDirection = Vec3f(0, 0, -1);
-    up = Vec3f(0, 1, 0);
+    // basePosition = Vec3f(0, 0, cameraDistance);
+    // baseDirection = Vec3f(0, 0, -1);
+    // up = Vec3f(0, 1, 0);
 
-    for (int i = 0; i <= numFrames; i++) {
-        float angle = (float)i / numFrames * M_PI;  // 0 to π (180 degrees)
+    // for (int i = 0; i <= numFrames; i++) {
+    //     float angle = (float)i / numFrames * M_PI;  // 0 to π (180 degrees)
         
-        // Rotate camera position around Y axis
-        Vec3f rotatedPos = rotateZ(basePosition, angle);
-        Vec3f finalPos = gridCenter + rotatedPos;
-        //Vec3f rotatedDir = rotateY(baseDirection, angle);
-        Vec3f rotatedDir = (gridCenter - finalPos).normalized();
+    //     // Rotate camera position around Y axis
+    //     Vec3f rotatedPos = rotateZ(basePosition, angle);
+    //     Vec3f finalPos = gridCenter + rotatedPos;
+    //     //Vec3f rotatedDir = rotateY(baseDirection, angle);
+    //     Vec3f rotatedDir = (gridCenter - finalPos).normalized();
         
-        // Create filename with frame number
-        char filename[256];
-        snprintf(filename, sizeof(filename), "output/framez_%03d.bmp", i);
+    //     // Create filename with frame number
+    //     char filename[256];
+    //     snprintf(filename, sizeof(filename), "output/framez_%03d.bmp", i);
         
-        // std::cout << "Rendering frame " << i << "/" << numFrames 
-        //             << " (angle: " << (angle * 360.0f / M_PI) << " degrees)" << std::endl;
+    //     // std::cout << "Rendering frame " << i << "/" << numFrames 
+    //     //             << " (angle: " << (angle * 360.0f / M_PI) << " degrees)" << std::endl;
         
-        renderView(filename, grid, finalPos, rotatedDir, up);
-    }
+    //     renderView(filename, grid, finalPos, rotatedDir, up);
+    // }
     
-    basePosition = Vec3f(0, 0, cameraDistance);
-    baseDirection = Vec3f(0, 0, -1);
-    up = Vec3f(0, 1, 0);
+    // basePosition = Vec3f(0, 0, cameraDistance);
+    // baseDirection = Vec3f(0, 0, -1);
+    // up = Vec3f(0, 1, 0);
 
     for (int i = 0; i <= numFrames; i++) {
         float angle = (float)i / numFrames * M_PI;  // 0 to π (180 degrees)
@@ -203,8 +203,8 @@ int main() {
         char filename[256];
         snprintf(filename, sizeof(filename), "output/framex_%03d.bmp", i);
         
-        // std::cout << "Rendering frame " << i << "/" << numFrames 
-        //             << " (angle: " << (angle * 360.0f / M_PI) << " degrees)" << std::endl;
+        std::cout << "Rendering frame " << i << "/" << numFrames 
+                    << " (angle: " << (angle * 360.0f / M_PI) << " degrees)" << std::endl;
         
         renderView(filename, grid, finalPos, rotatedDir, up);
     }

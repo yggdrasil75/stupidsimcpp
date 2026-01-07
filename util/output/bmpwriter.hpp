@@ -133,9 +133,9 @@ public:
                 
                 // Input is already BGR: pixels[i]=b, pixels[i+1]=g, pixels[i+2]=r
                 // So we can copy directly
-                row[dstOffset] = srcRow[srcOffset];     // B
+                row[dstOffset + 0] = srcRow[srcOffset + 2]; // B
                 row[dstOffset + 1] = srcRow[srcOffset + 1]; // G
-                row[dstOffset + 2] = srcRow[srcOffset + 2]; // R
+                row[dstOffset + 2] = srcRow[srcOffset + 0]; // R
             }
             file.write(reinterpret_cast<const char*>(row.data()), rowSize);
         }

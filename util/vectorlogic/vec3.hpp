@@ -247,7 +247,6 @@ public:
         return Vec3<bool>(comp(x, other.x), comp(y, other.y), comp(z, other.z));
     }
 
-
     Vec3 abs() const {
         return Vec3(std::abs(x), std::abs(y), std::abs(z));
     }
@@ -266,6 +265,10 @@ public:
 
     Vec3<float> toFloat() const {
         return Vec3<float>(static_cast<float>(x), static_cast<float>(y), static_cast<float>(z));
+    }
+
+    Vec3<double> toDouble() const {
+        return Vec3<double>(static_cast<double>(x), static_cast<double>(y), static_cast<double>(z));
     }
     
     Vec3 ceil() const {
