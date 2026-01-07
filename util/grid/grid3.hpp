@@ -197,7 +197,7 @@ public:
         return gridSize.z;
     }
 
-    frame renderFrame(const Vec3f& CamPos, const Vec3f& dir, const Vec3f& up, float fov, size_t outW, size_t outH) {
+    frame renderFrame(const Vec3f& CamPos, const Vec3f& dir, const Vec3f& up, float fov, size_t outW, size_t outH, frame::colormap colorformat = frame::colormap::RGB) {
         TIME_FUNCTION;
         Vec3f forward = (dir - CamPos).normalized();
         Vec3f right = forward.cross(up).normalized();
@@ -234,10 +234,24 @@ public:
                 hitVoxels.clear();
                 hitVoxels.shrink_to_fit();
                 // Set pixel color in buffer
-                size_t idx = (y * outW + x) * 3;
-                colorBuffer[idx + 0] = hitColor.x;
-                colorBuffer[idx + 1] = hitColor.y;
-                colorBuffer[idx + 2] = hitColor.z;
+                switch (colorformat) {
+                    case frame::colormap::RGB: {
+                        size_t idx = (y * outW + x) * 3;
+                        colorBuffer[idx + 0] = hitColor.x;
+                        colorBuffer[idx + 1] = hitColor.y;
+                        colorBuffer[idx + 2] = hitColor.z;
+                        break;
+                    }
+                    case frame::colormap::BGRA: {
+                        size_t idx = (y * outW + x) * 4;
+                        colorBuffer[idx + 3] = hitColor.x;
+                        colorBuffer[idx + 2] = hitColor.y;
+                        colorBuffer[idx + 1] = hitColor.z;
+                        colorBuffer[idx + 0] = 1;
+                        break;
+                    }
+
+                }
             }
         }
         

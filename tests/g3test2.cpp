@@ -1,228 +1,176 @@
-// main.cpp - Noise Grid Generator and Renderer
 #include <iostream>
-#include <memory>
-#include <cmath>
 #include <vector>
 #include "../util/grid/grid3.hpp"
 #include "../util/output/bmpwriter.hpp"
-#include "../util/noise/pnoise2.hpp"
+#include "../util/output/frame.hpp"
 #include "../util/timing_decorator.cpp"
 
-// Constants
-const size_t GRID_SIZE = 128;
-const size_t RENDER_WIDTH = 512;
-const size_t RENDER_HEIGHT = 512;
+#include "../imgui/imgui.h"
+#include "../imgui/backends/imgui_impl_glfw.h"
+#include "../imgui/backends/imgui_impl_opengl3.h"
+#include <GLFW/glfw3.h>
+#include "../stb/stb_image.h"
 
-// Function to generate grayscale noise grid
-void generateNoiseGrid(VoxelGrid& grid, PNoise2& noise) {
-    TIME_FUNCTION;
-    std::cout << "Generating 1024x1024x1024 noise grid..." << std::endl;
-    
-    // Generate Perlin noise in the grid
-    #pragma omp parallel for
-    for (size_t z = 0; z < GRID_SIZE; ++z) {
+struct defaults {
+    int outWidth = 1024;
+    int outHeight = 1024;
+    size_t gridWidth = 1024;
+    size_t gridHeight = 1024;
+    size_t gridDepth = 1024;
+    float fps = 30.0f;
+    PNoise2 noise = PNoise2(42);
+};
+
+std::mutex PreviewMutex;
+frame currentPreviewFrame;
+GLuint textu = 0;
+bool updatePreview;
+
+VoxelGrid setup(defaults config) {
+    float threshold = 0.3 * 255;
+    VoxelGrid grid(config.gridWidth, config.gridHeight, config.gridDepth);
+    std::cout << "Generating grid of size " << config.gridWidth << "x" << config.gridHeight << "x" << config.gridDepth << std::endl;
+    for (size_t z = 0; z < config.gridDepth; ++z) {
         if (z % 64 == 0) {
-            std::cout << "Processing layer " << z << " of " << GRID_SIZE << std::endl;
+            std::cout << "Processing layer " << z << " of " << config.gridDepth << std::endl;
         }
-        
-        //#pragma omp parallel for
-        for (size_t y = 0; y < GRID_SIZE; ++y) {
-            //#pragma omp parallel for
-            for (size_t x = 0; x < GRID_SIZE; ++x) {
-                // Create 3D noise coordinates (scaled for better frequency)
-                float scale = 0.05f; // Controls noise frequency
-                float noiseVal = noise.permute(Vec3f(x * scale, y * scale, z * scale));
-                
-                // Convert from [-1, 1] to [0, 1] range
-                //float normalizedNoise = (noiseVal + 1.0f) * 0.5f;
-                
-                // Apply threshold to make some voxels "active"
-                // Higher threshold = sparser voxels
-                float threshold = 0.3;
-                float active = (noiseVal > threshold) ? noiseVal : 0.0f;
-                
-                // Create grayscale color based on noise value
-                uint8_t grayValue = static_cast<uint8_t>(noiseVal * 255);
-                Vec3ui8 color(grayValue, grayValue, 0);
-                #pragma omp critical
-                if (active > threshold) {
-                    grid.set(x, y, z, true, color);
+
+        for (size_t y = 0; y < config.gridWidth; ++y) {
+            for (size_t x = 0; x < config.gridHeight; ++x) {
+                Vec4ui8 noisecolor = config.noise.permuteColor(Vec3f( x / 64, y / 64, z / 64));
+                if (noisecolor.a > threshold) {
+                    grid.set(Vec3T(x,y,z), true, Vec3ui8(noisecolor.xyz()));
                 }
             }
         }
     }
-    
     std::cout << "Noise grid generation complete!" << std::endl;
 }
 
-// Function to render grid from a specific viewpoint
-bool renderView(const std::string& filename, VoxelGrid& grid, const Vec3f& position, 
-                const Vec3f& direction, const Vec3f& up = Vec3f(0, 1, 0)) {
-    TIME_FUNCTION;
-    Camera cam(position, direction, up, 40);
+void livePreview(VoxelGrid& grid, defaults config, Camera cam) {
+    std::lock_guard<std::mutex> lock(PreviewMutex);
     
-    std::vector<uint8_t> renderBuffer;
-    size_t width = RENDER_WIDTH;
-    size_t height = RENDER_HEIGHT;
+    currentPreviewFrame = grid.renderFrame(cam.posfor.origin, cam.posfor.direction, cam.up, cam.fov, config.outWidth, config.outHeight, frame::colormap::BGRA);
+
+    glGenTextures(1, &textu);
+    glBindTexture(GL_TEXTURE_2D, textu);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
     
-    // Render the view
-    frame output = grid.renderFrame(position, direction, up, 40, RENDER_WIDTH, RENDER_HEIGHT);
-    //grid.renderOut(renderBuffer, width, height, cam);
+    glBindTexture(GL_TEXTURE_2D, textu);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, currentPreviewFrame.getWidth(), currentPreviewFrame.getHeight(), 
+                 0, GL_RGBA, GL_UNSIGNED_BYTE, currentPreviewFrame.getData().data());
     
-    // Save to BMP
-    bool success = BMPWriter::saveBMP(filename, output);
-    //bool success = BMPWriter::saveBMP(filename, renderBuffer, width, height);
-    
-    // if (success) {
-    //     std::cout << "Saved: " << filename << std::endl;
-    // } else {
-    //     std::cout << "Failed to save: " << filename << std::endl;
-    // }
-    
-    return success;
+    updatePreview = true;
 }
 
-Vec3f rotateX(const Vec3f& vec, float angle) {
-    TIME_FUNCTION;
-    float cosA = cos(angle);
-    float sinA = sin(angle);
-    return Vec3f(
-        vec.x,
-        vec.y * cosA - vec.z * sinA,
-        vec.y * sinA + vec.z * cosA
-    );
+static void glfw_error_callback(int error, const char* description)
+{
+    fprintf(stderr, "GLFW Error %d: %s\n", error, description);
 }
 
-Vec3f rotateY(const Vec3f& vec, float angle) {
-    TIME_FUNCTION;
-    float cosA = cos(angle);
-    float sinA = sin(angle);
-    return Vec3f(
-        vec.x * cosA + vec.z * sinA,
-        vec.y,
-        -vec.x * sinA + vec.z * cosA
-    );
-}
-
-Vec3f rotateZ(const Vec3f& vec, float angle) {
-    TIME_FUNCTION;
-    float cosA = cos(angle);
-    float sinA = sin(angle);
-    return Vec3f(
-        vec.x * cosA - vec.y * sinA,
-        vec.x * sinA + vec.y * cosA,
-        vec.z
-    );
-}
 
 int main() {
-    TIME_FUNCTION;
-    std::cout << "=== Noise Grid Generator and Renderer ===" << std::endl;
-    std::cout << "Grid Size: 1024x1024x1024 voxels" << std::endl;
-    std::cout << "Render Size: 512x512 pixels" << std::endl;
-    
-    // Initialize Perlin noise generator
-    PNoise2 noise;
-    
-    // Create voxel grid
-    VoxelGrid grid(GRID_SIZE, GRID_SIZE, GRID_SIZE);
-    
-    // Generate noise grid
-    generateNoiseGrid(grid, noise);
-    
-    // Define center of the grid for camera positioning
-    Vec3f gridCenter(GRID_SIZE / 2.0f, GRID_SIZE / 2.0f, GRID_SIZE / 2.0f);
-    
-    // Camera distance from center (outside the grid)
-    float cameraDistance = GRID_SIZE * 2.0f;
-    
-    int numFrames = 360;
-    
-    // Base camera position (looking from front)
-    Vec3f basePosition(0, 0, cameraDistance);
-    Vec3f baseDirection(0, 0, -1);  // Looking towards negative Z (towards center)
-    Vec3f up(0, 1, 0);
-    
-    // // Render frames around 180 degrees
-    // for (int i = 0; i <= numFrames; i++) {
-    //     float angle = (float)i / numFrames * M_PI;  // 0 to π (180 degrees)
-        
-    //     // Rotate camera position around Y axis
-    //     Vec3f rotatedPos = rotateY(basePosition, angle);
-    //     Vec3f finalPos = gridCenter + rotatedPos;
-    //     //Vec3f rotatedDir = rotateY(baseDirection, angle);
-    //     Vec3f rotatedDir = (gridCenter - finalPos).normalized();
-        
-    //     // Create filename with frame number
-    //     char filename[256];
-    //     snprintf(filename, sizeof(filename), "output/framey_%03d.bmp", i);
-        
-    //     // std::cout << "Rendering frame " << i << "/" << numFrames 
-    //     //             << " (angle: " << (angle * 360.0f / M_PI) << " degrees)" << std::endl;
-        
-    //     renderView(filename, grid, finalPos, rotatedDir, up);
-    // }
-    
-    // basePosition = Vec3f(0, 0, cameraDistance);
-    // baseDirection = Vec3f(0, 0, -1);
-    // up = Vec3f(0, 1, 0);
-
-    // for (int i = 0; i <= numFrames; i++) {
-    //     float angle = (float)i / numFrames * M_PI;  // 0 to π (180 degrees)
-        
-    //     // Rotate camera position around Y axis
-    //     Vec3f rotatedPos = rotateZ(basePosition, angle);
-    //     Vec3f finalPos = gridCenter + rotatedPos;
-    //     //Vec3f rotatedDir = rotateY(baseDirection, angle);
-    //     Vec3f rotatedDir = (gridCenter - finalPos).normalized();
-        
-    //     // Create filename with frame number
-    //     char filename[256];
-    //     snprintf(filename, sizeof(filename), "output/framez_%03d.bmp", i);
-        
-    //     // std::cout << "Rendering frame " << i << "/" << numFrames 
-    //     //             << " (angle: " << (angle * 360.0f / M_PI) << " degrees)" << std::endl;
-        
-    //     renderView(filename, grid, finalPos, rotatedDir, up);
-    // }
-    
-    // basePosition = Vec3f(0, 0, cameraDistance);
-    // baseDirection = Vec3f(0, 0, -1);
-    // up = Vec3f(0, 1, 0);
-
-    for (int i = 0; i <= numFrames; i++) {
-        float angle = (float)i / numFrames * M_PI;  // 0 to π (180 degrees)
-        
-        // Rotate camera position around Y axis
-        Vec3f rotatedPos = rotateX(basePosition, angle);
-        Vec3f finalPos = gridCenter + rotatedPos;
-        //Vec3f rotatedDir = rotateY(baseDirection, angle);
-        Vec3f rotatedDir = (gridCenter - finalPos).normalized();
-        
-        // Create filename with frame number
-        char filename[256];
-        snprintf(filename, sizeof(filename), "output/framex_%03d.bmp", i);
-        
-        std::cout << "Rendering frame " << i << "/" << numFrames 
-                    << " (angle: " << (angle * 360.0f / M_PI) << " degrees)" << std::endl;
-        
-        renderView(filename, grid, finalPos, rotatedDir, up);
+    glfwSetErrorCallback(glfw_error_callback);
+    if (!glfwInit()) {
+        std::cerr << "gui stuff is dumb in c++." << std::endl;
+        glfwTerminate();
+        return 1;
     }
+    // COPIED VERBATIM FROM IMGUI.
+    #if defined(IMGUI_IMPL_OPENGL_ES2)
+        // GL ES 2.0 + GLSL 100 (WebGL 1.0)
+        const char* glsl_version = "#version 100";
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2);
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
+        glfwWindowHint(GLFW_CLIENT_API, GLFW_OPENGL_ES_API);
+    #elif defined(IMGUI_IMPL_OPENGL_ES3)
+        // GL ES 3.0 + GLSL 300 es (WebGL 2.0)
+        const char* glsl_version = "#version 300 es";
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
+        glfwWindowHint(GLFW_CLIENT_API, GLFW_OPENGL_ES_API);
+    #elif defined(__APPLE__)
+        // GL 3.2 + GLSL 150
+        const char* glsl_version = "#version 150";
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
+        glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);  // 3.2+ only
+        glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);            // Required on Mac
+    #else
+        // GL 3.0 + GLSL 130
+        const char* glsl_version = "#version 130";
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
+        //glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);  // 3.2+ only
+        //glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);            // 3.0+ only
+    #endif
+
+    bool application_not_closed = true;
+    GLFWwindow* window = glfwCreateWindow((int)(1280), (int)(800), "voxelgrid live renderer", nullptr, nullptr);
+    if (window == nullptr)
+        return 1;
+    glfwMakeContextCurrent(window);
+    glfwSwapInterval(1);
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO(); (void)io;
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    ImGui::StyleColorsDark();
+    ImGuiStyle& style = ImGui::GetStyle();
+    ImGui_ImplGlfw_InitForOpenGL(window, true);
+
+    #ifdef __EMSCRIPTEN__
+        ImGui_ImplGlfw_InstallEmscriptenCallbacks(window, "#canvas");
+    #endif
+        ImGui_ImplOpenGL3_Init(glsl_version);
+
+    bool show_demo_window = true;
+    bool show_another_window = false;
+    ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
+    while (!glfwWindowShouldClose(window)) {
+        glfwPollEvents();
+
+        // Start the Dear ImGui frame
+        ImGui_ImplOpenGL3_NewFrame();
+        ImGui_ImplGlfw_NewFrame();
+        ImGui::NewFrame();
+        {
+            ImGui::Begin("settings");
+        }
+        // std::cout << "ending frame" << std::endl;
+        ImGui::Render();
+        int display_w, display_h;
+        glfwGetFramebufferSize(window, &display_w, &display_h);
+        glViewport(0, 0, display_w, display_h);
+        glClearColor(clear_color.x * clear_color.w, clear_color.y * clear_color.w, clear_color.z * clear_color.w, clear_color.w);
+        glClear(GL_COLOR_BUFFER_BIT);
+        
+        // std::cout << "rendering" << std::endl;
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+        glfwSwapBuffers(window);
+        //mainlogicthread.join();
+        
+        // std::cout << "swapping buffers" << std::endl;
+    }
+
     
-    std::cout << "\nRendering zenith and nadir views..." << std::endl;
-    renderView("output/zenith_view.bmp", grid,
-                gridCenter + Vec3f(0, cameraDistance, 0),
-                Vec3f(0, -1, 0),   // Look down
-                Vec3f(0, 0, -1));  // Adjust up vector for proper orientation
-    
-    // Nadir view (looking from below)
-    renderView("output/nadir_view.bmp", grid,
-                gridCenter + Vec3f(0, -cameraDistance, 0),
-                Vec3f(0, 1, 0),    // Look up
-                Vec3f(0, 0, 1));   // Adjust up vector
-    
-    std::cout << "\n=== All renders complete! ===" << std::endl;
-    
+    // std::cout << "shutting down" << std::endl;
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+    ImGui::DestroyContext();
+
+    // std::cout << "destroying" << std::endl;
+    glfwDestroyWindow(window);
+    if (textu != 0) {
+        glDeleteTextures(1, &textu);
+        textu = 0;
+    }
+    glfwTerminate();
     FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
+    
+    // std::cout << "printing" << std::endl;
     return 0;
 }
