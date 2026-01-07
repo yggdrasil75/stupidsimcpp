@@ -25,6 +25,10 @@ std::mutex PreviewMutex;
 frame currentPreviewFrame;
 GLuint textu = 0;
 bool updatePreview;
+struct Shared {
+    std::mutex mutex;
+    VoxelGrid grid;
+};
 
 VoxelGrid setup(defaults config) {
     float threshold = 0.3 * 255;
