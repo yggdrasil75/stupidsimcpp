@@ -220,9 +220,11 @@ public:
         float maxDist = std::sqrt(gridSize.lengthSquared()) * binSize;
         frame outFrame(outH, outW, frame::colormap::RGB);
         std::vector<uint8_t> colorBuffer(outW * outH * 3);
+        std::cout << "a" << std::endl;
         #pragma omp parallel for
         for (int y = 0; y < outH; y++) {
             float v = (static_cast<float>(y) / static_cast<float>(outH - 1)) - 0.5f;    
+            std::cout << "b";
             for (int x = 0; x < outW; x++) {
                 std::vector<Vec3i> hitVoxels;
                 float u = (static_cast<float>(x) / static_cast<float>(outW - 1)) - 0.5f;
@@ -242,6 +244,7 @@ public:
                         }
                     }
                 }
+                std::cout << "c";
                 hitVoxels.clear();
                 hitVoxels.shrink_to_fit();
                 // Set pixel color in buffer
@@ -264,9 +267,11 @@ public:
 
                 }
             }
+            std::cout << "b" << std::endl;
         }
         
         outFrame.setData(colorBuffer);
+        std::cout << "d" << std::endl;
         return outFrame;
     }
 };

@@ -22,9 +22,11 @@ struct defaults {
 };
 
 std::mutex PreviewMutex;
-frame currentPreviewFrame;
 GLuint textu = 0;
-bool updatePreview;
+bool textureInitialized = false;
+bool updatePreview = false;
+bool previewRequested = false;
+
 struct Shared {
     std::mutex mutex;
     VoxelGrid grid;
@@ -39,11 +41,11 @@ void setup(defaults config, VoxelGrid& grid) {
             std::cout << "Processing layer " << z << " of " << config.gridDepth << std::endl;
         }
 
-        for (int y = 0; y < config.gridWidth; ++y) {
-            for (int x = 0; x < config.gridHeight; ++x) {
-                Vec4ui8 noisecolor = config.noise.permuteColor(Vec3f( x / 64, y / 64, z / 64));
+        for (int y = 0; y < config.gridHeight; ++y) {
+            for (int x = 0; x < config.gridWidth; ++x) {
+                Vec4ui8 noisecolor = config.noise.permuteColor(Vec3f( static_cast<float>(x) / 64, static_cast<float>(y) / 64, static_cast<float>(z) / 64));
                 if (noisecolor.a > threshold) {
-                    grid.set(Vec3i(x,y,z), true, Vec3ui8(noisecolor.xyz()));
+                    grid.set(Vec3i(x, y, z), true, Vec3ui8(noisecolor.xyz()));
                 }
             }
         }
@@ -52,29 +54,30 @@ void setup(defaults config, VoxelGrid& grid) {
 }
 
 void livePreview(VoxelGrid& grid, defaults config, Camera cam) {
-    updatePreview = false;
-    std::lock_guard<std::mutex> lock(PreviewMutex);
-    
-    currentPreviewFrame = grid.renderFrame(cam.posfor.origin, cam.posfor.direction, cam.up, cam.fov, config.outWidth, config.outHeight, frame::colormap::BGRA);
-
-    glGenTextures(1, &textu);
-    glBindTexture(GL_TEXTURE_2D, textu);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-    
-    glBindTexture(GL_TEXTURE_2D, textu);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, currentPreviewFrame.getWidth(), currentPreviewFrame.getHeight(), 
-                 0, GL_RGBA, GL_UNSIGNED_BYTE, currentPreviewFrame.getData().data());
-    
     updatePreview = true;
+    //std::lock_guard<std::mutex> lock(PreviewMutex);
+    frame currentPreviewFrame = grid.renderFrame(cam.posfor.origin, cam.posfor.direction, cam.up, cam.fov, config.outWidth, config.outHeight, frame::colormap::BGRA);
+
+    // glGenTextures(1, &textu);
+    // glBindTexture(GL_TEXTURE_2D, textu);
+    // glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    // glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    // glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    
+    // glBindTexture(GL_TEXTURE_2D, textu);
+    // glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, currentPreviewFrame.getWidth(), currentPreviewFrame.getHeight(), 
+    //              0, GL_RGBA, GL_UNSIGNED_BYTE, currentPreviewFrame.getData().data());
+    
+    std::cout << "freeing previous frame" << std::endl;
+    currentPreviewFrame.free();
+    updatePreview = false;
+    textureInitialized = true;
 }
 
 static void glfw_error_callback(int error, const char* description)
 {
     fprintf(stderr, "GLFW Error %d: %s\n", error, description);
 }
-
 
 int main() {
     glfwSetErrorCallback(glfw_error_callback);
@@ -122,7 +125,7 @@ int main() {
     glfwSwapInterval(1);
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
-    ImGuiIO& io = ImGui::GetIO(); 
+    ImGuiIO& io = ImGui::GetIO();
     (void)io;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     ImGui::StyleColorsDark();
@@ -132,7 +135,7 @@ int main() {
     #ifdef __EMSCRIPTEN__
         ImGui_ImplGlfw_InstallEmscriptenCallbacks(window, "#canvas");
     #endif
-        ImGui_ImplOpenGL3_Init(glsl_version);
+    ImGui_ImplOpenGL3_Init(glsl_version);
 
     bool show_demo_window = true;
     bool show_another_window = false;
@@ -153,7 +156,7 @@ int main() {
         ImGui::NewFrame();
         {
             ImGui::Begin("settings");
-
+            
             if(ImGui::CollapsingHeader("output", ImGuiTreeNodeFlags_DefaultOpen)) {
                 ImGui::SliderInt("Width", &config.outWidth, 256, 4096);
                 ImGui::SliderInt("Height", &config.outHeight, 256, 4096);
@@ -170,21 +173,25 @@ int main() {
             if (ImGui::Button("Generate Grid")) {
                 setup(config, grid);
                 gridInitialized = true;
-                
+
             }
 
             ImGui::End();
         }
 
-        {
-            ImGui::Begin("Preview");
-
-            if (gridInitialized) {
-                ImGui::Image((void*)(intptr_t)textu,ImVec2(config.outWidth, config.outHeight));
-            }
-
-            ImGui::End();
-        }
+        // {
+        //     ImGui::Begin("Preview");
+            
+        //     if (gridInitialized && textureInitialized) {
+        //         ImGui::Image((void*)(intptr_t)textu,ImVec2(config.outWidth, config.outHeight));
+        //     } else if (gridInitialized) {
+        //         ImGui::Text("Preview not generated yet");
+        //     } else {
+        //         ImGui::Text("No grid generated");
+        //     }
+            
+        //     ImGui::End();
+        // }
 
         if (gridInitialized && updatePreview == false) {
             livePreview(grid, config, cam);
