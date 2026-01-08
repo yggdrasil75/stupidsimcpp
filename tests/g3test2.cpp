@@ -56,7 +56,8 @@ void setup(defaults config, VoxelGrid& grid) {
 void livePreview(VoxelGrid& grid, defaults config, Camera cam) {
     updatePreview = true;
     //std::lock_guard<std::mutex> lock(PreviewMutex);
-    frame currentPreviewFrame = grid.renderFrame(cam.posfor.origin, cam.posfor.direction, cam.up, cam.fov, config.outWidth, config.outHeight, frame::colormap::BGRA);
+    //frame currentPreviewFrame = 
+    grid.renderFrame(cam.posfor.origin, cam.posfor.direction, cam.up, cam.fov, config.outWidth, config.outHeight, frame::colormap::BGRA);
 
     // glGenTextures(1, &textu);
     // glBindTexture(GL_TEXTURE_2D, textu);
@@ -69,9 +70,34 @@ void livePreview(VoxelGrid& grid, defaults config, Camera cam) {
     //              0, GL_RGBA, GL_UNSIGNED_BYTE, currentPreviewFrame.getData().data());
     
     std::cout << "freeing previous frame" << std::endl;
-    currentPreviewFrame.free();
+    //currentPreviewFrame.free();
     updatePreview = false;
     textureInitialized = true;
+}
+
+bool savePreview(VoxelGrid& grid, defaults config, Camera cam) {
+    TIME_FUNCTION;
+    
+    std::vector<uint8_t> renderBuffer;
+    size_t width = config.outWidth;
+    size_t height = config.outHeight;
+    
+    // Render the view
+    frame output = grid.renderFrame(cam.posfor.origin, cam.posfor.direction, cam.up, cam.fov, config.outWidth, config.outHeight, frame::colormap::RGB);
+    //grid.renderOut(renderBuffer, width, height, cam);
+    
+    // Save to BMP
+    bool success = BMPWriter::saveBMP("output/save.bmp", output);
+    //bool success = BMPWriter::saveBMP(filename, renderBuffer, width, height);
+    
+    // if (success) {
+    //     std::cout << "Saved: " << filename << std::endl;
+    // } else {
+    //     std::cout << "Failed to save: " << filename << std::endl;
+    // }
+    
+    return success;
+
 }
 
 static void glfw_error_callback(int error, const char* description)
@@ -173,7 +199,7 @@ int main() {
             if (ImGui::Button("Generate Grid")) {
                 setup(config, grid);
                 gridInitialized = true;
-
+                //livePreview(grid,config,cam);
             }
 
             ImGui::End();
@@ -193,9 +219,9 @@ int main() {
         //     ImGui::End();
         // }
 
-        if (gridInitialized && updatePreview == false) {
-            livePreview(grid, config, cam);
-        }
+        // if (gridInitialized && updatePreview == false) {
+        //     livePreview(grid, config, cam);
+        // }
 
         // std::cout << "ending frame" << std::endl;
         ImGui::Render();
@@ -219,6 +245,7 @@ int main() {
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
+    savePreview(grid, config, cam);
 
     // std::cout << "destroying" << std::endl;
     glfwDestroyWindow(window);
