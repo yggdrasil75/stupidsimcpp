@@ -54,20 +54,19 @@ void setup(defaults config, VoxelGrid& grid) {
 }
 
 void livePreview(VoxelGrid& grid, defaults config, Camera cam) {
+    std::lock_guard<std::mutex> lock(PreviewMutex);
     updatePreview = true;
-    //std::lock_guard<std::mutex> lock(PreviewMutex);
-    //frame currentPreviewFrame = 
-    grid.renderFrame(cam.posfor.origin, cam.posfor.direction, cam.up, cam.fov, config.outWidth, config.outHeight, frame::colormap::BGRA);
+    frame currentPreviewFrame = grid.renderFrame(cam.posfor.origin, cam.posfor.direction, cam.up, cam.fov, config.outWidth, config.outHeight, frame::colormap::BGR);
 
-    // glGenTextures(1, &textu);
-    // glBindTexture(GL_TEXTURE_2D, textu);
-    // glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    // glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    // glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glGenTextures(1, &textu);
+    glBindTexture(GL_TEXTURE_2D, textu);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
     
-    // glBindTexture(GL_TEXTURE_2D, textu);
-    // glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, currentPreviewFrame.getWidth(), currentPreviewFrame.getHeight(), 
-    //              0, GL_RGBA, GL_UNSIGNED_BYTE, currentPreviewFrame.getData().data());
+    glBindTexture(GL_TEXTURE_2D, textu);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, currentPreviewFrame.getWidth(), currentPreviewFrame.getHeight(), 
+                 0, GL_RGB, GL_UNSIGNED_BYTE, currentPreviewFrame.getData().data());
     
     std::cout << "freeing previous frame" << std::endl;
     //currentPreviewFrame.free();
@@ -199,29 +198,29 @@ int main() {
             if (ImGui::Button("Generate Grid")) {
                 setup(config, grid);
                 gridInitialized = true;
-                //livePreview(grid,config,cam);
+                savePreview(grid, config, cam);
             }
 
             ImGui::End();
         }
 
-        // {
-        //     ImGui::Begin("Preview");
+        {
+            ImGui::Begin("Preview");
             
-        //     if (gridInitialized && textureInitialized) {
-        //         ImGui::Image((void*)(intptr_t)textu,ImVec2(config.outWidth, config.outHeight));
-        //     } else if (gridInitialized) {
-        //         ImGui::Text("Preview not generated yet");
-        //     } else {
-        //         ImGui::Text("No grid generated");
-        //     }
+            if (gridInitialized && textureInitialized) {
+                ImGui::Image((void*)(intptr_t)textu,ImVec2(config.outWidth, config.outHeight));
+            } else if (gridInitialized) {
+                ImGui::Text("Preview not generated yet");
+            } else {
+                ImGui::Text("No grid generated");
+            }
             
-        //     ImGui::End();
-        // }
+            ImGui::End();
+        }
 
-        // if (gridInitialized && updatePreview == false) {
-        //     livePreview(grid, config, cam);
-        // }
+        if (gridInitialized && updatePreview == false) {
+            livePreview(grid, config, cam);
+        }
 
         // std::cout << "ending frame" << std::endl;
         ImGui::Render();
@@ -245,7 +244,7 @@ int main() {
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
-    savePreview(grid, config, cam);
+    
 
     // std::cout << "destroying" << std::endl;
     glfwDestroyWindow(window);
