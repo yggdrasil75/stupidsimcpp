@@ -261,7 +261,7 @@ public:
                         colorBuffer[idx + 3] = hitColor.x;
                         colorBuffer[idx + 2] = hitColor.y;
                         colorBuffer[idx + 1] = hitColor.z;
-                        colorBuffer[idx + 0] = 1;
+                        colorBuffer[idx + 0] = 255;
                         break;
                     }
 
