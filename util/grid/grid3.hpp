@@ -29,8 +29,8 @@ struct Camera {
 class VoxelGrid {
 private:
     double binSize = 1;
-    Vec3T gridSize;
-    //size_t width, height, depth;
+    Vec3i gridSize;
+    //int width, height, depth;
     std::vector<Voxel> voxels;
     float radians(float rads) {
         return rads * (M_PI / 180);
@@ -69,49 +69,60 @@ private:
     }
 
 public:
-    VoxelGrid(size_t w, size_t h, size_t d) : gridSize(w,h,d) {
+    VoxelGrid() : gridSize(0,0,0) {
+        std::cout << "creating empty grid." << std::endl;
+    }
+
+    VoxelGrid(int w, int h, int d) : gridSize(w,h,d) {
         voxels.resize(w * h * d);
     }
 
-    Voxel& get(size_t x, size_t y, size_t z) {
+    Voxel& get(int x, int y, int z) {
         return voxels[z * gridSize.x * gridSize.y + y * gridSize.x + x];
     }
 
-    const Voxel& get(size_t x, size_t y, size_t z) const {
+    const Voxel& get(int x, int y, int z) const {
         return voxels[z * gridSize.x * gridSize.y + y * gridSize.x + x];
     }
 
-    Voxel& get(const Vec3T& xyz) {
+    Voxel& get(const Vec3i& xyz) {
         return voxels[xyz.z * gridSize.x * gridSize.y + xyz.y * gridSize.x + xyz.x];
     }
 
-    void resize() {
-        //TODO: proper resizing
+    void resize(int newW, int newH, int newD) {
+        std::vector<Voxel> newVoxels(newW * newH * newD);
+        int copyW = std::min(static_cast<int>(gridSize.x), newW);
+        int copyH = std::min(static_cast<int>(gridSize.y), newH);
+        int copyD = std::min(static_cast<int>(gridSize.z), newD);
+        for (int z = 0; z < copyD; ++z) {
+            for (int y = 0; y < copyH; ++y) {
+                int oldRowStart = z * gridSize.x * gridSize.y + y * gridSize.x;
+                int newRowStart = z * newW * newH + y * newW;
+                std::copy(
+                    voxels.begin() + oldRowStart, 
+                    voxels.begin() + oldRowStart + copyW, 
+                    newVoxels.begin() + newRowStart
+                );
+            }
+        }
+        voxels = std::move(newVoxels);
+        gridSize = Vec3i(newW, newH, newD);
     }
 
-    void set(size_t x, size_t y, size_t z, bool active, Vec3ui8 color) {
-        set(Vec3T(x,y,z), active, color);
+    void set(int x, int y, int z, bool active, Vec3ui8 color) {
+        set(Vec3i(x,y,z), active, color);
     }
 
-    void set(Vec3T pos, bool active, Vec3ui8 color) {
+    void set(Vec3i pos, bool active, Vec3ui8 color) {
         if (pos.x >= 0 || pos.y >= 0 || pos.z >= 0) {
             if (!(pos.x < gridSize.x)) {
-                //until resizing added:
-                return;
-                gridSize.x = pos.x;
-                resize();
+                resize(pos.x, gridSize.y, gridSize.z);
             }
             else if (!(pos.y < gridSize.y)) {
-                //until resizing added:
-                return;
-                gridSize.y = pos.y;
-                resize();
+                resize(gridSize.x, pos.y, gridSize.z);
             }
             else if (!(pos.z < gridSize.z)) {
-                //until resizing added:
-                return;
-                gridSize.z = pos.z;
-                resize();
+                resize(gridSize.x, gridSize.y, pos.z);
             }
 
             Voxel& v = get(pos);
@@ -120,7 +131,7 @@ public:
         }
     }
 
-    void set(Vec3T pos, Vec4ui8 rgbaval) {
+    void set(Vec3i pos, Vec4ui8 rgbaval) {
         set(pos, static_cast<float>(rgbaval.a / 255), rgbaval.toVec3());
     }
 
@@ -129,9 +140,9 @@ public:
         return (voxl >= 0 && voxl.x < gridSize.x && voxl.y < gridSize.y && voxl.z < gridSize.z);
     }
 
-    void voxelTraverse(const Vec3d& origin, const Vec3d& end, std::vector<Vec3T>& visitedVoxel) {
-        Vec3T cv = (origin / binSize).floorToT();
-        Vec3T lv = (end / binSize).floorToT();
+    void voxelTraverse(const Vec3d& origin, const Vec3d& end, std::vector<Vec3i>& visitedVoxel) {
+        Vec3i cv = (origin / binSize).floorToI();
+        Vec3i lv = (end / binSize).floorToI();
         Vec3d ray = end - origin;
         Vec3f step = Vec3f(ray.x >= 0 ? 1 : -1, ray.y >= 0 ? 1 : -1, ray.z >= 0 ? 1 : -1);
         Vec3d nextVox = cv.toDouble() + step * binSize;
@@ -142,7 +153,7 @@ public:
                              ray.y != 0 ? binSize / ray.y * step.y : INF,
                              ray.z != 0 ? binSize / ray.z * step.z : INF);
 
-        Vec3T diff(0,0,0);
+        Vec3i diff(0,0,0);
         bool negRay = false;
         if (cv.x != lv.x && ray.x < 0) {
             diff.x = diff.x--;
@@ -187,17 +198,17 @@ public:
         return; // &&visitedVoxel;
     }
 
-    size_t getWidth() const {
+    int getWidth() const {
         return gridSize.x;
     }
-    size_t getHeight() const {
+    int getHeight() const {
         return gridSize.y;
     }
-    size_t getDepth() const {
+    int getDepth() const {
         return gridSize.z;
     }
 
-    frame renderFrame(const Vec3f& CamPos, const Vec3f& dir, const Vec3f& up, float fov, size_t outW, size_t outH, frame::colormap colorformat = frame::colormap::RGB) {
+    frame renderFrame(const Vec3f& CamPos, const Vec3f& dir, const Vec3f& up, float fov, int outW, int outH, frame::colormap colorformat = frame::colormap::RGB) {
         TIME_FUNCTION;
         Vec3f forward = (dir - CamPos).normalized();
         Vec3f right = forward.cross(up).normalized();
@@ -210,10 +221,10 @@ public:
         frame outFrame(outH, outW, frame::colormap::RGB);
         std::vector<uint8_t> colorBuffer(outW * outH * 3);
         #pragma omp parallel for
-        for (size_t y = 0; y < outH; y++) {
+        for (int y = 0; y < outH; y++) {
             float v = (static_cast<float>(y) / static_cast<float>(outH - 1)) - 0.5f;    
-            for (size_t x = 0; x < outW; x++) {
-                std::vector<Vec3T> hitVoxels;
+            for (int x = 0; x < outW; x++) {
+                std::vector<Vec3i> hitVoxels;
                 float u = (static_cast<float>(x) / static_cast<float>(outW - 1)) - 0.5f;
                 Vec3f rayDirWorld = (forward + right * (u * viewW) + upCor * (v * viewH)).normalized();
                 Vec3f rayEnd = CamPos + rayDirWorld * maxDist;
@@ -221,7 +232,7 @@ public:
                 Vec3d rayEndGrid = rayEnd.toDouble() / binSize;
                 voxelTraverse(rayStartGrid, rayEndGrid, hitVoxels);
                 Vec3ui8 hitColor(10, 10, 255);
-                for (const Vec3T& voxelPos : hitVoxels) {
+                for (const Vec3i& voxelPos : hitVoxels) {
                     if (inGrid(voxelPos)) {
                         const Voxel& voxel = get(voxelPos);
                         if (voxel.active) {
@@ -236,14 +247,14 @@ public:
                 // Set pixel color in buffer
                 switch (colorformat) {
                     case frame::colormap::RGB: {
-                        size_t idx = (y * outW + x) * 3;
+                        int idx = (y * outW + x) * 3;
                         colorBuffer[idx + 0] = hitColor.x;
                         colorBuffer[idx + 1] = hitColor.y;
                         colorBuffer[idx + 2] = hitColor.z;
                         break;
                     }
                     case frame::colormap::BGRA: {
-                        size_t idx = (y * outW + x) * 4;
+                        int idx = (y * outW + x) * 4;
                         colorBuffer[idx + 3] = hitColor.x;
                         colorBuffer[idx + 2] = hitColor.y;
                         colorBuffer[idx + 1] = hitColor.z;

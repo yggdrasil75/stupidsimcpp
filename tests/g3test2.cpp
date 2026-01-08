@@ -12,11 +12,11 @@
 #include "../stb/stb_image.h"
 
 struct defaults {
-    int outWidth = 1024;
-    int outHeight = 1024;
-    size_t gridWidth = 1024;
-    size_t gridHeight = 1024;
-    size_t gridDepth = 1024;
+    int outWidth = 512;
+    int outHeight = 512;
+    int gridWidth = 64;
+    int gridHeight = 64;
+    int gridDepth = 64;
     float fps = 30.0f;
     PNoise2 noise = PNoise2(42);
 };
@@ -30,20 +30,20 @@ struct Shared {
     VoxelGrid grid;
 };
 
-VoxelGrid setup(defaults config) {
+void setup(defaults config, VoxelGrid& grid) {
     float threshold = 0.3 * 255;
-    VoxelGrid grid(config.gridWidth, config.gridHeight, config.gridDepth);
+    grid.resize(config.gridWidth, config.gridHeight, config.gridDepth);
     std::cout << "Generating grid of size " << config.gridWidth << "x" << config.gridHeight << "x" << config.gridDepth << std::endl;
-    for (size_t z = 0; z < config.gridDepth; ++z) {
+    for (int z = 0; z < config.gridDepth; ++z) {
         if (z % 64 == 0) {
             std::cout << "Processing layer " << z << " of " << config.gridDepth << std::endl;
         }
 
-        for (size_t y = 0; y < config.gridWidth; ++y) {
-            for (size_t x = 0; x < config.gridHeight; ++x) {
+        for (int y = 0; y < config.gridWidth; ++y) {
+            for (int x = 0; x < config.gridHeight; ++x) {
                 Vec4ui8 noisecolor = config.noise.permuteColor(Vec3f( x / 64, y / 64, z / 64));
                 if (noisecolor.a > threshold) {
-                    grid.set(Vec3T(x,y,z), true, Vec3ui8(noisecolor.xyz()));
+                    grid.set(Vec3i(x,y,z), true, Vec3ui8(noisecolor.xyz()));
                 }
             }
         }
@@ -52,6 +52,7 @@ VoxelGrid setup(defaults config) {
 }
 
 void livePreview(VoxelGrid& grid, defaults config, Camera cam) {
+    updatePreview = false;
     std::lock_guard<std::mutex> lock(PreviewMutex);
     
     currentPreviewFrame = grid.renderFrame(cam.posfor.origin, cam.posfor.direction, cam.up, cam.fov, config.outWidth, config.outHeight, frame::colormap::BGRA);
@@ -113,13 +114,16 @@ int main() {
 
     bool application_not_closed = true;
     GLFWwindow* window = glfwCreateWindow((int)(1280), (int)(800), "voxelgrid live renderer", nullptr, nullptr);
-    if (window == nullptr)
+    if (window == nullptr) {
+        glfwTerminate();
         return 1;
+    }
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
-    ImGuiIO& io = ImGui::GetIO(); (void)io;
+    ImGuiIO& io = ImGui::GetIO(); 
+    (void)io;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     ImGui::StyleColorsDark();
     ImGuiStyle& style = ImGui::GetStyle();
@@ -133,6 +137,13 @@ int main() {
     bool show_demo_window = true;
     bool show_another_window = false;
     ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
+
+    defaults config;
+    VoxelGrid grid;
+    bool gridInitialized = false;
+
+    Camera cam(config.gridWidth, Vec3f(0,0,0), Vec3f(0,1,0), 80);
+
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
 
@@ -142,7 +153,43 @@ int main() {
         ImGui::NewFrame();
         {
             ImGui::Begin("settings");
+
+            if(ImGui::CollapsingHeader("output", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::SliderInt("Width", &config.outWidth, 256, 4096);
+                ImGui::SliderInt("Height", &config.outHeight, 256, 4096);
+            }
+
+            if (ImGui::CollapsingHeader("Grid Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::SliderInt("#Width", &config.gridWidth, 64, 512);
+                ImGui::SliderInt("#Height", &config.gridHeight, 64, 512);
+                ImGui::SliderInt("#Depth", &config.gridDepth, 64, 512);
+            }
+
+            ImGui::Separator();
+
+            if (ImGui::Button("Generate Grid")) {
+                setup(config, grid);
+                gridInitialized = true;
+                
+            }
+
+            ImGui::End();
         }
+
+        {
+            ImGui::Begin("Preview");
+
+            if (gridInitialized) {
+                ImGui::Image((void*)(intptr_t)textu,ImVec2(config.outWidth, config.outHeight));
+            }
+
+            ImGui::End();
+        }
+
+        if (gridInitialized && updatePreview == false) {
+            livePreview(grid, config, cam);
+        }
+
         // std::cout << "ending frame" << std::endl;
         ImGui::Render();
         int display_w, display_h;
@@ -173,8 +220,8 @@ int main() {
         textu = 0;
     }
     glfwTerminate();
+    // std::cout << "printing" << std::endl;
     FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
     
-    // std::cout << "printing" << std::endl;
     return 0;
 }
