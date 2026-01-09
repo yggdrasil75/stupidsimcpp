@@ -1,5 +1,7 @@
 #include <iostream>
 #include <vector>
+#include <chrono>
+#include <thread>
 #include "../util/grid/grid3.hpp"
 #include "../util/output/bmpwriter.hpp"
 #include "../util/output/frame.hpp"
@@ -53,10 +55,10 @@ void setup(defaults config, VoxelGrid& grid) {
     std::cout << "Noise grid generation complete!" << std::endl;
 }
 
-void livePreview(VoxelGrid& grid, defaults config, Camera cam) {
+void livePreview(VoxelGrid& grid, defaults& config, const Camera& cam) {
     std::lock_guard<std::mutex> lock(PreviewMutex);
     updatePreview = true;
-    frame currentPreviewFrame = grid.renderFrame(cam.posfor.origin, cam.posfor.direction, cam.up, cam.fov, config.outWidth, config.outHeight, frame::colormap::BGR);
+    frame currentPreviewFrame = grid.renderFrame(cam, Vec2i(config.outWidth, config.outHeight), frame::colormap::RGB);
 
     glGenTextures(1, &textu);
     glBindTexture(GL_TEXTURE_2D, textu);
@@ -68,13 +70,11 @@ void livePreview(VoxelGrid& grid, defaults config, Camera cam) {
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, currentPreviewFrame.getWidth(), currentPreviewFrame.getHeight(), 
                  0, GL_RGB, GL_UNSIGNED_BYTE, currentPreviewFrame.getData().data());
     
-    std::cout << "freeing previous frame" << std::endl;
-    //currentPreviewFrame.free();
     updatePreview = false;
     textureInitialized = true;
 }
 
-bool savePreview(VoxelGrid& grid, defaults config, Camera cam) {
+bool savePreview(VoxelGrid& grid, defaults& config, const Camera& cam) {
     TIME_FUNCTION;
     
     std::vector<uint8_t> renderBuffer;
@@ -82,7 +82,7 @@ bool savePreview(VoxelGrid& grid, defaults config, Camera cam) {
     size_t height = config.outHeight;
     
     // Render the view
-    frame output = grid.renderFrame(cam.posfor.origin, cam.posfor.direction, cam.up, cam.fov, config.outWidth, config.outHeight, frame::colormap::RGB);
+    frame output = grid.renderFrame(cam, Vec2i(config.outWidth, config.outHeight), frame::colormap::RGB);
     //grid.renderOut(renderBuffer, width, height, cam);
     
     // Save to BMP
@@ -102,6 +102,64 @@ bool savePreview(VoxelGrid& grid, defaults config, Camera cam) {
 static void glfw_error_callback(int error, const char* description)
 {
     fprintf(stderr, "GLFW Error %d: %s\n", error, description);
+}
+
+// Camera movement function
+void handleCameraMovement(GLFWwindow* window, Camera& cam, float deltaTime) {
+    float moveSpeed = 50.0f * deltaTime;  // Adjust speed as needed
+    float rotateSpeed = 50.0f * deltaTime; // Rotation speed
+    
+    // Get camera vectors
+    Vec3f forward = cam.posfor.direction.normalized();
+    Vec3f up = cam.up.normalized();
+    Vec3f right = forward.cross(up).normalized();
+    
+    // Position movement
+    if (glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS) {
+        cam.posfor.origin = cam.posfor.origin + forward * moveSpeed;
+    }
+    if (glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS) {
+        cam.posfor.origin = cam.posfor.origin - forward * moveSpeed;
+    }
+    if (glfwGetKey(window, GLFW_KEY_LEFT) == GLFW_PRESS) {
+        cam.posfor.origin = cam.posfor.origin - right * moveSpeed;
+    }
+    if (glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS) {
+        cam.posfor.origin = cam.posfor.origin + right * moveSpeed;
+    }
+    
+    // Vertical movement (optional - add with PageUp/PageDown or other keys)
+    if (glfwGetKey(window, GLFW_KEY_PAGE_UP) == GLFW_PRESS) {
+        cam.posfor.origin = cam.posfor.origin + up * moveSpeed;
+    }
+    if (glfwGetKey(window, GLFW_KEY_PAGE_DOWN) == GLFW_PRESS) {
+        cam.posfor.origin = cam.posfor.origin - up * moveSpeed;
+    }
+    
+    // Camera rotation (using WASD or other keys for rotation)
+    // For simplicity, let's add rotation with Q/E for yaw and R/F for pitch
+    if (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS) {
+        // Rotate left (yaw)
+        float yaw = -rotateSpeed * deltaTime;
+        // You'll need to add rotation logic to your Camera class
+        // For now, let's assume Camera has a rotateYaw method
+        cam.rotateYaw(yaw);
+    }
+    if (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS) {
+        // Rotate right (yaw)
+        float yaw = rotateSpeed * deltaTime;
+        cam.rotateYaw(yaw);
+    }
+    if (glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS) {
+        // Look up (pitch)
+        float pitch = rotateSpeed * deltaTime;
+        cam.rotatePitch(pitch);
+    }
+    if (glfwGetKey(window, GLFW_KEY_F) == GLFW_PRESS) {
+        // Look down (pitch)
+        float pitch = -rotateSpeed * deltaTime;
+        cam.rotatePitch(pitch);
+    }
 }
 
 int main() {
@@ -147,7 +205,7 @@ int main() {
         return 1;
     }
     glfwMakeContextCurrent(window);
-    glfwSwapInterval(1);
+    glfwSwapInterval(1);    
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
@@ -171,14 +229,58 @@ int main() {
     bool gridInitialized = false;
 
     Camera cam(config.gridWidth, Vec3f(0,0,0), Vec3f(0,1,0), 80);
+    
+    // Variables for framerate limiting
+    const double targetFrameTime = 1.0 / config.fps; // 30 FPS
+    double lastFrameTime = glfwGetTime();
+    double accumulator = 0.0;
+    
+    // For camera movement
+    bool cameraMoved = false;
+    double lastUpdateTime = glfwGetTime();
 
     while (!glfwWindowShouldClose(window)) {
+        double currentTime = glfwGetTime();
+        double deltaTime = currentTime - lastFrameTime;
+        lastFrameTime = currentTime;
+        
+        // Accumulate time
+        accumulator += deltaTime;
+        
+        // Limit framerate
+        if (accumulator < targetFrameTime) {
+            std::this_thread::sleep_for(std::chrono::duration<double>(targetFrameTime - accumulator));
+            currentTime = glfwGetTime();
+            accumulator = targetFrameTime;
+        }
+        
+        // Handle camera movement
+        if (gridInitialized) {
+            float frameDeltaTime = static_cast<float>(targetFrameTime); // Use fixed delta for consistent movement
+            handleCameraMovement(window, cam, frameDeltaTime);
+            
+            // Check if any camera movement keys are pressed
+            if (glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS ||
+                glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS ||
+                glfwGetKey(window, GLFW_KEY_LEFT) == GLFW_PRESS ||
+                glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS ||
+                glfwGetKey(window, GLFW_KEY_PAGE_UP) == GLFW_PRESS ||
+                glfwGetKey(window, GLFW_KEY_PAGE_DOWN) == GLFW_PRESS ||
+                glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS ||
+                glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS ||
+                glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS ||
+                glfwGetKey(window, GLFW_KEY_F) == GLFW_PRESS) {
+                cameraMoved = true;
+            }
+        }
+        
         glfwPollEvents();
 
         // Start the Dear ImGui frame
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
+        
         {
             ImGui::Begin("settings");
             
@@ -199,6 +301,22 @@ int main() {
                 setup(config, grid);
                 gridInitialized = true;
                 savePreview(grid, config, cam);
+                cameraMoved = true; // Force preview update after generation
+            }
+            
+            // Display camera position
+            if (gridInitialized) {
+                ImGui::Separator();
+                ImGui::Text("Camera Position:");
+                ImGui::Text("X: %.2f, Y: %.2f, Z: %.2f", 
+                           cam.posfor.origin.x, 
+                           cam.posfor.origin.y, 
+                           cam.posfor.origin.z);
+                ImGui::Text("Controls:");
+                ImGui::BulletText("Arrow Keys: Move camera");
+                ImGui::BulletText("Page Up/Down: Move vertically");
+                ImGui::BulletText("Q/E: Rotate left/right");
+                ImGui::BulletText("R/F: Rotate up/down");
             }
 
             ImGui::End();
@@ -208,7 +326,7 @@ int main() {
             ImGui::Begin("Preview");
             
             if (gridInitialized && textureInitialized) {
-                ImGui::Image((void*)(intptr_t)textu,ImVec2(config.outWidth, config.outHeight));
+                ImGui::Image((void*)(intptr_t)textu, ImVec2(config.outWidth, config.outHeight));
             } else if (gridInitialized) {
                 ImGui::Text("Preview not generated yet");
             } else {
@@ -218,11 +336,19 @@ int main() {
             ImGui::End();
         }
 
-        if (gridInitialized && updatePreview == false) {
-            livePreview(grid, config, cam);
+        // Update preview if camera moved or enough time has passed
+        if (gridInitialized && !updatePreview) {
+            double timeSinceLastUpdate = currentTime - lastUpdateTime;
+            if (cameraMoved || timeSinceLastUpdate > 0.1) { // Update at least every 0.1 seconds
+                livePreview(grid, config, cam);
+                lastUpdateTime = currentTime;
+                cameraMoved = false;
+            }
         }
+        
+        // Reset accumulator for next frame
+        accumulator -= targetFrameTime;
 
-        // std::cout << "ending frame" << std::endl;
         ImGui::Render();
         int display_w, display_h;
         glfwGetFramebufferSize(window, &display_w, &display_h);

@@ -23,12 +23,12 @@ private:
         return t * t * t * (t * (t * 6 - 15) + 10);
     }
 
-    Vec2 GetConstantVector(int v) {
+    Vec2f GetConstantVector(int v) {
         int h = v & 3;
-        if (h == 0) return Vec2(1,1);
-        else if (h == 1) return Vec2(-1,1);
-        else if (h == 2) return Vec2(-1,-1);
-        else return Vec2(1,-1);
+        if (h == 0) return Vec2f(1,1);
+        else if (h == 1) return Vec2f(-1,1);
+        else if (h == 2) return Vec2f(-1,-1);
+        else return Vec2f(1,-1);
     }
 
     Vec3ui8 GetConstantVector3(int v) {
@@ -70,7 +70,8 @@ public:
         initializePermutation();
     }
     
-    float permute(Vec2 point) {
+    template<typename T>
+    float permute(Vec2<T> point) {
         TIME_FUNCTION;
         float x = point.x;
         float y = point.y;

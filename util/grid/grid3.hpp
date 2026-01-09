@@ -2,6 +2,7 @@
 #define GRID3_HPP
 
 #include <unordered_map>
+#include "../vectorlogic/vec2.hpp"
 #include "../vectorlogic/vec3.hpp"
 #include "../vectorlogic/vec4.hpp"
 #include "../timing_decorator.hpp"
@@ -24,6 +25,38 @@ struct Camera {
     Vec3f up;
     float fov;
     Camera(Vec3f pos, Vec3f viewdir, Vec3f up, float fov = 80) : posfor(Ray3f(pos, viewdir)), up(up), fov(fov) {}
+    
+    void rotateYaw(float angle) {
+        float cosA = cos(angle);
+        float sinA = sin(angle);
+        
+        Vec3f right = posfor.direction.cross(up).normalized();
+        posfor.direction = posfor.direction * cosA + right * sinA;
+        posfor.direction = posfor.direction.normalized();
+    }
+    
+    void rotatePitch(float angle) {
+        float cosA = cos(angle);
+        float sinA = sin(angle);
+        
+        Vec3f right = posfor.direction.cross(up).normalized();
+        posfor.direction = posfor.direction * cosA + up * sinA;
+        posfor.direction = posfor.direction.normalized();
+        
+        up = right.cross(posfor.direction).normalized();
+    }
+
+    Vec3f forward() const {
+        return (posfor.direction - posfor.origin).normalized();
+    }
+
+    Vec3f right() const {
+        return forward().cross(up).normalized();
+    }
+
+    float fovRad() const {
+        return fov * (M_PI / 180);
+    }
 };
 
 class VoxelGrid {
@@ -207,30 +240,28 @@ public:
     int getDepth() const {
         return gridSize.z;
     }
-
-    frame renderFrame(const Vec3f& CamPos, const Vec3f& dir, const Vec3f& up, float fov, int outW, int outH, frame::colormap colorformat = frame::colormap::RGB) {
+    
+    frame renderFrame(const Camera& cam, Vec2i resolution, frame::colormap colorformat = frame::colormap::RGB) {
         TIME_FUNCTION;
-        Vec3f forward = (dir - CamPos).normalized();
-        Vec3f right = forward.cross(up).normalized();
+        Vec3f forward = cam.forward();
+        Vec3f right = cam.right();
         Vec3f upCor = right.cross(forward).normalized();
-        float aspect = static_cast<float>(outW) / static_cast<float>(outH);
-        float fovRad = radians(fov);
+        float aspect = resolution.aspect();
+        float fovRad = cam.fovRad();
         float viewH = 2 * tan(fovRad / 2);
         float viewW = viewH * aspect;
         float maxDist = std::sqrt(gridSize.lengthSquared()) * binSize;
-        frame outFrame(outH, outW, frame::colormap::RGB);
-        std::vector<uint8_t> colorBuffer(outW * outH * 3);
-        std::cout << "a" << std::endl;
+        frame outFrame(resolution.x, resolution.y, frame::colormap::RGB);
+        std::vector<uint8_t> colorBuffer(resolution.x * resolution.y * 3);
         #pragma omp parallel for
-        for (int y = 0; y < outH; y++) {
-            float v = (static_cast<float>(y) / static_cast<float>(outH - 1)) - 0.5f;    
-            std::cout << "b";
-            for (int x = 0; x < outW; x++) {
+        for (int y = 0; y < resolution.x; y++) {
+            float v = (static_cast<float>(y) / static_cast<float>(resolution.x - 1)) - 0.5f;    
+            for (int x = 0; x < resolution.y; x++) {
                 std::vector<Vec3i> hitVoxels;
-                float u = (static_cast<float>(x) / static_cast<float>(outW - 1)) - 0.5f;
+                float u = (static_cast<float>(x) / static_cast<float>(resolution.y - 1)) - 0.5f;
                 Vec3f rayDirWorld = (forward + right * (u * viewW) + upCor * (v * viewH)).normalized();
-                Vec3f rayEnd = CamPos + rayDirWorld * maxDist;
-                Vec3d rayStartGrid = CamPos.toDouble() / binSize;
+                Vec3f rayEnd = cam.posfor.origin + rayDirWorld * maxDist;
+                Vec3d rayStartGrid = cam.posfor.origin.toDouble() / binSize;
                 Vec3d rayEndGrid = rayEnd.toDouble() / binSize;
                 voxelTraverse(rayStartGrid, rayEndGrid, hitVoxels);
                 Vec3ui8 hitColor(10, 10, 255);
@@ -244,34 +275,31 @@ public:
                         }
                     }
                 }
-                std::cout << "c";
                 hitVoxels.clear();
                 hitVoxels.shrink_to_fit();
                 // Set pixel color in buffer
                 switch (colorformat) {
-                    case frame::colormap::RGB: {
-                        int idx = (y * outW + x) * 3;
-                        colorBuffer[idx + 0] = hitColor.x;
-                        colorBuffer[idx + 1] = hitColor.y;
-                        colorBuffer[idx + 2] = hitColor.z;
-                        break;
-                    }
                     case frame::colormap::BGRA: {
-                        int idx = (y * outW + x) * 4;
+                        int idx = (y * resolution.y + x) * 4;
                         colorBuffer[idx + 3] = hitColor.x;
                         colorBuffer[idx + 2] = hitColor.y;
                         colorBuffer[idx + 1] = hitColor.z;
                         colorBuffer[idx + 0] = 255;
                         break;
                     }
-
+                    case frame::colormap::RGB:
+                    default: {
+                        int idx = (y * resolution.y + x) * 3;
+                        colorBuffer[idx + 0] = hitColor.x;
+                        colorBuffer[idx + 1] = hitColor.y;
+                        colorBuffer[idx + 2] = hitColor.z;
+                        break;
+                    }
                 }
             }
-            std::cout << "b" << std::endl;
         }
         
         outFrame.setData(colorBuffer);
-        std::cout << "d" << std::endl;
         return outFrame;
     }
 };

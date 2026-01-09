@@ -5,12 +5,17 @@
 #include <algorithm>
 #include <string>
 
+template<typename T>
 class Vec2 {
-    public:
-    float x, y;
+public:
+    T x, y;
+    
     Vec2() : x(0), y(0) {}
-    Vec2(float x, float y) : x(x), y(y) {}
-
+    Vec2(T x, T y) : x(x), y(y) {}
+    
+    template<typename U>
+    explicit Vec2(const Vec2<U>& other) : x(static_cast<T>(other.x)), y(static_cast<T>(other.y)) {}
+    
     Vec2& move(const Vec2 newpos) {
         x = newpos.x;
         y = newpos.y;
@@ -32,29 +37,34 @@ class Vec2 {
     Vec2 operator/(const Vec2& other) const {
         return Vec2(x / other.x, y / other.y);
     }
-
-    Vec2 operator+(float scalar) const {
+    
+    template<typename U>
+    Vec2 operator+(U scalar) const {
         return Vec2(x + scalar, y + scalar);
     }
-
-    Vec2 operator-(float scalar) const {
+    
+    template<typename U>
+    Vec2 operator-(U scalar) const {
         return Vec2(x - scalar, y - scalar);
     }
     
     Vec2 operator-() const {
         return Vec2(-x, -y);
     }
-
-    Vec2 operator*(float scalar) const {
+    
+    template<typename U>
+    Vec2 operator*(U scalar) const {
         return Vec2(x * scalar, y * scalar);
     }
-
-    Vec2 operator/(float scalar) const {
+    
+    template<typename U>
+    Vec2 operator/(U scalar) const {
         return Vec2(x / scalar, y / scalar);
     }
-
-    Vec2& operator=(float scalar) {
-        x = y = scalar;
+    
+    template<typename U>
+    Vec2& operator=(U scalar) {
+        x = y = static_cast<T>(scalar);
         return *this;
     }
     
@@ -82,57 +92,64 @@ class Vec2 {
         return *this;
     }
     
-    Vec2& operator+=(float scalar) {
+    template<typename U>
+    Vec2& operator+=(U scalar) {
         x += scalar;
         y += scalar;
         return *this;
     }
     
-    Vec2& operator-=(float scalar) {
+    template<typename U>
+    Vec2& operator-=(U scalar) {
         x -= scalar;
         y -= scalar;
         return *this;
     }
     
-    Vec2& operator*=(float scalar) {
+    template<typename U>
+    Vec2& operator*=(U scalar) {
         x *= scalar;
         y *= scalar;
         return *this;
     }
     
-    Vec2& operator/=(float scalar) {
+    template<typename U>
+    Vec2& operator/=(U scalar) {
         x /= scalar;
         y /= scalar;
         return *this;
     }
-
-    float dot(const Vec2& other) const {
+    
+    T dot(const Vec2& other) const {
         return x * other.x + y * other.y;
     }
-
-    float length() const {
-        return std::sqrt(x * x + y * y);
+    
+    template<typename U = float>
+    U length() const {
+        return std::sqrt(static_cast<U>(x * x + y * y));
     }
     
-    float lengthSquared() const {
+    T lengthSquared() const {
         return x * x + y * y;
     }
     
-    float distance(const Vec2& other) const {
-        return (*this - other).length();
+    template<typename U = float>
+    U distance(const Vec2& other) const {
+        return (*this - other).template length<U>();
     }
     
-    float distanceSquared(const Vec2& other) const {
+    T distanceSquared(const Vec2& other) const {
         Vec2 diff = *this - other;
         return diff.x * diff.x + diff.y * diff.y;
     }
-
-    Vec2 normalized() const {
-        float len = length();
+    
+    template<typename U = float>
+    Vec2<U> normalized() const {
+        auto len = length<U>();
         if (len > 0) {
-            return *this / len;
+            return Vec2<U>(static_cast<U>(x) / len, static_cast<U>(y) / len);
         }
-        return *this;
+        return Vec2<U>(static_cast<U>(x), static_cast<U>(y));
     }
     
     bool operator==(const Vec2& other) const {
@@ -190,118 +207,155 @@ class Vec2 {
         );
     }
     
-    Vec2 clamp(float minVal, float maxVal) const {
+    template<typename U>
+    Vec2 clamp(U minVal, U maxVal) const {
         return Vec2(
-            std::clamp(x, minVal, maxVal),
-            std::clamp(y, minVal, maxVal)
+            std::clamp(x, static_cast<T>(minVal), static_cast<T>(maxVal)),
+            std::clamp(y, static_cast<T>(minVal), static_cast<T>(maxVal))
         );
     }
     
-    bool isZero(float epsilon = 1e-10f) const {
-        return std::abs(x) < epsilon && std::abs(y) < epsilon;
+    template<typename U = float>
+    bool isZero(U epsilon = static_cast<U>(1e-10)) const {
+        return std::abs(static_cast<U>(x)) < epsilon && 
+               std::abs(static_cast<U>(y)) < epsilon;
     }
     
-    bool equals(const Vec2& other, float epsilon = 1e-10f) const {
-        return std::abs(x - other.x) < epsilon && 
-               std::abs(y - other.y) < epsilon;
+    template<typename U = float>
+    bool equals(const Vec2& other, U epsilon = static_cast<U>(1e-10)) const {
+        return std::abs(static_cast<U>(x - other.x)) < epsilon && 
+               std::abs(static_cast<U>(y - other.y)) < epsilon;
     }
     
-    friend Vec2 operator+(float scalar, const Vec2& vec) {
-        return Vec2(scalar + vec.x, scalar + vec.y);
-    }
-    
-    friend Vec2 operator-(float scalar, const Vec2& vec) {
-        return Vec2(scalar - vec.x, scalar - vec.y);
-    }
-    
-    friend Vec2 operator*(float scalar, const Vec2& vec) {
-        return Vec2(scalar * vec.x, scalar * vec.y);
-    }
-    
-    friend Vec2 operator/(float scalar, const Vec2& vec) {
-        return Vec2(scalar / vec.x, scalar / vec.y);
-    }
-
     Vec2 perpendicular() const {
         return Vec2(-y, x);
     }
     
-    Vec2 reflect(const Vec2& normal) const {
-        return *this - 2.0f * this->dot(normal) * normal;
+    template<typename U = float>
+    Vec2<U> reflect(const Vec2<U>& normal) const {
+        auto this_f = Vec2<U>(static_cast<U>(x), static_cast<U>(y));
+        return this_f - static_cast<U>(2.0) * this_f.dot(normal) * normal;
     }
     
-    Vec2 lerp(const Vec2& other, float t) const {
-        t = std::clamp(t, 0.0f, 1.0f);
-        return *this + (other - *this) * t;
+    template<typename U = float>
+    Vec2<U> lerp(const Vec2<U>& other, U t) const {
+        t = std::clamp(t, static_cast<U>(0.0), static_cast<U>(1.0));
+        auto this_f = Vec2<U>(static_cast<U>(x), static_cast<U>(y));
+        return this_f + (other - this_f) * t;
     }
     
-    Vec2 slerp(const Vec2& other, float t) const {
-        t = std::clamp(t, 0.0f, 1.0f);
-        float dot = this->dot(other);
-        dot = std::clamp(dot, -1.0f, 1.0f);
+    template<typename U = float>
+    Vec2<U> slerp(const Vec2<U>& other, U t) const {
+        t = std::clamp(t, static_cast<U>(0.0), static_cast<U>(1.0));
+        auto this_f = Vec2<U>(static_cast<U>(x), static_cast<U>(y));
+        U dot = this_f.dot(other);
+        dot = std::clamp(dot, static_cast<U>(-1.0), static_cast<U>(1.0));
         
-        float theta = std::acos(dot) * t;
-        Vec2 relative = other - *this * dot;
+        U theta = std::acos(dot) * t;
+        auto relative = other - this_f * dot;
         relative = relative.normalized();
         
-        return (*this * std::cos(theta)) + (relative * std::sin(theta));
+        return (this_f * std::cos(theta)) + (relative * std::sin(theta));
     }
     
-    Vec2 rotate(float angle) const {
-        float cosA = std::cos(angle);
-        float sinA = std::sin(angle);
-        return Vec2(x * cosA - y * sinA, x * sinA + y * cosA);
+    template<typename U = float>
+    Vec2<U> rotate(U angle) const {
+        U cosA = std::cos(angle);
+        U sinA = std::sin(angle);
+        return Vec2<U>(
+            static_cast<U>(x) * cosA - static_cast<U>(y) * sinA,
+            static_cast<U>(x) * sinA + static_cast<U>(y) * cosA
+        );
     }
     
-    float angle() const {
-        return std::atan2(y, x);
+    template<typename U = float>
+    U angle() const {
+        return std::atan2(static_cast<U>(y), static_cast<U>(x));
     }
     
-    float angleTo(const Vec2& other) const {
-        return std::acos(this->dot(other) / (this->length() * other.length()));
+    template<typename U = float>
+    U angleTo(const Vec2<U>& other) const {
+        auto this_f = Vec2<U>(static_cast<U>(x), static_cast<U>(y));
+        return std::acos(this_f.dot(other) / (this_f.length() * other.length()));
     }
-
-    float directionTo(const Vec2& other) const {
-        Vec2 direction = other - *this;
+    
+    template<typename U = float>
+    U directionTo(const Vec2<U>& other) const {
+        auto this_f = Vec2<U>(static_cast<U>(x), static_cast<U>(y));
+        auto direction = other - this_f;
         return direction.angle();
     }
     
-    float& operator[](int index) {
+    T& operator[](int index) {
         return (&x)[index];
     }
     
-    const float& operator[](int index) const {
+    const T& operator[](int index) const {
         return (&x)[index];
     }
     
     std::string toString() const {
         return "(" + std::to_string(x) + ", " + std::to_string(y) + ")";
     }
-
+    
     std::ostream& operator<<(std::ostream& os) {
         os << toString();
         return os;
     }
-
+    
     struct Hash {
         std::size_t operator()(const Vec2& v) const {
-            return std::hash<float>()(v.x) ^ (std::hash<float>()(v.y) << 1);
+            return std::hash<T>()(v.x) ^ (std::hash<T>()(v.y) << 1);
         }
     };
+
+    float aspect() {
+        return static_cast<float>(x) / static_cast<float>(y);
+    }
 };
 
-inline std::ostream& operator<<(std::ostream& os, const Vec2& vec) {
+template<typename T>
+inline std::ostream& operator<<(std::ostream& os, const Vec2<T>& vec) {
     os << vec.toString();
     return os;
 }
 
+template<typename T, typename U>
+auto operator+(U scalar, const Vec2<T>& vec) -> Vec2<decltype(scalar + vec.x)> {
+    using ResultType = decltype(scalar + vec.x);
+    return Vec2<ResultType>(scalar + vec.x, scalar + vec.y);
+}
+
+template<typename T, typename U>
+auto operator-(U scalar, const Vec2<T>& vec) -> Vec2<decltype(scalar - vec.x)> {
+    using ResultType = decltype(scalar - vec.x);
+    return Vec2<ResultType>(scalar - vec.x, scalar - vec.y);
+}
+
+template<typename T, typename U>
+auto operator*(U scalar, const Vec2<T>& vec) -> Vec2<decltype(scalar * vec.x)> {
+    using ResultType = decltype(scalar * vec.x);
+    return Vec2<ResultType>(scalar * vec.x, scalar * vec.y);
+}
+
+template<typename T, typename U>
+auto operator/(U scalar, const Vec2<T>& vec) -> Vec2<decltype(scalar / vec.x)> {
+    using ResultType = decltype(scalar / vec.x);
+    return Vec2<ResultType>(scalar / vec.x, scalar / vec.y);
+}
+
 namespace std {
-    template<>
-    struct hash<Vec2> {
-        size_t operator()(const Vec2& v) const {
-            return hash<float>()(v.x) ^ (hash<float>()(v.y) << 1);
+    template<typename T>
+    struct hash<Vec2<T>> {
+        size_t operator()(const Vec2<T>& v) const {
+            return hash<T>()(v.x) ^ (hash<T>()(v.y) << 1);
         }
     };
 }
+
+using Vec2f = Vec2<float>;
+using Vec2d = Vec2<double>;
+using Vec2i = Vec2<int>;
+using Vec2u = Vec2<unsigned int>;
 
 #endif

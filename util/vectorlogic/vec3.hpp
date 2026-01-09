@@ -17,7 +17,7 @@ public:
     Vec3(T scalar) : x(scalar), y(scalar), z(scalar) {}
     Vec3(float acd[3]) : x(acd[0]), y(acd[1]), z(acd[2]) {}
 
-    Vec3(const class Vec2& vec2, T z = 0);
+    Vec3(const class Vec2<T>& vec2, T z = 0);
     
     Vec3& move(const Vec3& newpos) {
         x = newpos.x;
