@@ -104,64 +104,6 @@ static void glfw_error_callback(int error, const char* description)
     fprintf(stderr, "GLFW Error %d: %s\n", error, description);
 }
 
-// Camera movement function
-void handleCameraMovement(GLFWwindow* window, Camera& cam, float deltaTime) {
-    float moveSpeed = 50.0f * deltaTime;  // Adjust speed as needed
-    float rotateSpeed = 50.0f * deltaTime; // Rotation speed
-    
-    // Get camera vectors
-    Vec3f forward = cam.posfor.direction.normalized();
-    Vec3f up = cam.up.normalized();
-    Vec3f right = forward.cross(up).normalized();
-    
-    // Position movement
-    if (glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS) {
-        cam.posfor.origin = cam.posfor.origin + forward * moveSpeed;
-    }
-    if (glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS) {
-        cam.posfor.origin = cam.posfor.origin - forward * moveSpeed;
-    }
-    if (glfwGetKey(window, GLFW_KEY_LEFT) == GLFW_PRESS) {
-        cam.posfor.origin = cam.posfor.origin - right * moveSpeed;
-    }
-    if (glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS) {
-        cam.posfor.origin = cam.posfor.origin + right * moveSpeed;
-    }
-    
-    // Vertical movement (optional - add with PageUp/PageDown or other keys)
-    if (glfwGetKey(window, GLFW_KEY_PAGE_UP) == GLFW_PRESS) {
-        cam.posfor.origin = cam.posfor.origin + up * moveSpeed;
-    }
-    if (glfwGetKey(window, GLFW_KEY_PAGE_DOWN) == GLFW_PRESS) {
-        cam.posfor.origin = cam.posfor.origin - up * moveSpeed;
-    }
-    
-    // Camera rotation (using WASD or other keys for rotation)
-    // For simplicity, let's add rotation with Q/E for yaw and R/F for pitch
-    if (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS) {
-        // Rotate left (yaw)
-        float yaw = -rotateSpeed * deltaTime;
-        // You'll need to add rotation logic to your Camera class
-        // For now, let's assume Camera has a rotateYaw method
-        cam.rotateYaw(yaw);
-    }
-    if (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS) {
-        // Rotate right (yaw)
-        float yaw = rotateSpeed * deltaTime;
-        cam.rotateYaw(yaw);
-    }
-    if (glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS) {
-        // Look up (pitch)
-        float pitch = rotateSpeed * deltaTime;
-        cam.rotatePitch(pitch);
-    }
-    if (glfwGetKey(window, GLFW_KEY_F) == GLFW_PRESS) {
-        // Look down (pitch)
-        float pitch = -rotateSpeed * deltaTime;
-        cam.rotatePitch(pitch);
-    }
-}
-
 int main() {
     glfwSetErrorCallback(glfw_error_callback);
     if (!glfwInit()) {
@@ -230,6 +172,13 @@ int main() {
 
     Camera cam(config.gridWidth, Vec3f(0,0,0), Vec3f(0,1,0), 80);
     
+    // Variables for camera sliders
+    float camX = 0.0f;
+    float camY = 0.0f;
+    float camZ = 0.0f;
+    float camYaw = 0.0f;
+    float camPitch = 0.0f;
+    
     // Variables for framerate limiting
     const double targetFrameTime = 1.0 / config.fps; // 30 FPS
     double lastFrameTime = glfwGetTime();
@@ -252,26 +201,6 @@ int main() {
             std::this_thread::sleep_for(std::chrono::duration<double>(targetFrameTime - accumulator));
             currentTime = glfwGetTime();
             accumulator = targetFrameTime;
-        }
-        
-        // Handle camera movement
-        if (gridInitialized) {
-            float frameDeltaTime = static_cast<float>(targetFrameTime); // Use fixed delta for consistent movement
-            handleCameraMovement(window, cam, frameDeltaTime);
-            
-            // Check if any camera movement keys are pressed
-            if (glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS ||
-                glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS ||
-                glfwGetKey(window, GLFW_KEY_LEFT) == GLFW_PRESS ||
-                glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS ||
-                glfwGetKey(window, GLFW_KEY_PAGE_UP) == GLFW_PRESS ||
-                glfwGetKey(window, GLFW_KEY_PAGE_DOWN) == GLFW_PRESS ||
-                glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS ||
-                glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS ||
-                glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS ||
-                glfwGetKey(window, GLFW_KEY_F) == GLFW_PRESS) {
-                cameraMoved = true;
-            }
         }
         
         glfwPollEvents();
@@ -300,23 +229,72 @@ int main() {
             if (ImGui::Button("Generate Grid")) {
                 setup(config, grid);
                 gridInitialized = true;
+                // Reset camera to center of grid
+                camX = config.gridWidth * config.gridWidth / 2.0f;
+                camY = config.gridHeight * config.gridHeight / 2.0f;
+                camZ = config.gridDepth * config.gridDepth / 2.0f;
+                camYaw = 0.0f;
+                camPitch = 0.0f;
+                
+                // Update camera position
+                cam.posfor.origin = Vec3f(camX, camY, camZ);
+                cam.rotateYaw(camYaw);
+                cam.rotatePitch(camPitch);
+                
                 savePreview(grid, config, cam);
                 cameraMoved = true; // Force preview update after generation
             }
             
-            // Display camera position
+            // Display camera controls
             if (gridInitialized) {
                 ImGui::Separator();
-                ImGui::Text("Camera Position:");
+                ImGui::Text("Camera Controls:");
+                
+                // Calculate max slider values based on grid size squared
+                float maxSliderValueX = config.gridWidth * config.gridWidth;
+                float maxSliderValueY = config.gridHeight * config.gridHeight;
+                float maxSliderValueZ = config.gridDepth * config.gridDepth;
+                float maxSliderValueRotation = 360.0f; // Degrees
+                
+                ImGui::Text("Position (0 to grid size²):");
+                if (ImGui::SliderFloat("Camera X", &camX, 0.0f, maxSliderValueX)) {
+                    cameraMoved = true;
+                    cam.posfor.origin.x = camX;
+                }
+                if (ImGui::SliderFloat("Camera Y", &camY, 0.0f, maxSliderValueY)) {
+                    cameraMoved = true;
+                    cam.posfor.origin.y = camY;
+                }
+                if (ImGui::SliderFloat("Camera Z", &camZ, 0.0f, maxSliderValueZ)) {
+                    cameraMoved = true;
+                    cam.posfor.origin.z = camZ;
+                }
+                
+                ImGui::Separator();
+                ImGui::Text("Rotation (degrees):");
+                if (ImGui::SliderFloat("Yaw", &camYaw, 0.0f, maxSliderValueRotation)) {
+                    cameraMoved = true;
+                    // Reset and reapply rotation
+                    // You might need to adjust this based on your Camera class implementation
+                    cam = Camera(config.gridWidth, Vec3f(camX, camY, camZ), Vec3f(0,1,0), 80);
+                    cam.rotateYaw(camYaw);
+                    cam.rotatePitch(camPitch);
+                }
+                if (ImGui::SliderFloat("Pitch", &camPitch, 0.0f, maxSliderValueRotation)) {
+                    cameraMoved = true;
+                    // Reset and reapply rotation
+                    cam = Camera(config.gridWidth, Vec3f(camX, camY, camZ), Vec3f(0,1,0), 80);
+                    cam.rotateYaw(camYaw);
+                    cam.rotatePitch(camPitch);
+                }
+                
+                ImGui::Separator();
+                ImGui::Text("Current Camera Position:");
                 ImGui::Text("X: %.2f, Y: %.2f, Z: %.2f", 
                            cam.posfor.origin.x, 
                            cam.posfor.origin.y, 
                            cam.posfor.origin.z);
-                ImGui::Text("Controls:");
-                ImGui::BulletText("Arrow Keys: Move camera");
-                ImGui::BulletText("Page Up/Down: Move vertically");
-                ImGui::BulletText("Q/E: Rotate left/right");
-                ImGui::BulletText("R/F: Rotate up/down");
+                ImGui::Text("Yaw: %.2f°, Pitch: %.2f°", camYaw, camPitch);
             }
 
             ImGui::End();
