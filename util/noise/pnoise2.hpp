@@ -171,18 +171,18 @@ public:
         float noiseG = permute(point + Vec3<float>(100.0f, 100.0f, 100.0f));
         float noiseB = permute(point + Vec3<float>(200.0f, 200.0f, 200.0f));
         float noiseA = permute(point + Vec3<float>(300.0f, 300.0f, 300.0f));
-        float rNormalized = (noiseR + 1.0f) * 0.5f;
-        float gNormalized = (noiseG + 1.0f) * 0.5f;
-        float bNormalized = (noiseB + 1.0f) * 0.5f;
-        float aNormalized = (noiseA + 1.0f) * 0.5f;
-        rNormalized = std::clamp(rNormalized, 0.0f, 1.0f);
-        gNormalized = std::clamp(gNormalized, 0.0f, 1.0f);
-        bNormalized = std::clamp(bNormalized, 0.0f, 1.0f);
-        aNormalized = std::clamp(aNormalized, 0.0f, 1.0f);
-        uint8_t r = static_cast<uint8_t>(rNormalized * 255.0f);
-        uint8_t g = static_cast<uint8_t>(gNormalized * 255.0f);
-        uint8_t b = static_cast<uint8_t>(bNormalized * 255.0f);
-        uint8_t a = static_cast<uint8_t>(aNormalized * 255.0f);
+        // float rNormalized = (noiseR + 1.0f) * 0.5f;
+        // float gNormalized = (noiseG + 1.0f) * 0.5f;
+        // float bNormalized = (noiseB + 1.0f) * 0.5f;
+        // float aNormalized = (noiseA + 1.0f) * 0.5f;
+        // rNormalized = std::clamp(rNormalized, 0.0f, 1.0f);
+        // gNormalized = std::clamp(gNormalized, 0.0f, 1.0f);
+        // bNormalized = std::clamp(bNormalized, 0.0f, 1.0f);
+        // aNormalized = std::clamp(aNormalized, 0.0f, 1.0f);
+        uint8_t r = static_cast<uint8_t>(noiseR * 255.0f);
+        uint8_t g = static_cast<uint8_t>(noiseG * 255.0f);
+        uint8_t b = static_cast<uint8_t>(noiseB * 255.0f);
+        uint8_t a = static_cast<uint8_t>(noiseA * 255.0f);
         
         return Vec4ui8(r, g, b, a);
     }

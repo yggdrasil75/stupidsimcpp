@@ -35,7 +35,7 @@ struct Shared {
 };
 
 void setup(defaults config, VoxelGrid& grid) {
-    float threshold = 0.3 * 255;
+    uint8_t threshold = 0.1 * 255;
     grid.resize(config.gridWidth, config.gridHeight, config.gridDepth);
     std::cout << "Generating grid of size " << config.gridWidth << "x" << config.gridHeight << "x" << config.gridDepth << std::endl;
     for (int z = 0; z < config.gridDepth; ++z) {
@@ -45,14 +45,20 @@ void setup(defaults config, VoxelGrid& grid) {
 
         for (int y = 0; y < config.gridHeight; ++y) {
             for (int x = 0; x < config.gridWidth; ++x) {
-                Vec4ui8 noisecolor = config.noise.permuteColor(Vec3f( static_cast<float>(x) / 64, static_cast<float>(y) / 64, static_cast<float>(z) / 64));
-                if (noisecolor.a > threshold) {
-                    grid.set(Vec3i(x, y, z), true, Vec3ui8(noisecolor.xyz()));
+                uint8_t r = config.noise.permute(Vec3f(static_cast<float>(x) / config.gridWidth / 64, static_cast<float>(y) / config.gridHeight / 64, static_cast<float>(z) / config.gridDepth / 64)) * 255;
+                uint8_t g = config.noise.permute(Vec3f(static_cast<float>(x) / config.gridWidth / 32, static_cast<float>(y) / config.gridHeight / 32, static_cast<float>(z) / config.gridDepth / 32)) * 255;
+                uint8_t b = config.noise.permute(Vec3f(static_cast<float>(x) / config.gridWidth / 16, static_cast<float>(y) / config.gridHeight / 16, static_cast<float>(z) / config.gridDepth / 16)) * 255;
+                uint8_t a = config.noise.permute(Vec3f(static_cast<float>(x) / config.gridWidth / 8 , static_cast<float>(y) / config.gridHeight / 8 , static_cast<float>(z) / config.gridDepth / 8)) * 255;
+                //Vec4ui8 noisecolor = config.noise.permuteColor(Vec3f( static_cast<float>(x) / 64, static_cast<float>(y) / 64, static_cast<float>(z) / 64));
+                if (a > threshold) {
+                    //std::cout << "setting a position" << std::endl;
+                    grid.set(Vec3i(x, y, z), true, Vec3ui8(r,g,b));
                 }
             }
         }
     }
     std::cout << "Noise grid generation complete!" << std::endl;
+    grid.printStats();
 }
 
 void livePreview(VoxelGrid& grid, defaults& config, const Camera& cam) {
@@ -170,14 +176,17 @@ int main() {
     VoxelGrid grid;
     bool gridInitialized = false;
 
-    Camera cam(config.gridWidth, Vec3f(0,0,0), Vec3f(0,1,0), 80);
+    Camera cam(Vec3f(config.gridWidth/2.0f, config.gridHeight/2.0f, config.gridDepth/2.0f), Vec3f(0,0,1), Vec3f(0,1,0), 80);
     
     // Variables for camera sliders
     float camX = 0.0f;
     float camY = 0.0f;
     float camZ = 0.0f;
-    float camYaw = 0.0f;
-    float camPitch = 0.0f;
+    float camvX = 0.f;
+    float camvY = 0.f;
+    float camvZ = 0.f;
+    //float camYaw = 0.0f;
+    //float camPitch = 0.0f;
     
     // Variables for framerate limiting
     const double targetFrameTime = 1.0 / config.fps; // 30 FPS
@@ -230,16 +239,17 @@ int main() {
                 setup(config, grid);
                 gridInitialized = true;
                 // Reset camera to center of grid
-                camX = config.gridWidth * config.gridWidth / 2.0f;
-                camY = config.gridHeight * config.gridHeight / 2.0f;
-                camZ = config.gridDepth * config.gridDepth / 2.0f;
-                camYaw = 0.0f;
-                camPitch = 0.0f;
+                camX = config.gridWidth / 2.0f;
+                camY = config.gridHeight / 2.0f;
+                camZ = config.gridDepth / 2.0f;
+                //camYaw = 0.0f;
+                //camPitch = 0.0f;
                 
                 // Update camera position
                 cam.posfor.origin = Vec3f(camX, camY, camZ);
-                cam.rotateYaw(camYaw);
-                cam.rotatePitch(camPitch);
+                cam.posfor.direction = Vec3f(camvX, camvY, camvZ);
+                // cam.rotateYaw(camYaw);
+                // cam.rotatePitch(camPitch);
                 
                 savePreview(grid, config, cam);
                 cameraMoved = true; // Force preview update after generation
@@ -251,9 +261,9 @@ int main() {
                 ImGui::Text("Camera Controls:");
                 
                 // Calculate max slider values based on grid size squared
-                float maxSliderValueX = config.gridWidth * config.gridWidth;
-                float maxSliderValueY = config.gridHeight * config.gridHeight;
-                float maxSliderValueZ = config.gridDepth * config.gridDepth;
+                float maxSliderValueX = config.gridWidth;
+                float maxSliderValueY = config.gridHeight;
+                float maxSliderValueZ = config.gridDepth;
                 float maxSliderValueRotation = 360.0f; // Degrees
                 
                 ImGui::Text("Position (0 to grid size²):");
@@ -271,21 +281,34 @@ int main() {
                 }
                 
                 ImGui::Separator();
-                ImGui::Text("Rotation (degrees):");
-                if (ImGui::SliderFloat("Yaw", &camYaw, 0.0f, maxSliderValueRotation)) {
+                // ImGui::Text("Rotation (degrees):");
+                // if (ImGui::SliderFloat("Yaw", &camYaw, 0.0f, maxSliderValueRotation)) {
+                //     cameraMoved = true;
+                //     // Reset and reapply rotation
+                //     // You might need to adjust this based on your Camera class implementation
+                //     cam = Camera(config.gridWidth, Vec3f(camX, camY, camZ), Vec3f(0,1,0), 80);
+                //     cam.rotateYaw(camYaw);
+                //     cam.rotatePitch(camPitch);
+                // }
+                // if (ImGui::SliderFloat("Pitch", &camPitch, 0.0f, maxSliderValueRotation)) {
+                //     cameraMoved = true;
+                //     // Reset and reapply rotation
+                //     cam = Camera(config.gridWidth, Vec3f(camX, camY, camZ), Vec3f(0,1,0), 80);
+                //     cam.rotateYaw(camYaw);
+                //     cam.rotatePitch(camPitch);
+                // }
+                ImGui::Text("View Direction:");
+                if (ImGui::SliderFloat("Camera View X", &camvX, -1.0f, 1.0f)) {
                     cameraMoved = true;
-                    // Reset and reapply rotation
-                    // You might need to adjust this based on your Camera class implementation
-                    cam = Camera(config.gridWidth, Vec3f(camX, camY, camZ), Vec3f(0,1,0), 80);
-                    cam.rotateYaw(camYaw);
-                    cam.rotatePitch(camPitch);
+                    cam.posfor.direction.x = camvX;
                 }
-                if (ImGui::SliderFloat("Pitch", &camPitch, 0.0f, maxSliderValueRotation)) {
+                if (ImGui::SliderFloat("Camera View Y", &camvY, -1.0f, 1.0f)) {
                     cameraMoved = true;
-                    // Reset and reapply rotation
-                    cam = Camera(config.gridWidth, Vec3f(camX, camY, camZ), Vec3f(0,1,0), 80);
-                    cam.rotateYaw(camYaw);
-                    cam.rotatePitch(camPitch);
+                    cam.posfor.direction.y = camvY;
+                }
+                if (ImGui::SliderFloat("Camera View Z", &camvZ, -1.0f, 1.0f)) {
+                    cameraMoved = true;
+                    cam.posfor.direction.z = camvZ;
                 }
                 
                 ImGui::Separator();
@@ -294,7 +317,7 @@ int main() {
                            cam.posfor.origin.x, 
                            cam.posfor.origin.y, 
                            cam.posfor.origin.z);
-                ImGui::Text("Yaw: %.2f°, Pitch: %.2f°", camYaw, camPitch);
+                // ImGui::Text("Yaw: %.2f°, Pitch: %.2f°", camYaw, camPitch);
             }
 
             ImGui::End();

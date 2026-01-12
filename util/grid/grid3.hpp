@@ -302,6 +302,31 @@ public:
         outFrame.setData(colorBuffer);
         return outFrame;
     }
+
+    
+    void printStats() const {
+        int totalVoxels = gridSize.x * gridSize.y * gridSize.z;
+        int activeVoxels = 0;
+        
+        // Count active voxels
+        for (const Voxel& voxel : voxels) {
+            if (voxel.active) {
+                activeVoxels++;
+            }
+        }
+        
+        float activePercentage = (totalVoxels > 0) ? 
+            (static_cast<float>(activeVoxels) / static_cast<float>(totalVoxels)) * 100.0f : 0.0f;
+        
+        std::cout << "=== Voxel Grid Statistics ===" << std::endl;
+        std::cout << "Grid dimensions: " << gridSize.x << " x " << gridSize.y << " x " << gridSize.z << std::endl;
+        std::cout << "Total voxels: " << totalVoxels << std::endl;
+        std::cout << "Active voxels: " << activeVoxels << std::endl;
+        std::cout << "Inactive voxels: " << (totalVoxels - activeVoxels) << std::endl;
+        std::cout << "Active percentage: " << activePercentage << "%" << std::endl;
+        std::cout << "Memory usage (approx): " << (voxels.size() * sizeof(Voxel)) / 1024 << " KB" << std::endl;
+        std::cout << "============================" << std::endl;
+    }
 };
 
 #endif
