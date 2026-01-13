@@ -7,6 +7,7 @@
 #include <iostream>
 #include "../vectorlogic/vec3.hpp"
 #include "../basicdefines.hpp"
+#include "../timing_decorator.hpp"
 
 /// @brief Finds the index of the least significant bit set to 1 in a 64-bit integer.
 /// @details Uses compiler intrinsics (_BitScanForward64, __builtin_ctzll) where available, 
@@ -658,8 +659,8 @@ public:
     /// @param upDir The up vector of the camera.
     /// @param fov the field of view for the camera
     void renderToRGB(std::vector<uint8_t>& buffer, int width, int height, const Vec3d& viewOrigin, 
-                     const Vec3d& viewDir, const Vec3d& upDir, float fov = 80) {
-        // Resize buffer to hold width * height * 3 bytes (RGB)
+                 const Vec3d& viewDir, const Vec3d& upDir, float fov = 80) {
+        TIME_FUNCTION;
         buffer.resize(width * height * 3);
         std::fill(buffer.begin(), buffer.end(), 0);
         
@@ -674,14 +675,11 @@ public:
         // Compute focal length based on FOV
         double aspectRatio = static_cast<double>(width) / static_cast<double>(height);
         double fovRad = fov * M_PI / 180.0;
-        double focalLength = 1.0 / tan(fovRad * 0.5);
+        double focalLength = 0.5 / tan(fovRad * 0.5); // Reduced for wider view
         
-        // Precompute scaling factors for screen coordinates
-        double pixelWidth = 2.0 / (width - 1);
-        double pixelHeight = 2.0 / (height - 1);
-        
-        // Compute half voxel size for accurate ray-voxel intersection
-        double halfVoxel = resolution * 0.5;
+        // Pixel to world scaling
+        double pixelWidth = 2.0 * focalLength / width;
+        double pixelHeight = 2.0 * focalLength / height;
         
         // Create an accessor for efficient voxel lookup
         Accessor accessor = createAccessor();
@@ -689,81 +687,55 @@ public:
         // For each pixel in the output image
         for (int y = 0; y < height; ++y) {
             for (int x = 0; x < width; ++x) {
-                // Convert pixel coordinates to normalized device coordinates [-1, 1]
-                double ndcX = (2.0 * x / (width - 1)) - 1.0;
-                double ndcY = 1.0 - (2.0 * y / (height - 1)); // Flip Y
+                // Calculate pixel position in camera space
+                double u = (x - width * 0.5) * pixelWidth;
+                double v = (height * 0.5 - y) * pixelHeight;
                 
-                // Scale by aspect ratio
-                ndcX *= aspectRatio;
-                
-                // Compute ray direction in camera space
-                Vec3d rayDirCam(ndcX, ndcY, focalLength);
-                
-                // Transform ray direction to world space
-                Vec3d rayDirWorld = (rightDir * rayDirCam.x) + 
-                                    (realUpDir * rayDirCam.y) + 
-                                    (viewDirN * rayDirCam.z);
+                // Compute ray direction in world space
+                Vec3d rayDirWorld = viewDirN * focalLength + 
+                                rightDir * u + 
+                                realUpDir * v;
                 rayDirWorld = rayDirWorld.normalized();
                 
                 // Set up ray marching
                 Vec3d rayPos = viewOrigin;
-                double maxDistance = 100.0; // Maximum ray distance
-                double stepSize = resolution; // Step size for ray marching
+                double maxDistance = 1000.0; // Increased maximum ray distance
+                double stepSize = resolution * 0.5; // Smaller step size
                 
                 // Ray marching loop
-                for (double t = 0; t < maxDistance; t += stepSize) {
+                bool hit = false;
+                for (double t = 0; t < maxDistance && !hit; t += stepSize) {
                     rayPos = viewOrigin + rayDirWorld * t;
+                    
+                    // Check if we're inside the grid bounds
+                    if (rayPos.x < 0 || rayPos.y < 0 || rayPos.z < 0 ||
+                        rayPos.x >= 128 || rayPos.y >= 128 || rayPos.z >= 128) {
+                        continue;
+                    }
                     
                     // Convert world position to voxel coordinate
                     Vec3i coord = posToCoord(rayPos);
                     
-                    // Look up voxel value using accessor (cached for efficiency)
+                    // Look up voxel value using accessor
                     DataT* voxelData = accessor.value(coord);
                     
                     if (voxelData) {
                         // Voxel hit - extract color
-                        // Assuming DataT is Vec3ui8 or compatible
                         Vec3ui8* colorPtr = reinterpret_cast<Vec3ui8*>(voxelData);
                         
                         // Get buffer index for this pixel
                         size_t pixelIdx = (y * width + x) * 3;
                         
-                        // Apply simple shading based on normal
-                        // Estimate normal by checking neighbors
-                        double shading = 1.0;
+                        // Simple distance-based attenuation
+                        double distance = t;
+                        double attenuation = 1.0 / (1.0 + distance * 0.01);
                         
-                        // Check neighboring voxels to estimate surface normal
-                        Vec3d voxelCenter = Vec3iToPos(coord);
-                        Vec3d toRay = (rayPos - voxelCenter).normalized();
+                        // Store color in buffer with attenuation
+                        buffer[pixelIdx]     = static_cast<uint8_t>(colorPtr->x * attenuation);
+                        buffer[pixelIdx + 1] = static_cast<uint8_t>(colorPtr->y * attenuation);
+                        buffer[pixelIdx + 2] = static_cast<uint8_t>(colorPtr->z * attenuation);
                         
-                        // Simple normal estimation by checking adjacent voxels
-                        Vec3i neighbors[6] = {
-                            Vec3i(coord.x + 1, coord.y, coord.z),
-                            Vec3i(coord.x - 1, coord.y, coord.z),
-                            Vec3i(coord.x, coord.y + 1, coord.z),
-                            Vec3i(coord.x, coord.y - 1, coord.z),
-                            Vec3i(coord.x, coord.y, coord.z + 1),
-                            Vec3i(coord.x, coord.y, coord.z - 1)
-                        };
-                        
-                        // Count empty neighbors to estimate surface orientation
-                        int emptyCount = 0;
-                        for (int i = 0; i < 6; ++i) {
-                            if (!accessor.value(neighbors[i])) {
-                                emptyCount++;
-                            }
-                        }
-                        
-                        // Simple shading: more visible if fewer neighbors (edge/corner)
-                        if (emptyCount > 0) {
-                            shading = 0.7 + 0.3 * (emptyCount / 6.0);
-                        }
-                        
-                        // Store color in buffer with shading
-                        buffer[pixelIdx]     = static_cast<uint8_t>(colorPtr->x * shading);
-                        buffer[pixelIdx + 1] = static_cast<uint8_t>(colorPtr->y * shading);
-                        buffer[pixelIdx + 2] = static_cast<uint8_t>(colorPtr->z * shading);
-                        
+                        hit = true;
                         break; // Stop ray marching after hitting first voxel
                     }
                 }
