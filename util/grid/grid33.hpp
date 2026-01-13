@@ -222,16 +222,15 @@ public:
         mWords[n >> 6] &= ~(uint64_t(1) << (n & 63));
     }
 
-    template<bool UseBranchless = true>
     void set(uint32_t n, bool On) {
-        if constexpr (UseBranchless) {
+#if 1
             auto &word = mWords[n >> 6];
             n &= 63;
             word &= ~(uint64_t(1) << n);
             word |= uint64_t(On) << n;
-        } else {
+#else
             On ? this->setOn(n) : this->setOff(n);
-        }
+#endif
     }
 
     void setOn() {
@@ -392,7 +391,7 @@ public:
 
                 const uint32_t inner_index = getInnerIndex(coord);
                 auto& inner_data = inner_ptr->data[inner_index];
-                if (inner_ptr->mask.setOn(inner_index)) {
+                if (inner_ptr->mask.setOn(inner_index) == false) {
                     inner_data = std::make_shared<LeafGrid>();
                 }
 
