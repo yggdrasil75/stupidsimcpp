@@ -6,6 +6,7 @@
 #include <string>
 #include <ostream>
 #include <cstdint>
+#include "vec2.hpp"
 
 template<typename T>
 class Vec3 {

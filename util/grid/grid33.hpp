@@ -45,9 +45,7 @@ inline uint32_t CountOn(uint64_t v)
     // Software Implementation
     v = v - ((v >> 1) & uint64_t(0x5555555555555555));
     v = (v & uint64_t(0x3333333333333333)) + ((v >> 2) & uint64_t(0x3333333333333333));
-    v = (((v + (v >> 4)) & uint64_t(0xF0F0F0F0F0F0F0F)) *
-         uint64_t(0x101010101010101)) >>
-        56;
+    v = (((v + (v >> 4)) & uint64_t(0xF0F0F0F0F0F0F0F)) * uint64_t(0x101010101010101)) >> 56;
 #endif
     return static_cast<uint32_t>(v);
 }
@@ -70,7 +68,7 @@ private:
     }
 
     uint32_t findNextOn(uint32_t start) const {
-        uint32_t n start >> 6;
+        uint32_t n = start >> 6;
         if (n >= WORD_COUNT) {
             return SIZE;
         }
@@ -126,7 +124,7 @@ public:
         
         Iterator& operator=(const Iterator&) = default;
         
-        uint32_t opeator*() const {
+        uint32_t operator*() const {
             return mPos;
         }
         
@@ -138,7 +136,7 @@ public:
             mPos = mParent -> findNextOn(mPos + 1);
             return *this;
         }
-    }
+    };
 
     Mask() {
         for (uint32_t i = 0; i < WORD_COUNT; ++i) {
@@ -269,6 +267,7 @@ public:
 
 template <typename DataT, int Log2DIM>
 class Grid {
+public:
     constexpr static int DIM = 1 << Log2DIM;
     constexpr static int SIZE = DIM * DIM * DIM;
     std::array<DataT, SIZE> data;
@@ -277,8 +276,6 @@ class Grid {
 
 template <typename DataT, int INNER_BITS = 2, int LEAF_BITS = 3>
 class VoxelGrid {
-private:
-    
 public:
     constexpr static int32_t Log2N = INNER_BITS + LEAF_BITS;
     using LeafGrid = Grid<DataT, LEAF_BITS>;
@@ -310,7 +307,7 @@ public:
         return total_size;
     }
 
-    static inline  Veci PosToCoord(float x, float y, float z) {
+    static inline  Vec3i PosToCoord(float x, float y, float z) {
         // union VI {
         //     __m128i m;
         //     int32_t i[4];
@@ -333,7 +330,7 @@ public:
         return pos.floorToI();
     }
 
-    Vec3d Vec3ioPos(const Vec3i &coord) {
+    Vec3d Vec3iToPos(const Vec3i& coord) const {
         return (coord.toDouble() * resolution) + half_resolution;
     }
 
@@ -342,7 +339,10 @@ public:
         constexpr static int32_t MASK_LEAF = ((1 << LEAF_BITS) - 1);
         constexpr static int32_t MASK_INNER = ((1 << INNER_BITS) - 1);
         for (auto& map_it : root_map) {
-            const auto& [xA, yA, zA] = (map_it.first);
+            const Vec3i& root_coord = map_it.first;
+            int32_t xA = root_coord.x;
+            int32_t yA = root_coord.y;
+            int32_t zA = root_coord.z;
             InnerGrid& inner_grid = map_it.second;
             auto& mask2 = inner_grid.mask;
             for (auto inner_it = mask2.beginOn(); inner_it; ++inner_it) {
@@ -364,7 +364,6 @@ public:
         }
     }
 
-
     class Accessor {
     private:
         RootMap &root_;
@@ -383,7 +382,7 @@ public:
                 if (root_key != prev_root_coord_ || !prev_inner_ptr_) {
                     auto root_it = root_.find(root_key);
                     if (root_it == root_.end()) {
-                        root_it = root_insert({root_key, InnerGrid()}).first;
+                        root_it = root_.insert({root_key, InnerGrid()}).first;
                     }
 
                     inner_ptr = &(root_it->second);
@@ -426,7 +425,7 @@ public:
                 }
 
                 const uint32_t inner_index = getInnerIndex(coord);
-                auto& inner_data - inner_ptr->data[inner_index];
+                auto& inner_data = inner_ptr->data[inner_index];
 
                 if (!inner_ptr->mask.isOn(inner_index)) {
                     return nullptr;
@@ -452,7 +451,7 @@ public:
         const LeafGrid* lastLeafGrid() const {
             return prev_leaf_ptr_;
         }
-    }
+    };
 
     Accessor createAccessor() {
         return Accessor(root_map);
@@ -487,5 +486,57 @@ public:
                ((coord.y & MASK) <<  LEAF_BITS) +
                ((coord.z & MASK) << (LEAF_BITS * 2));
         // clang-format on
+    }
+
+    bool setVoxelColor(const Vec3d& worldPos, const Vec3ui8& color) {
+        Vec3i coord = posToCoord(worldPos);
+        Accessor accessor = createAccessor();
+        return accessor.setValue(coord, color);
+    }
+    
+    Vec3ui8* getVoxelColor(const Vec3d& worldPos) {
+        Vec3i coord = posToCoord(worldPos);
+        Accessor accessor = createAccessor();
+        return accessor.value(coord);
+    }
+    
+    // Render with projection (simple orthographic projection)
+    void renderProjectedToRGBBuffer(std::vector<uint8_t>& buffer, int width, int height, const Vec3d& viewDir = Vec3d(0, 0, 1),
+                                   const Vec3d& upDir = Vec3d(0, 1, 0)) {
+        // Clear buffer
+        buffer.clear();
+        buffer.resize(width * height * 3, 0);
+        
+        // Create view matrix (simplified orthographic projection)
+        Vec3d view = viewDir.normalized();
+        Vec3d up = upDir.normalized();
+        Vec3d right = view.cross(up).normalized();
+        up = right.cross(view).normalized(); // Re-orthogonalize
+        
+        // For each voxel, project to screen
+        forEachCell([&](const Vec3ui8& color, const Vec3i& coord) {
+            // Convert voxel coordinate to world position
+            Vec3d worldPos = Vec3iToPos(coord);
+            
+            // Simple orthographic projection: drop view direction component
+            double xProj = worldPos.dot(right);
+            double yProj = worldPos.dot(up);
+            
+            // Normalize to pixel coordinates (assuming unit size)
+            int px = static_cast<int>((xProj + 0.5) * width);
+            int py = static_cast<int>((yProj + 0.5) * height);
+            
+            // Clamp to image bounds
+            if (px >= 0 && px < width && py >= 0 && py < height) {
+                int index = (py * width + px) * 3;
+                
+                Vec3ui8 finalColor = color;
+                
+                // Write RGB
+                buffer[index] = finalColor.x;     // R
+                buffer[index + 1] = finalColor.y; // G
+                buffer[index + 2] = finalColor.z; // B
+            }
+        });
     }
 };
