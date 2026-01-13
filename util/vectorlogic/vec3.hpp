@@ -459,6 +459,7 @@ public:
 using Vec3f = Vec3<float>;
 using Vec3d = Vec3<double>;
 using Vec3i = Vec3<int>;
+using Vec3i32 = Vec3<uint32_t>;
 using Vec3i8 = Vec3<int8_t>;
 using Vec3ui8 = Vec3<uint8_t>;
 using Vec3T = Vec3<size_t>;

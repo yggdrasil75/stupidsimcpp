@@ -8,6 +8,7 @@
 #include <random>
 #include "../vectorlogic/vec2.hpp"
 #include "../vectorlogic/vec3.hpp"
+#include "../vectorlogic/vec4.hpp"
 #include "../timing_decorator.hpp"
 
 class PNoise2 {

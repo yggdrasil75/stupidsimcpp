@@ -6,7 +6,13 @@
 #include <cmath>
 #include <iostream>
 #include "../vectorlogic/vec3.hpp"
+#include "../basicdefines.hpp"
 
+/// @brief Finds the index of the least significant bit set to 1 in a 64-bit integer.
+/// @details Uses compiler intrinsics (_BitScanForward64, __builtin_ctzll) where available, 
+/// falling back to a De Bruijn sequence multiplication lookup for portability.
+/// @param v The 64-bit integer to scan.
+/// @return The zero-based index of the lowest set bit. Behavior is undefined if v is 0.
 static inline uint32_t FindLowestOn(uint64_t v)
 {
 #if defined(_MSC_VER) && defined(TREEXY_USE_INTRINSICS)
@@ -35,6 +41,11 @@ static inline uint32_t FindLowestOn(uint64_t v)
 #endif
 }
 
+/// @brief Counts the number of bits set to 1 (population count) in a 64-bit integer.
+/// @details Uses compiler intrinsics (__popcnt64, __builtin_popcountll) where available,
+/// falling back to a software Hamming weight implementation.
+/// @param v The 64-bit integer to count.
+/// @return The number of bits set to 1.
 inline uint32_t CountOn(uint64_t v)
 {
 #if defined(_MSC_VER) && defined(_M_X64)
@@ -50,6 +61,8 @@ inline uint32_t CountOn(uint64_t v)
     return static_cast<uint32_t>(v);
 }
 
+/// @brief A bitmask class for tracking active cells within a specific grid dimension.
+/// @tparam LOG2DIM The log base 2 of the dimension size.
 template<uint32_t LOG2DIM>
 class Mask {
 private: 
@@ -57,6 +70,8 @@ private:
     static constexpr uint32_t WORD_COUNT = SIZE / 64;
     uint64_t mWords[WORD_COUNT];
 
+    /// @brief Internal helper to find the linear index of the first active bit.
+    /// @return The index of the first on bit, or SIZE if none are set.
     uint32_t findFirstOn() const {
         const uint64_t *w = mWords;
         uint32_t n = 0;
@@ -67,6 +82,9 @@ private:
         return n == WORD_COUNT ? SIZE : (n << 6) + FindLowestOn(*w);
     }
 
+    /// @brief Internal helper to find the next active bit after a specific index.
+    /// @param start The index to start searching from (inclusive check, though logic implies sequential access).
+    /// @return The index of the next on bit, or SIZE if none are found.
     uint32_t findNextOn(uint32_t start) const {
         uint32_t n = start >> 6;
         if (n >= WORD_COUNT) {
@@ -85,26 +103,37 @@ private:
     }
 
 public:
+    /// @brief Returns the memory size of this Mask instance.
     static size_t memUsage() {
         return sizeof(Mask);
     }
     
+    /// @brief Returns the total capacity (number of bits) in the mask.
     static uint32_t bitCount() {
         return SIZE;
     }
     
+    /// @brief Returns the number of 64-bit words used to store the mask.
     static uint32_t wordCount() {
         return WORD_COUNT;
     }
 
+    /// @brief Retrieves a specific 64-bit word from the mask array.
+    /// @param n The index of the word.
+    /// @return The word value.
     uint64_t getWord(size_t n) const {
         return mWords[n];
     }
 
+    /// @brief Sets a specific 64-bit word in the mask array.
+    /// @param n The index of the word.
+    /// @param v The value to set.
     void setWord(size_t n, uint64_t v) {
         mWords[n] = v;
     }
 
+    /// @brief Calculates the total number of bits set to 1 in the mask.
+    /// @return The count of active bits.
     uint32_t countOn() const {
         uint32_t sum = 0;
         uint32_t n = WORD_COUNT;
@@ -114,36 +143,52 @@ public:
         return sum;
     }
 
+    /// @brief Iterator class for traversing set bits in the Mask.
     class Iterator {
     private:
         uint32_t mPos;
         const Mask* mParent;
     public:
+        /// @brief Default constructor creating an invalid end iterator.
         Iterator() : mPos(Mask::SIZE), mParent(nullptr) {}
+        
+        /// @brief Constructor for a specific position.
+        /// @param pos The current bit index.
+        /// @param parent Pointer to the Mask being iterated.
         Iterator(uint32_t pos, const Mask* parent) : mPos(pos), mParent(parent) {}
         
+        /// @brief Default assignment operator.
         Iterator& operator=(const Iterator&) = default;
         
+        /// @brief Dereference operator.
+        /// @return The index of the current active bit.
         uint32_t operator*() const {
             return mPos;
         }
         
+        /// @brief Boolean conversion operator.
+        /// @return True if the iterator is valid (not at end), false otherwise.
         operator bool() const {
             return mPos != Mask::SIZE;
         }
 
+        /// @brief Pre-increment operator. Advances to the next active bit.
+        /// @return Reference to self.
         Iterator& operator++() {
             mPos = mParent -> findNextOn(mPos + 1);
             return *this;
         }
     };
 
+    /// @brief Default constructor. Initializes all bits to 0 (off).
     Mask() {
         for (uint32_t i = 0; i < WORD_COUNT; ++i) {
             mWords[i] = 0;
         }
     }
 
+    /// @brief Constructor initializing all bits to a specific state.
+    /// @param on If true, all bits are set to 1; otherwise 0.
     Mask(bool on) {
         const uint64_t v = on ? ~uint64_t(0) : uint64_t(0);
         for (uint32_t i = 0; i < WORD_COUNT; ++i) {
@@ -151,17 +196,25 @@ public:
         }
     }
 
+    /// @brief Copy constructor.
     Mask(const Mask &other) {
         for (uint32_t i = 0; i < WORD_COUNT; ++i) {
             mWords[i] = other.mWords[i];
         }
     }
 
+    /// @brief Reinterprets internal words as a different type and retrieves one.
+    /// @tparam WordT The type to cast the pointer to (e.g., uint32_t).
+    /// @param n The index in the reinterpreted array.
+    /// @return The value at index n.
     template<typename WordT>
     WordT getWord(int n) const {
         return reinterpret_cast<const WordT *>(mWords)[n];
     }
 
+    /// @brief Assignment operator.
+    /// @param other The mask to copy from.
+    /// @return Reference to self.
     Mask &operator=(const Mask &other) {
         // static_assert(sizeof(Mask) == sizeof(Mask), "Mismatching sizeof");
         // static_assert(WORD_COUNT == Mask::WORD_COUNT, "Mismatching word count");
@@ -174,6 +227,9 @@ public:
         return *this;
     }
 
+    /// @brief Equality operator.
+    /// @param other The mask to compare.
+    /// @return True if all bits match, false otherwise.
     bool operator==(const Mask &other) const {
         for (uint32_t i = 0; i < WORD_COUNT; ++i) {
             if (mWords[i] != other.mWords[i]) return false;
@@ -181,21 +237,28 @@ public:
         return true;
     }
 
+    /// @brief Inequality operator.
+    /// @param other The mask to compare.
+    /// @return True if any bits differ.
     bool operator!=(const Mask &other) const {
         return !((*this) == other);
     }
 
+    /// @brief Returns an iterator to the first active bit.
+    /// @return An Iterator pointing to the first set bit.
     Iterator beginOn() const {
         return Iterator(this->findFirstOn(), this);
     }
 
-    /// @brief return true if bit n is set.
-    /// @param n the bit to check
-    /// @return true otherwise return false
+    /// @brief Checks if a specific bit is set.
+    /// @param n The bit index to check.
+    /// @return True if the bit is 1, false if 0.
     bool isOn(uint32_t n) const {
         return 0 != (mWords[n >> 6] & (uint64_t(1) << (n&63)));
     }
 
+    /// @brief Checks if all bits are set to 1.
+    /// @return True if fully saturated.
     bool isOn() const {
         for (uint32_t i = 0; i < WORD_COUNT; ++i) {
             if (mWords[i] != ~uint64_t(0)) return false;
@@ -203,6 +266,8 @@ public:
         return true;
     }
 
+    /// @brief Checks if all bits are set to 0.
+    /// @return True if fully empty.
     bool isOff() const {
         for (uint32_t i = 0; i < WORD_COUNT; ++i) {
             if (mWords[i] != ~uint64_t(0)) return true;
@@ -210,6 +275,9 @@ public:
         return false;
     }
 
+    /// @brief Sets a specific bit to 1.
+    /// @param n The bit index to set.
+    /// @return True if the bit was already on, false otherwise.
     bool setOn(uint32_t n) {
         uint64_t &word = mWords[n >> 6];
         const uint64_t bit = (uint64_t(1) << (n & 63));
@@ -218,10 +286,15 @@ public:
         return wasOn;
     }
 
+    /// @brief Sets a specific bit to 0.
+    /// @param n The bit index to clear.
     void setOff(uint32_t n) {
         mWords[n >> 6] &= ~(uint64_t(1) << (n & 63));
     }
 
+    /// @brief Sets a specific bit to the boolean value `On`.
+    /// @param n The bit index.
+    /// @param On The state to set (true=1, false=0).
     void set(uint32_t n, bool On) {
 #if 1
             auto &word = mWords[n >> 6];
@@ -233,18 +306,22 @@ public:
 #endif
     }
 
+    /// @brief Sets all bits to 1.
     void setOn() {
         for (uint32_t i = 0; i < WORD_COUNT; ++i) {
             mWords[i] = ~uint64_t(0);
         }
     }
 
+    /// @brief Sets all bits to 0.
     void setOff() {
         for (uint32_t i = 0; i < WORD_COUNT; ++i) {
             mWords[i] = uint64_t(0);
         }
     }
 
+    /// @brief Sets all bits to a specific boolean state.
+    /// @param on If true, fill with 1s; otherwise 0s.
     void set(bool on) {
         const uint64_t v = on ? ~uint64_t(0) : uint64_t(0);
         for (uint32_t i = 0; i < WORD_COUNT; ++i) {
@@ -252,6 +329,7 @@ public:
         }
     }
 
+    /// @brief Inverts (flips) all bits in the mask.
     void toggle() {
         uint32_t n = WORD_COUNT;
         for (auto* w = mWords; n--; ++w) {
@@ -259,11 +337,16 @@ public:
         }
     }
 
+    /// @brief Inverts (flips) a specific bit.
+    /// @param n The bit index to toggle.
     void toggle(uint32_t n) {
         mWords[n >> 6] ^= uint64_t(1) << (n & 63);
     }
 };
 
+/// @brief Represents a generic grid block containing data and a presence mask.
+/// @tparam DataT The type of data stored in each cell.
+/// @tparam Log2DIM The log base 2 of the grid dimension (e.g., 3 for 8x8x8).
 template <typename DataT, int Log2DIM>
 class Grid {
 public:
@@ -273,6 +356,11 @@ public:
     Mask<Log2DIM> mask;
 };
 
+/// @brief A sparse hierarchical voxel grid container.
+/// @details Implements a 3-level structure: Root Map -> Inner Grid -> Leaf Grid.
+/// @tparam DataT The type of data stored in the leaf voxels.
+/// @tparam INNER_BITS Log2 dimension of the inner grid nodes (intermediate layer).
+/// @tparam LEAF_BITS Log2 dimension of the leaf grid nodes (data layer).
 template <typename DataT, int INNER_BITS = 2, int LEAF_BITS = 3>
 class VoxelGrid {
 public:
@@ -285,8 +373,12 @@ public:
     const double inv_resolution;
     const double half_resolution;
 
+    /// @brief Constructs a VoxelGrid with a specific voxel size.
+    /// @param voxel_size The size of a single voxel in world units.
     VoxelGrid(double voxel_size) : resolution(voxel_size), inv_resolution(1.0 / voxel_size), half_resolution(0.5 * voxel_size) {}
     
+    /// @brief Calculates the approximate memory usage of the grid structure.
+    /// @return The size in bytes used by the map, inner grids, and leaf grids.
     size_t getMemoryUsage() const {
         size_t total_size = 0;
         for (unsigned i = 0; i < root_map.bucket_count(); ++i) {
@@ -306,6 +398,11 @@ public:
         return total_size;
     }
 
+    /// @brief Converts a 3D float position to integer grid coordinates.
+    /// @param x X coordinate.
+    /// @param y Y coordinate.
+    /// @param z Z coordinate.
+    /// @return The integer grid coordinates.
     static inline  Vec3i PosToCoord(float x, float y, float z) {
         // union VI {
         //     __m128i m;
@@ -321,18 +418,32 @@ public:
         return Vec3f(x,y,z).floorToI();
     }
 
+    /// @brief Converts a 3D double position to integer grid coordinates.
+    /// @param x X coordinate.
+    /// @param y Y coordinate.
+    /// @param z Z coordinate.
+    /// @return The integer grid coordinates.
     static inline Vec3i posToCoord(double x, double y, double z) {
         return Vec3f(x,y,z).floorToI();
     }
 
+    /// @brief Converts a Vec3d position to integer grid coordinates.
+    /// @param pos The position vector.
+    /// @return The integer grid coordinates.
     static inline Vec3i posToCoord(const Vec3d &pos) {
         return pos.floorToI();
     }
 
+    /// @brief Converts integer grid coordinates back to world position (center of voxel).
+    /// @param coord The grid coordinate.
+    /// @return The world position center of the voxel.
     Vec3d Vec3iToPos(const Vec3i& coord) const {
         return (coord.toDouble() * resolution) + half_resolution;
     }
 
+    /// @brief Iterates over every active cell in the grid and applies a visitor function.
+    /// @tparam VisitorFunction The type of the callable (DataT& val, Vec3i pos).
+    /// @param func The function to execute for each active voxel.
     template <class VisitorFunction>
     void forEachCell(VisitorFunction func) {
         constexpr static int32_t MASK_LEAF = ((1 << LEAF_BITS) - 1);
@@ -363,6 +474,7 @@ public:
         }
     }
 
+    /// @brief Helper class to accelerate random access to the VoxelGrid by caching recent paths.
     class Accessor {
     private:
         RootMap &root_;
@@ -371,7 +483,14 @@ public:
         InnerGrid* prev_inner_ptr_ = nullptr;
         LeafGrid* prev_leaf_ptr_ = nullptr;
     public:
+        /// @brief Constructs an Accessor for a specific root map.
+        /// @param root Reference to the grid's root map.
         Accessor(RootMap& root) : root_(root) {}
+
+        /// @brief Sets a value at a specific coordinate, creating nodes if they don't exist.
+        /// @param coord The grid coordinate.
+        /// @param value The value to store.
+        /// @return True if the voxel was already active, false if it was newly activated.
         bool setValue(const Vec3i& coord, const DataT& value) {
             LeafGrid* leaf_ptr = prev_leaf_ptr_;
             const Vec3i inner_key = getInnerKey(coord);
@@ -406,6 +525,9 @@ public:
             return was_on;
         }
 
+        /// @brief Retrieves a pointer to the value at a coordinate.
+        /// @param coord The grid coordinate.
+        /// @return Pointer to the data if active, otherwise nullptr.
         DataT* value(const Vec3i& coord) {
             LeafGrid* leaf_ptr = prev_leaf_ptr_;
             const Vec3i inner_key = getInnerKey(coord);
@@ -443,30 +565,45 @@ public:
             return &(leaf_ptr->data[leaf_index]);
         }
 
+        /// @brief Returns the most recently accessed InnerGrid pointer.
+        /// @return Pointer to the cached InnerGrid.
         const InnerGrid* lastInnerGrid() const {
             return prev_inner_ptr_;
         }
 
+        /// @brief Returns the most recently accessed LeafGrid pointer.
+        /// @return Pointer to the cached LeafGrid.
         const LeafGrid* lastLeafGrid() const {
             return prev_leaf_ptr_;
         }
     };
 
+    /// @brief Creates a new Accessor instance for this grid.
+    /// @return An Accessor object.
     Accessor createAccessor() {
         return Accessor(root_map);
     }
 
+    /// @brief Computes the key for the RootMap based on global coordinates.
+    /// @param coord The global grid coordinate.
+    /// @return The base coordinate for the root key (masked).
     static inline Vec3i getRootKey(const Vec3i& coord) {
         constexpr static int32_t MASK = ~((1 << Log2N) - 1);
         return {coord.x & MASK, coord.y & MASK, coord.z & MASK};
     }
 
+    /// @brief Computes the key for locating an InnerGrid (intermediate block).
+    /// @param coord The global grid coordinate.
+    /// @return The coordinate masked to the InnerGrid resolution.
     static inline Vec3i getInnerKey(const Vec3i &coord)
     {
         constexpr static int32_t MASK = ~((1 << LEAF_BITS) - 1);
         return {coord.x & MASK, coord.y & MASK, coord.z & MASK};
     }
 
+    /// @brief Computes the linear index within an InnerGrid for a given coordinate.
+    /// @param coord The global grid coordinate.
+    /// @return The linear index (0 to size of InnerGrid).
     static inline uint32_t getInnerIndex(const Vec3i &coord)
     {
         constexpr static int32_t MASK = ((1 << INNER_BITS) - 1);
@@ -477,6 +614,9 @@ public:
         // clang-format on
     }
 
+    /// @brief Computes the linear index within a LeafGrid for a given coordinate.
+    /// @param coord The global grid coordinate.
+    /// @return The linear index (0 to size of LeafGrid).
     static inline uint32_t getLeafIndex(const Vec3i &coord)
     {
         constexpr static int32_t MASK = ((1 << LEAF_BITS) - 1);
@@ -487,55 +627,147 @@ public:
         // clang-format on
     }
 
+    /// @brief Sets the color of a voxel at a specific world position.
+    /// @details Assumes DataT is compatible with Vec3ui8.
+    /// @param worldPos The 3D world position.
+    /// @param color The color value to set.
+    /// @return True if the voxel previously existed, false if created.
     bool setVoxelColor(const Vec3d& worldPos, const Vec3ui8& color) {
         Vec3i coord = posToCoord(worldPos);
         Accessor accessor = createAccessor();
         return accessor.setValue(coord, color);
     }
     
+    /// @brief Retrieves the color of a voxel at a specific world position.
+    /// @details Assumes DataT is compatible with Vec3ui8.
+    /// @param worldPos The 3D world position.
+    /// @return Pointer to the color if exists, nullptr otherwise.
     Vec3ui8* getVoxelColor(const Vec3d& worldPos) {
         Vec3i coord = posToCoord(worldPos);
         Accessor accessor = createAccessor();
         return accessor.value(coord);
     }
     
-    // Render with projection (simple orthographic projection)
-    void renderProjectedToRGBBuffer(std::vector<uint8_t>& buffer, int width, int height, const Vec3d& viewDir = Vec3d(0, 0, 1),
-                                   const Vec3d& upDir = Vec3d(0, 1, 0)) {
-        // Clear buffer
-        buffer.clear();
-        buffer.resize(width * height * 3, 0);
+    /// @brief Renders the grid to an RGB buffer 
+    /// @details Iterates all cells and projects them onto a 2D plane defined by viewDir and upDir.
+    /// @param buffer The output buffer (will be resized to width * height * 3).
+    /// @param width Width of the output image.
+    /// @param height Height of the output image.
+    /// @param viewOrigin the position of the camera
+    /// @param viewDir The direction the camera is looking.
+    /// @param upDir The up vector of the camera.
+    /// @param fov the field of view for the camera
+    void renderToRGB(std::vector<uint8_t>& buffer, int width, int height, const Vec3d& viewOrigin, 
+                     const Vec3d& viewDir, const Vec3d& upDir, float fov = 80) {
+        // Resize buffer to hold width * height * 3 bytes (RGB)
+        buffer.resize(width * height * 3);
+        std::fill(buffer.begin(), buffer.end(), 0);
         
-        // Create view matrix (simplified orthographic projection)
-        Vec3d view = viewDir.normalized();
-        Vec3d up = upDir.normalized();
-        Vec3d right = view.cross(up).normalized();
-        up = right.cross(view).normalized(); // Re-orthogonalize
+        // Normalize view direction and compute right vector
+        Vec3d viewDirN = viewDir.normalized();
+        Vec3d upDirN = upDir.normalized();
+        Vec3d rightDir = viewDirN.cross(upDirN).normalized();
         
-        // For each voxel, project to screen
-        forEachCell([&](const Vec3ui8& color, const Vec3i& coord) {
-            // Convert voxel coordinate to world position
-            Vec3d worldPos = Vec3iToPos(coord);
-            
-            // Simple orthographic projection: drop view direction component
-            double xProj = worldPos.dot(right);
-            double yProj = worldPos.dot(up);
-            
-            // Normalize to pixel coordinates (assuming unit size)
-            int px = static_cast<int>((xProj + 0.5) * width);
-            int py = static_cast<int>((yProj + 0.5) * height);
-            
-            // Clamp to image bounds
-            if (px >= 0 && px < width && py >= 0 && py < height) {
-                int index = (py * width + px) * 3;
+        // Recompute up vector to ensure orthogonality
+        Vec3d realUpDir = rightDir.cross(viewDirN).normalized();
+        
+        // Compute focal length based on FOV
+        double aspectRatio = static_cast<double>(width) / static_cast<double>(height);
+        double fovRad = fov * M_PI / 180.0;
+        double focalLength = 1.0 / tan(fovRad * 0.5);
+        
+        // Precompute scaling factors for screen coordinates
+        double pixelWidth = 2.0 / (width - 1);
+        double pixelHeight = 2.0 / (height - 1);
+        
+        // Compute half voxel size for accurate ray-voxel intersection
+        double halfVoxel = resolution * 0.5;
+        
+        // Create an accessor for efficient voxel lookup
+        Accessor accessor = createAccessor();
+        
+        // For each pixel in the output image
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                // Convert pixel coordinates to normalized device coordinates [-1, 1]
+                double ndcX = (2.0 * x / (width - 1)) - 1.0;
+                double ndcY = 1.0 - (2.0 * y / (height - 1)); // Flip Y
                 
-                Vec3ui8 finalColor = color;
+                // Scale by aspect ratio
+                ndcX *= aspectRatio;
                 
-                // Write RGB
-                buffer[index] = finalColor.x;     // R
-                buffer[index + 1] = finalColor.y; // G
-                buffer[index + 2] = finalColor.z; // B
+                // Compute ray direction in camera space
+                Vec3d rayDirCam(ndcX, ndcY, focalLength);
+                
+                // Transform ray direction to world space
+                Vec3d rayDirWorld = (rightDir * rayDirCam.x) + 
+                                    (realUpDir * rayDirCam.y) + 
+                                    (viewDirN * rayDirCam.z);
+                rayDirWorld = rayDirWorld.normalized();
+                
+                // Set up ray marching
+                Vec3d rayPos = viewOrigin;
+                double maxDistance = 100.0; // Maximum ray distance
+                double stepSize = resolution; // Step size for ray marching
+                
+                // Ray marching loop
+                for (double t = 0; t < maxDistance; t += stepSize) {
+                    rayPos = viewOrigin + rayDirWorld * t;
+                    
+                    // Convert world position to voxel coordinate
+                    Vec3i coord = posToCoord(rayPos);
+                    
+                    // Look up voxel value using accessor (cached for efficiency)
+                    DataT* voxelData = accessor.value(coord);
+                    
+                    if (voxelData) {
+                        // Voxel hit - extract color
+                        // Assuming DataT is Vec3ui8 or compatible
+                        Vec3ui8* colorPtr = reinterpret_cast<Vec3ui8*>(voxelData);
+                        
+                        // Get buffer index for this pixel
+                        size_t pixelIdx = (y * width + x) * 3;
+                        
+                        // Apply simple shading based on normal
+                        // Estimate normal by checking neighbors
+                        double shading = 1.0;
+                        
+                        // Check neighboring voxels to estimate surface normal
+                        Vec3d voxelCenter = Vec3iToPos(coord);
+                        Vec3d toRay = (rayPos - voxelCenter).normalized();
+                        
+                        // Simple normal estimation by checking adjacent voxels
+                        Vec3i neighbors[6] = {
+                            Vec3i(coord.x + 1, coord.y, coord.z),
+                            Vec3i(coord.x - 1, coord.y, coord.z),
+                            Vec3i(coord.x, coord.y + 1, coord.z),
+                            Vec3i(coord.x, coord.y - 1, coord.z),
+                            Vec3i(coord.x, coord.y, coord.z + 1),
+                            Vec3i(coord.x, coord.y, coord.z - 1)
+                        };
+                        
+                        // Count empty neighbors to estimate surface orientation
+                        int emptyCount = 0;
+                        for (int i = 0; i < 6; ++i) {
+                            if (!accessor.value(neighbors[i])) {
+                                emptyCount++;
+                            }
+                        }
+                        
+                        // Simple shading: more visible if fewer neighbors (edge/corner)
+                        if (emptyCount > 0) {
+                            shading = 0.7 + 0.3 * (emptyCount / 6.0);
+                        }
+                        
+                        // Store color in buffer with shading
+                        buffer[pixelIdx]     = static_cast<uint8_t>(colorPtr->x * shading);
+                        buffer[pixelIdx + 1] = static_cast<uint8_t>(colorPtr->y * shading);
+                        buffer[pixelIdx + 2] = static_cast<uint8_t>(colorPtr->z * shading);
+                        
+                        break; // Stop ray marching after hitting first voxel
+                    }
+                }
             }
-        });
+        }
     }
 };

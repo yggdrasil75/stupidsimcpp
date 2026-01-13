@@ -6,6 +6,7 @@
 #include "../util/output/bmpwriter.hpp"
 #include "../util/output/frame.hpp"
 #include "../util/timing_decorator.cpp"
+#include "../util/noise/pnoise2.hpp"
 
 #include "../imgui/imgui.h"
 #include "../imgui/backends/imgui_impl_glfw.h"
