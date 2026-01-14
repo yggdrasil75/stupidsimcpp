@@ -59,6 +59,7 @@ void setup(defaults config, VoxelGrid& grid) {
         }
     }
     std::cout << "Noise grid generation complete!" << std::endl;
+    grid.serializeToFile("output/gridsave.ygg3");
     grid.printStats();
 }
 
@@ -176,6 +177,13 @@ int main() {
     defaults config;
     VoxelGrid grid;
     bool gridInitialized = false;
+    auto supposedGrid = VoxelGrid::deserializeFromFile("output/gridsave.ygg3");
+    if (supposedGrid) {
+        grid = std::move(*supposedGrid);
+        gridInitialized = true;
+    }
+    
+    
 
     Camera cam(Vec3f(config.gridWidth/2.0f, config.gridHeight/2.0f, config.gridDepth/2.0f), Vec3f(0,0,1), Vec3f(0,1,0), 80);
     

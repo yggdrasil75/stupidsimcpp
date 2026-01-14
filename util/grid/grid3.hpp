@@ -2,6 +2,8 @@
 #define GRID3_HPP
 
 #include <unordered_map>
+#include <fstream>
+#include <cstring>
 #include "../vectorlogic/vec2.hpp"
 #include "../vectorlogic/vec3.hpp"
 #include "../vectorlogic/vec4.hpp"
@@ -9,9 +11,12 @@
 #include "../output/frame.hpp"
 #include "../noise/pnoise2.hpp"
 #include "../vecmat/mat4.hpp"
+//#include "serialization.hpp"
 #include <vector>
 #include <algorithm>
 #include "../basicdefines.hpp"
+
+constexpr char magic[4] = {'Y', 'G', 'G', '3'};
 
 struct Voxel {
     //float active;
@@ -109,7 +114,95 @@ public:
     VoxelGrid(int w, int h, int d) : gridSize(w,h,d) {
         voxels.resize(w * h * d);
     }
-
+    
+    //bool serializeToFile(const VoxelGrid grid, const std::string& filename);
+    bool serializeToFile(const std::string& filename) {
+        std::ofstream file(filename, std::ios::binary);
+        if (!file.is_open()) {
+            std::cerr << "failed to open file (serializeToFile): " << filename << std::endl;
+            return false;
+        }
+        
+        file.write(magic, 4);
+        
+        //file.write(reinterpret_cast<const char*>(&binSize), sizeof(binSize));
+        
+        // Write grid dimensions
+        int dims[3] = {gridSize.x, gridSize.y, gridSize.z};
+        file.write(reinterpret_cast<const char*>(dims), sizeof(dims));
+        
+        // Write voxel data
+        size_t voxelCount = voxels.size();
+        file.write(reinterpret_cast<const char*>(&voxelCount), sizeof(voxelCount));
+        
+        // Write each voxel
+        for (const Voxel& voxel : voxels) {
+            file.write(reinterpret_cast<const char*>(&voxel.active), sizeof(voxel.active));
+            file.write(reinterpret_cast<const char*>(&voxel.color.x), sizeof(voxel.color.x));
+            file.write(reinterpret_cast<const char*>(&voxel.color.y), sizeof(voxel.color.y));
+            file.write(reinterpret_cast<const char*>(&voxel.color.z), sizeof(voxel.color.z));
+        }
+        
+        file.close();
+        return !file.fail();
+    }
+    
+    static std::unique_ptr<VoxelGrid> deserializeFromFile(const std::string& filename) {
+        VoxelGrid outgrid;
+        std::ifstream file(filename, std::ios::binary);
+        if (!file.is_open()) {
+            std::cerr << "Error: Could not open file for reading: " << filename << std::endl;
+            return nullptr;
+        }
+        
+        // Read and verify magic number
+        char filemagic[4];
+        file.read(filemagic, 4);
+        if (std::strncmp(filemagic, "YGG7", 4) != 0) {
+            std::cerr << "Error: Invalid file format or corrupted file" << std::endl;
+            return nullptr;
+        }
+        
+        // Read binSize
+        //file.read(reinterpret_cast<char*>(&binSize), sizeof(binSize));
+        
+        // Read grid dimensions
+        int dims[3];
+        file.read(reinterpret_cast<char*>(dims), sizeof(dims));
+        outgrid.resize(Vec3i(dims[0], dims[1], dims[2]));
+        //gridSize = Vec3i(dims[0], dims[1], dims[2]);
+        
+        // Read voxel count
+        size_t voxelCount;
+        file.read(reinterpret_cast<char*>(&voxelCount), sizeof(voxelCount));
+        
+        // Verify voxel count matches grid dimensions
+        size_t expectedCount = static_cast<size_t>(dims[0]) * dims[1] * dims[2];
+        if (voxelCount != expectedCount) {
+            std::cerr << "Error: Voxel count mismatch. Expected " << expectedCount 
+                     << ", found " << voxelCount << std::endl;
+            return nullptr;
+        }
+        
+        // Resize and read voxels
+        //voxels.resize(voxelCount);
+        grid->voxels.resize(voxelCount);
+        for (size_t i = 0; i < voxelCount; ++i) {
+            file.read(reinterpret_cast<char*>(&grid->voxels[i].active), sizeof(grid->voxels[i].active));
+            file.read(reinterpret_cast<char*>(&grid->voxels[i].color.x), sizeof(grid->voxels[i].color.x));
+            file.read(reinterpret_cast<char*>(&grid->voxels[i].color.y), sizeof(grid->voxels[i].color.y));
+            file.read(reinterpret_cast<char*>(&grid->voxels[i].color.z), sizeof(grid->voxels[i].color.z));
+        }
+        
+        file.close();
+        if (file.fail()) {
+            std::cerr << "Error: Failed to read from file: " << filename << std::endl;
+            return nullptr;
+        }
+        
+        return grid;
+    }
+    
     Voxel& get(int x, int y, int z) {
         return voxels[z * gridSize.x * gridSize.y + y * gridSize.x + x];
     }
@@ -140,6 +233,10 @@ public:
         }
         voxels = std::move(newVoxels);
         gridSize = Vec3i(newW, newH, newD);
+    }
+
+    void resize(Vec3i newsize) {
+        resize(newsize.x, newsize.y, newsize.z);
     }
 
     void set(int x, int y, int z, bool active, Vec3ui8 color) {
@@ -303,7 +400,6 @@ public:
         return outFrame;
     }
 
-    
     void printStats() const {
         int totalVoxels = gridSize.x * gridSize.y * gridSize.z;
         int activeVoxels = 0;
