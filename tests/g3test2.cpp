@@ -3,6 +3,7 @@
 #include <chrono>
 #include <thread>
 #include "../util/grid/grid3.hpp"
+#include "../util/grid/g3_serialization.hpp"
 #include "../util/output/bmpwriter.hpp"
 #include "../util/output/frame.hpp"
 #include "../util/timing_decorator.cpp"
@@ -196,6 +197,19 @@ int main() {
     float camvZ = 0.f;
     //float camYaw = 0.0f;
     //float camPitch = 0.0f;
+    bool autoRotate = false;  // Toggle for auto-rotation
+    bool autoRotateView = false; // Toggle for auto-rotation of the view only
+    float rotationSpeedX = 0.1f;  // Speed for X rotation
+    float rotationSpeedY = 0.07f;  // Speed for Y rotation
+    float rotationSpeedZ = 0.05f;  // Speed for Z rotation
+    float autoRotationTime = 0.0f;  // Timer for auto-rotation
+    Vec3f initialViewDir = Vec3f(0, 0, 1);  // Initial view direction
+    float rotationRadius = 50.0f;  // Distance from center for rotation
+    float yawSpeed = 0.5f;                  // Horizontal rotation speed (degrees per second)
+    float pitchSpeed = 0.3f;                // Vertical rotation speed
+    float rollSpeed = 0.2f;                 // Roll rotation speed (optional)
+    float autoRotationAngle = 0.0f;         // Accumulated rotation angle
+    Vec3f initialUpDir = Vec3f(0, 1, 0);    // Initial up direction
     
     // Variables for framerate limiting
     const double targetFrameTime = 1.0 / config.fps; // 30 FPS
@@ -349,6 +363,90 @@ int main() {
         // Update preview if camera moved or enough time has passed
         if (gridInitialized && !updatePreview) {
             double timeSinceLastUpdate = currentTime - lastUpdateTime;
+            if (autoRotate) {
+                // Update rotation time
+                autoRotationTime += deltaTime;
+                
+                // Calculate new view direction using spherical coordinates
+                // This creates smooth 360-degree rotation with different speeds
+                float angleX = autoRotationTime * rotationSpeedX;
+                float angleY = autoRotationTime * rotationSpeedY;
+                float angleZ = autoRotationTime * rotationSpeedZ;
+                
+                // Create rotation matrix or calculate new direction
+                // Using simple parametric equation for a sphere
+                camvX = sinf(angleX) * cosf(angleY);
+                camvY = sinf(angleY) * sinf(angleZ);
+                camvZ = cosf(angleX) * cosf(angleZ);
+                
+                // Normalize the direction vector (optional but good practice)
+                float length = sqrtf(camvX * camvX + camvY * camvY + camvZ * camvZ);
+                if (length > 0.001f) {
+                    camvX /= length;
+                    camvY /= length;
+                    camvZ /= length;
+                }
+                
+                // Update camera position to orbit around grid center
+                camX = config.gridWidth / 2.0f + rotationRadius * camvX;
+                camY = config.gridHeight / 2.0f + rotationRadius * camvY;
+                camZ = config.gridDepth / 2.0f + rotationRadius * camvZ;
+                
+                // Update camera
+                cam.posfor.origin = Vec3f(camX, camY, camZ);
+                cam.posfor.direction = Vec3f(camvX, camvY, camvZ);
+                
+                cameraMoved = true;
+            }
+            
+            if (autoRotateView) {
+                // Update rotation angle based on time
+                autoRotationAngle += deltaTime;
+                
+                // Calculate rotation angles (in radians)
+                float yaw = autoRotationAngle * yawSpeed * (3.14159f / 180.0f);  // Convert to radians
+                float pitch = sinf(autoRotationAngle * 0.7f) * pitchSpeed * (3.14159f / 180.0f);
+                float roll = sinf(autoRotationAngle * 0.3f) * rollSpeed * (3.14159f / 180.0f);
+                
+                // Start with forward direction
+                Vec3f forward = initialViewDir;
+                
+                // Apply yaw rotation (around Y axis)
+                float cosYaw = cosf(yaw);
+                float sinYaw = sinf(yaw);
+                Vec3f tempForward;
+                tempForward.x = forward.x * cosYaw + forward.z * sinYaw;
+                tempForward.y = forward.y;
+                tempForward.z = -forward.x * sinYaw + forward.z * cosYaw;
+                forward = tempForward;
+                
+                // Apply pitch rotation (around X axis)
+                float cosPitch = cosf(pitch);
+                float sinPitch = sinf(pitch);
+                tempForward.x = forward.x;
+                tempForward.y = forward.y * cosPitch - forward.z * sinPitch;
+                tempForward.z = forward.y * sinPitch + forward.z * cosPitch;
+                forward = tempForward;
+                
+                // Normalize the direction
+                float length = sqrtf(forward.x * forward.x + forward.y * forward.y + forward.z * forward.z);
+                if (length > 0.001f) {
+                    forward.x /= length;
+                    forward.y /= length;
+                    forward.z /= length;
+                }
+                
+                // Update view direction variables
+                camvX = forward.x;
+                camvY = forward.y;
+                camvZ = forward.z;
+                
+                // Update camera
+                cam.posfor.direction = Vec3f(camvX, camvY, camvZ);
+                
+                cameraMoved = true;
+            }
+            
             if (cameraMoved || timeSinceLastUpdate > 0.1) { // Update at least every 0.1 seconds
                 livePreview(grid, config, cam);
                 lastUpdateTime = currentTime;
@@ -356,6 +454,123 @@ int main() {
             }
         }
         
+        
+        ImGui::Separator();
+        ImGui::Text("Auto-Rotation:");
+
+        // Toggle button for auto-rotation
+        if (ImGui::Button(autoRotate ? "Stop Auto-Rotation" : "Start Auto-Rotation")) {
+            autoRotate = !autoRotate;
+            if (autoRotate) {
+                // Reset rotation time when starting
+                autoRotationTime = 0.0f;
+                // Save initial positions
+                initialViewDir = Vec3f(camvX, camvY, camvZ);
+            }
+        }
+
+        if (ImGui::Button(autoRotateView ? "Stop Looking Around" : "Start Looking Around")) {
+            autoRotateView = !autoRotateView;
+            if (autoRotateView) {
+                // Reset rotation when starting
+                autoRotationAngle = 0.0f;
+                // Save current view direction as initial
+                initialViewDir = Vec3f(camvX, camvY, camvZ);
+            }
+        }
+
+        if (autoRotate) {
+            ImGui::SameLine();
+            ImGui::Text("(Running)");
+            
+            // Sliders to control rotation speeds
+            ImGui::SliderFloat("X Speed", &rotationSpeedX, 0.01f, 1.0f);
+            ImGui::SliderFloat("Y Speed", &rotationSpeedY, 0.01f, 1.0f);
+            ImGui::SliderFloat("Z Speed", &rotationSpeedZ, 0.01f, 1.0f);
+            
+            // Slider for orbit radius
+            ImGui::SliderFloat("Orbit Radius", &rotationRadius, 10.0f, 200.0f);
+            
+            // Reset button
+            if (ImGui::Button("Reset to Center")) {
+                camX = config.gridWidth / 2.0f;
+                camY = config.gridHeight / 2.0f;
+                camZ = config.gridDepth / 2.0f;
+                cam.posfor.origin = Vec3f(camX, camY, camZ);
+                cameraMoved = true;
+            }
+        }
+
+        if (autoRotateView) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0, 1, 0, 1), " ACTIVE");
+            
+            // Show current view direction
+            ImGui::Text("Current View: (%.3f, %.3f, %.3f)", camvX, camvY, camvZ);
+            
+            // Sliders to control rotation speeds
+            ImGui::SliderFloat("Yaw Speed", &yawSpeed, 0.1f, 5.0f, "%.2f deg/sec");
+            ImGui::SliderFloat("Pitch Speed", &pitchSpeed, 0.0f, 2.0f, "%.2f deg/sec");
+            ImGui::SliderFloat("Roll Speed", &rollSpeed, 0.0f, 1.0f, "%.2f deg/sec");
+            
+            // Add some presets
+            ImGui::Separator();
+            ImGui::Text("Presets:");
+            
+            if (ImGui::Button("Slow Pan")) {
+                yawSpeed = 0.3f;
+                pitchSpeed = 0.1f;
+                rollSpeed = 0.0f;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Full Exploration")) {
+                yawSpeed = 0.8f;
+                pitchSpeed = 0.5f;
+                rollSpeed = 0.2f;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Reset View")) {
+                // Reset to forward view
+                camvX = 0.0f;
+                camvY = 0.0f;
+                camvZ = 1.0f;
+                cam.posfor.direction = Vec3f(camvX, camvY, camvZ);
+                cameraMoved = true;
+            }
+            
+            // Progress indicator
+            float progress = fmodf(autoRotationAngle * yawSpeed / 360.0f, 1.0f);
+            ImGui::ProgressBar(progress, ImVec2(-1, 0));
+            ImGui::Text("Full rotation progress: %.1f%%", progress * 100.0f);
+        }
+        
+        if (ImGui::Button("Save Screenshot During Rotation")) {
+            if (autoRotate) {
+                // Generate filename with timestamp
+                auto now = std::chrono::system_clock::now();
+                auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now.time_since_epoch()).count();
+                std::string filename = "output/rotation_frame_" + 
+                                    std::to_string(timestamp) + ".bmp";
+                
+                // Save current frame
+                frame output = grid.renderFrame(cam, Vec2i(config.outWidth, config.outHeight), 
+                                            frame::colormap::RGB);
+                BMPWriter::saveBMP(filename.c_str(), output);
+                
+                ImGui::OpenPopup("Screenshot Saved");
+            }
+        }
+
+        // Popup notification
+        if (ImGui::BeginPopupModal("Screenshot Saved", NULL, 
+                                ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::Text("Screenshot saved during rotation!");
+            if (ImGui::Button("OK")) {
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
         // Reset accumulator for next frame
         accumulator -= targetFrameTime;
 
