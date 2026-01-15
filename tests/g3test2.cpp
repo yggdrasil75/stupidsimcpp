@@ -2,12 +2,16 @@
 #include <vector>
 #include <chrono>
 #include <thread>
+#include <atomic>
+#include <mutex>
+
 #include "../util/grid/grid3.hpp"
 #include "../util/grid/g3_serialization.hpp"
 #include "../util/output/bmpwriter.hpp"
 #include "../util/output/frame.hpp"
 #include "../util/timing_decorator.cpp"
 #include "../util/noise/pnoise2.hpp"
+#include "../util/output/aviwriter.hpp"
 
 #include "../imgui/imgui.h"
 #include "../imgui/backends/imgui_impl_glfw.h"
@@ -30,6 +34,13 @@ GLuint textu = 0;
 bool textureInitialized = false;
 bool updatePreview = false;
 bool previewRequested = false;
+
+// Add AVI recording variables
+std::atomic<bool> isRecordingAVI{false};
+std::atomic<bool> recordingRequested{false};
+std::atomic<int> recordingFramesRemaining{0};
+std::vector<frame> recordedFrames;
+std::mutex recordingMutex;
 
 struct Shared {
     std::mutex mutex;
@@ -68,7 +79,7 @@ void livePreview(VoxelGrid& grid, defaults& config, const Camera& cam) {
     std::lock_guard<std::mutex> lock(PreviewMutex);
     updatePreview = true;
     frame currentPreviewFrame = grid.renderFrame(cam, Vec2i(config.outWidth, config.outHeight), frame::colormap::RGB);
-
+    
     glGenTextures(1, &textu);
     glBindTexture(GL_TEXTURE_2D, textu);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -81,14 +92,15 @@ void livePreview(VoxelGrid& grid, defaults& config, const Camera& cam) {
     
     updatePreview = false;
     textureInitialized = true;
+    if (isRecordingAVI) {
+        std::lock_guard<std::mutex> recLock(recordingMutex);
+        currentPreviewFrame.compressFrameLZ78();
+        recordedFrames.push_back(currentPreviewFrame);
+    }
 }
 
 bool savePreview(VoxelGrid& grid, defaults& config, const Camera& cam) {
     TIME_FUNCTION;
-    
-    std::vector<uint8_t> renderBuffer;
-    size_t width = config.outWidth;
-    size_t height = config.outHeight;
     
     // Render the view
     frame output = grid.renderFrame(cam, Vec2i(config.outWidth, config.outHeight), frame::colormap::RGB);
@@ -105,7 +117,42 @@ bool savePreview(VoxelGrid& grid, defaults& config, const Camera& cam) {
     // }
     
     return success;
+}
 
+void startAVIRecording(int frameCount) {
+    std::lock_guard<std::mutex> lock(recordingMutex);
+    recordedFrames.clear();
+    recordedFrames.reserve(frameCount);
+    recordingFramesRemaining = frameCount;
+    recordingRequested = true;
+}
+
+void stopAndSaveAVI(defaults& config, const std::string& filename) {
+    std::lock_guard<std::mutex> lock(recordingMutex);
+    
+    if (!recordedFrames.empty()) {
+        auto now = std::chrono::system_clock::now();
+        auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now.time_since_epoch()).count();
+        std::string finalFilename = "output/recording_" + std::to_string(timestamp) + ".avi";
+        
+        
+        std::cout << "Saving AVI with " << recordedFrames.size() << " frames..." << std::endl;
+        
+        // Save using the new streaming method
+        bool success = AVIWriter::saveAVIFromCompressedFrames(finalFilename, recordedFrames, config.outWidth, config.outHeight, config.fps);
+        
+        if (success) {
+            std::cout << "AVI saved to: " << finalFilename << std::endl;
+        } else {
+            std::cout << "Failed to save AVI: " << finalFilename << std::endl;
+        }
+        
+        recordedFrames.clear();
+    }
+    
+    isRecordingAVI = false;
+    recordingFramesRemaining = 0;
 }
 
 static void glfw_error_callback(int error, const char* description)
@@ -182,10 +229,13 @@ int main() {
     if (supposedGrid) {
         grid = std::move(*supposedGrid);
         gridInitialized = true;
+        config.gridDepth = grid.getDepth();
+        config.gridHeight = grid.getHeight();
+        config.gridWidth = grid.getWidth();
     }
     
     
-
+    
     Camera cam(Vec3f(config.gridWidth/2.0f, config.gridHeight/2.0f, config.gridDepth/2.0f), Vec3f(0,0,1), Vec3f(0,1,0), 80);
     
     // Variables for camera sliders
@@ -219,6 +269,14 @@ int main() {
     // For camera movement
     bool cameraMoved = false;
     double lastUpdateTime = glfwGetTime();
+    
+    // AVI recording variables
+    int recordingDurationFrames = 300; // 10 seconds at 30fps
+    std::string aviFilename = "output/recording.avi";
+    
+    // For frame-based timing (not real time)
+    int frameCounter = 0;
+    float animationTime = 0.0f;
 
     while (!glfwWindowShouldClose(window)) {
         double currentTime = glfwGetTime();
@@ -235,6 +293,10 @@ int main() {
             accumulator = targetFrameTime;
         }
         
+        // Frame-based timing for animations (independent of real time)
+        frameCounter++;
+        animationTime = frameCounter / config.fps; // Time in seconds based on frame count
+        
         glfwPollEvents();
 
         // Start the Dear ImGui frame
@@ -248,6 +310,7 @@ int main() {
             if(ImGui::CollapsingHeader("output", ImGuiTreeNodeFlags_DefaultOpen)) {
                 ImGui::SliderInt("Width", &config.outWidth, 256, 4096);
                 ImGui::SliderInt("Height", &config.outHeight, 256, 4096);
+                ImGui::SliderFloat("FPS", &config.fps, 1.0f, 120.0f);
             }
 
             if (ImGui::CollapsingHeader("Grid Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -275,7 +338,30 @@ int main() {
                 // cam.rotatePitch(camPitch);
                 
                 savePreview(grid, config, cam);
-                cameraMoved = true; // Force preview update after generation
+                cameraMoved = true;
+            }
+            
+            // AVI Recording Controls
+            ImGui::Separator();
+            ImGui::Text("AVI Recording:");
+            
+            if (!isRecordingAVI) {
+                ImGui::InputInt("Frames to Record", &recordingDurationFrames, 30, 300);
+                recordingDurationFrames = std::max(30, recordingDurationFrames); // Minimum 1 second at 30fps
+                
+                if (ImGui::Button("Start AVI Recording")) {
+                    startAVIRecording(recordingDurationFrames);
+                    ImGui::OpenPopup("Recording Started");
+                }
+            } else {
+                ImGui::TextColored(ImVec4(1, 0, 0, 1), "RECORDING");
+                ImGui::Text("Frames captured: %d / %d", 
+                           recordedFrames.size(), 
+                           recordingDurationFrames);
+                
+                if (ImGui::Button("Stop Recording Early")) {
+                    isRecordingAVI = false;
+                }
             }
             
             // Display camera controls
@@ -360,26 +446,47 @@ int main() {
             ImGui::End();
         }
 
-        // Update preview if camera moved or enough time has passed
-        if (gridInitialized && !updatePreview) {
-            double timeSinceLastUpdate = currentTime - lastUpdateTime;
+        // Auto-rotation controls
+        {
+            ImGui::Begin("Animation Controls");
+            
+            ImGui::Text("Auto-Rotation:");
+            
+            // Toggle button for auto-rotation
+            if (ImGui::Button(autoRotate ? "Stop Auto-Rotation" : "Start Auto-Rotation")) {
+                autoRotate = !autoRotate;
+                if (autoRotate) {
+                    autoRotationTime = 0.0f;
+                    initialViewDir = Vec3f(camvX, camvY, camvZ);
+                }
+            }
+
+            if (ImGui::Button(autoRotateView ? "Stop Looking Around" : "Start Looking Around")) {
+                autoRotateView = !autoRotateView;
+                if (autoRotateView) {
+                    autoRotationAngle = 0.0f;
+                    initialViewDir = Vec3f(camvX, camvY, camvZ);
+                }
+            }
+
             if (autoRotate) {
-                // Update rotation time
-                autoRotationTime += deltaTime;
+                ImGui::SameLine();
+                ImGui::Text("(Running)");
                 
-                // Calculate new view direction using spherical coordinates
-                // This creates smooth 360-degree rotation with different speeds
+                // Use frame-based timing for animation
+                float frameTime = 1.0f / config.fps;
+                autoRotationTime += frameTime; // Use constant frame time, not real time
+                
+                // Calculate new view direction using frame-based timing
                 float angleX = autoRotationTime * rotationSpeedX;
                 float angleY = autoRotationTime * rotationSpeedY;
                 float angleZ = autoRotationTime * rotationSpeedZ;
                 
-                // Create rotation matrix or calculate new direction
-                // Using simple parametric equation for a sphere
                 camvX = sinf(angleX) * cosf(angleY);
                 camvY = sinf(angleY) * sinf(angleZ);
                 camvZ = cosf(angleX) * cosf(angleZ);
                 
-                // Normalize the direction vector (optional but good practice)
+                // Normalize
                 float length = sqrtf(camvX * camvX + camvY * camvY + camvZ * camvZ);
                 if (length > 0.001f) {
                     camvX /= length;
@@ -387,7 +494,7 @@ int main() {
                     camvZ /= length;
                 }
                 
-                // Update camera position to orbit around grid center
+                // Update camera position
                 camX = config.gridWidth / 2.0f + rotationRadius * camvX;
                 camY = config.gridHeight / 2.0f + rotationRadius * camvY;
                 camZ = config.gridDepth / 2.0f + rotationRadius * camvZ;
@@ -397,21 +504,32 @@ int main() {
                 cam.posfor.direction = Vec3f(camvX, camvY, camvZ);
                 
                 cameraMoved = true;
+                
+                // Sliders to control rotation speeds
+                ImGui::SliderFloat("X Speed", &rotationSpeedX, 0.01f, 1.0f);
+                ImGui::SliderFloat("Y Speed", &rotationSpeedY, 0.01f, 1.0f);
+                ImGui::SliderFloat("Z Speed", &rotationSpeedZ, 0.01f, 1.0f);
+                
+                // Slider for orbit radius
+                ImGui::SliderFloat("Orbit Radius", &rotationRadius, 10.0f, 200.0f);
             }
-            
+
             if (autoRotateView) {
-                // Update rotation angle based on time
-                autoRotationAngle += deltaTime;
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0, 1, 0, 1), " ACTIVE");
                 
-                // Calculate rotation angles (in radians)
-                float yaw = autoRotationAngle * yawSpeed * (3.14159f / 180.0f);  // Convert to radians
+                // Use frame-based timing
+                float frameTime = 1.0f / config.fps;
+                autoRotationAngle += frameTime;
+                
+                // Calculate rotation angles using frame-based timing
+                float yaw = autoRotationAngle * yawSpeed * (3.14159f / 180.0f);
                 float pitch = sinf(autoRotationAngle * 0.7f) * pitchSpeed * (3.14159f / 180.0f);
-                float roll = sinf(autoRotationAngle * 0.3f) * rollSpeed * (3.14159f / 180.0f);
                 
-                // Start with forward direction
+                // Apply rotations
                 Vec3f forward = initialViewDir;
                 
-                // Apply yaw rotation (around Y axis)
+                // Yaw rotation (around Y axis)
                 float cosYaw = cosf(yaw);
                 float sinYaw = sinf(yaw);
                 Vec3f tempForward;
@@ -420,7 +538,7 @@ int main() {
                 tempForward.z = -forward.x * sinYaw + forward.z * cosYaw;
                 forward = tempForward;
                 
-                // Apply pitch rotation (around X axis)
+                // Pitch rotation (around X axis)
                 float cosPitch = cosf(pitch);
                 float sinPitch = sinf(pitch);
                 tempForward.x = forward.x;
@@ -428,7 +546,7 @@ int main() {
                 tempForward.z = forward.y * sinPitch + forward.z * cosPitch;
                 forward = tempForward;
                 
-                // Normalize the direction
+                // Normalize
                 float length = sqrtf(forward.x * forward.x + forward.y * forward.y + forward.z * forward.z);
                 if (length > 0.001f) {
                     forward.x /= length;
@@ -436,7 +554,7 @@ int main() {
                     forward.z /= length;
                 }
                 
-                // Update view direction variables
+                // Update view direction
                 camvX = forward.x;
                 camvY = forward.y;
                 camvZ = forward.z;
@@ -445,132 +563,50 @@ int main() {
                 cam.posfor.direction = Vec3f(camvX, camvY, camvZ);
                 
                 cameraMoved = true;
+                
+                // Show current view direction
+                ImGui::Text("Current View: (%.3f, %.3f, %.3f)", camvX, camvY, camvZ);
+                
+                // Sliders to control rotation speeds
+                ImGui::SliderFloat("Yaw Speed", &yawSpeed, 0.1f, 5.0f, "%.2f deg/sec");
+                ImGui::SliderFloat("Pitch Speed", &pitchSpeed, 0.0f, 2.0f, "%.2f deg/sec");
             }
             
-            if (cameraMoved || timeSinceLastUpdate > 0.1) { // Update at least every 0.1 seconds
+            // Record button during animations
+            if ((autoRotate || autoRotateView) && !isRecordingAVI) {
+                ImGui::Separator();
+                if (ImGui::Button("Record Animation to AVI")) {
+                    startAVIRecording(recordingDurationFrames);
+                }
+            }
+            
+            ImGui::End();
+        }
+
+        // Handle AVI recording start request
+        if (recordingRequested) {
+            isRecordingAVI = true;
+            recordingRequested = false;
+        }
+        
+        // Check if recording should stop
+        if (isRecordingAVI && recordedFrames.size() >= recordingDurationFrames) {
+            stopAndSaveAVI(config, aviFilename);
+            ImGui::OpenPopup("Recording Complete");
+        }
+
+        // Update preview if camera moved or enough time has passed
+        if (gridInitialized && !updatePreview) {
+            double timeSinceLastUpdate = currentTime - lastUpdateTime;
+            
+            // Update preview if needed
+            if (cameraMoved || timeSinceLastUpdate > 0.1) {
                 livePreview(grid, config, cam);
                 lastUpdateTime = currentTime;
                 cameraMoved = false;
             }
         }
         
-        
-        ImGui::Separator();
-        ImGui::Text("Auto-Rotation:");
-
-        // Toggle button for auto-rotation
-        if (ImGui::Button(autoRotate ? "Stop Auto-Rotation" : "Start Auto-Rotation")) {
-            autoRotate = !autoRotate;
-            if (autoRotate) {
-                // Reset rotation time when starting
-                autoRotationTime = 0.0f;
-                // Save initial positions
-                initialViewDir = Vec3f(camvX, camvY, camvZ);
-            }
-        }
-
-        if (ImGui::Button(autoRotateView ? "Stop Looking Around" : "Start Looking Around")) {
-            autoRotateView = !autoRotateView;
-            if (autoRotateView) {
-                // Reset rotation when starting
-                autoRotationAngle = 0.0f;
-                // Save current view direction as initial
-                initialViewDir = Vec3f(camvX, camvY, camvZ);
-            }
-        }
-
-        if (autoRotate) {
-            ImGui::SameLine();
-            ImGui::Text("(Running)");
-            
-            // Sliders to control rotation speeds
-            ImGui::SliderFloat("X Speed", &rotationSpeedX, 0.01f, 1.0f);
-            ImGui::SliderFloat("Y Speed", &rotationSpeedY, 0.01f, 1.0f);
-            ImGui::SliderFloat("Z Speed", &rotationSpeedZ, 0.01f, 1.0f);
-            
-            // Slider for orbit radius
-            ImGui::SliderFloat("Orbit Radius", &rotationRadius, 10.0f, 200.0f);
-            
-            // Reset button
-            if (ImGui::Button("Reset to Center")) {
-                camX = config.gridWidth / 2.0f;
-                camY = config.gridHeight / 2.0f;
-                camZ = config.gridDepth / 2.0f;
-                cam.posfor.origin = Vec3f(camX, camY, camZ);
-                cameraMoved = true;
-            }
-        }
-
-        if (autoRotateView) {
-            ImGui::SameLine();
-            ImGui::TextColored(ImVec4(0, 1, 0, 1), " ACTIVE");
-            
-            // Show current view direction
-            ImGui::Text("Current View: (%.3f, %.3f, %.3f)", camvX, camvY, camvZ);
-            
-            // Sliders to control rotation speeds
-            ImGui::SliderFloat("Yaw Speed", &yawSpeed, 0.1f, 5.0f, "%.2f deg/sec");
-            ImGui::SliderFloat("Pitch Speed", &pitchSpeed, 0.0f, 2.0f, "%.2f deg/sec");
-            ImGui::SliderFloat("Roll Speed", &rollSpeed, 0.0f, 1.0f, "%.2f deg/sec");
-            
-            // Add some presets
-            ImGui::Separator();
-            ImGui::Text("Presets:");
-            
-            if (ImGui::Button("Slow Pan")) {
-                yawSpeed = 0.3f;
-                pitchSpeed = 0.1f;
-                rollSpeed = 0.0f;
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Full Exploration")) {
-                yawSpeed = 0.8f;
-                pitchSpeed = 0.5f;
-                rollSpeed = 0.2f;
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Reset View")) {
-                // Reset to forward view
-                camvX = 0.0f;
-                camvY = 0.0f;
-                camvZ = 1.0f;
-                cam.posfor.direction = Vec3f(camvX, camvY, camvZ);
-                cameraMoved = true;
-            }
-            
-            // Progress indicator
-            float progress = fmodf(autoRotationAngle * yawSpeed / 360.0f, 1.0f);
-            ImGui::ProgressBar(progress, ImVec2(-1, 0));
-            ImGui::Text("Full rotation progress: %.1f%%", progress * 100.0f);
-        }
-        
-        if (ImGui::Button("Save Screenshot During Rotation")) {
-            if (autoRotate) {
-                // Generate filename with timestamp
-                auto now = std::chrono::system_clock::now();
-                auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    now.time_since_epoch()).count();
-                std::string filename = "output/rotation_frame_" + 
-                                    std::to_string(timestamp) + ".bmp";
-                
-                // Save current frame
-                frame output = grid.renderFrame(cam, Vec2i(config.outWidth, config.outHeight), 
-                                            frame::colormap::RGB);
-                BMPWriter::saveBMP(filename.c_str(), output);
-                
-                ImGui::OpenPopup("Screenshot Saved");
-            }
-        }
-
-        // Popup notification
-        if (ImGui::BeginPopupModal("Screenshot Saved", NULL, 
-                                ImGuiWindowFlags_AlwaysAutoResize)) {
-            ImGui::Text("Screenshot saved during rotation!");
-            if (ImGui::Button("OK")) {
-                ImGui::CloseCurrentPopup();
-            }
-            ImGui::EndPopup();
-        }
         // Reset accumulator for next frame
         accumulator -= targetFrameTime;
 
@@ -581,30 +617,23 @@ int main() {
         glClearColor(clear_color.x * clear_color.w, clear_color.y * clear_color.w, clear_color.z * clear_color.w, clear_color.w);
         glClear(GL_COLOR_BUFFER_BIT);
         
-        // std::cout << "rendering" << std::endl;
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
         glfwSwapBuffers(window);
-        //mainlogicthread.join();
-        
-        // std::cout << "swapping buffers" << std::endl;
     }
 
-    
-    // std::cout << "shutting down" << std::endl;
+    // Cleanup
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
     
-
-    // std::cout << "destroying" << std::endl;
     glfwDestroyWindow(window);
     if (textu != 0) {
         glDeleteTextures(1, &textu);
         textu = 0;
     }
     glfwTerminate();
-    // std::cout << "printing" << std::endl;
+    
     FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
     
     return 0;
