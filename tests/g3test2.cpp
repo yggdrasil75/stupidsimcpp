@@ -4,6 +4,7 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <cmath>
 
 #include "../util/grid/grid3.hpp"
 #include "../util/grid/g3_serialization.hpp"
@@ -42,6 +43,23 @@ std::atomic<int> recordingFramesRemaining{0};
 std::vector<frame> recordedFrames;
 std::mutex recordingMutex;
 
+// Sphere generation parameters
+struct SphereConfig {
+    float centerX = 256.0f;
+    float centerY = 256.0f;
+    float centerZ = 32.0f;
+    float radius = 30.0f;
+    uint8_t r = 0;
+    uint8_t g = 255;
+    uint8_t b = 0;
+    uint8_t a = 255;
+    bool fillInside = true;
+    bool outlineOnly = false;
+    float outlineThickness = 1.0f;
+};
+
+SphereConfig sphereConfig;
+
 struct Shared {
     std::mutex mutex;
     VoxelGrid grid;
@@ -74,9 +92,7 @@ void setup(defaults config, VoxelGrid& grid) {
                 uint8_t g = config.noise.permute(Vec3f(static_cast<float>(x) * gValw, static_cast<float>(y) * gValh, static_cast<float>(z) * gVald)) * 255;
                 uint8_t b = config.noise.permute(Vec3f(static_cast<float>(x) * bValw, static_cast<float>(y) * bValh, static_cast<float>(z) * bVald)) * 255;
                 uint8_t a = config.noise.permute(Vec3f(static_cast<float>(x) * aValw, static_cast<float>(y) * aValh, static_cast<float>(z) * aVald)) * 255;
-                //Vec4ui8 noisecolor = config.noise.permuteColor(Vec3f( static_cast<float>(x) / 64, static_cast<float>(y) / 64, static_cast<float>(z) / 64));
                 if (a > threshold) {
-                    //std::cout << "setting a position" << std::endl;
                     grid.set(Vec3i(x, y, z), true, Vec3ui8(r,g,b));
                 }
             }
@@ -84,6 +100,67 @@ void setup(defaults config, VoxelGrid& grid) {
     }
     std::cout << "Noise grid generation complete!" << std::endl;
     grid.serializeToFile("output/gridsave.ygg3");
+    grid.printStats();
+}
+
+void createGreenSphere(defaults config, VoxelGrid& grid) {
+    grid.resize(config.gridWidth, config.gridHeight, config.gridDepth);
+    std::cout << "Creating green sphere of size " << config.gridWidth << "x" << config.gridHeight << "x" << config.gridDepth << std::endl;
+    
+    float radiusSq = sphereConfig.radius * sphereConfig.radius;
+    float outlineInnerRadiusSq = (sphereConfig.radius - sphereConfig.outlineThickness) * 
+                                 (sphereConfig.radius - sphereConfig.outlineThickness);
+    float outlineOuterRadiusSq = (sphereConfig.radius + sphereConfig.outlineThickness) * 
+                                 (sphereConfig.radius + sphereConfig.outlineThickness);
+    
+    int progressStep = std::max(1, config.gridDepth / 10);
+    
+    for (int z = 0; z < config.gridDepth; ++z) {
+        if (z % progressStep == 0) {
+            std::cout << "Processing layer " << z << " of " << config.gridDepth << std::endl;
+        }
+        
+        for (int y = 0; y < config.gridHeight; ++y) {
+            for (int x = 0; x < config.gridWidth; ++x) {
+                // Calculate distance from sphere center
+                float dx = x - sphereConfig.centerX;
+                float dy = y - sphereConfig.centerY;
+                float dz = z - sphereConfig.centerZ;
+                float distSq = dx*dx + dy*dy + dz*dz;
+                
+                bool shouldSet = false;
+                
+                if (sphereConfig.outlineOnly) {
+                    // Only create outline (shell)
+                    if (distSq >= outlineInnerRadiusSq && distSq <= outlineOuterRadiusSq) {
+                        shouldSet = true;
+                    }
+                } else if (sphereConfig.fillInside) {
+                    // Fill entire sphere
+                    if (distSq <= radiusSq) {
+                        shouldSet = true;
+                    }
+                } else {
+                    // Hollow sphere (just the surface)
+                    if (distSq <= radiusSq && distSq >= (radiusSq - sphereConfig.radius * 0.5f)) {
+                        shouldSet = true;
+                    }
+                }
+                
+                if (shouldSet) {
+                    grid.set(Vec3i(x, y, z), true, 
+                             Vec3ui8(sphereConfig.r, sphereConfig.g, sphereConfig.b));
+                }
+            }
+        }
+    }
+    
+    std::cout << "Green sphere generation complete!" << std::endl;
+    std::cout << "Sphere center: (" << sphereConfig.centerX << ", " 
+              << sphereConfig.centerY << ", " << sphereConfig.centerZ << ")" << std::endl;
+    std::cout << "Sphere radius: " << sphereConfig.radius << std::endl;
+    
+    grid.serializeToFile("output/sphere_grid.ygg3");
     grid.printStats();
 }
 
@@ -148,10 +225,7 @@ void stopAndSaveAVI(defaults& config, const std::string& filename) {
             now.time_since_epoch()).count();
         std::string finalFilename = "output/recording_" + std::to_string(timestamp) + ".avi";
         
-        
         std::cout << "Saving AVI with " << recordedFrames.size() << " frames..." << std::endl;
-        
-        // Save using the new streaming method
         bool success = AVIWriter::saveAVIFromCompressedFrames(finalFilename, recordedFrames, config.outWidth, config.outHeight, config.fps);
         
         if (success) {
@@ -167,7 +241,7 @@ void stopAndSaveAVI(defaults& config, const std::string& filename) {
     recordingFramesRemaining = 0;
 }
 
-void saveSlices(defaults& config, VoxelGrid& grid) {
+void saveSlices(const defaults& config, VoxelGrid& grid) {
     std::vector<frame> frames = grid.genSlices(frame::colormap::RGB);
     for (int i = 0; i < frames.size(); i++) {
         std::string filename = "output/slices/" + std::to_string(i) + ".bmp";
@@ -281,6 +355,13 @@ int main() {
     float autoRotationAngle = 0.0f;         // Accumulated rotation angle
     Vec3f initialUpDir = Vec3f(0, 1, 0);    // Initial up direction
     
+
+    // After your existing initialization code, add sphere parameter initialization:
+    sphereConfig.centerX = config.gridWidth / 2.0f;
+    sphereConfig.centerY = config.gridHeight / 2.0f;
+    sphereConfig.centerZ = config.gridDepth / 2.0f;
+    sphereConfig.radius = std::min(config.gridWidth, std::min(config.gridHeight, config.gridDepth)) / 4.0f;
+
     // Variables for framerate limiting
     const double targetFrameTime = 1.0 / config.fps; // 30 FPS
     double lastFrameTime = glfwGetTime();
@@ -348,14 +429,28 @@ int main() {
                 camX = config.gridWidth / 2.0f;
                 camY = config.gridHeight / 2.0f;
                 camZ = config.gridDepth / 2.0f;
-                //camYaw = 0.0f;
-                //camPitch = 0.0f;
                 
                 // Update camera position
                 cam.posfor.origin = Vec3f(camX, camY, camZ);
                 cam.posfor.direction = Vec3f(camvX, camvY, camvZ);
-                // cam.rotateYaw(camYaw);
-                // cam.rotatePitch(camPitch);
+                
+                savePreview(grid, config, cam);
+                cameraMoved = true;
+            }
+            
+            // Add the new green sphere button
+            if (ImGui::Button("Create Green Sphere")) {
+                createGreenSphere(config, grid);
+                gridInitialized = true;
+                
+                // Reset camera to center of grid
+                camX = config.gridWidth / 2.0f;
+                camY = config.gridHeight / 2.0f;
+                camZ = config.gridDepth / 2.0f;
+                
+                // Update camera position
+                cam.posfor.origin = Vec3f(camX, camY, camZ);
+                cam.posfor.direction = Vec3f(camvX, camvY, camvZ);
                 
                 savePreview(grid, config, cam);
                 cameraMoved = true;
@@ -371,7 +466,7 @@ int main() {
             
             if (!isRecordingAVI) {
                 ImGui::InputInt("Frames to Record", &recordingDurationFrames, 30, 300);
-                recordingDurationFrames = std::max(30, recordingDurationFrames); // Minimum 1 second at 30fps
+                recordingDurationFrames = std::max(30, recordingDurationFrames);
                 
                 if (ImGui::Button("Start AVI Recording")) {
                     startAVIRecording(recordingDurationFrames);
@@ -388,6 +483,7 @@ int main() {
                 }
             }
             
+
             // Display camera controls
             if (gridInitialized) {
                 ImGui::Separator();
@@ -452,7 +548,7 @@ int main() {
                            cam.posfor.origin.z);
                 // ImGui::Text("Yaw: %.2f°, Pitch: %.2f°", camYaw, camPitch);
             }
-
+            
             ImGui::End();
         }
 
@@ -601,6 +697,74 @@ int main() {
                 ImGui::Separator();
                 if (ImGui::Button("Record Animation to AVI")) {
                     startAVIRecording(recordingDurationFrames);
+                }
+            }
+            
+            ImGui::End();
+        }
+
+        // Add a new window for sphere configuration
+        {
+            ImGui::Begin("Sphere Configuration");
+            
+            if (ImGui::CollapsingHeader("Sphere Properties", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::Text("Sphere Center:");
+                ImGui::SliderFloat("Center X", &sphereConfig.centerX, 0.0f, static_cast<float>(config.gridWidth));
+                ImGui::SliderFloat("Center Y", &sphereConfig.centerY, 0.0f, static_cast<float>(config.gridHeight));
+                ImGui::SliderFloat("Center Z", &sphereConfig.centerZ, 0.0f, static_cast<float>(config.gridDepth));
+                
+                ImGui::Separator();
+                ImGui::Text("Sphere Size:");
+                float maxRadius = std::min(std::min(config.gridWidth, config.gridHeight), config.gridDepth) / 2.0f;
+                ImGui::SliderFloat("Radius", &sphereConfig.radius, 5.0f, maxRadius);
+                
+                ImGui::Separator();
+                ImGui::Text("Sphere Style:");
+                ImGui::Checkbox("Fill Inside", &sphereConfig.fillInside);
+                if (!sphereConfig.fillInside) {
+                    ImGui::Checkbox("Outline Only", &sphereConfig.outlineOnly);
+                    if (sphereConfig.outlineOnly) {
+                        ImGui::SliderFloat("Outline Thickness", &sphereConfig.outlineThickness, 0.5f, 10.0f);
+                    }
+                }
+                
+                ImGui::Separator();
+                ImGui::Text("Sphere Color:");
+                float color[3] = {sphereConfig.r, sphereConfig.g, sphereConfig.b};
+                if (ImGui::ColorEdit3("Color", color)) {
+                    sphereConfig.r = static_cast<uint8_t>(color[0] * 255);
+                    sphereConfig.g = static_cast<uint8_t>(color[1] * 255);
+                    sphereConfig.b = static_cast<uint8_t>(color[2] * 255);
+                }
+                
+                // Preview color
+                ImGui::SameLine();
+                ImVec4 previewColor = ImVec4(sphereConfig.r/255.0f, sphereConfig.g/255.0f, sphereConfig.b/255.0f, 1.0f);
+                ImGui::ColorButton("##preview", previewColor, ImGuiColorEditFlags_NoTooltip, ImVec2(20, 20));
+                
+                // Quick color presets
+                if (ImGui::Button("Green")) {
+                    sphereConfig.r = 0;
+                    sphereConfig.g = 255;
+                    sphereConfig.b = 0;
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Blue")) {
+                    sphereConfig.r = 0;
+                    sphereConfig.g = 0;
+                    sphereConfig.b = 255;
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Red")) {
+                    sphereConfig.r = 255;
+                    sphereConfig.g = 0;
+                    sphereConfig.b = 0;
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Random")) {
+                    sphereConfig.r = rand() % 256;
+                    sphereConfig.g = rand() % 256;
+                    sphereConfig.b = rand() % 256;
                 }
             }
             

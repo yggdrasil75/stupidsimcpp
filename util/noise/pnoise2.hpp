@@ -16,14 +16,28 @@ private:
     std::vector<int> permutation;
     std::default_random_engine rng;
     
+    /// @brief Linear interpolation between two values
+    /// @param t Interpolation factor [0,1]
+    /// @param a1 First value
+    /// @param a2 Second value
+    /// @return Interpolated value between a1 and a2
+    /// @note Changing interpolation method affects noise smoothness
     float lerp(float t, float a1, float a2) {
         return a1 + t * (a2 - a1);
     }
 
+    /// @brief Fade function for smooth interpolation
+    /// @param t Input parameter
+    /// @return Smoothed t value using 6t^5 - 15t^4 + 10t^3
+    /// @note Critical for gradient continuity; changes affect noise smoothness
     static double fade(double t) {
         return t * t * t * (t * (t * 6 - 15) + 10);
     }
 
+    /// @brief Get constant gradient vector for 2D Perlin noise
+    /// @param v Hash value (0-3)
+    /// @return One of four 2D gradient vectors
+    /// @note Changing vectors affects noise pattern orientation
     Vec2f GetConstantVector(int v) {
         int h = v & 3;
         if (h == 0) return Vec2f(1,1);
@@ -32,6 +46,10 @@ private:
         else return Vec2f(1,-1);
     }
 
+    /// @brief Get constant gradient vector for 3D Perlin noise
+    /// @param v Hash value (0-7)
+    /// @return One of eight 3D gradient vectors
+    /// @note Vector selection affects 3D noise patterns
     Vec3ui8 GetConstantVector3(int v) {
         int h = v & 7;
         if (h == 0) return Vec3ui8(1,1,1);
@@ -44,6 +62,13 @@ private:
         else return Vec3ui8(1,-1, -1);
     }
 
+    /// @brief Gradient function for 2D/3D Perlin noise
+    /// @param hash Hash value for gradient selection
+    /// @param x X coordinate
+    /// @param y Y coordinate
+    /// @param z Z coordinate (default 0 for 2D)
+    /// @return Dot product of gradient vector and distance vector
+    /// @note Core of Perlin noise; changes affect basic noise character
     static double grad(int hash, double x, double y, double z = 0.0) {
         int h = hash & 15;
         double u = h < 8 ? x : y;
@@ -51,6 +76,8 @@ private:
         return ((h & 1) == 0 ? u : -u) + ((h & 2) == 0 ? v : -v);
     }
 
+    /// @brief Initialize permutation table with shuffled values
+    /// @note Called on construction; changing seed or shuffle affects all noise patterns
     void initializePermutation() {
         permutation.clear();
         std::vector<int> permutationt;
@@ -63,38 +90,82 @@ private:
         permutation.insert(permutation.end(), permutationt.begin(), permutationt.end());
     }
 
+    /// @brief Normalize noise value from [-1,1] to [0,1]
+    /// @param point Input coordinate
+    /// @return Normalized noise value in [0,1] range
+    /// @note Useful for texture generation; changes affect output range
     float normalizedNoise(const Vec2<float>& point) {
         return (permute(point) + 1.0f) * 0.5f;
     }
 
+    /// @brief Map value from one range to another
+    /// @param value Input value
+    /// @param inMin Original range minimum
+    /// @param inMax Original range maximum
+    /// @param outMin Target range minimum
+    /// @param outMax Target range maximum
+    /// @return Value mapped to new range
+    /// @note Useful for post-processing; changes affect output scaling
     float mapRange(float value, float inMin, float inMax, float outMin, float outMax) {
         return (value - inMin) * (outMax - outMin) / (inMax - inMin) + outMin;
     }
 
+    /// @brief Blend two noise values
+    /// @param noise1 First noise value
+    /// @param noise2 Second noise value
+    /// @param blendFactor Blending factor [0,1]
+    /// @return Blended noise value
+    /// @note Changes affect multi-layer noise combinations
     float blendNoises(float noise1, float noise2, float blendFactor) {
         return lerp(noise1, noise2, blendFactor);
     }
 
+    /// @brief Add two noise values with clamping
+    /// @param noise1 First noise value
+    /// @param noise2 Second noise value
+    /// @return Sum clamped to [-1,1]
+    /// @note Clamping prevents overflow; changes affect combined noise magnitude
     float addNoises(float noise1, float noise2) {
         return std::clamp(noise1 + noise2, -1.0f, 1.0f);
     }
 
+    /// @brief Multiply two noise values
+    /// @param noise1 First noise value
+    /// @param noise2 Second noise value
+    /// @return Product of noise values
+    /// @note Creates modulation effects; changes affect combined noise character
     float multiplyNoises(float noise1, float noise2) {
         return noise1 * noise2;
     }
 
+    /// @brief Hash function for 2D coordinates
+    /// @param x X coordinate integer
+    /// @param y Y coordinate integer
+    /// @return Hash value in [-1,1] range
+    /// @note Core of value noise; changes affect random distribution
     float hash(int x, int y) {
         return (permutation[(x + permutation[y & 255]) & 255] / 255.0f) * 2.0f - 1.0f;
     }
+    
 public:
+    /// @brief Default constructor with random seed
+    /// @note Uses random_device for seed; different runs produce different noise
     PNoise2() : rng(std::random_device{}()) {
         initializePermutation();
     }
     
+    /// @brief Constructor with specified seed
+    /// @param seed Random seed value
+    /// @note Same seed produces identical noise patterns across runs
     PNoise2(unsigned int seed) : rng(seed) {
         initializePermutation();
     }
     
+    /// @brief Generate 2D Perlin noise at given point
+    /// @tparam T Coordinate type (float, double, etc.)
+    /// @param point 2D coordinate
+    /// @return Noise value in [-1,1] range
+    /// @note Core 2D noise function; changes affect all 2D noise outputs
     template<typename T>
     float permute(Vec2<T> point) {
         TIME_FUNCTION;
@@ -132,6 +203,11 @@ public:
         return retval;
     }
 
+    /// @brief Generate 3D Perlin noise at given point
+    /// @tparam T Coordinate type (float, double, etc.)
+    /// @param point 3D coordinate
+    /// @return Noise value in [-1,1] range
+    /// @note Core 3D noise function; changes affect all 3D noise outputs
     template<typename T>
     float permute(Vec3<T> point) {
         TIME_FUNCTION;
@@ -190,6 +266,10 @@ public:
         return retval;
     }
 
+    /// @brief Generate 2D value noise (simpler alternative to Perlin)
+    /// @param point 2D coordinate
+    /// @return Noise value in [-1,1] range
+    /// @note Different character than Perlin; changes affect value-based textures
     float valueNoise(const Vec2<float>& point) {
         int xi = (int)std::floor(point.x);
         int yi = (int)std::floor(point.y);
@@ -218,6 +298,10 @@ public:
         return lerp(nx0, nx1, sy);
     }
 
+    /// @brief Generate RGBA color from 3D noise with offset channels
+    /// @param point 3D coordinate
+    /// @return Vec4ui8 containing RGBA noise values
+    /// @note Each channel uses different offset; changes affect color patterns
     Vec4ui8 permuteColor(const Vec3<float>& point) {
         TIME_FUNCTION;
         float noiseR = permute(point);
@@ -240,6 +324,14 @@ public:
         return Vec4ui8(r, g, b, a);
     }
 
+    /// @brief Generate fractal (octave) noise for natural-looking patterns
+    /// @tparam T Coordinate type
+    /// @param point Input coordinate
+    /// @param octaves Number of noise layers
+    /// @param persistence Amplitude multiplier per octave
+    /// @param lacunarity Frequency multiplier per octave
+    /// @return Combined noise value
+    /// @note Parameters control noise character: octaves=detail, persistence=roughness, lacunarity=frequency change
     template<typename T>
     float fractalNoise(const Vec2<T>& point, int octaves, float persistence, float lacunarity) {
         float total = 0.0f;
@@ -256,6 +348,12 @@ public:
         return total / maxV;
     }
 
+    /// @brief Generate turbulence noise (absolute value of octaves)
+    /// @tparam T Coordinate type
+    /// @param point Input coordinate
+    /// @param octaves Number of noise layers
+    /// @return Turbulence noise value
+    /// @note Creates swirling, turbulent patterns; changes affect visual complexity
     template<typename T>
     float turbulence(const Vec2<T>& point, int octaves) {
         float value = 0.0f;
@@ -267,6 +365,12 @@ public:
         return value;
     }
 
+    /// @brief Generate ridged (ridged multifractal) noise
+    /// @param point Input coordinate
+    /// @param octaves Number of noise layers
+    /// @param offset Weighting offset for ridge formation
+    /// @return Ridged noise value
+    /// @note Creates sharp ridge-like patterns; offset controls ridge prominence
     float ridgedNoise(const Vec2<float>& point, int octaves, float offset = 1.0f) {
         float result = 0.f;
         float weight = 1.f;
@@ -284,6 +388,11 @@ public:
         return result;
     }
 
+    /// @brief Generate billow (cloud-like) noise
+    /// @param point Input coordinate
+    /// @param octaves Number of noise layers
+    /// @return Billow noise value
+    /// @note Creates soft, billowy patterns like clouds
     float billowNoise(const Vec2<float>& point, int octaves) {
         float value = 0.0f;
         float amplitude = 1.0f;
@@ -297,8 +406,6 @@ public:
         
         return value;
     }
-
-
 };
 
 #endif
