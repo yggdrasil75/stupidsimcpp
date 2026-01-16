@@ -703,10 +703,10 @@ public:
                     }
                     switch (colorFormat) {
                         case frame::colormap::RGBA: {
-                            colorBuffer[pidx + 1] = cvColor.x;
-                            colorBuffer[pidx + 2] = cvColor.y;
-                            colorBuffer[pidx + 3] = cvColor.z;
-                            colorBuffer[pidx + 0] = cvAlpha;
+                            colorBuffer[pidx + 0] = cvColor.x;
+                            colorBuffer[pidx + 1] = cvColor.y;
+                            colorBuffer[pidx + 2] = cvColor.z;
+                            colorBuffer[pidx + 3] = cvAlpha;
                             break;
                         }
                         case frame::colormap::BGRA: {

@@ -25,7 +25,7 @@ struct defaults {
     int outHeight = 512;
     int gridWidth = 512;
     int gridHeight = 512;
-    int gridDepth = 64;
+    int gridDepth = 512;
     float fps = 30.0f;
     PNoise2 noise = PNoise2(42);
 };
@@ -699,7 +699,7 @@ int main() {
                     startAVIRecording(recordingDurationFrames);
                 }
             }
-            
+
             ImGui::End();
         }
 
