@@ -659,6 +659,89 @@ public:
     bool isMeshDirty() const {
         return meshDirty;
     }
+
+    std::vector<frame> genSlices(frame::colormap colorFormat = frame::colormap::RGB) const {
+        TIME_FUNCTION;
+        int colors;
+        std::vector<frame> outframes;
+        switch (colorFormat) {
+            case frame::colormap::RGBA:
+            case frame::colormap::BGRA: {
+                colors = 4;
+                break;
+            }
+            case frame::colormap::B: {
+                colors = 1;
+                break;
+            }
+            case frame::colormap::RGB:
+            case frame::colormap::BGR:
+            default: {
+                colors = 3;
+                break;
+            }
+        }
+        size_t cbsize = gridSize.x * gridSize.y * colors;
+        for (int layer = 0; layer < getDepth(); layer++) {
+            int layerMult = layer * gridSize.x * gridSize.y;
+            frame layerFrame(gridSize.x, gridSize.y, colorFormat);
+            std::vector<uint8_t> colorBuffer(cbsize);
+            for (int y = 0; y < gridSize.y; y++) {
+                int yMult = layerMult + (y * gridSize.x);
+                for (int x = 0; x < gridSize.x; x++)  {
+                    int vidx = yMult+x;
+                    int pidx = (y * gridSize.x + x) * colors;
+                    Voxel cv = voxels[vidx];
+                    Vec3ui8 cvColor;
+                    float cvAlpha;
+                    if (cv.active) {
+                        cvColor = cv.color;
+                        cvAlpha = cv.alpha;
+                    } else {
+                        cvColor = Vec3ui8(255,255,255);
+                        cvAlpha = 255;
+                    }
+                    switch (colorFormat) {
+                        case frame::colormap::RGBA: {
+                            colorBuffer[pidx + 1] = cvColor.x;
+                            colorBuffer[pidx + 2] = cvColor.y;
+                            colorBuffer[pidx + 3] = cvColor.z;
+                            colorBuffer[pidx + 0] = cvAlpha;
+                            break;
+                        }
+                        case frame::colormap::BGRA: {
+                            colorBuffer[pidx + 3] = cvColor.x;
+                            colorBuffer[pidx + 2] = cvColor.y;
+                            colorBuffer[pidx + 1] = cvColor.z;
+                            colorBuffer[pidx + 0] = cvAlpha;
+                            break;
+                        }
+                        case frame::colormap::RGB: {
+                            colorBuffer[pidx + 1] = cvColor.x;
+                            colorBuffer[pidx + 2] = cvColor.y;
+                            colorBuffer[pidx + 3] = cvColor.z;
+                            break;
+                        }
+                        case frame::colormap::BGR: {
+                            colorBuffer[pidx + 3] = cvColor.x;
+                            colorBuffer[pidx + 2] = cvColor.y;
+                            colorBuffer[pidx + 1] = cvColor.z;
+                            break;
+                        }
+                        case frame::colormap::B: {
+                            colorBuffer[pidx] = (cvColor.x * 0.299) + (cvColor.y * 0.587) + (cvColor.z * 0.114);
+                            break;
+                        }
+                    }
+                }
+            }
+            layerFrame.setData(colorBuffer);
+            //layerFrame.compressFrameLZ78();
+            outframes.emplace_back(layerFrame);   
+        }
+        return outframes;
+    }
+    
  
 };
 //#include "g3_serialization.hpp" needed to be usable

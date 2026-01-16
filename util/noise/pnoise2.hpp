@@ -62,6 +62,30 @@ private:
         permutation.insert(permutation.end(), permutationt.begin(), permutationt.end());
         permutation.insert(permutation.end(), permutationt.begin(), permutationt.end());
     }
+
+    float normalizedNoise(const Vec2<float>& point) {
+        return (permute(point) + 1.0f) * 0.5f;
+    }
+
+    float mapRange(float value, float inMin, float inMax, float outMin, float outMax) {
+        return (value - inMin) * (outMax - outMin) / (inMax - inMin) + outMin;
+    }
+
+    float blendNoises(float noise1, float noise2, float blendFactor) {
+        return lerp(noise1, noise2, blendFactor);
+    }
+
+    float addNoises(float noise1, float noise2) {
+        return std::clamp(noise1 + noise2, -1.0f, 1.0f);
+    }
+
+    float multiplyNoises(float noise1, float noise2) {
+        return noise1 * noise2;
+    }
+
+    float hash(int x, int y) {
+        return (permutation[(x + permutation[y & 255]) & 255] / 255.0f) * 2.0f - 1.0f;
+    }
 public:
     PNoise2() : rng(std::random_device{}()) {
         initializePermutation();
@@ -74,8 +98,8 @@ public:
     template<typename T>
     float permute(Vec2<T> point) {
         TIME_FUNCTION;
-        float x = point.x;
-        float y = point.y;
+        float x = static_cast<float>(point.x);
+        float y = static_cast<float>(point.y);
         int X = (int)floor(x);
         int xmod = X & 255;
         int Y = (int)floor(point.y);
@@ -166,6 +190,34 @@ public:
         return retval;
     }
 
+    float valueNoise(const Vec2<float>& point) {
+        int xi = (int)std::floor(point.x);
+        int yi = (int)std::floor(point.y);
+        
+        float tx = point.x - xi;
+        float ty = point.y - yi;
+        
+        int rx0 = xi & 255;
+        int rx1 = (xi + 1) & 255;
+        int ry0 = yi & 255;
+        int ry1 = (yi + 1) & 255;
+        
+        // Random values at corners
+        float c00 = hash(rx0, ry0);
+        float c10 = hash(rx1, ry0);
+        float c01 = hash(rx0, ry1);
+        float c11 = hash(rx1, ry1);
+        
+        // Interpolation
+        float sx = fade(tx);
+        float sy = fade(ty);
+        
+        float nx0 = lerp(c00, c10, sx);
+        float nx1 = lerp(c01, c11, sx);
+        
+        return lerp(nx0, nx1, sy);
+    }
+
     Vec4ui8 permuteColor(const Vec3<float>& point) {
         TIME_FUNCTION;
         float noiseR = permute(point);
@@ -187,6 +239,65 @@ public:
         
         return Vec4ui8(r, g, b, a);
     }
+
+    template<typename T>
+    float fractalNoise(const Vec2<T>& point, int octaves, float persistence, float lacunarity) {
+        float total = 0.0f;
+        float frequency = 1.f;
+        float amplitude = 1.f;
+        float maxV = 0.f;
+        for (int i = 0; i < octaves; i++) {
+            total += permute(point*frequency) * amplitude;
+            maxV += amplitude;
+            amplitude *= persistence;
+            frequency *= lacunarity;
+        }
+
+        return total / maxV;
+    }
+
+    template<typename T>
+    float turbulence(const Vec2<T>& point, int octaves) {
+        float value = 0.0f;
+        Vec2<float> tempPoint = point;
+        for (int i = 0; i < octaves; i++) {
+            value += std::abs(permute(tempPoint));
+            tempPoint *= 2.f;
+        }
+        return value;
+    }
+
+    float ridgedNoise(const Vec2<float>& point, int octaves, float offset = 1.0f) {
+        float result = 0.f;
+        float weight = 1.f;
+        Vec2<float> p = point;
+        
+        for (int i = 0; i < octaves; i++) {
+            float signal = 1.f - std::abs(permute(p));
+            signal *= signal;
+            signal *= weight;
+            weight = signal * offset;
+            result += signal;
+            p *= 2.f;
+        }
+        
+        return result;
+    }
+
+    float billowNoise(const Vec2<float>& point, int octaves) {
+        float value = 0.0f;
+        float amplitude = 1.0f;
+        float frequency = 1.0f;
+        
+        for (int i = 0; i < octaves; i++) {
+            value += std::abs(permute(point * frequency)) * amplitude;
+            amplitude *= 0.5f;
+            frequency *= 2.0f;
+        }
+        
+        return value;
+    }
+
 
 };
 

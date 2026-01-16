@@ -22,8 +22,8 @@
 struct defaults {
     int outWidth = 512;
     int outHeight = 512;
-    int gridWidth = 64;
-    int gridHeight = 64;
+    int gridWidth = 512;
+    int gridHeight = 512;
     int gridDepth = 64;
     float fps = 30.0f;
     PNoise2 noise = PNoise2(42);
@@ -51,6 +51,18 @@ void setup(defaults config, VoxelGrid& grid) {
     uint8_t threshold = 0.1 * 255;
     grid.resize(config.gridWidth, config.gridHeight, config.gridDepth);
     std::cout << "Generating grid of size " << config.gridWidth << "x" << config.gridHeight << "x" << config.gridDepth << std::endl;
+    size_t rValw = config.gridWidth  / 64;
+    size_t rValh = config.gridHeight / 64;
+    size_t rVald = config.gridDepth  / 64;
+    size_t gValw = config.gridWidth  / 32;
+    size_t gValh = config.gridHeight / 32;
+    size_t gVald = config.gridDepth  / 32;
+    size_t bValw = config.gridWidth  / 16;
+    size_t bValh = config.gridHeight / 16;
+    size_t bVald = config.gridDepth  / 16;
+    size_t aValw = config.gridWidth  / 8;
+    size_t aValh = config.gridHeight / 8;
+    size_t aVald = config.gridDepth  / 8;
     for (int z = 0; z < config.gridDepth; ++z) {
         if (z % 64 == 0) {
             std::cout << "Processing layer " << z << " of " << config.gridDepth << std::endl;
@@ -58,10 +70,10 @@ void setup(defaults config, VoxelGrid& grid) {
 
         for (int y = 0; y < config.gridHeight; ++y) {
             for (int x = 0; x < config.gridWidth; ++x) {
-                uint8_t r = config.noise.permute(Vec3f(static_cast<float>(x) / config.gridWidth / 64, static_cast<float>(y) / config.gridHeight / 64, static_cast<float>(z) / config.gridDepth / 64)) * 255;
-                uint8_t g = config.noise.permute(Vec3f(static_cast<float>(x) / config.gridWidth / 32, static_cast<float>(y) / config.gridHeight / 32, static_cast<float>(z) / config.gridDepth / 32)) * 255;
-                uint8_t b = config.noise.permute(Vec3f(static_cast<float>(x) / config.gridWidth / 16, static_cast<float>(y) / config.gridHeight / 16, static_cast<float>(z) / config.gridDepth / 16)) * 255;
-                uint8_t a = config.noise.permute(Vec3f(static_cast<float>(x) / config.gridWidth / 8 , static_cast<float>(y) / config.gridHeight / 8 , static_cast<float>(z) / config.gridDepth / 8)) * 255;
+                uint8_t r = config.noise.permute(Vec3f(static_cast<float>(x) * rValw, static_cast<float>(y) * rValh, static_cast<float>(z) * rVald)) * 255;
+                uint8_t g = config.noise.permute(Vec3f(static_cast<float>(x) * gValw, static_cast<float>(y) * gValh, static_cast<float>(z) * gVald)) * 255;
+                uint8_t b = config.noise.permute(Vec3f(static_cast<float>(x) * bValw, static_cast<float>(y) * bValh, static_cast<float>(z) * bVald)) * 255;
+                uint8_t a = config.noise.permute(Vec3f(static_cast<float>(x) * aValw, static_cast<float>(y) * aValh, static_cast<float>(z) * aVald)) * 255;
                 //Vec4ui8 noisecolor = config.noise.permuteColor(Vec3f( static_cast<float>(x) / 64, static_cast<float>(y) / 64, static_cast<float>(z) / 64));
                 if (a > threshold) {
                     //std::cout << "setting a position" << std::endl;
@@ -153,6 +165,14 @@ void stopAndSaveAVI(defaults& config, const std::string& filename) {
     
     isRecordingAVI = false;
     recordingFramesRemaining = 0;
+}
+
+void saveSlices(defaults& config, VoxelGrid& grid) {
+    std::vector<frame> frames = grid.genSlices(frame::colormap::RGB);
+    for (int i = 0; i < frames.size(); i++) {
+        std::string filename = "output/slices/" + std::to_string(i) + ".bmp";
+        BMPWriter::saveBMP(filename, frames[i]);
+    }
 }
 
 static void glfw_error_callback(int error, const char* description)
@@ -341,6 +361,10 @@ int main() {
                 cameraMoved = true;
             }
             
+            if (ImGui::Button("Save Slices")) {
+                saveSlices(config, grid);
+            }
+
             // AVI Recording Controls
             ImGui::Separator();
             ImGui::Text("AVI Recording:");
