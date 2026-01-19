@@ -116,7 +116,6 @@ struct Vertex {
 class VoxelGrid {
 private:
     Vec3i gridSize;
-    //int width, height, depth;
     std::vector<Voxel> voxels;
     bool meshDirty = true;
 
@@ -244,7 +243,7 @@ public:
 
         while (lv != cv && inGrid(cv) && visitedVoxel.size() < 10) {
             if (get(cv).active) {
-                visitedVoxel.push_back(cv);
+                    visitedVoxel.push_back(cv);
             }
             if (tMax.x < tMax.y) {
                 if (tMax.x < tMax.z) {
@@ -509,19 +508,19 @@ public:
                             break;
                         }
                         case frame::colormap::RGB: {
-                            colorBuffer[pidx + 1] = cvColor.x;
-                            colorBuffer[pidx + 2] = cvColor.y;
-                            colorBuffer[pidx + 3] = cvColor.z;
+                            colorBuffer[pidx + 0] = cvColor.x;
+                            colorBuffer[pidx + 1] = cvColor.y;
+                            colorBuffer[pidx + 2] = cvColor.z;
                             break;
                         }
                         case frame::colormap::BGR: {
-                            colorBuffer[pidx + 3] = cvColor.x;
-                            colorBuffer[pidx + 2] = cvColor.y;
-                            colorBuffer[pidx + 1] = cvColor.z;
+                            colorBuffer[pidx + 2] = cvColor.x;
+                            colorBuffer[pidx + 1] = cvColor.y;
+                            colorBuffer[pidx + 0] = cvColor.z;
                             break;
                         }
                         case frame::colormap::B: {
-                            colorBuffer[pidx] = (cvColor.x * 0.299) + (cvColor.y * 0.587) + (cvColor.z * 0.114);
+                            colorBuffer[pidx] = static_cast<uint8_t>((cvColor.x * 0.299) + (cvColor.y * 0.587) + (cvColor.z * 0.114));
                             break;
                         }
                     }
