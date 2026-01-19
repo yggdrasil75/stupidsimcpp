@@ -53,10 +53,10 @@ Mat4f perspective(float fovy, float aspect, float zNear, float zfar) {
 }
 
 struct Voxel {
-    float weight;
-    bool active;
-    float alpha;
-    Vec3ui8 color;
+    float weight = 1.0;
+    bool active = false;
+    float alpha = 0.0;
+    Vec3ui8 color = Vec3ui8(0,0,0);
     Voxel() = default;
     Voxel(float weight, bool active, float alpha, Vec3ui8 color) : weight(weight), active(active), alpha(alpha), color(color) {}
     // TODO: add curving and similar for water and glass and so on.
@@ -155,13 +155,12 @@ struct Chunk {
 
         if (children.empty()) {
             int index = getVoxelIndex(pos);
-            if (index >= 0 && index < static_cast<int>(voxels.size())) {
+            //if (index >= 0 && index < static_cast<int>(voxels.size())) {
                 voxels[index] = newVox;
                 dirty = true;
                 return true;
-                
-            }
-            return false;
+            // }
+            // return false;
         }
 
         for (Chunk& child : children) {
@@ -223,7 +222,7 @@ struct Chunk {
         return Voxel();
     }
 
-    const Voxel get(const Vec3i& pos, int maxDepth = 0) const {
+    const Voxel& get(const Vec3i& pos, int maxDepth = 0) const {
         if (!inChunk(pos)) {
             return Voxel();
         }
@@ -251,12 +250,11 @@ struct Chunk {
     
     int getVoxelIndex(Vec3i pos) const {
         Vec3i localPos = pos - minCorner;
-        return localPos.z * chunkSize.x * chunkSize.y + 
-               localPos.y * chunkSize.x + 
-               localPos.x;
+        return localPos.z * chunkSize.x * chunkSize.y + localPos.y * chunkSize.x + localPos.x;
     }
 
     void updateAverages() {
+        TIME_FUNCTION;
         if (voxels.empty()) {
             weight = 0.0f;
             alpha = 0.0f;
@@ -303,6 +301,7 @@ struct Chunk {
     }
     
     void updateAveragesRecursive() {
+        TIME_FUNCTION;
         if (children.empty()) {
             updateAverages();
         } else {
@@ -353,6 +352,7 @@ struct Chunk {
     }
 
     void subdivide(int numChildrenPerAxis = 2) {
+        TIME_FUNCTION;
         if (!children.empty()) return;  // Already subdivided
         
         Vec3i childSize = (maxCorner - minCorner) / numChildrenPerAxis;
@@ -387,13 +387,10 @@ struct Chunk {
                 }
             }
         }
-        
-        // Clear parent voxels after subdivision to save memory
-        voxels.clear();
-        voxels.shrink_to_fit();
     }
     
     void merge() {
+        TIME_FUNCTION;
         if (children.empty()) return;
         
         // Calculate total size from children
@@ -441,6 +438,55 @@ private:
         return rads * (M_PI / 180);
     }
 
+    void createChunksFromVoxels() {
+        TIME_FUNCTION;
+        chunks.clear();
+        
+        // Create chunks based on CHUNK_THRESHOLD
+        int chunksX = std::max(1, (gridSize.x + CHUNK_THRESHOLD - 1) / CHUNK_THRESHOLD);
+        int chunksY = std::max(1, (gridSize.y + CHUNK_THRESHOLD - 1) / CHUNK_THRESHOLD);
+        int chunksZ = std::max(1, (gridSize.z + CHUNK_THRESHOLD - 1) / CHUNK_THRESHOLD);
+        
+        Vec3i chunkSize = Vec3i(
+            (gridSize.x + chunksX - 1) / chunksX,
+            (gridSize.y + chunksY - 1) / chunksY,
+            (gridSize.z + chunksZ - 1) / chunksZ
+        );
+        
+        for (int z = 0; z < chunksZ; z++) {
+            for (int y = 0; y < chunksY; y++) {
+                for (int x = 0; x < chunksX; x++) {
+                    Vec3i minCorner = Vec3i(x * chunkSize.x, y * chunkSize.y, z * chunkSize.z);
+                    Vec3i maxCorner = Vec3i(
+                        std::min(minCorner.x + chunkSize.x, gridSize.x),
+                        std::min(minCorner.y + chunkSize.y, gridSize.y),
+                        std::min(minCorner.z + chunkSize.z, gridSize.z)
+                    );
+                    
+                    Chunk chunk(minCorner, maxCorner);
+                    
+                    // Copy voxel data to chunk
+                    for (int cz = minCorner.z; cz < maxCorner.z; cz++) {
+                        for (int cy = minCorner.y; cy < maxCorner.y; cy++) {
+                            for (int cx = minCorner.x; cx < maxCorner.x; cx++) {
+                                Vec3i pos(cx, cy, cz);
+                                int voxelIndex = cz * gridSize.x * gridSize.y + cy * gridSize.x + cx;
+                                int chunkIndex = chunk.getVoxelIndex(pos);
+                                
+                                if (voxelIndex >= 0 && voxelIndex < static_cast<int>(voxels.size()) &&
+                                    chunkIndex >= 0 && chunkIndex < static_cast<int>(chunk.voxels.size())) {
+                                    chunk.voxels[chunkIndex] = voxels[voxelIndex];
+                                }
+                            }
+                        }
+                    }
+                    
+                    chunks.push_back(chunk);
+                }
+            }
+        }
+    }
+
 public:
     double binSize = 1;
     VoxelGrid() : gridSize(0,0,0) {
@@ -449,6 +495,12 @@ public:
 
     VoxelGrid(int w, int h, int d) : gridSize(w,h,d) {
         voxels.resize(w * h * d);
+        
+        // // Enable chunks if any dimension exceeds CHUNK_THRESHOLD
+        // if (w > CHUNK_THRESHOLD || h > CHUNK_THRESHOLD || d > CHUNK_THRESHOLD) {
+        //     useChunks = true;
+        //     createChunksFromVoxels();
+        // }
     }
     
     bool serializeToFile(const std::string& filename);
@@ -456,26 +508,46 @@ public:
     static std::unique_ptr<VoxelGrid> deserializeFromFile(const std::string& filename);
     
     Voxel& get(int x, int y, int z) {
+        if (useChunks) {
+            for (Chunk& chunk : chunks) {
+                if (chunk.inChunk(Vec3i(x, y, z))) {
+                    Voxel* voxelPtr = chunk.getPtr(Vec3i(x, y, z));
+                    if (voxelPtr) {
+                        return *voxelPtr;
+                    }
+                }
+            }
+        }
         return voxels[z * gridSize.x * gridSize.y + y * gridSize.x + x];
     }
 
     const Voxel& get(int x, int y, int z) const {
+        if (useChunks) {
+            for (const Chunk& chunk : chunks) {
+                if (chunk.inChunk(Vec3i(x, y, z))) {
+                    Voxel voxel = chunk.get(Vec3i(x, y, z));
+                    return voxel;
+                }
+            }
+        }
         return voxels[z * gridSize.x * gridSize.y + y * gridSize.x + x];
     }
 
     Voxel& get(const Vec3i& xyz) {
-        return voxels[xyz.z * gridSize.x * gridSize.y + xyz.y * gridSize.x + xyz.x];
+        return get(xyz.x, xyz.y, xyz.z);
     }
 
     const Voxel& get(const Vec3i& xyz) const {
-        return voxels[xyz.z * gridSize.x * gridSize.y + xyz.y * gridSize.x + xyz.x];
+        return get(xyz.x, xyz.y, xyz.z);
     }
 
     void resize(int newW, int newH, int newD) {
+        TIME_FUNCTION;
         std::vector<Voxel> newVoxels(newW * newH * newD);
         int copyW = std::min(static_cast<int>(gridSize.x), newW);
         int copyH = std::min(static_cast<int>(gridSize.y), newH);
         int copyD = std::min(static_cast<int>(gridSize.z), newD);
+        
         for (int z = 0; z < copyD; ++z) {
             for (int y = 0; y < copyH; ++y) {
                 int oldRowStart = z * gridSize.x * gridSize.y + y * gridSize.x;
@@ -487,8 +559,18 @@ public:
                 );
             }
         }
+        
         voxels = std::move(newVoxels);
         gridSize = Vec3i(newW, newH, newD);
+        
+        // Check if we need to enable chunks
+        if (newW > CHUNK_THRESHOLD || newH > CHUNK_THRESHOLD || newD > CHUNK_THRESHOLD) {
+            useChunks = true;
+            createChunksFromVoxels();
+        } else {
+            useChunks = false;
+            chunks.clear();
+        }
     }
 
     void resize(Vec3i newsize) {
@@ -512,8 +594,21 @@ public:
             }
 
             Voxel& v = get(pos);
-            v.active = active; // std::clamp(active, 0.0f, 1.0f);
+            v.active = active;
             v.color = color;
+            
+            // // Also update in chunks if using chunks
+            // if (useChunks) {
+            //     for (Chunk& chunk : chunks) {
+            //         if (chunk.inChunk(pos)) {
+            //             Voxel newVoxel;
+            //             newVoxel.active = active;
+            //             newVoxel.color = color;
+            //             chunk.set(pos, newVoxel);
+            //             break;
+            //         }
+            //     }
+            // }
         }
     }
 
@@ -560,8 +655,10 @@ public:
         }
 
         while (lv != cv && inGrid(cv) && visitedVoxel.size() < 10) {
-            if (get(cv).active) {
-                    visitedVoxel.push_back(cv);
+            const Voxel& cvv = get(cv);
+
+            if (cvv.active) {
+                visitedVoxel.push_back(cv);
             }
             if (tMax.x < tMax.y) {
                 if (tMax.x < tMax.z) {
@@ -606,7 +703,7 @@ public:
         float maxDist = std::sqrt(gridSize.lengthSquared()) * binSize;
         frame outFrame(resolution.x, resolution.y, frame::colormap::RGB);
         std::vector<uint8_t> colorBuffer(resolution.x * resolution.y * 3);
-        #pragma omp parallel for
+        //#pragma omp parallel for
         for (int y = 0; y < resolution.x; y++) {
             float v = (static_cast<float>(y) / static_cast<float>(resolution.x - 1)) - 0.5f;    
             for (int x = 0; x < resolution.y; x++) {
@@ -616,7 +713,9 @@ public:
                 Vec3f rayEnd = cam.posfor.origin + rayDirWorld * maxDist;
                 Vec3d rayStartGrid = cam.posfor.origin.toDouble() / binSize;
                 Vec3d rayEndGrid = rayEnd.toDouble() / binSize;
+                std::cout << "traversing";
                 voxelTraverse(rayStartGrid, rayEndGrid, hitVoxels);
+                std::cout << "traversed";
                 Vec3ui8 hitColor(10, 10, 255);
                 for (const Vec3i& voxelPos : hitVoxels) {
                     if (inGrid(voxelPos)) {
@@ -628,6 +727,7 @@ public:
                         }
                     }
                 }
+                std::cout << "hit done" << std::endl;
                 hitVoxels.clear();
                 hitVoxels.shrink_to_fit();
                 // Set pixel color in buffer
@@ -808,8 +908,7 @@ public:
         return outframes;
     }
     
- 
-};
+ };
 //#include "g3_serialization.hpp" needed to be usable
 
 #endif

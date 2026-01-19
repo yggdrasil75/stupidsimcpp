@@ -23,9 +23,9 @@
 struct defaults {
     int outWidth = 512;
     int outHeight = 512;
-    int gridWidth = 512;
-    int gridHeight = 512;
-    int gridDepth = 512;
+    int gridWidth = 256;
+    int gridHeight = 256;
+    int gridDepth = 256;
     float fps = 30.0f;
     PNoise2 noise = PNoise2(42);
 };
