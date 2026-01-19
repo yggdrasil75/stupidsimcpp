@@ -54,6 +54,8 @@ struct Voxel {
     bool active;
     float alpha;
     Vec3ui8 color;
+    Voxel() = default;
+    Voxel(float weight, bool active, float alpha, Vec3ui8 color) : weight(weight), active(active), alpha(alpha), color(color) {}
     // TODO: add curving and similar for water and glass and so on.
     auto members() const -> std::tuple<const float&, const bool&, const float&, const Vec3ui8&> {
         return std::tie(weight, active, alpha, color);
@@ -111,6 +113,264 @@ struct Vertex {
     
     Vertex() = default;
     Vertex(Vec3f pos, Vec3f norm, Vec3ui8 colr, Vec2f tex = Vec2f(0,0)) : position(pos), normal(norm), color(colr), texCoord(tex) {}
+};
+
+struct Chunk {
+    float weight;
+    bool active;
+    float alpha;
+    Vec3ui8 color;
+    std::vector<Voxel> voxels;
+    std::vector<Chunk> children;
+    Vec3i chunkSize;
+    Vec3i minCorner;
+    Vec3i maxCorner;
+    int depth;
+
+    Chunk() : depth(0) {}
+
+    Chunk(Vec3i minCorner, Vec3i maxCorner, int depth = 0) : minCorner(minCorner), maxCorner(maxCorner), depth(depth) {
+        chunkSize = maxCorner - minCorner;
+        voxels.resize(chunkSize.x * chunkSize.y * chunkSize.z);
+    }
+
+    bool inChunk(Vec3i pos) const {
+        if (pos.AllGT(minCorner) && pos.AllLT(maxCorner)) return true;
+        return false;
+    }
+
+    bool setRecurse(Vec3i pos, Voxel newVox) {
+        if (!inChunk(pos)) return false;
+
+        if (children.empty()) {
+            int index = getVoxelIndex(pos);
+            if (index >= 0 && index < static_cast<int>(voxels.size())) {
+                voxels[index] = newVox;
+                return true;
+                updateAverages();
+            }
+            return false;
+        }
+
+        for (Chunk& child : children) {
+            if (child.set(pos, newVox)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    Voxel get(Vec3i pos, int maxDepth = 0) const {
+        if (!inChunk(pos)) {
+            return Voxel();
+        }
+
+        if (children.empty() || (maxDepth > 0 && depth >= maxDepth)) {
+            int index = getVoxelIndex(pos);
+            if (index >= 0 && index < static_cast<int>(voxels.size())) {
+                return voxels[index];
+            }
+            return Voxel();
+        } else if (maxDepth > 0 && depth >= maxDepth) {
+            return Voxel(weight, active, alpha, color);
+        }
+        
+        for (const Chunk& child : children) {
+            if (child.inChunk(pos)) {
+                return child.get(pos, maxDepth);
+            }
+        }
+        return Voxel();
+    }
+    
+    bool set(Vec3i pos, Voxel newVox) {
+        if (inChunk(pos)) {
+            int index = getVoxelIndex(pos);
+            voxels[index] = newVox;
+            if (newVox.active) {
+                updateAveragesRecursive();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    int getVoxelIndex(Vec3i pos) const {
+        Vec3i localPos = pos - minCorner;
+        return localPos.z * chunkSize.x * chunkSize.y + 
+               localPos.y * chunkSize.x + 
+               localPos.x;
+    }
+
+    void updateAverages() {
+        if (voxels.empty()) {
+            weight = 0.0f;
+            alpha = 0.0f;
+            color = Vec3ui8(0, 0, 0);
+            active = false;
+            return;
+        }
+        
+        float totalWeight = 0.0f;
+        float totalAlpha = 0.0f;
+        float totalR = 0.0f;
+        float totalG = 0.0f;
+        float totalB = 0.0f;
+        int activeCount = 0;
+        
+        for (const Voxel& voxel : voxels) {
+            totalWeight += voxel.weight;
+            totalAlpha += voxel.alpha;
+            
+            if (voxel.active) {
+                totalR += voxel.color.x;
+                totalG += voxel.color.y;
+                totalB += voxel.color.z;
+                activeCount++;
+            }
+        }
+        
+        int voxelCount = voxels.size();
+        weight = totalWeight / voxelCount;
+        alpha = totalAlpha / voxelCount;
+        
+        if (activeCount > 0) {
+            color = Vec3ui8(
+                static_cast<uint8_t>(totalR / activeCount),
+                static_cast<uint8_t>(totalG / activeCount),
+                static_cast<uint8_t>(totalB / activeCount)
+            );
+            active = true;
+        } else {
+            color = Vec3ui8(0, 0, 0);
+            active = false;
+        }
+    }
+    
+    void updateAveragesRecursive() {
+        if (children.empty()) {
+            updateAverages();
+        } else {
+            // Update all children first
+            for (Chunk& child : children) {
+                child.updateAveragesRecursive();
+            }
+            
+            // Then update this chunk based on children
+            if (children.empty()) return;
+            
+            float totalWeight = 0.0f;
+            float totalAlpha = 0.0f;
+            float totalR = 0.0f;
+            float totalG = 0.0f;
+            float totalB = 0.0f;
+            int activeChildren = 0;
+            
+            for (const Chunk& child : children) {
+                totalWeight += child.weight;
+                totalAlpha += child.alpha;
+                
+                if (child.active) {
+                    totalR += child.color.x;
+                    totalG += child.color.y;
+                    totalB += child.color.z;
+                    activeChildren++;
+                }
+            }
+            
+            int childCount = children.size();
+            weight = totalWeight / childCount;
+            alpha = totalAlpha / childCount;
+            
+            if (activeChildren > 0) {
+                color = Vec3ui8(
+                    static_cast<uint8_t>(totalR / activeChildren),
+                    static_cast<uint8_t>(totalG / activeChildren),
+                    static_cast<uint8_t>(totalB / activeChildren)
+                );
+                active = true;
+            } else {
+                color = Vec3ui8(0, 0, 0);
+                active = false;
+            }
+        }
+    }
+
+    void subdivide(int numChildrenPerAxis = 2) {
+        if (!children.empty()) return;  // Already subdivided
+        
+        Vec3i childSize = (maxCorner - minCorner) / numChildrenPerAxis;
+        
+        for (int z = 0; z < numChildrenPerAxis; z++) {
+            for (int y = 0; y < numChildrenPerAxis; y++) {
+                for (int x = 0; x < numChildrenPerAxis; x++) {
+                    Vec3i childMin = minCorner + Vec3i(x, y, z) * childSize;
+                    Vec3i childMax = childMin + childSize;
+                    
+                    Chunk child(childMin, childMax, depth + 1);
+                    
+                    // Copy voxel data from parent to child
+                    for (int cz = childMin.z; cz < childMax.z; cz++) {
+                        for (int cy = childMin.y; cy < childMax.y; cy++) {
+                            for (int cx = childMin.x; cx < childMax.x; cx++) {
+                                Vec3i pos(cx, cy, cz);
+                                int parentIndex = getVoxelIndex(pos);
+                                if (parentIndex >= 0 && parentIndex < static_cast<int>(voxels.size())) {
+                                    int childLocalIndex = (cz - childMin.z) * childSize.x * childSize.y +
+                                                         (cy - childMin.y) * childSize.x +
+                                                         (cx - childMin.x);
+                                    if (childLocalIndex >= 0 && childLocalIndex < static_cast<int>(child.voxels.size())) {
+                                        child.voxels[childLocalIndex] = voxels[parentIndex];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    children.push_back(child);
+                }
+            }
+        }
+        
+        // Clear parent voxels after subdivision to save memory
+        voxels.clear();
+        voxels.shrink_to_fit();
+    }
+    
+    void merge() {
+        if (children.empty()) return;
+        
+        // Calculate total size from children
+        Vec3i totalSize(0, 0, 0);
+        for (const Chunk& child : children) {
+            totalSize = totalSize.max(child.maxCorner);
+        }
+        chunkSize = totalSize - minCorner;
+        
+        // Resize voxels vector
+        voxels.resize(chunkSize.x * chunkSize.y * chunkSize.z);
+        
+        // Copy data from children
+        for (const Chunk& child : children) {
+            for (int z = child.minCorner.z; z < child.maxCorner.z; z++) {
+                for (int y = child.minCorner.y; y < child.maxCorner.y; y++) {
+                    for (int x = child.minCorner.x; x < child.maxCorner.x; x++) {
+                        Vec3i pos(x, y, z);
+                        Voxel voxel = child.get(pos);
+                        
+                        int parentIndex = getVoxelIndex(pos);
+                        if (parentIndex >= 0 && parentIndex < static_cast<int>(voxels.size())) {
+                            voxels[parentIndex] = voxel;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Clear children
+        children.clear();
+        children.shrink_to_fit();
+    }
 };
 
 class VoxelGrid {
@@ -182,7 +442,7 @@ public:
     }
 
     void set(Vec3i pos, bool active, Vec3ui8 color) {
-        if (pos.x >= 0 || pos.y >= 0 || pos.z >= 0) {
+        if (pos.x >= 0 && pos.y >= 0 && pos.z >= 0) {
             if (!(pos.x < gridSize.x)) {
                 resize(pos.x, gridSize.y, gridSize.z);
             }
