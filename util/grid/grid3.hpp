@@ -132,15 +132,11 @@ struct Chunk {
     bool dirty = false;
 
     Chunk(Vec3i minCorner, Vec3i maxCorner, int depth = 0) 
-      : minCorner(minCorner), maxCorner(maxCorner), depth(depth) {
+      : minCorner(minCorner), maxCorner(maxCorner), depth(depth), active(false) {
         chunkSize = maxCorner - minCorner;
-        
-        // Check if we need to subdivide based on CHUNK_THRESHOLD
         if (chunkSize.x > CHUNK_THRESHOLD || chunkSize.y > CHUNK_THRESHOLD || chunkSize.z > CHUNK_THRESHOLD) {
-            // This chunk is too large, need to subdivide
             subdivide();
         } else {
-            // This chunk is small enough, create voxels
             voxels.resize(chunkSize.x * chunkSize.y * chunkSize.z);
         }
     }
@@ -155,16 +151,22 @@ struct Chunk {
 
         if (children.empty()) {
             int index = getVoxelIndex(pos);
-            //if (index >= 0 && index < static_cast<int>(voxels.size())) {
+            if (index >= 0 && index < static_cast<int>(voxels.size())) {
                 voxels[index] = newVox;
+                if (newVox.active) {
+                    active = true;
+                }
                 dirty = true;
                 return true;
-            // }
-            // return false;
+            }
+            return false;
         }
 
         for (Chunk& child : children) {
             if (child.set(pos, newVox)) {
+                if (newVox.active) {
+                    active = true;
+                }
                 dirty = true;
                 return true;
             }
@@ -192,8 +194,7 @@ struct Chunk {
         }
         return nullptr;
     }
-
-    // Non-const get returns by value in your original code, which is safe.
+    
     Voxel get(Vec3i pos, int maxDepth = 0)  {
         if (!inChunk(pos)) {
             return Voxel();
@@ -223,8 +224,6 @@ struct Chunk {
         return Voxel();
     }
 
-    // FIX: Changed return type to Voxel (value) instead of const Voxel&
-    // Returning a reference to a temporary (Voxel()) or a recursive call that returns a temporary is UB.
     Voxel get(const Vec3i& pos, int maxDepth = 0) const {
         if (!inChunk(pos)) {
             return Voxel();
@@ -391,7 +390,7 @@ struct Chunk {
             }
         }
     }
-    
+
     void merge() {
         TIME_FUNCTION;
         if (children.empty()) return;
@@ -434,11 +433,19 @@ private:
     Vec3i gridSize;
     std::vector<Chunk> chunks;
     std::vector<Voxel> voxels;
-    bool useChunks = false;
+    bool useChunks = true;
     bool meshDirty = true;
 
     float radians(float rads) {
         return rads * (M_PI / 180);
+    }
+
+    // Helper to align a dimension to the next multiple of CHUNK_THRESHOLD
+    static int alignToChunkSize(int size) {
+        if (size <= 0) return CHUNK_THRESHOLD;
+        int remainder = size % CHUNK_THRESHOLD;
+        if (remainder == 0) return size;
+        return size + (CHUNK_THRESHOLD - remainder);
     }
 
     void createChunksFromVoxels() {
@@ -494,16 +501,12 @@ public:
     double binSize = 1;
     VoxelGrid() : gridSize(0,0,0) {
         std::cout << "creating empty grid." << std::endl;
+        resize(CHUNK_THRESHOLD, CHUNK_THRESHOLD, CHUNK_THRESHOLD);
     }
 
     VoxelGrid(int w, int h, int d) : gridSize(w,h,d) {
         voxels.resize(w * h * d);
         
-        // // Enable chunks if any dimension exceeds CHUNK_THRESHOLD
-        // if (w > CHUNK_THRESHOLD || h > CHUNK_THRESHOLD || d > CHUNK_THRESHOLD) {
-        //     useChunks = true;
-        //     createChunksFromVoxels();
-        // }
     }
     
     bool serializeToFile(const std::string& filename);
@@ -524,13 +527,11 @@ public:
         return voxels[z * gridSize.x * gridSize.y + y * gridSize.x + x];
     }
 
-    // FIX: Changed return type to Voxel (value).
-    // Returning 'const Voxel&' to a local variable 'voxel' inside the function causes dangling reference crash.
     Voxel get(int x, int y, int z) const {
         if (useChunks) {
             for (const Chunk& chunk : chunks) {
                 if (chunk.inChunk(Vec3i(x, y, z))) {
-                    return chunk.get(Vec3i(x, y, z)); // Returns by value now
+                    return chunk.get(Vec3i(x, y, z)); 
                 }
             }
         }
@@ -541,22 +542,30 @@ public:
         return get(xyz.x, xyz.y, xyz.z);
     }
 
-    // FIX: Changed return type to Voxel (value) for consistency and safety.
     Voxel get(const Vec3i& xyz) const {
         return get(xyz.x, xyz.y, xyz.z);
     }
 
     void resize(int newW, int newH, int newD) {
         TIME_FUNCTION;
-        std::vector<Voxel> newVoxels(newW * newH * newD);
-        int copyW = std::min(static_cast<int>(gridSize.x), newW);
-        int copyH = std::min(static_cast<int>(gridSize.y), newH);
-        int copyD = std::min(static_cast<int>(gridSize.z), newD);
+        
+        int alignedW = alignToChunkSize(newW);
+        int alignedH = alignToChunkSize(newH);
+        int alignedD = alignToChunkSize(newD);
+
+        if (alignedW == gridSize.x && alignedH == gridSize.y && alignedD == gridSize.z) {
+            return;
+        }
+
+        std::vector<Voxel> newVoxels(alignedW * alignedH * alignedD);
+        int copyW = std::min(static_cast<int>(gridSize.x), alignedW);
+        int copyH = std::min(static_cast<int>(gridSize.y), alignedH);
+        int copyD = std::min(static_cast<int>(gridSize.z), alignedD);
         
         for (int z = 0; z < copyD; ++z) {
             for (int y = 0; y < copyH; ++y) {
                 int oldRowStart = z * gridSize.x * gridSize.y + y * gridSize.x;
-                int newRowStart = z * newW * newH + y * newW;
+                int newRowStart = z * alignedW * alignedH + y * alignedW;
                 std::copy(
                     voxels.begin() + oldRowStart, 
                     voxels.begin() + oldRowStart + copyW, 
@@ -566,16 +575,11 @@ public:
         }
         
         voxels = std::move(newVoxels);
-        gridSize = Vec3i(newW, newH, newD);
+        gridSize = Vec3i(alignedW, alignedH, alignedD);
         
-        // Check if we need to enable chunks
-        if (newW > CHUNK_THRESHOLD || newH > CHUNK_THRESHOLD || newD > CHUNK_THRESHOLD) {
-            useChunks = true;
-            createChunksFromVoxels();
-        } else {
-            useChunks = false;
-            chunks.clear();
-        }
+        // Rebuild chunks structure (which will now be perfectly aligned cubes)
+        useChunks = true;
+        createChunksFromVoxels();
     }
 
     void resize(Vec3i newsize) {
@@ -588,17 +592,15 @@ public:
 
     void set(Vec3i pos, bool active, Vec3ui8 color) {
         if (pos.x >= 0 && pos.y >= 0 && pos.z >= 0) {
-            // FIX: Added +1 to resize calls. 
-            // If pos.x is 256, we need size 257 to include index 256. 
-            // resize(256) creates indices 0..255, so 256 would still be OOB.
+            // Check against current aligned gridSize
             if (!(pos.x < gridSize.x)) {
-                resize(pos.x + 1, gridSize.y, gridSize.z);
+                resize(pos.x, gridSize.y, gridSize.z);
             }
             else if (!(pos.y < gridSize.y)) {
-                resize(gridSize.x, pos.y + 1, gridSize.z);
+                resize(gridSize.x, pos.y, gridSize.z);
             }
             else if (!(pos.z < gridSize.z)) {
-                resize(gridSize.x, gridSize.y, pos.z + 1);
+                resize(gridSize.x, gridSize.y, pos.z);
             }
 
             Voxel& v = get(pos);
@@ -629,19 +631,24 @@ public:
         return (voxl >= 0 && voxl.x < gridSize.x && voxl.y < gridSize.y && voxl.z < gridSize.z);
     }
 
-    void voxelTraverse(const Vec3d& origin, const Vec3d& end, std::vector<Vec3i>& visitedVoxel) const {
+    void chunkTraverse(const Vec3d& origin, const Vec3d& end, std::vector<Vec3i>& visitedVoxel) const {
+        
+    }
+
+    void voxelTraverse(const Vec3d& origin, const Vec3d& end, std::vector<Vec3i>& visitedVoxel, int maxDist = 10000000) const {
         Vec3i cv = (origin / binSize).floorToI();
         Vec3i lv = (end / binSize).floorToI();
         Vec3d ray = end - origin;
+        
         Vec3f step = Vec3f(ray.x >= 0 ? 1 : -1, ray.y >= 0 ? 1 : -1, ray.z >= 0 ? 1 : -1);
         Vec3d nextVox = cv.toDouble() + step * binSize;
         Vec3d tMax = Vec3d(ray.x != 0 ? (nextVox.x - origin.x) / ray.x : INF,
                            ray.y != 0 ? (nextVox.y - origin.y) / ray.y : INF,
-                           ray.z != 0 ? (nextVox.z-origin.z) / ray.z : INF);
+                           ray.z != 0 ? (nextVox.z - origin.z) / ray.z : INF);
         Vec3d tDelta = Vec3d(ray.x != 0 ? binSize / ray.x * step.x : INF,
                              ray.y != 0 ? binSize / ray.y * step.y : INF,
                              ray.z != 0 ? binSize / ray.z * step.z : INF);
-
+        float dist = 0;
         Vec3i diff(0,0,0);
         bool negRay = false;
         if (cv.x != lv.x && ray.x < 0) {
@@ -662,33 +669,36 @@ public:
             visitedVoxel.push_back(cv);
         }
 
-        while (lv != cv && inGrid(cv) && visitedVoxel.size() < 10) {
-            // FIX: This calls the const version of get(). 
-            // Previous crash happened here because get returned a reference to a destroyed local variable.
+        while (lv != cv && inGrid(cv) && visitedVoxel.size() < 10 && dist < maxDist) {
             Voxel cvv = get(cv);
 
             if (cvv.active) {
                 visitedVoxel.push_back(cv);
             }
+            
             if (tMax.x < tMax.y) {
                 if (tMax.x < tMax.z) {
+                    dist += tDelta.x;
                     cv.x += step.x;
                     tMax.x += tDelta.x;
                 } else {
+                    dist += tDelta.y;
                     cv.z += step.z;
                     tMax.z += tDelta.z;
                 }
             } else {
                 if (tMax.y < tMax.z) {
+                    dist += tDelta.y;
                     cv.y += step.y;
                     tMax.y += tDelta.y;
                 } else {
+                    dist += tDelta.z;
                     cv.z += step.z;
                     tMax.z += tDelta.z;
                 }
             }
         }
-        return; 
+        return;
     }
 
     int getWidth() const {
@@ -723,8 +733,10 @@ public:
                 Vec3f rayEnd = cam.posfor.origin + rayDirWorld * maxDist;
                 Vec3d rayStartGrid = cam.posfor.origin.toDouble() / binSize;
                 Vec3d rayEndGrid = rayEnd.toDouble() / binSize;
-                //std::cout << "traversing";
-                voxelTraverse(rayStartGrid, rayEndGrid, hitVoxels);
+                if (useChunks) {
+                    chunkTraverse(rayStartGrid, rayEndGrid, hitVoxels);
+                } else voxelTraverse(rayStartGrid, rayEndGrid, hitVoxels);
+                
                 //std::cout << "traversed";
                 Vec3ui8 hitColor(10, 10, 255);
                 for (const Vec3i& voxelPos : hitVoxels) {
@@ -918,7 +930,7 @@ public:
         return outframes;
     }
     
- };
+};
 //#include "g3_serialization.hpp" needed to be usable
 
 #endif

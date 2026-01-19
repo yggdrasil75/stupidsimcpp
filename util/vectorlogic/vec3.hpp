@@ -335,13 +335,12 @@ public:
     //                   static_cast<T>(scalar * vec.y), 
     //                   static_cast<T>(scalar * vec.z));
     // }
-    
-    // template<typename S>
-    // friend Vec3<T> operator/(S scalar, const Vec3<T>& vec) {
-    //     return Vec3<T>(static_cast<T>(scalar / vec.x), 
-    //                   static_cast<T>(scalar / vec.y), 
-    //                   static_cast<T>(scalar / vec.z));
-    // }
+    //previously was commented because Vec3<S> was treated as friend S instead.
+    friend Vec3<T> operator/(float scalar, const Vec3<T>& vec) {
+        return Vec3<T>(static_cast<T>(scalar / vec.x), 
+                      static_cast<T>(scalar / vec.y), 
+                      static_cast<T>(scalar / vec.z));
+    }
 
     Vec3 reflect(const Vec3& normal) const {
         return *this - 2.0f * this->dot(normal) * normal;
