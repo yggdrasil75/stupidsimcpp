@@ -4,6 +4,8 @@
 #include <unordered_map>
 #include <fstream>
 #include <cstring>
+#include <memory>
+#include <array>
 #include "../vectorlogic/vec2.hpp"
 #include "../vectorlogic/vec3.hpp"
 #include "../vectorlogic/vec4.hpp"
@@ -16,6 +18,7 @@
 #include "../basicdefines.hpp"
 
 //constexpr char magic[4] = {'Y', 'G', 'G', '3'};
+static constexpr int CHUNK_THRESHOLD = 16; //at this size, subdivide.
 
 Mat4f lookAt(const Vec3f& eye, const Vec3f& center, const Vec3f& up) {
     Vec3f const f = (center - eye).normalized();
@@ -126,12 +129,20 @@ struct Chunk {
     Vec3i minCorner;
     Vec3i maxCorner;
     int depth;
+    bool dirty = false;
 
-    Chunk() : depth(0) {}
-
-    Chunk(Vec3i minCorner, Vec3i maxCorner, int depth = 0) : minCorner(minCorner), maxCorner(maxCorner), depth(depth) {
+    Chunk(Vec3i minCorner, Vec3i maxCorner, int depth = 0) 
+      : minCorner(minCorner), maxCorner(maxCorner), depth(depth) {
         chunkSize = maxCorner - minCorner;
-        voxels.resize(chunkSize.x * chunkSize.y * chunkSize.z);
+        
+        // Check if we need to subdivide based on CHUNK_THRESHOLD
+        if (chunkSize.x > CHUNK_THRESHOLD || chunkSize.y > CHUNK_THRESHOLD || chunkSize.z > CHUNK_THRESHOLD) {
+            // This chunk is too large, need to subdivide
+            subdivide();
+        } else {
+            // This chunk is small enough, create voxels
+            voxels.resize(chunkSize.x * chunkSize.y * chunkSize.z);
+        }
     }
 
     bool inChunk(Vec3i pos) const {
@@ -139,28 +150,51 @@ struct Chunk {
         return false;
     }
 
-    bool setRecurse(Vec3i pos, Voxel newVox) {
+    bool set(Vec3i pos, Voxel newVox) {
         if (!inChunk(pos)) return false;
 
         if (children.empty()) {
             int index = getVoxelIndex(pos);
             if (index >= 0 && index < static_cast<int>(voxels.size())) {
                 voxels[index] = newVox;
+                dirty = true;
                 return true;
-                updateAverages();
+                
             }
             return false;
         }
 
         for (Chunk& child : children) {
             if (child.set(pos, newVox)) {
+                dirty = true;
                 return true;
             }
         }
         return false;
     }
 
-    Voxel get(Vec3i pos, int maxDepth = 0) const {
+    Voxel* getPtr(Vec3i pos, int maxDepth = 0) {
+        if (!inChunk(pos)) {
+            return nullptr;
+        }
+
+        if (children.empty() || (maxDepth > 0 && depth >= maxDepth)) {
+            int index = getVoxelIndex(pos);
+            if (index >= 0 && index < static_cast<int>(voxels.size())) {
+                return &voxels[index];
+            }
+            return nullptr;
+        }
+        
+        for (Chunk& child : children) {
+            if (child.inChunk(pos)) {
+                return child.getPtr(pos, maxDepth);
+            }
+        }
+        return nullptr;
+    }
+
+    Voxel get(Vec3i pos, int maxDepth = 0)  {
         if (!inChunk(pos)) {
             return Voxel();
         }
@@ -168,6 +202,38 @@ struct Chunk {
         if (children.empty() || (maxDepth > 0 && depth >= maxDepth)) {
             int index = getVoxelIndex(pos);
             if (index >= 0 && index < static_cast<int>(voxels.size())) {
+                if (dirty) {
+                    updateAveragesRecursive();
+                }
+                return voxels[index];
+            }
+            return Voxel();
+        } else if (maxDepth > 0 && depth >= maxDepth) {
+            return Voxel(weight, active, alpha, color);
+        }
+        
+        for (Chunk& child : children) {
+            if (child.inChunk(pos)) {
+                if (dirty) {
+                    updateAveragesRecursive();
+                }
+                return child.get(pos, maxDepth);
+            }
+        }
+        return Voxel();
+    }
+
+    const Voxel get(const Vec3i& pos, int maxDepth = 0) const {
+        if (!inChunk(pos)) {
+            return Voxel();
+        }
+
+        if (children.empty() || (maxDepth > 0 && depth >= maxDepth)) {
+            int index = getVoxelIndex(pos);
+            if (index >= 0 && index < static_cast<int>(voxels.size())) {
+                if (dirty) {
+                    std::cout << "need to clean chunk" << std::endl;
+                }
                 return voxels[index];
             }
             return Voxel();
@@ -183,18 +249,6 @@ struct Chunk {
         return Voxel();
     }
     
-    bool set(Vec3i pos, Voxel newVox) {
-        if (inChunk(pos)) {
-            int index = getVoxelIndex(pos);
-            voxels[index] = newVox;
-            if (newVox.active) {
-                updateAveragesRecursive();
-                return true;
-            }
-        }
-        return false;
-    }
-
     int getVoxelIndex(Vec3i pos) const {
         Vec3i localPos = pos - minCorner;
         return localPos.z * chunkSize.x * chunkSize.y + 
@@ -245,6 +299,7 @@ struct Chunk {
             color = Vec3ui8(0, 0, 0);
             active = false;
         }
+        dirty = false;
     }
     
     void updateAveragesRecursive() {
@@ -294,6 +349,7 @@ struct Chunk {
                 active = false;
             }
         }
+        dirty = false;
     }
 
     void subdivide(int numChildrenPerAxis = 2) {
@@ -376,7 +432,9 @@ struct Chunk {
 class VoxelGrid {
 private:
     Vec3i gridSize;
+    std::vector<Chunk> chunks;
     std::vector<Voxel> voxels;
+    bool useChunks = false;
     bool meshDirty = true;
 
     float radians(float rads) {
@@ -618,7 +676,11 @@ public:
         std::cout << "Active voxels: " << activeVoxels << std::endl;
         std::cout << "Inactive voxels: " << (totalVoxels - activeVoxels) << std::endl;
         std::cout << "Active percentage: " << activePercentage << "%" << std::endl;
-        std::cout << "Memory usage (approx): " << (voxels.size() * sizeof(Voxel)) / 1024 << " KB" << std::endl;
+        std::cout << "Memory usage (approx): " << (voxels.size() * sizeof(Voxel)) / 1024 << " KB" << std::endl; //needs to be updated to include chunks
+        std::cout << "Using chunks: " << (useChunks ? "Yes" : "No") << std::endl;
+        if (useChunks) {
+            std::cout << "Number of chunks: " << chunks.size() << std::endl;
+        }
         std::cout << "============================" << std::endl;
     }
 
@@ -662,53 +724,6 @@ private:
         }
         return Vec3f(0, 1, 0); // Default up normal
     }
-    
-    Vertex getEdgeVertex(int edge, int x, int y, int z, float isoLevel = 0.5f) const {
-        // Edge vertices based on Marching Cubes algorithm
-        static const std::array<std::array<int, 2>, 12> edgeVertices = {{
-            {0, 1}, {1, 2}, {2, 3}, {3, 0}, // Bottom edges
-            {4, 5}, {5, 6}, {6, 7}, {7, 4}, // Top edges
-            {0, 4}, {1, 5}, {2, 6}, {3, 7}  // Vertical edges
-        }};
-        
-        static const std::array<Vec3f, 8> cubeVertices = {{
-            Vec3f(0, 0, 0), Vec3f(1, 0, 0), Vec3f(1, 1, 0), Vec3f(0, 1, 0),
-            Vec3f(0, 0, 1), Vec3f(1, 0, 1), Vec3f(1, 1, 1), Vec3f(0, 1, 1)
-        }};
-        
-        const auto& [v1, v2] = edgeVertices[edge];
-        const Vec3f& p1 = cubeVertices[v1];
-        const Vec3f& p2 = cubeVertices[v2];
-        
-        // For binary voxels, we can just use midpoint
-        Vec3f position = (p1 + p2) * 0.5f;
-        
-        // Convert to world coordinates
-        position = position + Vec3f(x, y, z);
-        position = position * binSize;
-        
-        // Get colors from neighboring voxels
-        Vec3ui8 color1 = get(x, y, z).color;
-        Vec3ui8 color2 = color1;
-        
-        // Determine which neighboring voxel to use for the second color
-        // This is simplified - in a full implementation, you'd interpolate based on values
-        if (v2 == 1) color2 = get(x+1, y, z).color;
-        else if (v2 == 3) color2 = get(x, y+1, z).color;
-        else if (v2 == 4) color2 = get(x, y, z+1).color;
-        
-        // Interpolate color
-        Vec3ui8 color(
-            static_cast<uint8_t>((color1.x + color2.x) / 2),
-            static_cast<uint8_t>((color1.y + color2.y) / 2),
-            static_cast<uint8_t>((color1.z + color2.z) / 2)
-        );
-        
-        // Calculate normal (simplified)
-        Vec3f normal = calculateVoxelNormal(x, y, z);
-        
-        return Vertex(position, normal, color);
-    }
 
 public:
     std::vector<frame> genSlices(frame::colormap colorFormat = frame::colormap::RGB) const {
@@ -740,7 +755,7 @@ public:
             for (int y = 0; y < gridSize.y; y++) {
                 int yMult = layerMult + (y * gridSize.x);
                 for (int x = 0; x < gridSize.x; x++)  {
-                    int vidx = yMult+x;
+                    int vidx = yMult + x;
                     int pidx = (y * gridSize.x + x) * colors;
                     Voxel cv = voxels[vidx];
                     Vec3ui8 cvColor;
