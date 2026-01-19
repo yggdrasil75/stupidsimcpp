@@ -193,6 +193,7 @@ struct Chunk {
         return nullptr;
     }
 
+    // Non-const get returns by value in your original code, which is safe.
     Voxel get(Vec3i pos, int maxDepth = 0)  {
         if (!inChunk(pos)) {
             return Voxel();
@@ -222,7 +223,9 @@ struct Chunk {
         return Voxel();
     }
 
-    const Voxel& get(const Vec3i& pos, int maxDepth = 0) const {
+    // FIX: Changed return type to Voxel (value) instead of const Voxel&
+    // Returning a reference to a temporary (Voxel()) or a recursive call that returns a temporary is UB.
+    Voxel get(const Vec3i& pos, int maxDepth = 0) const {
         if (!inChunk(pos)) {
             return Voxel();
         }
@@ -521,12 +524,13 @@ public:
         return voxels[z * gridSize.x * gridSize.y + y * gridSize.x + x];
     }
 
-    const Voxel& get(int x, int y, int z) const {
+    // FIX: Changed return type to Voxel (value).
+    // Returning 'const Voxel&' to a local variable 'voxel' inside the function causes dangling reference crash.
+    Voxel get(int x, int y, int z) const {
         if (useChunks) {
             for (const Chunk& chunk : chunks) {
                 if (chunk.inChunk(Vec3i(x, y, z))) {
-                    Voxel voxel = chunk.get(Vec3i(x, y, z));
-                    return voxel;
+                    return chunk.get(Vec3i(x, y, z)); // Returns by value now
                 }
             }
         }
@@ -537,7 +541,8 @@ public:
         return get(xyz.x, xyz.y, xyz.z);
     }
 
-    const Voxel& get(const Vec3i& xyz) const {
+    // FIX: Changed return type to Voxel (value) for consistency and safety.
+    Voxel get(const Vec3i& xyz) const {
         return get(xyz.x, xyz.y, xyz.z);
     }
 
@@ -583,14 +588,17 @@ public:
 
     void set(Vec3i pos, bool active, Vec3ui8 color) {
         if (pos.x >= 0 && pos.y >= 0 && pos.z >= 0) {
+            // FIX: Added +1 to resize calls. 
+            // If pos.x is 256, we need size 257 to include index 256. 
+            // resize(256) creates indices 0..255, so 256 would still be OOB.
             if (!(pos.x < gridSize.x)) {
-                resize(pos.x, gridSize.y, gridSize.z);
+                resize(pos.x + 1, gridSize.y, gridSize.z);
             }
             else if (!(pos.y < gridSize.y)) {
-                resize(gridSize.x, pos.y, gridSize.z);
+                resize(gridSize.x, pos.y + 1, gridSize.z);
             }
             else if (!(pos.z < gridSize.z)) {
-                resize(gridSize.x, gridSize.y, pos.z);
+                resize(gridSize.x, gridSize.y, pos.z + 1);
             }
 
             Voxel& v = get(pos);
@@ -655,7 +663,9 @@ public:
         }
 
         while (lv != cv && inGrid(cv) && visitedVoxel.size() < 10) {
-            const Voxel& cvv = get(cv);
+            // FIX: This calls the const version of get(). 
+            // Previous crash happened here because get returned a reference to a destroyed local variable.
+            Voxel cvv = get(cv);
 
             if (cvv.active) {
                 visitedVoxel.push_back(cv);
@@ -713,13 +723,13 @@ public:
                 Vec3f rayEnd = cam.posfor.origin + rayDirWorld * maxDist;
                 Vec3d rayStartGrid = cam.posfor.origin.toDouble() / binSize;
                 Vec3d rayEndGrid = rayEnd.toDouble() / binSize;
-                std::cout << "traversing";
+                //std::cout << "traversing";
                 voxelTraverse(rayStartGrid, rayEndGrid, hitVoxels);
-                std::cout << "traversed";
+                //std::cout << "traversed";
                 Vec3ui8 hitColor(10, 10, 255);
                 for (const Vec3i& voxelPos : hitVoxels) {
                     if (inGrid(voxelPos)) {
-                        const Voxel& voxel = get(voxelPos);
+                        const Voxel voxel = get(voxelPos);
                         if (voxel.active) {
                             hitColor = voxel.color;
                             
@@ -727,7 +737,7 @@ public:
                         }
                     }
                 }
-                std::cout << "hit done" << std::endl;
+                //std::cout << "hit done" << std::endl;
                 hitVoxels.clear();
                 hitVoxels.shrink_to_fit();
                 // Set pixel color in buffer
