@@ -454,6 +454,29 @@ public:
             return std::hash<float>()(v.x) ^ (std::hash<float>()(v.y) << 1) ^ (std::hash<float>()(v.z) << 2);
         }
     };
+
+    Vec2<T> toLatLon() const {
+        float r = length();
+        if (r == 0) return Vec2<T>(0, 0);
+        float θ = std::acos(z / r);
+        float lat = static_cast<T>(M_PI/2.0 - θ);
+        
+        float lon = static_cast<T>(std::atan2(y, x));
+        return Vec2<T>(lat, lon);
+    }
+
+    Vec2<T> toLatLon(const Vec3& center) const {
+        Vec3 relative = *this - center;
+        return relative.toLatLon();
+    }
+
+    T toElevation() const {
+        return length();
+    }
+
+    T toElevation(const Vec3& center) const {
+        return distance(center);
+    }
 };
 
 using Vec3f = Vec3<float>;

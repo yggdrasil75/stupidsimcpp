@@ -312,6 +312,11 @@ public:
     float aspect() {
         return static_cast<float>(x) / static_cast<float>(y);
     }
+    
+    Vec2<float> toFloat() {
+        return Vec2<float>(static_cast<float>(x), static_cast<float>(y));
+    }
+    
 };
 
 template<typename T>

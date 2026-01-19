@@ -52,14 +52,21 @@ private:
     /// @note Vector selection affects 3D noise patterns
     Vec3ui8 GetConstantVector3(int v) {
         int h = v & 7;
-        if (h == 0) return Vec3ui8(1,1,1);
-        else if (h == 1) return Vec3ui8(-1,1, 1);
-        else if (h == 2) return Vec3ui8(-1,-1, 1);
-        else if (h == 3) return Vec3ui8(-1,-1, 1);
-        else if (h == 4) return Vec3ui8(-1,-1,-1);
-        else if (h == 5) return Vec3ui8(-1,-1, -1);
-        else if (h == 6) return Vec3ui8(-1,-1, -1);
-        else return Vec3ui8(1,-1, -1);
+        switch(h) {
+            case 0: return Vec3ui8( 1, 1, 0);
+            case 1: return Vec3ui8(-1, 1, 0);
+            case 2: return Vec3ui8( 1,-1, 0);
+            case 3: return Vec3ui8(-1,-1, 0);
+            case 4: return Vec3ui8( 1, 0, 1);
+            case 5: return Vec3ui8(-1, 0, 1);
+            case 6: return Vec3ui8( 1, 0,-1);
+            case 7: return Vec3ui8(-1, 0,-1);
+            case 8: return Vec3ui8( 0, 1, 1);
+            case 9: return Vec3ui8( 0,-1, 1);
+            case 10: return Vec3ui8( 0, 1,-1);
+            case 11: return Vec3ui8( 0,-1,-1);
+            default: return Vec3ui8(0,0,0);
+        }
     }
 
     /// @brief Gradient function for 2D/3D Perlin noise
@@ -95,6 +102,15 @@ private:
     /// @return Normalized noise value in [0,1] range
     /// @note Useful for texture generation; changes affect output range
     float normalizedNoise(const Vec2<float>& point) {
+        return (permute(point) + 1.0f) * 0.5f;
+    }
+
+    /// @brief Normalize 3D noise value from [-1,1] to [0,1]
+    /// @tparam T Coordinate type
+    /// @param point Input coordinate
+    /// @return Normalized noise value in [0,1] range
+    template<typename T>
+    float normalizedNoise(const Vec3<T>& point) {
         return (permute(point) + 1.0f) * 0.5f;
     }
 
@@ -147,6 +163,16 @@ private:
         return (permutation[(x + permutation[y & 255]) & 255] / 255.0f) * 2.0f - 1.0f;
     }
     
+    /// @brief Hash function for 3D coordinates
+    /// @param x X coordinate integer
+    /// @param y Y coordinate integer
+    /// @param z Z coordinate integer
+    /// @return Hash value in [-1,1] range
+    /// @note 3D version of hash function
+    float hash(int x, int y, int z) {
+        return (permutation[(z + permutation[(y + permutation[x & 255]) & 255]) & 255] / 255.0f) * 2.0f - 1.0f;
+    }
+
 public:
     /// @brief Default constructor with random seed
     /// @note Uses random_device for seed; different runs produce different noise
@@ -178,20 +204,20 @@ public:
         float xf = point.x - X;
         float yf = point.y - Y;
 
-        Vec2 BL = Vec2(xf-0, yf-0);
-        Vec2 BR = Vec2(xf-1, yf-0);
-        Vec2 TL = Vec2(xf-0, yf-1);
-        Vec2 TR = Vec2(xf-1, yf-1);
+        Vec2f BL = Vec2f(xf-0, yf-0);
+        Vec2f BR = Vec2f(xf-1, yf-0);
+        Vec2f TL = Vec2f(xf-0, yf-1);
+        Vec2f TR = Vec2f(xf-1, yf-1);
 
         int vBL = permutation[permutation[xmod+0]+ymod+0];
         int vBR = permutation[permutation[xmod+1]+ymod+0];
         int vTL = permutation[permutation[xmod+0]+ymod+1];
         int vTR = permutation[permutation[xmod+1]+ymod+1];
 
-        float dBL = BL.dot(GetConstantVector(vBL));
-        float dBR = BR.dot(GetConstantVector(vBR));
-        float dTL = TL.dot(GetConstantVector(vTL));
-        float dTR = TR.dot(GetConstantVector(vTR));
+        // float dBL = BL.dot(GetConstantVector(vBL));
+        // float dBR = BR.dot(GetConstantVector(vBR));
+        // float dTL = TL.dot(GetConstantVector(vTL));
+        // float dTR = TR.dot(GetConstantVector(vTR));
         
         float u = fade(xf);
         float v = fade(yf);
@@ -238,15 +264,15 @@ public:
         int vRTL = permutation[permutation[permutation[Z+1]+X+0]+Y+1];
         int vRTR = permutation[permutation[permutation[Z+1]+X+1]+Y+1];
 
-        float dFBL = FBL.dot(GetConstantVector3(vFBL));
-        float dFBR = FBR.dot(GetConstantVector3(vFBR));
-        float dFTL = FTL.dot(GetConstantVector3(vFTL));
-        float dFTR = FTR.dot(GetConstantVector3(vFTR));
+        // float dFBL = FBL.dot(GetConstantVector3(vFBL));
+        // float dFBR = FBR.dot(GetConstantVector3(vFBR));
+        // float dFTL = FTL.dot(GetConstantVector3(vFTL));
+        // float dFTR = FTR.dot(GetConstantVector3(vFTR));
 
-        float dRBL = RBL.dot(GetConstantVector3(vRBL));
-        float dRBR = RBR.dot(GetConstantVector3(vRBR));
-        float dRTL = RTL.dot(GetConstantVector3(vRTL));
-        float dRTR = RTR.dot(GetConstantVector3(vRTR));
+        // float dRBL = RBL.dot(GetConstantVector3(vRBL));
+        // float dRBR = RBR.dot(GetConstantVector3(vRBR));
+        // float dRTL = RTL.dot(GetConstantVector3(vRTL));
+        // float dRTR = RTR.dot(GetConstantVector3(vRTR));
         
         float u = fade(xf);
         float v = fade(yf);
@@ -296,6 +322,51 @@ public:
         float nx1 = lerp(c01, c11, sx);
         
         return lerp(nx0, nx1, sy);
+    }
+
+    /// @brief Generate 3D value noise
+    /// @param point 3D coordinate
+    /// @return Noise value in [-1,1] range
+    float valueNoise(const Vec3<float>& point) {
+        int xi = (int)std::floor(point.x);
+        int yi = (int)std::floor(point.y);
+        int zi = (int)std::floor(point.z);
+        
+        float tx = point.x - xi;
+        float ty = point.y - yi;
+        float tz = point.z - zi;
+        
+        int rx0 = xi & 255;
+        int rx1 = (xi + 1) & 255;
+        int ry0 = yi & 255;
+        int ry1 = (yi + 1) & 255;
+        int rz0 = zi & 255;
+        int rz1 = (zi + 1) & 255;
+        
+        // Random values at corners
+        float c000 = hash(rx0, ry0, rz0);
+        float c100 = hash(rx1, ry0, rz0);
+        float c010 = hash(rx0, ry1, rz0);
+        float c110 = hash(rx1, ry1, rz0);
+        float c001 = hash(rx0, ry0, rz1);
+        float c101 = hash(rx1, ry0, rz1);
+        float c011 = hash(rx0, ry1, rz1);
+        float c111 = hash(rx1, ry1, rz1);
+        
+        // Interpolation
+        float sx = fade(tx);
+        float sy = fade(ty);
+        float sz = fade(tz);
+        
+        float nx00 = lerp(c000, c100, sx);
+        float nx10 = lerp(c010, c110, sx);
+        float nx01 = lerp(c001, c101, sx);
+        float nx11 = lerp(c011, c111, sx);
+        
+        float ny0 = lerp(nx00, nx10, sy);
+        float ny1 = lerp(nx01, nx11, sy);
+        
+        return lerp(ny0, ny1, sz);
     }
 
     /// @brief Generate RGBA color from 3D noise with offset channels
@@ -348,6 +419,29 @@ public:
         return total / maxV;
     }
 
+    /// @brief Generate 3D fractal (octave) noise
+    /// @tparam T Coordinate type
+    /// @param point Input coordinate
+    /// @param octaves Number of noise layers
+    /// @param persistence Amplitude multiplier per octave
+    /// @param lacunarity Frequency multiplier per octave
+    /// @return Combined noise value
+    template<typename T>
+    float fractalNoise(const Vec3<T>& point, int octaves, float persistence, float lacunarity) {
+        float total = 0.0f;
+        float frequency = 1.f;
+        float amplitude = 1.f;
+        float maxV = 0.f;
+        for (int i = 0; i < octaves; i++) {
+            total += permute(point*frequency) * amplitude;
+            maxV += amplitude;
+            amplitude *= persistence;
+            frequency *= lacunarity;
+        }
+
+        return total / maxV;
+    }
+
     /// @brief Generate turbulence noise (absolute value of octaves)
     /// @tparam T Coordinate type
     /// @param point Input coordinate
@@ -357,9 +451,25 @@ public:
     template<typename T>
     float turbulence(const Vec2<T>& point, int octaves) {
         float value = 0.0f;
-        Vec2<float> tempPoint = point;
+        Vec2f tempPoint = point.toFloat();
         for (int i = 0; i < octaves; i++) {
-            value += std::abs(permute(tempPoint));
+            value += std::abs(permute(tempPoint)) / (1 << i);
+            tempPoint *= 2.f;
+        }
+        return value;
+    }
+
+    /// @brief Generate 3D turbulence noise
+    /// @tparam T Coordinate type
+    /// @param point Input coordinate
+    /// @param octaves Number of noise layers
+    /// @return Turbulence noise value
+    template<typename T>
+    float turbulence(const Vec3<T>& point, int octaves) {
+        float value = 0.0f;
+        Vec3f tempPoint = point.toFloat();
+        for (int i = 0; i < octaves; i++) {
+            value += std::abs(permute(tempPoint)) / (1 << i);
             tempPoint *= 2.f;
         }
         return value;
@@ -388,12 +498,52 @@ public:
         return result;
     }
 
+    /// @brief Generate 3D ridged noise
+    /// @param point Input coordinate
+    /// @param octaves Number of noise layers
+    /// @param offset Weighting offset for ridge formation
+    /// @return Ridged noise value
+    float ridgedNoise(const Vec3<float>& point, int octaves, float offset = 1.0f) {
+        float result = 0.f;
+        float weight = 1.f;
+        Vec3<float> p = point;
+        
+        for (int i = 0; i < octaves; i++) {
+            float signal = 1.f - std::abs(permute(p));
+            signal *= signal;
+            signal *= weight;
+            weight = signal * offset;
+            result += signal;
+            p *= 2.f;
+        }
+        
+        return result;
+    }
+
     /// @brief Generate billow (cloud-like) noise
     /// @param point Input coordinate
     /// @param octaves Number of noise layers
     /// @return Billow noise value
     /// @note Creates soft, billowy patterns like clouds
     float billowNoise(const Vec2<float>& point, int octaves) {
+        float value = 0.0f;
+        float amplitude = 1.0f;
+        float frequency = 1.0f;
+        
+        for (int i = 0; i < octaves; i++) {
+            value += std::abs(permute(point * frequency)) * amplitude;
+            amplitude *= 0.5f;
+            frequency *= 2.0f;
+        }
+        
+        return value;
+    }
+
+    /// @brief Generate 3D billow noise
+    /// @param point Input coordinate
+    /// @param octaves Number of noise layers
+    /// @return Billow noise value
+    float billowNoise(const Vec3<float>& point, int octaves) {
         float value = 0.0f;
         float amplitude = 1.0f;
         float frequency = 1.0f;

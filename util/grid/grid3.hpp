@@ -200,7 +200,6 @@ public:
 
 class VoxelGrid {
 private:
-    double binSize = 1;
     Vec3i gridSize;
     //int width, height, depth;
     std::vector<Voxel> voxels;
@@ -212,6 +211,7 @@ private:
     }
 
 public:
+    double binSize = 1;
     VoxelGrid() : gridSize(0,0,0) {
         std::cout << "creating empty grid." << std::endl;
     }
