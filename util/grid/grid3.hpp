@@ -113,97 +113,11 @@ struct Vertex {
     Vertex(Vec3f pos, Vec3f norm, Vec3ui8 colr, Vec2f tex = Vec2f(0,0)) : position(pos), normal(norm), color(colr), texCoord(tex) {}
 };
 
-struct Tri {
-    size_t v0,v1,v2;
-    Tri() = default;
-    Tri(size_t a, size_t b, size_t c) : v0(a), v1(b), v2(c) {}
-};
-
-class Mesh {
-private:
-    std::vector<Vertex> vertices;
-    std::vector<Tri> tris;
-    Vec3f boundBoxMin;
-    Vec3f boundBoxMax;
-public:
-    Mesh() = default;
-
-    void clear() {
-        vertices.clear();
-        tris.clear();
-        boundBoxMax = Vec3f(0,0,0);
-        boundBoxMin = Vec3f(0,0,0);
-    }
-
-    void addVertex(const Vertex& vertex) {
-        vertices.push_back(vertex);
-        boundBoxMin = boundBoxMin.min(vertex.position);
-        boundBoxMax = boundBoxMax.max(vertex.position);
-    }
-    
-    void addTriangle(const Tri& triangle) {
-        tris.push_back(triangle);
-    }
-    
-    void addTriangle(uint32_t v0, uint32_t v1, uint32_t v2) {
-        tris.emplace_back(v0, v1, v2);
-    }
-
-    const std::vector<Vertex>& getVertices() const { return vertices; }
-    const std::vector<Tri>& getTriangles() const { return tris; }
-    
-    size_t getVertexCount() const { return vertices.size(); }
-    size_t getTriangleCount() const { return tris.size(); }
-    
-    Vec3f getBoundingBoxMin() const { return boundBoxMin; }
-    Vec3f getBoundingBoxMax() const { return boundBoxMax; }
-    Vec3f getBoundingBoxSize() const { return boundBoxMax - boundBoxMin; }
-    Vec3f getBoundingBoxCenter() const { return (boundBoxMin + boundBoxMax) * 0.5f; }
-    
-    // Calculate normals if they're not already set
-    void calculateNormals() {
-        // Reset all normals to zero
-        for (auto& vertex : vertices) {
-            vertex.normal = Vec3f(0, 0, 0);
-        }
-        
-        // Accumulate face normals to vertices
-        for (const auto& tri : tris) {
-            const Vec3f& v0 = vertices[tri.v0].position;
-            const Vec3f& v1 = vertices[tri.v1].position;
-            const Vec3f& v2 = vertices[tri.v2].position;
-            
-            Vec3f edge1 = v1 - v0;
-            Vec3f edge2 = v2 - v0;
-            Vec3f normal = edge1.cross(edge2).normalized();
-            
-            vertices[tri.v0].normal = vertices[tri.v0].normal + normal;
-            vertices[tri.v1].normal = vertices[tri.v1].normal + normal;
-            vertices[tri.v2].normal = vertices[tri.v2].normal + normal;
-        }
-        
-        // Normalize all vertex normals
-        for (auto& vertex : vertices) {
-            if (vertex.normal.lengthSquared() > 0) {
-                vertex.normal = vertex.normal.normalized();
-            } else {
-                vertex.normal = Vec3f(0, 1, 0); // Default up normal
-            }
-        }
-    }
-
-    void optimize() {
-        calculateNormals();
-        //optimize may have optional params later for future expansion of features
-    }
-};
-
 class VoxelGrid {
 private:
     Vec3i gridSize;
     //int width, height, depth;
     std::vector<Voxel> voxels;
-    std::unique_ptr<Mesh> cachedMesh;
     bool meshDirty = true;
 
     float radians(float rads) {
@@ -328,7 +242,7 @@ public:
             visitedVoxel.push_back(cv);
         }
 
-        while (lv != cv && inGrid(cv)) {
+        while (lv != cv && inGrid(cv) && visitedVoxel.size() < 10) {
             if (get(cv).active) {
                 visitedVoxel.push_back(cv);
             }
@@ -350,7 +264,7 @@ public:
                 }
             }
         }
-        return; // &&visitedVoxel;
+        return; 
     }
 
     int getWidth() const {
@@ -446,11 +360,6 @@ public:
         std::cout << "Inactive voxels: " << (totalVoxels - activeVoxels) << std::endl;
         std::cout << "Active percentage: " << activePercentage << "%" << std::endl;
         std::cout << "Memory usage (approx): " << (voxels.size() * sizeof(Voxel)) / 1024 << " KB" << std::endl;
-        std::cout << "Mesh cached: " << (cachedMesh ? "Yes" : "No") << std::endl;
-        if (cachedMesh) {
-            std::cout << "Mesh vertices: " << cachedMesh->getVertexCount() << std::endl;
-            std::cout << "Mesh triangles: " << cachedMesh->getTriangleCount() << std::endl;
-        }
         std::cout << "============================" << std::endl;
     }
 
@@ -542,124 +451,7 @@ private:
         return Vertex(position, normal, color);
     }
 
-    // Helper function to add a face to the mesh
-    void addFace(Mesh& mesh, const Vec3f& basePos, const Vec3f& normal, 
-                 const Vec3ui8& color, bool flipWinding = false) {
-        Vec3f right, up;
-        
-        // Determine right and up vectors based on normal
-        if (std::abs(normal.x) > std::abs(normal.y)) {
-            right = Vec3f(0, 0, 1);
-        } else {
-            right = Vec3f(1, 0, 0);
-        }
-        up = normal.cross(right).normalized();
-        right = up.cross(normal).normalized();
-        
-        // Create face vertices
-        float halfSize = binSize * 0.5f;
-        Vec3f center = basePos + normal * halfSize;
-        
-        Vec3f v0 = center - right * halfSize - up * halfSize;
-        Vec3f v1 = center + right * halfSize - up * halfSize;
-        Vec3f v2 = center + right * halfSize + up * halfSize;
-        Vec3f v3 = center - right * halfSize + up * halfSize;
-        
-        // Add vertices to mesh
-        uint32_t startIndex = static_cast<uint32_t>(mesh.getVertexCount());
-        
-        mesh.addVertex(Vertex(v0, normal, color));
-        mesh.addVertex(Vertex(v1, normal, color));
-        mesh.addVertex(Vertex(v2, normal, color));
-        mesh.addVertex(Vertex(v3, normal, color));
-        
-        // Add triangles (two triangles per quad)
-        if (flipWinding) {
-            mesh.addTriangle(startIndex, startIndex + 1, startIndex + 2);
-            mesh.addTriangle(startIndex, startIndex + 2, startIndex + 3);
-        } else {
-            mesh.addTriangle(startIndex, startIndex + 2, startIndex + 1);
-            mesh.addTriangle(startIndex, startIndex + 3, startIndex + 2);
-        }
-    }
-
 public:
-    // Mesh generation using Naive Surface Nets (simpler than Marching Cubes)
-    std::unique_ptr<Mesh> meshify() {
-        TIME_FUNCTION;
-        
-        // If mesh is cached and not dirty, return it
-        if (cachedMesh && !meshDirty) {
-            return std::make_unique<Mesh>(*cachedMesh);
-        }
-        
-        auto mesh = std::make_unique<Mesh>();
-        mesh->clear();
-        
-        // For each voxel that's on the surface, create a quad
-        for (int z = 0; z < gridSize.z; z++) {
-            for (int y = 0; y < gridSize.y; y++) {
-                for (int x = 0; x < gridSize.x; x++) {
-                    if (!get(x, y, z).active) continue;
-                    
-                    const Voxel& voxel = get(x, y, z);
-                    Vec3f basePos(x * binSize, y * binSize, z * binSize);
-                    
-                    // Check each face
-                    // Right face (x+)
-                    if (!inGrid(Vec3i(x+1, y, z)) || !get(x+1, y, z).active) {
-                        addFace(*mesh, basePos, Vec3f(1, 0, 0), voxel.color, true);
-                    }
-                    // Left face (x-)
-                    if (!inGrid(Vec3i(x-1, y, z)) || !get(x-1, y, z).active) {
-                        addFace(*mesh, basePos, Vec3f(-1, 0, 0), voxel.color, false);
-                    }
-                    // Top face (y+)
-                    if (!inGrid(Vec3i(x, y+1, z)) || !get(x, y+1, z).active) {
-                        addFace(*mesh, basePos, Vec3f(0, 1, 0), voxel.color, true);
-                    }
-                    // Bottom face (y-)
-                    if (!inGrid(Vec3i(x, y-1, z)) || !get(x, y-1, z).active) {
-                        addFace(*mesh, basePos, Vec3f(0, -1, 0), voxel.color, false);
-                    }
-                    // Front face (z+)
-                    if (!inGrid(Vec3i(x, y, z+1)) || !get(x, y, z+1).active) {
-                        addFace(*mesh, basePos, Vec3f(0, 0, 1), voxel.color, true);
-                    }
-                    // Back face (z-)
-                    if (!inGrid(Vec3i(x, y, z-1)) || !get(x, y, z-1).active) {
-                        addFace(*mesh, basePos, Vec3f(0, 0, -1), voxel.color, false);
-                    }
-                }
-            }
-        }
-        
-        // Optimize the mesh
-        mesh->optimize();
-        
-        // Cache the mesh
-        cachedMesh = std::make_unique<Mesh>(*mesh);
-        meshDirty = false;
-        
-        return mesh;
-    }
-    
-    // Get cached mesh (regenerates if dirty)
-    std::unique_ptr<Mesh> getMesh() {
-        return meshify();
-    }
-    
-    // Clear mesh cache
-    void clearMeshCache() {
-        cachedMesh.reset();
-        meshDirty = true;
-    }
-    
-    // Check if mesh needs regeneration
-    bool isMeshDirty() const {
-        return meshDirty;
-    }
-
     std::vector<frame> genSlices(frame::colormap colorFormat = frame::colormap::RGB) const {
         TIME_FUNCTION;
         int colors;
