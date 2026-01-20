@@ -251,7 +251,7 @@ public:
         return (voxl >= 0 && voxl.x < gridSize.x && voxl.y < gridSize.y && voxl.z < gridSize.z);
     }
 
-    void voxelTraverse(const Vec3d& origin, const Vec3d& end, std::vector<Vec3i>& visitedVoxel, int maxDist = 10000000) const {
+    void voxelTraverse(const Vec3d& origin, const Vec3d& end, Voxel& outVoxel, int maxDist = 10000000) const {
         Vec3i cv = (origin / binSize).floorToI();
         Vec3i lv = (end / binSize).floorToI();
         Vec3d ray = end - origin;
@@ -266,64 +266,44 @@ public:
                              ray.z != 0 ? binSize / ray.z * step.z : INF);
 
         float dist = 0;
+        outVoxel.alpha = 0.0;
+        //float alphaDiff = 1;
         
-        while (lv != cv && visitedVoxel.size() < 10 && dist < maxDist && inGrid(cv)) {
+        while (lv != cv && outVoxel.alpha < 1 && dist < maxDist && inGrid(cv)) {
             
-            Vec3i currentChunk = getChunkCoord(cv);
+            //Vec3i currentChunk = getChunkCoord(cv);
             
-            auto it = activeChunks.find(currentChunk);
-            bool isChunkActive = (it != activeChunks.end() && it->second);
-
-            if (get(cv).active) {
-                visitedVoxel.push_back(cv);
+            //auto it = activeChunks.find(currentChunk);
+            //bool isChunkActive = (it != activeChunks.end() && it->second);
+            Voxel curv = get(cv);
+            if (curv.active) {
+                outVoxel.active = true;
+                outVoxel.color = curv.color;
+                outVoxel.alpha = curv.alpha;
+                // float covCon = curv.alpha * alphaDiff;
+                // outVoxel.color = outVoxel.color + curv.color * covCon;
+                // outVoxel.alpha += covCon;
+                // alphaDiff *= (1.f-curv.alpha);
             } 
-            if (!isChunkActive) {
-                Vec3f chunkStep = step * CHUNK_THRESHOLD / 2;
-                Vec3d chunkDelta = tDelta * CHUNK_THRESHOLD / 2;
-                if (tMax.x < tMax.y) {
-                    if (tMax.x < tMax.z) {
-                        dist += chunkDelta.x;
-                        cv.x += chunkStep.x;
-                        tMax.x += chunkDelta.x;
-                    } else {
-                        dist += chunkDelta.z;
-                        cv.z += chunkStep.z;
-                        tMax.z += chunkDelta.z;
-                    }
+            if (tMax.x < tMax.y) {
+                if (tMax.x < tMax.z) {
+                    dist += tDelta.x;
+                    cv.x += step.x;
+                    tMax.x += tDelta.x;
                 } else {
-                    if (tMax.y < tMax.z) {
-                        dist += chunkDelta.y;
-                        cv.y += chunkStep.y;
-                        tMax.y += chunkDelta.y;
-                    } else {
-                        dist += chunkDelta.z;
-                        cv.z += chunkStep.z;
-                        tMax.z += chunkDelta.z;
-                    }
+                    dist += tDelta.z;
+                    cv.z += step.z;
+                    tMax.z += tDelta.z;
                 }
-                
-                continue;
             } else {
-                if (tMax.x < tMax.y) {
-                    if (tMax.x < tMax.z) {
-                        dist += tDelta.x;
-                        cv.x += step.x;
-                        tMax.x += tDelta.x;
-                    } else {
-                        dist += tDelta.z;
-                        cv.z += step.z;
-                        tMax.z += tDelta.z;
-                    }
+                if (tMax.y < tMax.z) {
+                    dist += tDelta.y;
+                    cv.y += step.y;
+                    tMax.y += tDelta.y;
                 } else {
-                    if (tMax.y < tMax.z) {
-                        dist += tDelta.y;
-                        cv.y += step.y;
-                        tMax.y += tDelta.y;
-                    } else {
-                        dist += tDelta.z;
-                        cv.z += step.z;
-                        tMax.z += tDelta.z;
-                    }
+                    dist += tDelta.z;
+                    cv.z += step.z;
+                    tMax.z += tDelta.z;
                 }
             }
         }
@@ -356,26 +336,14 @@ public:
         for (int y = 0; y < resolution.x; y++) {
             float v = (static_cast<float>(y) / static_cast<float>(resolution.x - 1)) - 0.5f;    
             for (int x = 0; x < resolution.y; x++) {
-                std::vector<Vec3i> hitVoxels;
+                Voxel outVoxel(0,false,0.f,Vec3ui8(10, 10, 255));
                 float u = (static_cast<float>(x) / static_cast<float>(resolution.y - 1)) - 0.5f;
                 Vec3f rayDirWorld = (forward + right * (u * viewW) + upCor * (v * viewH)).normalized();
                 Vec3f rayEnd = cam.posfor.origin + rayDirWorld * maxDist;
                 Vec3d rayStartGrid = cam.posfor.origin.toDouble() / binSize;
                 Vec3d rayEndGrid = rayEnd.toDouble() / binSize;
-                voxelTraverse(rayStartGrid, rayEndGrid, hitVoxels);
-                Vec3ui8 hitColor(10, 10, 255);
-                for (const Vec3i& voxelPos : hitVoxels) {
-                    if (inGrid(voxelPos)) {
-                        const Voxel& voxel = get(voxelPos);
-                        if (voxel.active) {
-                            hitColor = voxel.color;
-                            
-                            break;
-                        }
-                    }
-                }
-                hitVoxels.clear();
-                hitVoxels.shrink_to_fit();
+                voxelTraverse(rayStartGrid, rayEndGrid, outVoxel);
+                Vec3ui8 hitColor = outVoxel.color;
                 // Set pixel color in buffer
                 switch (colorformat) {
                     case frame::colormap::BGRA: {
