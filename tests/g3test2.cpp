@@ -730,7 +730,7 @@ int main() {
                 
                 ImGui::Separator();
                 ImGui::Text("Sphere Color:");
-                float color[3] = {sphereConfig.r, sphereConfig.g, sphereConfig.b};
+                float color[3] = {sphereConfig.r / 255, sphereConfig.g / 255, sphereConfig.b / 255};
                 if (ImGui::ColorEdit3("Color", color)) {
                     sphereConfig.r = static_cast<uint8_t>(color[0] * 255);
                     sphereConfig.g = static_cast<uint8_t>(color[1] * 255);

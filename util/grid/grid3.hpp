@@ -153,7 +153,6 @@ private:
     }
 
 public:
-    double binSize = 1;
     VoxelGrid() : gridSize(0,0,0) {
         std::cout << "creating empty grid." << std::endl;
     }
@@ -251,19 +250,19 @@ public:
         return (voxl >= 0 && voxl.x < gridSize.x && voxl.y < gridSize.y && voxl.z < gridSize.z);
     }
 
-    void voxelTraverse(const Vec3d& origin, const Vec3d& end, Voxel& outVoxel, int maxDist = 10000000) const {
-        Vec3i cv = (origin / binSize).floorToI();
-        Vec3i lv = (end / binSize).floorToI();
-        Vec3d ray = end - origin;
-        Vec3f step = Vec3f(ray.x >= 0 ? 1 : -1, ray.y >= 0 ? 1 : -1, ray.z >= 0 ? 1 : -1);
-        Vec3d nextVox = cv.toDouble() + step * binSize;
+    void voxelTraverse(const Vec3f& origin, const Vec3f& end, Voxel& outVoxel, int maxDist = 10000000) const {
+        Vec3i cv = origin.floorToI();
+        Vec3i lv = end.floorToI();
+        Vec3f ray = end - origin;
+        Vec3i step = Vec3i(ray.x >= 0 ? 1 : -1, ray.y >= 0 ? 1 : -1, ray.z >= 0 ? 1 : -1);
+        Vec3i nextVox = cv + step;
         
-        Vec3d tMax = Vec3d(ray.x != 0 ? (nextVox.x - origin.x) / ray.x : INF,
+        Vec3f tMax = Vec3f(ray.x != 0 ? (nextVox.x - origin.x) / ray.x : INF,
                            ray.y != 0 ? (nextVox.y - origin.y) / ray.y : INF,
                            ray.z != 0 ? (nextVox.z - origin.z) / ray.z : INF);
-        Vec3d tDelta = Vec3d(ray.x != 0 ? binSize / ray.x * step.x : INF,
-                             ray.y != 0 ? binSize / ray.y * step.y : INF,
-                             ray.z != 0 ? binSize / ray.z * step.z : INF);
+        Vec3f tDelta = Vec3f(ray.x != 0 ? 1 / ray.x * static_cast<float>(step.x) : INF,
+                             ray.y != 0 ? 1 / ray.y * static_cast<float>(step.y) : INF,
+                             ray.z != 0 ? 1 / ray.z * static_cast<float>(step.z) : INF);
 
         float dist = 0;
         outVoxel.alpha = 0.0;
@@ -324,25 +323,24 @@ public:
         TIME_FUNCTION;
         Vec3f forward = cam.forward();
         Vec3f right = cam.right();
-        Vec3f upCor = right.cross(forward).normalized();
+        //Vec3f upCor = right.cross(forward).normalized();
         float aspect = resolution.aspect();
         float fovRad = cam.fovRad();
-        float viewH = 2 * tan(fovRad / 2);
+        float viewH = tan(cam.fov / 2.f);
         float viewW = viewH * aspect;
-        float maxDist = std::sqrt(gridSize.lengthSquared()) * binSize;
-        frame outFrame(resolution.x, resolution.y, frame::colormap::RGB);
+        float maxDist = std::sqrt(gridSize.lengthSquared());
+        frame outFrame(resolution.x, resolution.y, colorformat);
         std::vector<uint8_t> colorBuffer(resolution.x * resolution.y * 3);
         #pragma omp parallel for
-        for (int x = 0; x < resolution.x; x++) {
-            float v = (2.0 * (x + 0.5f) / resolution.y - 1.f) * viewH;
-            for (int y = 0; y < resolution.y; y++) {
+        for (int y = 0; y < resolution.y; y++) {
+            float v = (1.f - 2.f * (y+0.5f) / resolution.y) * viewH;    
+            for (int x = 0; x < resolution.x; x++) {
                 Voxel outVoxel(0,false,0.f,Vec3ui8(10, 10, 255));
-                float u = (1.f - 2.f * (y + 0.5f) / resolution.x) * viewW;
-                Vec3f rayDirWorld = (forward + right * v + upCor * u).normalized();
-                Vec3f rayEnd = cam.posfor.origin + rayDirWorld * maxDist;
-                Vec3d rayStartGrid = cam.posfor.origin.toDouble() / binSize;
-                Vec3d rayEndGrid = rayEnd.toDouble() / binSize;
-                voxelTraverse(rayStartGrid, rayEndGrid, outVoxel);
+                float u = (2.f * (x+0.5f)/resolution.x - 1.f) * viewW;
+                Vec3f rayDirWorld = (forward + right * u + cam.up * v).normalized();
+                Vec3f rayStartGrid = cam.posfor.origin;
+                Vec3f rayEnd = rayStartGrid + rayDirWorld * maxDist;
+                voxelTraverse(rayStartGrid, rayEnd, outVoxel, maxDist);
                 Vec3ui8 hitColor = outVoxel.color;
                 // Set pixel color in buffer
                 switch (colorformat) {
@@ -457,7 +455,7 @@ public:
                 break;
             }
         }
-        size_t cbsize = gridSize.x * gridSize.y * colors;
+        int cbsize = gridSize.x * gridSize.y * colors;
         for (int layer = 0; layer < getDepth(); layer++) {
             int layerMult = layer * gridSize.x * gridSize.y;
             frame layerFrame(gridSize.x, gridSize.y, colorFormat);
