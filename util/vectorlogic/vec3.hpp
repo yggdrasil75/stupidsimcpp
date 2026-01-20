@@ -259,6 +259,10 @@ public:
     Vec3<int> floorToI() const {
         return Vec3<int>(static_cast<int>(std::floor(x)), static_cast<int>(std::floor(x)), static_cast<int>(std::floor(z)));
     }
+
+    Vec3<uint8_t> floorToI8() const {
+        return Vec3<uint8_t>(static_cast<uint8_t>(std::floor(x)), static_cast<uint8_t>(std::floor(x)), static_cast<uint8_t>(std::floor(z)));
+    }
     
     Vec3<size_t> floorToT() const {
         return Vec3<size_t>(static_cast<size_t>(std::floor(x)), static_cast<size_t>(std::floor(x)), static_cast<size_t>(std::floor(z)));

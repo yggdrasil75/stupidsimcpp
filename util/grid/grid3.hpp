@@ -267,65 +267,63 @@ public:
 
         float dist = 0;
         
-        while (lv != cv && visitedVoxel.size() < 10 && dist < maxDist) {
+        while (lv != cv && visitedVoxel.size() < 10 && dist < maxDist && inGrid(cv)) {
             
             Vec3i currentChunk = getChunkCoord(cv);
             
             auto it = activeChunks.find(currentChunk);
             bool isChunkActive = (it != activeChunks.end() && it->second);
 
+            if (get(cv).active) {
+                visitedVoxel.push_back(cv);
+            } 
             if (!isChunkActive) {
-                while (getChunkCoord(cv) == currentChunk && inGrid(cv)) {
-                    Vec3f chunkStep = step * CHUNK_THRESHOLD / 2;
-                    Vec3d chunkDelta = tDelta * CHUNK_THRESHOLD / 2;
-                    if (tMax.x < tMax.y) {
-                        if (tMax.x < tMax.z) {
-                            dist += chunkDelta.x;
-                            cv.x += chunkStep.x;
-                            tMax.x += chunkDelta.x;
-                        } else {
-                            dist += chunkDelta.z;
-                            cv.z += chunkStep.z;
-                            tMax.z += chunkDelta.z;
-                        }
+                Vec3f chunkStep = step * CHUNK_THRESHOLD / 2;
+                Vec3d chunkDelta = tDelta * CHUNK_THRESHOLD / 2;
+                if (tMax.x < tMax.y) {
+                    if (tMax.x < tMax.z) {
+                        dist += chunkDelta.x;
+                        cv.x += chunkStep.x;
+                        tMax.x += chunkDelta.x;
                     } else {
-                        if (tMax.y < tMax.z) {
-                            dist += chunkDelta.y;
-                            cv.y += chunkStep.y;
-                            tMax.y += chunkDelta.y;
-                        } else {
-                            dist += chunkDelta.z;
-                            cv.z += chunkStep.z;
-                            tMax.z += chunkDelta.z;
-                        }
+                        dist += chunkDelta.z;
+                        cv.z += chunkStep.z;
+                        tMax.z += chunkDelta.z;
+                    }
+                } else {
+                    if (tMax.y < tMax.z) {
+                        dist += chunkDelta.y;
+                        cv.y += chunkStep.y;
+                        tMax.y += chunkDelta.y;
+                    } else {
+                        dist += chunkDelta.z;
+                        cv.z += chunkStep.z;
+                        tMax.z += chunkDelta.z;
                     }
                 }
                 
                 continue;
-            }
-            if (get(cv).active) {
-                visitedVoxel.push_back(cv);
-            }
-
-            if (tMax.x < tMax.y) {
-                if (tMax.x < tMax.z) {
-                    dist += tDelta.x;
-                    cv.x += step.x;
-                    tMax.x += tDelta.x;
-                } else {
-                    dist += tDelta.z;
-                    cv.z += step.z;
-                    tMax.z += tDelta.z;
-                }
             } else {
-                if (tMax.y < tMax.z) {
-                    dist += tDelta.y;
-                    cv.y += step.y;
-                    tMax.y += tDelta.y;
+                if (tMax.x < tMax.y) {
+                    if (tMax.x < tMax.z) {
+                        dist += tDelta.x;
+                        cv.x += step.x;
+                        tMax.x += tDelta.x;
+                    } else {
+                        dist += tDelta.z;
+                        cv.z += step.z;
+                        tMax.z += tDelta.z;
+                    }
                 } else {
-                    dist += tDelta.z;
-                    cv.z += step.z;
-                    tMax.z += tDelta.z;
+                    if (tMax.y < tMax.z) {
+                        dist += tDelta.y;
+                        cv.y += step.y;
+                        tMax.y += tDelta.y;
+                    } else {
+                        dist += tDelta.z;
+                        cv.z += step.z;
+                        tMax.z += tDelta.z;
+                    }
                 }
             }
         }
