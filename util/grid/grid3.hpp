@@ -119,394 +119,33 @@ struct Vertex {
 };
 
 struct Chunk {
-    float weight;
-    bool active;
-    float alpha;
-    Vec3ui8 color;
-    std::vector<Voxel> voxels;
-    std::vector<Chunk> children;
-    Vec3i chunkSize;
-    Vec3i minCorner;
-    Vec3i maxCorner;
-    int depth;
-    bool dirty = false;
-
-    Chunk(Vec3i minCorner, Vec3i maxCorner, int depth = 0) 
-      : minCorner(minCorner), maxCorner(maxCorner), depth(depth), active(false) {
-        chunkSize = maxCorner - minCorner;
-        if (chunkSize.x > CHUNK_THRESHOLD || chunkSize.y > CHUNK_THRESHOLD || chunkSize.z > CHUNK_THRESHOLD) {
-            subdivide();
-        } else {
-            voxels.resize(chunkSize.x * chunkSize.y * chunkSize.z);
-        }
-    }
-
-    bool inChunk(Vec3i pos) const {
-        if (pos.AllGT(minCorner) && pos.AllLT(maxCorner)) return true;
-        return false;
-    }
-
-    bool set(Vec3i pos, Voxel newVox) {
-        if (!inChunk(pos)) return false;
-
-        if (children.empty()) {
-            int index = getVoxelIndex(pos);
-            if (index >= 0 && index < static_cast<int>(voxels.size())) {
-                voxels[index] = newVox;
-                if (newVox.active) {
-                    active = true;
-                }
-                dirty = true;
-                return true;
-            }
-            return false;
-        }
-
-        for (Chunk& child : children) {
-            if (child.set(pos, newVox)) {
-                if (newVox.active) {
-                    active = true;
-                }
-                dirty = true;
-                return true;
-            }
-        }
-        return false;
-    }
-
-    Voxel* getPtr(Vec3i pos, int maxDepth = 0) {
-        if (!inChunk(pos)) {
-            return nullptr;
-        }
-
-        if (children.empty() || (maxDepth > 0 && depth >= maxDepth)) {
-            int index = getVoxelIndex(pos);
-            if (index >= 0 && index < static_cast<int>(voxels.size())) {
-                return &voxels[index];
-            }
-            return nullptr;
-        }
-        
-        for (Chunk& child : children) {
-            if (child.inChunk(pos)) {
-                return child.getPtr(pos, maxDepth);
-            }
-        }
-        return nullptr;
-    }
-    
-    Voxel get(Vec3i pos, int maxDepth = 0)  {
-        if (!inChunk(pos)) {
-            return Voxel();
-        }
-
-        if (children.empty() || (maxDepth > 0 && depth >= maxDepth)) {
-            int index = getVoxelIndex(pos);
-            if (index >= 0 && index < static_cast<int>(voxels.size())) {
-                if (dirty) {
-                    updateAveragesRecursive();
-                }
-                return voxels[index];
-            }
-            return Voxel();
-        } else if (maxDepth > 0 && depth >= maxDepth) {
-            return Voxel(weight, active, alpha, color);
-        }
-        
-        for (Chunk& child : children) {
-            if (child.inChunk(pos)) {
-                if (dirty) {
-                    updateAveragesRecursive();
-                }
-                return child.get(pos, maxDepth);
-            }
-        }
-        return Voxel();
-    }
-
-    Voxel get(const Vec3i& pos, int maxDepth = 0) const {
-        if (!inChunk(pos)) {
-            return Voxel();
-        }
-
-        if (children.empty() || (maxDepth > 0 && depth >= maxDepth)) {
-            int index = getVoxelIndex(pos);
-            if (index >= 0 && index < static_cast<int>(voxels.size())) {
-                if (dirty) {
-                    std::cout << "need to clean chunk" << std::endl;
-                }
-                return voxels[index];
-            }
-            return Voxel();
-        } else if (maxDepth > 0 && depth >= maxDepth) {
-            return Voxel(weight, active, alpha, color);
-        }
-        
-        for (const Chunk& child : children) {
-            if (child.inChunk(pos)) {
-                return child.get(pos, maxDepth);
-            }
-        }
-        return Voxel();
-    }
-    
-    int getVoxelIndex(Vec3i pos) const {
-        Vec3i localPos = pos - minCorner;
-        return localPos.z * chunkSize.x * chunkSize.y + localPos.y * chunkSize.x + localPos.x;
-    }
-
-    void updateAverages() {
-        TIME_FUNCTION;
-        if (voxels.empty()) {
-            weight = 0.0f;
-            alpha = 0.0f;
-            color = Vec3ui8(0, 0, 0);
-            active = false;
-            return;
-        }
-        
-        float totalWeight = 0.0f;
-        float totalAlpha = 0.0f;
-        float totalR = 0.0f;
-        float totalG = 0.0f;
-        float totalB = 0.0f;
-        int activeCount = 0;
-        
-        for (const Voxel& voxel : voxels) {
-            totalWeight += voxel.weight;
-            totalAlpha += voxel.alpha;
-            
-            if (voxel.active) {
-                totalR += voxel.color.x;
-                totalG += voxel.color.y;
-                totalB += voxel.color.z;
-                activeCount++;
-            }
-        }
-        
-        int voxelCount = voxels.size();
-        weight = totalWeight / voxelCount;
-        alpha = totalAlpha / voxelCount;
-        
-        if (activeCount > 0) {
-            color = Vec3ui8(
-                static_cast<uint8_t>(totalR / activeCount),
-                static_cast<uint8_t>(totalG / activeCount),
-                static_cast<uint8_t>(totalB / activeCount)
-            );
-            active = true;
-        } else {
-            color = Vec3ui8(0, 0, 0);
-            active = false;
-        }
-        dirty = false;
-    }
-    
-    void updateAveragesRecursive() {
-        TIME_FUNCTION;
-        if (children.empty()) {
-            updateAverages();
-        } else {
-            // Update all children first
-            for (Chunk& child : children) {
-                child.updateAveragesRecursive();
-            }
-            
-            // Then update this chunk based on children
-            if (children.empty()) return;
-            
-            float totalWeight = 0.0f;
-            float totalAlpha = 0.0f;
-            float totalR = 0.0f;
-            float totalG = 0.0f;
-            float totalB = 0.0f;
-            int activeChildren = 0;
-            
-            for (const Chunk& child : children) {
-                totalWeight += child.weight;
-                totalAlpha += child.alpha;
-                
-                if (child.active) {
-                    totalR += child.color.x;
-                    totalG += child.color.y;
-                    totalB += child.color.z;
-                    activeChildren++;
-                }
-            }
-            
-            int childCount = children.size();
-            weight = totalWeight / childCount;
-            alpha = totalAlpha / childCount;
-            
-            if (activeChildren > 0) {
-                color = Vec3ui8(
-                    static_cast<uint8_t>(totalR / activeChildren),
-                    static_cast<uint8_t>(totalG / activeChildren),
-                    static_cast<uint8_t>(totalB / activeChildren)
-                );
-                active = true;
-            } else {
-                color = Vec3ui8(0, 0, 0);
-                active = false;
-            }
-        }
-        dirty = false;
-    }
-
-    void subdivide(int numChildrenPerAxis = 2) {
-        TIME_FUNCTION;
-        if (!children.empty()) return;  // Already subdivided
-        
-        Vec3i childSize = (maxCorner - minCorner) / numChildrenPerAxis;
-        
-        for (int z = 0; z < numChildrenPerAxis; z++) {
-            for (int y = 0; y < numChildrenPerAxis; y++) {
-                for (int x = 0; x < numChildrenPerAxis; x++) {
-                    Vec3i childMin = minCorner + Vec3i(x, y, z) * childSize;
-                    Vec3i childMax = childMin + childSize;
-                    
-                    Chunk child(childMin, childMax, depth + 1);
-                    
-                    // Copy voxel data from parent to child
-                    for (int cz = childMin.z; cz < childMax.z; cz++) {
-                        for (int cy = childMin.y; cy < childMax.y; cy++) {
-                            for (int cx = childMin.x; cx < childMax.x; cx++) {
-                                Vec3i pos(cx, cy, cz);
-                                int parentIndex = getVoxelIndex(pos);
-                                if (parentIndex >= 0 && parentIndex < static_cast<int>(voxels.size())) {
-                                    int childLocalIndex = (cz - childMin.z) * childSize.x * childSize.y +
-                                                         (cy - childMin.y) * childSize.x +
-                                                         (cx - childMin.x);
-                                    if (childLocalIndex >= 0 && childLocalIndex < static_cast<int>(child.voxels.size())) {
-                                        child.voxels[childLocalIndex] = voxels[parentIndex];
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    
-                    children.push_back(child);
-                }
-            }
-        }
-    }
-
-    void merge() {
-        TIME_FUNCTION;
-        if (children.empty()) return;
-        
-        // Calculate total size from children
-        Vec3i totalSize(0, 0, 0);
-        for (const Chunk& child : children) {
-            totalSize = totalSize.max(child.maxCorner);
-        }
-        chunkSize = totalSize - minCorner;
-        
-        // Resize voxels vector
-        voxels.resize(chunkSize.x * chunkSize.y * chunkSize.z);
-        
-        // Copy data from children
-        for (const Chunk& child : children) {
-            for (int z = child.minCorner.z; z < child.maxCorner.z; z++) {
-                for (int y = child.minCorner.y; y < child.maxCorner.y; y++) {
-                    for (int x = child.minCorner.x; x < child.maxCorner.x; x++) {
-                        Vec3i pos(x, y, z);
-                        Voxel voxel = child.get(pos);
-                        
-                        int parentIndex = getVoxelIndex(pos);
-                        if (parentIndex >= 0 && parentIndex < static_cast<int>(voxels.size())) {
-                            voxels[parentIndex] = voxel;
-                        }
-                    }
-                }
-            }
-        }
-        
-        // Clear children
-        children.clear();
-        children.shrink_to_fit();
-    }
+    Voxel reprVoxel; //average of all voxels in chunk for LOD rendering
+    std::vector<Voxel> voxels; //list of all voxels in chunk.
+    std::vector<Chunk> children; //list of all chunks in chunk
+    bool active; //active if any child chunk or child voxel is active. used to efficiently find active voxels by only going down when an active chunk is found.
+    int chunkSize; //should be (CHUNK_THRESHOLD/2) * 2 ^ depth I think. (ie: 1 depth will be (16/2)*(2^1) or 16, second will be (16/2)*(2^2) or 8*4=32)
+    Vec3i minCorner; //position of chunk in world space.
+    int depth; //number of parent/child traversals to get here. 
 };
 
 class VoxelGrid {
 private:
     Vec3i gridSize;
-    std::vector<Chunk> chunks;
     std::vector<Voxel> voxels;
-    bool useChunks = true;
     bool meshDirty = true;
 
     float radians(float rads) {
         return rads * (M_PI / 180);
     }
 
-    // Helper to align a dimension to the next multiple of CHUNK_THRESHOLD
-    static int alignToChunkSize(int size) {
-        if (size <= 0) return CHUNK_THRESHOLD;
-        int remainder = size % CHUNK_THRESHOLD;
-        if (remainder == 0) return size;
-        return size + (CHUNK_THRESHOLD - remainder);
-    }
-
-    void createChunksFromVoxels() {
-        TIME_FUNCTION;
-        chunks.clear();
-        
-        // Create chunks based on CHUNK_THRESHOLD
-        int chunksX = std::max(1, (gridSize.x + CHUNK_THRESHOLD - 1) / CHUNK_THRESHOLD);
-        int chunksY = std::max(1, (gridSize.y + CHUNK_THRESHOLD - 1) / CHUNK_THRESHOLD);
-        int chunksZ = std::max(1, (gridSize.z + CHUNK_THRESHOLD - 1) / CHUNK_THRESHOLD);
-        
-        Vec3i chunkSize = Vec3i(
-            (gridSize.x + chunksX - 1) / chunksX,
-            (gridSize.y + chunksY - 1) / chunksY,
-            (gridSize.z + chunksZ - 1) / chunksZ
-        );
-        
-        for (int z = 0; z < chunksZ; z++) {
-            for (int y = 0; y < chunksY; y++) {
-                for (int x = 0; x < chunksX; x++) {
-                    Vec3i minCorner = Vec3i(x * chunkSize.x, y * chunkSize.y, z * chunkSize.z);
-                    Vec3i maxCorner = Vec3i(
-                        std::min(minCorner.x + chunkSize.x, gridSize.x),
-                        std::min(minCorner.y + chunkSize.y, gridSize.y),
-                        std::min(minCorner.z + chunkSize.z, gridSize.z)
-                    );
-                    
-                    Chunk chunk(minCorner, maxCorner);
-                    
-                    // Copy voxel data to chunk
-                    for (int cz = minCorner.z; cz < maxCorner.z; cz++) {
-                        for (int cy = minCorner.y; cy < maxCorner.y; cy++) {
-                            for (int cx = minCorner.x; cx < maxCorner.x; cx++) {
-                                Vec3i pos(cx, cy, cz);
-                                int voxelIndex = cz * gridSize.x * gridSize.y + cy * gridSize.x + cx;
-                                int chunkIndex = chunk.getVoxelIndex(pos);
-                                
-                                if (voxelIndex >= 0 && voxelIndex < static_cast<int>(voxels.size()) &&
-                                    chunkIndex >= 0 && chunkIndex < static_cast<int>(chunk.voxels.size())) {
-                                    chunk.voxels[chunkIndex] = voxels[voxelIndex];
-                                }
-                            }
-                        }
-                    }
-                    
-                    chunks.push_back(chunk);
-                }
-            }
-        }
-    }
-
 public:
     double binSize = 1;
     VoxelGrid() : gridSize(0,0,0) {
         std::cout << "creating empty grid." << std::endl;
-        resize(CHUNK_THRESHOLD, CHUNK_THRESHOLD, CHUNK_THRESHOLD);
     }
 
     VoxelGrid(int w, int h, int d) : gridSize(w,h,d) {
         voxels.resize(w * h * d);
-        
     }
     
     bool serializeToFile(const std::string& filename);
@@ -514,27 +153,10 @@ public:
     static std::unique_ptr<VoxelGrid> deserializeFromFile(const std::string& filename);
     
     Voxel& get(int x, int y, int z) {
-        if (useChunks) {
-            for (Chunk& chunk : chunks) {
-                if (chunk.inChunk(Vec3i(x, y, z))) {
-                    Voxel* voxelPtr = chunk.getPtr(Vec3i(x, y, z));
-                    if (voxelPtr) {
-                        return *voxelPtr;
-                    }
-                }
-            }
-        }
         return voxels[z * gridSize.x * gridSize.y + y * gridSize.x + x];
     }
 
-    Voxel get(int x, int y, int z) const {
-        if (useChunks) {
-            for (const Chunk& chunk : chunks) {
-                if (chunk.inChunk(Vec3i(x, y, z))) {
-                    return chunk.get(Vec3i(x, y, z)); 
-                }
-            }
-        }
+    const Voxel& get(int x, int y, int z) const {
         return voxels[z * gridSize.x * gridSize.y + y * gridSize.x + x];
     }
 
@@ -542,30 +164,19 @@ public:
         return get(xyz.x, xyz.y, xyz.z);
     }
 
-    Voxel get(const Vec3i& xyz) const {
+    const Voxel& get(const Vec3i& xyz) const {
         return get(xyz.x, xyz.y, xyz.z);
     }
 
     void resize(int newW, int newH, int newD) {
-        TIME_FUNCTION;
-        
-        int alignedW = alignToChunkSize(newW);
-        int alignedH = alignToChunkSize(newH);
-        int alignedD = alignToChunkSize(newD);
-
-        if (alignedW == gridSize.x && alignedH == gridSize.y && alignedD == gridSize.z) {
-            return;
-        }
-
-        std::vector<Voxel> newVoxels(alignedW * alignedH * alignedD);
-        int copyW = std::min(static_cast<int>(gridSize.x), alignedW);
-        int copyH = std::min(static_cast<int>(gridSize.y), alignedH);
-        int copyD = std::min(static_cast<int>(gridSize.z), alignedD);
-        
+        std::vector<Voxel> newVoxels(newW * newH * newD);
+        int copyW = std::min(static_cast<int>(gridSize.x), newW);
+        int copyH = std::min(static_cast<int>(gridSize.y), newH);
+        int copyD = std::min(static_cast<int>(gridSize.z), newD);
         for (int z = 0; z < copyD; ++z) {
             for (int y = 0; y < copyH; ++y) {
                 int oldRowStart = z * gridSize.x * gridSize.y + y * gridSize.x;
-                int newRowStart = z * alignedW * alignedH + y * alignedW;
+                int newRowStart = z * newW * newH + y * newW;
                 std::copy(
                     voxels.begin() + oldRowStart, 
                     voxels.begin() + oldRowStart + copyW, 
@@ -573,13 +184,8 @@ public:
                 );
             }
         }
-        
         voxels = std::move(newVoxels);
-        gridSize = Vec3i(alignedW, alignedH, alignedD);
-        
-        // Rebuild chunks structure (which will now be perfectly aligned cubes)
-        useChunks = true;
-        createChunksFromVoxels();
+        gridSize = Vec3i(newW, newH, newD);
     }
 
     void resize(Vec3i newsize) {
@@ -592,7 +198,6 @@ public:
 
     void set(Vec3i pos, bool active, Vec3ui8 color) {
         if (pos.x >= 0 && pos.y >= 0 && pos.z >= 0) {
-            // Check against current aligned gridSize
             if (!(pos.x < gridSize.x)) {
                 resize(pos.x, gridSize.y, gridSize.z);
             }
@@ -606,19 +211,6 @@ public:
             Voxel& v = get(pos);
             v.active = active;
             v.color = color;
-            
-            // // Also update in chunks if using chunks
-            // if (useChunks) {
-            //     for (Chunk& chunk : chunks) {
-            //         if (chunk.inChunk(pos)) {
-            //             Voxel newVoxel;
-            //             newVoxel.active = active;
-            //             newVoxel.color = color;
-            //             chunk.set(pos, newVoxel);
-            //             break;
-            //         }
-            //     }
-            // }
         }
     }
 
@@ -631,15 +223,10 @@ public:
         return (voxl >= 0 && voxl.x < gridSize.x && voxl.y < gridSize.y && voxl.z < gridSize.z);
     }
 
-    void chunkTraverse(const Vec3d& origin, const Vec3d& end, std::vector<Vec3i>& visitedVoxel) const {
-        
-    }
-
     void voxelTraverse(const Vec3d& origin, const Vec3d& end, std::vector<Vec3i>& visitedVoxel, int maxDist = 10000000) const {
         Vec3i cv = (origin / binSize).floorToI();
         Vec3i lv = (end / binSize).floorToI();
         Vec3d ray = end - origin;
-        
         Vec3f step = Vec3f(ray.x >= 0 ? 1 : -1, ray.y >= 0 ? 1 : -1, ray.z >= 0 ? 1 : -1);
         Vec3d nextVox = cv.toDouble() + step * binSize;
         Vec3d tMax = Vec3d(ray.x != 0 ? (nextVox.x - origin.x) / ray.x : INF,
@@ -670,12 +257,9 @@ public:
         }
 
         while (lv != cv && inGrid(cv) && visitedVoxel.size() < 10 && dist < maxDist) {
-            Voxel cvv = get(cv);
-
-            if (cvv.active) {
-                visitedVoxel.push_back(cv);
+            if (get(cv).active) {
+                    visitedVoxel.push_back(cv);
             }
-            
             if (tMax.x < tMax.y) {
                 if (tMax.x < tMax.z) {
                     dist += tDelta.x;
@@ -723,7 +307,7 @@ public:
         float maxDist = std::sqrt(gridSize.lengthSquared()) * binSize;
         frame outFrame(resolution.x, resolution.y, frame::colormap::RGB);
         std::vector<uint8_t> colorBuffer(resolution.x * resolution.y * 3);
-        //#pragma omp parallel for
+        #pragma omp parallel for
         for (int y = 0; y < resolution.x; y++) {
             float v = (static_cast<float>(y) / static_cast<float>(resolution.x - 1)) - 0.5f;    
             for (int x = 0; x < resolution.y; x++) {
@@ -733,15 +317,11 @@ public:
                 Vec3f rayEnd = cam.posfor.origin + rayDirWorld * maxDist;
                 Vec3d rayStartGrid = cam.posfor.origin.toDouble() / binSize;
                 Vec3d rayEndGrid = rayEnd.toDouble() / binSize;
-                if (useChunks) {
-                    chunkTraverse(rayStartGrid, rayEndGrid, hitVoxels);
-                } else voxelTraverse(rayStartGrid, rayEndGrid, hitVoxels);
-                
-                //std::cout << "traversed";
+                voxelTraverse(rayStartGrid, rayEndGrid, hitVoxels);
                 Vec3ui8 hitColor(10, 10, 255);
                 for (const Vec3i& voxelPos : hitVoxels) {
                     if (inGrid(voxelPos)) {
-                        const Voxel voxel = get(voxelPos);
+                        const Voxel& voxel = get(voxelPos);
                         if (voxel.active) {
                             hitColor = voxel.color;
                             
@@ -749,7 +329,6 @@ public:
                         }
                     }
                 }
-                //std::cout << "hit done" << std::endl;
                 hitVoxels.clear();
                 hitVoxels.shrink_to_fit();
                 // Set pixel color in buffer
@@ -798,11 +377,7 @@ public:
         std::cout << "Active voxels: " << activeVoxels << std::endl;
         std::cout << "Inactive voxels: " << (totalVoxels - activeVoxels) << std::endl;
         std::cout << "Active percentage: " << activePercentage << "%" << std::endl;
-        std::cout << "Memory usage (approx): " << (voxels.size() * sizeof(Voxel)) / 1024 << " KB" << std::endl; //needs to be updated to include chunks
-        std::cout << "Using chunks: " << (useChunks ? "Yes" : "No") << std::endl;
-        if (useChunks) {
-            std::cout << "Number of chunks: " << chunks.size() << std::endl;
-        }
+        std::cout << "Memory usage (approx): " << (voxels.size() * sizeof(Voxel)) / 1024 << " KB" << std::endl;
         std::cout << "============================" << std::endl;
     }
 
@@ -846,7 +421,6 @@ private:
         }
         return Vec3f(0, 1, 0); // Default up normal
     }
-
 public:
     std::vector<frame> genSlices(frame::colormap colorFormat = frame::colormap::RGB) const {
         TIME_FUNCTION;
@@ -930,6 +504,7 @@ public:
         return outframes;
     }
     
+ 
 };
 //#include "g3_serialization.hpp" needed to be usable
 
