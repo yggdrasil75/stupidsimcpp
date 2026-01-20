@@ -18,6 +18,7 @@ inline bool VoxelGrid::serializeToFile(const std::string& filename) {
     int dims[3] = {gridSize.x, gridSize.y, gridSize.z};
     file.write(reinterpret_cast<const char*>(dims), sizeof(dims));
     size_t voxelCount = voxels.size();
+    file.write(reinterpret_cast<const char*>(&voxelCount), sizeof(voxelCount));
     for (const Voxel& voxel : voxels) {
         auto write_member = [&file](const auto& member) {
             file.write(reinterpret_cast<const char*>(&member), sizeof(member));

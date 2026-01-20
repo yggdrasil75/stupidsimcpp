@@ -333,12 +333,12 @@ public:
         frame outFrame(resolution.x, resolution.y, frame::colormap::RGB);
         std::vector<uint8_t> colorBuffer(resolution.x * resolution.y * 3);
         #pragma omp parallel for
-        for (int y = 0; y < resolution.x; y++) {
-            float v = (static_cast<float>(y) / static_cast<float>(resolution.x - 1)) - 0.5f;    
-            for (int x = 0; x < resolution.y; x++) {
+        for (int x = 0; x < resolution.x; x++) {
+            float v = (2.0 * (x + 0.5f) / resolution.y - 1.f) * viewH;
+            for (int y = 0; y < resolution.y; y++) {
                 Voxel outVoxel(0,false,0.f,Vec3ui8(10, 10, 255));
-                float u = (static_cast<float>(x) / static_cast<float>(resolution.y - 1)) - 0.5f;
-                Vec3f rayDirWorld = (forward + right * (u * viewW) + upCor * (v * viewH)).normalized();
+                float u = (1.f - 2.f * (y + 0.5f) / resolution.x) * viewW;
+                Vec3f rayDirWorld = (forward + right * v + upCor * u).normalized();
                 Vec3f rayEnd = cam.posfor.origin + rayDirWorld * maxDist;
                 Vec3d rayStartGrid = cam.posfor.origin.toDouble() / binSize;
                 Vec3d rayEndGrid = rayEnd.toDouble() / binSize;
