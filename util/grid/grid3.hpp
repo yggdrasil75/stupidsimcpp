@@ -120,7 +120,7 @@ struct Vertex {
 
 struct Chunk {
     Voxel reprVoxel; //average of all voxels in chunk for LOD rendering
-    std::vector<Voxel> voxels; //list of all voxels in chunk.
+    //std::vector<Voxel> voxels; //list of all voxels in chunk.
     std::vector<Chunk> children; //list of all chunks in chunk
     bool active; //active if any child chunk or child voxel is active. used to efficiently find active voxels by only going down when an active chunk is found.
     int chunkSize; //should be (CHUNK_THRESHOLD/2) * 2 ^ depth I think. (ie: 1 depth will be (16/2)*(2^1) or 16, second will be (16/2)*(2^2) or 8*4=32)
@@ -132,10 +132,24 @@ class VoxelGrid {
 private:
     Vec3i gridSize;
     std::vector<Voxel> voxels;
-    bool meshDirty = true;
-
+    std::unordered_map<Vec3i, Chunk, Vec3i::Hash> chunkList;
+    std::unordered_map<Vec3i, bool, Vec3i::Hash> activeChunks;
+    
     float radians(float rads) {
         return rads * (M_PI / 180);
+    }
+
+    Vec3i getChunkCoord(const Vec3i& voxelPos) const {
+        return Vec3i(voxelPos.x / CHUNK_THRESHOLD, voxelPos.y / CHUNK_THRESHOLD, voxelPos.z / CHUNK_THRESHOLD);
+    }
+
+    void updateChunkStatus(const Vec3i& pos, bool isActive) {
+        Vec3i chunkCoord = getChunkCoord(pos);
+
+        if (isActive) {
+            chunkList[chunkCoord].active = true;
+            activeChunks[chunkCoord] = true;
+        }
     }
 
 public:
@@ -170,6 +184,10 @@ public:
 
     void resize(int newW, int newH, int newD) {
         std::vector<Voxel> newVoxels(newW * newH * newD);
+        
+        std::unordered_map<Vec3i, Chunk, Vec3i::Hash> chunklist;
+        std::unordered_map<Vec3i, bool, Vec3i::Hash> newActiveChunks;
+
         int copyW = std::min(static_cast<int>(gridSize.x), newW);
         int copyH = std::min(static_cast<int>(gridSize.y), newH);
         int copyD = std::min(static_cast<int>(gridSize.z), newD);
@@ -177,14 +195,23 @@ public:
             for (int y = 0; y < copyH; ++y) {
                 int oldRowStart = z * gridSize.x * gridSize.y + y * gridSize.x;
                 int newRowStart = z * newW * newH + y * newW;
+                
                 std::copy(
                     voxels.begin() + oldRowStart, 
                     voxels.begin() + oldRowStart + copyW, 
                     newVoxels.begin() + newRowStart
                 );
+
+                for (int x = 0; x < copyW; ++x) {
+                    if (voxels[oldRowStart + x].active) {
+                        Vec3i cc(x / CHUNK_THRESHOLD, y / CHUNK_THRESHOLD, z / CHUNK_THRESHOLD);
+                        newActiveChunks[cc] = true;
+                    }
+                }
             }
         }
         voxels = std::move(newVoxels);
+        activeChunks = std::move(newActiveChunks);
         gridSize = Vec3i(newW, newH, newD);
     }
 
@@ -211,6 +238,7 @@ public:
             Voxel& v = get(pos);
             v.active = active;
             v.color = color;
+            updateChunkStatus(pos, active);
         }
     }
 
@@ -229,44 +257,63 @@ public:
         Vec3d ray = end - origin;
         Vec3f step = Vec3f(ray.x >= 0 ? 1 : -1, ray.y >= 0 ? 1 : -1, ray.z >= 0 ? 1 : -1);
         Vec3d nextVox = cv.toDouble() + step * binSize;
+        
         Vec3d tMax = Vec3d(ray.x != 0 ? (nextVox.x - origin.x) / ray.x : INF,
                            ray.y != 0 ? (nextVox.y - origin.y) / ray.y : INF,
                            ray.z != 0 ? (nextVox.z - origin.z) / ray.z : INF);
         Vec3d tDelta = Vec3d(ray.x != 0 ? binSize / ray.x * step.x : INF,
                              ray.y != 0 ? binSize / ray.y * step.y : INF,
                              ray.z != 0 ? binSize / ray.z * step.z : INF);
+
         float dist = 0;
-        Vec3i diff(0,0,0);
-        bool negRay = false;
-        if (cv.x != lv.x && ray.x < 0) {
-            diff.x = diff.x--;
-            negRay = true;
-        }
-        if (cv.y != lv.y && ray.y < 0) {
-            diff.y = diff.y--;
-            negRay = true;
-        }
-        if (cv.z != lv.z && ray.z < 0) {
-            diff.z = diff.z--;
-            negRay = true;
-        }
+        
+        while (lv != cv && visitedVoxel.size() < 10 && dist < maxDist) {
+            
+            Vec3i currentChunk = getChunkCoord(cv);
+            
+            auto it = activeChunks.find(currentChunk);
+            bool isChunkActive = (it != activeChunks.end() && it->second);
 
-        if (negRay) {
-            cv += diff;
-            visitedVoxel.push_back(cv);
-        }
-
-        while (lv != cv && inGrid(cv) && visitedVoxel.size() < 10 && dist < maxDist) {
-            if (get(cv).active) {
-                    visitedVoxel.push_back(cv);
+            if (!isChunkActive) {
+                while (getChunkCoord(cv) == currentChunk && inGrid(cv)) {
+                    Vec3f chunkStep = step * CHUNK_THRESHOLD / 2;
+                    Vec3d chunkDelta = tDelta * CHUNK_THRESHOLD / 2;
+                    if (tMax.x < tMax.y) {
+                        if (tMax.x < tMax.z) {
+                            dist += chunkDelta.x;
+                            cv.x += chunkStep.x;
+                            tMax.x += chunkDelta.x;
+                        } else {
+                            dist += chunkDelta.z;
+                            cv.z += chunkStep.z;
+                            tMax.z += chunkDelta.z;
+                        }
+                    } else {
+                        if (tMax.y < tMax.z) {
+                            dist += chunkDelta.y;
+                            cv.y += chunkStep.y;
+                            tMax.y += chunkDelta.y;
+                        } else {
+                            dist += chunkDelta.z;
+                            cv.z += chunkStep.z;
+                            tMax.z += chunkDelta.z;
+                        }
+                    }
+                }
+                
+                continue;
             }
+            if (get(cv).active) {
+                visitedVoxel.push_back(cv);
+            }
+
             if (tMax.x < tMax.y) {
                 if (tMax.x < tMax.z) {
                     dist += tDelta.x;
                     cv.x += step.x;
                     tMax.x += tDelta.x;
                 } else {
-                    dist += tDelta.y;
+                    dist += tDelta.z;
                     cv.z += step.z;
                     tMax.z += tDelta.z;
                 }
@@ -376,6 +423,7 @@ public:
         std::cout << "Total voxels: " << totalVoxels << std::endl;
         std::cout << "Active voxels: " << activeVoxels << std::endl;
         std::cout << "Inactive voxels: " << (totalVoxels - activeVoxels) << std::endl;
+        std::cout << "Active chunks (map size): " << activeChunks.size() << std::endl;
         std::cout << "Active percentage: " << activePercentage << "%" << std::endl;
         std::cout << "Memory usage (approx): " << (voxels.size() * sizeof(Voxel)) / 1024 << " KB" << std::endl;
         std::cout << "============================" << std::endl;
