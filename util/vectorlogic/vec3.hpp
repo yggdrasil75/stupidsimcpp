@@ -8,6 +8,10 @@
 #include <cstdint>
 #include "vec2.hpp"
 
+#ifdef __SSE__
+#include <xmmintrin.h>
+#endif
+
 template<typename T>
 class Vec3 {
 public:
@@ -31,6 +35,12 @@ public:
     template<typename U>
     Vec3 operator+(const Vec3<U>& other) const {
         return Vec3(x + other.x, y + other.y, z + other.z);
+    }
+
+    Vec3 addMulti(Vec3* result, const Vec3* a, const Vec3* b, size_t count) noexcept {
+        for (size_t i = 0; i < count; ++i) {
+            result[i] = a[i] + b[i];
+        }
     }
     
     template<typename U>
@@ -142,7 +152,32 @@ public:
     }
 
     T length() const {
-        return static_cast<T>(std::sqrt(static_cast<double>(x * x + y * y + z * z)));
+        return std::sqrt(x * x + y * y + z * z);
+        //return static_cast<T>(std::sqrt(static_cast<double>(x * x + y * y + z * z)));
+    }
+    
+    // Fast inverse length (Quake III algorithm)
+    T invLength() const {
+        const T lenSq = x * x + y * y + z * z;
+        if (lenSq == 0) return 0;
+        
+        // Fast inverse square root approximation
+        const T half = T(0.5) * lenSq;
+        T y = lenSq;
+        
+        // Type punning for float/double
+        if constexpr (std::is_same_v<T, float>) {
+            long i = *(long*)&y;
+            i = 0x5f3759df - (i >> 1);
+            y = *(float*)&i;
+        } else if constexpr (std::is_same_v<T, double>) {
+            long long i = *(long long*)&y;
+            i = 0x5fe6eb50c7b537a9 - (i >> 1);
+            y = *(double*)&i;
+        }
+        
+        y = y * (T(1.5) - (half * y * y));
+        return y;
     }
     
     T lengthSquared() const {
@@ -159,9 +194,9 @@ public:
     }
 
     Vec3 normalized() const {
-        T len = length();
-        if (len > 0) {
-            return *this / len;
+        const T invLen = invLength();
+        if (invLen > 0) {
+            return Vec3(x * invLen, y * invLen, z * invLen);
         }
         return *this;
     }
@@ -257,15 +292,15 @@ public:
     }
 
     Vec3<int> floorToI() const {
-        return Vec3<int>(static_cast<int>(std::floor(x)), static_cast<int>(std::floor(x)), static_cast<int>(std::floor(z)));
+        return Vec3<int>(static_cast<int>(std::floor(x)), static_cast<int>(std::floor(y)), static_cast<int>(std::floor(z)));
     }
 
     Vec3<uint8_t> floorToI8() const {
-        return Vec3<uint8_t>(static_cast<uint8_t>(std::floor(x)), static_cast<uint8_t>(std::floor(x)), static_cast<uint8_t>(std::floor(z)));
+        return Vec3<uint8_t>(static_cast<uint8_t>(std::floor(x)), static_cast<uint8_t>(std::floor(y)), static_cast<uint8_t>(std::floor(z)));
     }
     
     Vec3<size_t> floorToT() const {
-        return Vec3<size_t>(static_cast<size_t>(std::floor(x)), static_cast<size_t>(std::floor(x)), static_cast<size_t>(std::floor(z)));
+        return Vec3<size_t>(static_cast<size_t>(std::floor(x)), static_cast<size_t>(std::floor(y)), static_cast<size_t>(std::floor(z)));
     }
 
     Vec3<float> toFloat() const {
@@ -481,6 +516,82 @@ public:
         return distance(center);
     }
 };
+
+// #ifdef __SSE__
+// template<>
+// class Vec3<float> {
+//     union {
+//         __m128 simd;
+//         struct { float x, y, z, w; };
+//     }
+// public: 
+    
+//     Vec3() noexcept : simd(_mm_setzero_ps()) {}
+    
+//     Vec3(float x, float y, float z) noexcept {
+//         simd = _mm_set_ps(0.0f, z, y, x);
+//     }
+    
+//     Vec3(float scalar) noexcept {
+//         simd = _mm_set_ps(0.0f, scalar, scalar, scalar);
+//     }
+    
+//     Vec3(const Vec3<float>& other) noexcept : simd(other.simd) {}
+    
+//     Vec3<float>& operator=(const Vec3<float>& other) noexcept {
+//         simd = other.simd;
+//         return *this;
+//     }
+    
+//     Vec3<float> operator+(const Vec3<float>& other) const noexcept {
+//         Vec3<float> result;
+//         result.simd = _mm_add_ps(simd, other.simd);
+//         return result;
+//     }
+    
+//     Vec3<float> operator-(const Vec3<float>& other) const noexcept {
+//         Vec3<float> result;
+//         result.simd = _mm_sub_ps(simd, other.simd);
+//         return result;
+//     }
+    
+//     Vec3<float> operator*(const Vec3<float>& other) const noexcept {
+//         Vec3<float> result;
+//         result.simd = _mm_mul_ps(simd, other.simd);
+//         return result;
+//     }
+    
+//     Vec3<float> operator*(float scalar) const noexcept {
+//         Vec3<float> result;
+//         __m128 scalar_vec = _mm_set1_ps(scalar);
+//         result.simd = _mm_mul_ps(simd, scalar_vec);
+//         return result;
+//     }
+    
+//     float dot(const Vec3<float>& other) const noexcept {
+//         __m128 mul = _mm_mul_ps(simd, other.simd);
+//         __m128 shuf = _mm_movehdup_ps(mul);
+//         __m128 sums = _mm_add_ps(mul, shuf);
+//         shuf = _mm_movehl_ps(shuf, sums);
+//         sums = _mm_add_ss(sums, shuf);
+//         return _mm_cvtss_f32(sums);
+//     }
+    
+//     // Add other necessary methods for the specialization
+//     float length() const {
+//         float len_sq = dot(*this);
+//         return std::sqrt(len_sq);
+//     }
+    
+//     Vec3<float> normalized() const {
+//         float len = length();
+//         if (len > 0) {
+//             return *this * (1.0f / len);
+//         }
+//         return *this;
+//     }
+// };
+// #endif
 
 using Vec3f = Vec3<float>;
 using Vec3d = Vec3<double>;

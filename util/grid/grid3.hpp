@@ -351,11 +351,12 @@ public:
         std::vector<uint8_t> colorBuffer(resolution.x * resolution.y * 3);
         #pragma omp parallel for
         for (int y = 0; y < resolution.y; y++) {
-            float v = (1.f - 2.f * (y+0.5f) / resolution.y) * viewH;    
+            float v = (1.f - 2.f * (y+0.5f) / resolution.y) * viewH;
+            Vec3f vup = cam.up * v;
             for (int x = 0; x < resolution.x; x++) {
                 Voxel outVoxel(0, false, 0.f, Vec3ui8(10, 10, 255));
                 float u = (2.f * (x+0.5f)/resolution.x - 1.f) * viewW;
-                Vec3f rayDirWorld = (forward + right * u + cam.up * v).normalized();
+                Vec3f rayDirWorld = (forward + right * u + vup).normalized();
                 Vec3f rayStartGrid = cam.posfor.origin;
                 Vec3f rayEnd = rayStartGrid + rayDirWorld * maxDist;
                 voxelTraverse(rayStartGrid, rayEnd, outVoxel, maxDist);
