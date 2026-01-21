@@ -13,6 +13,7 @@
 #include "../output/frame.hpp"
 #include "../noise/pnoise2.hpp"
 #include "../vecmat/mat4.hpp"
+//#include "../vecmat/mat3.hpp"
 #include <vector>
 #include <algorithm>
 #include "../basicdefines.hpp"
@@ -108,16 +109,6 @@ struct Camera {
     }
 };
 
-struct Vertex {
-    Vec3f position;
-    Vec3f normal;
-    Vec3ui8 color;
-    Vec2f texCoord;
-    
-    Vertex() = default;
-    Vertex(Vec3f pos, Vec3f norm, Vec3ui8 colr, Vec2f tex = Vec2f(0,0)) : position(pos), normal(norm), color(colr), texCoord(tex) {}
-};
-
 struct Chunk {
     Voxel reprVoxel; //average of all voxels in chunk for LOD rendering
     //std::vector<Voxel> voxels; //list of all voxels in chunk.
@@ -138,9 +129,9 @@ private:
     float radians(float rads) {
         return rads * (M_PI / 180);
     }
-
+    
     Vec3i getChunkCoord(const Vec3i& voxelPos) const {
-        return Vec3i(voxelPos.x / CHUNK_THRESHOLD, voxelPos.y / CHUNK_THRESHOLD, voxelPos.z / CHUNK_THRESHOLD);
+        return voxelPos / CHUNK_THRESHOLD;
     }
 
     void updateChunkStatus(const Vec3i& pos, bool isActive) {
@@ -221,19 +212,34 @@ public:
     void set(int x, int y, int z, bool active, Vec3ui8 color, float alpha = 1) {
         set(Vec3i(x,y,z), active, color, alpha);
     }
-
-    void set(Vec3i pos, bool active, Vec3ui8 color, float alpha = 1) {
-        if (pos.x >= 0 && pos.y >= 0 && pos.z >= 0) {
-            if (!(pos.x < gridSize.x)) {
-                resize(pos.x, gridSize.y, gridSize.z);
+    
+    void set(Vec3i pos, bool active, Vec3ui8 color, float alpha = 1.f) {
+        if (pos.AllGTE(0)) {
+            if (pos.AnyGTE(gridSize)) {
+                resize(gridSize.max(pos));
             }
-            else if (!(pos.y < gridSize.y)) {
-                resize(gridSize.x, pos.y, gridSize.z);
-            }
-            else if (!(pos.z < gridSize.z)) {
-                resize(gridSize.x, gridSize.y, pos.z);
-            }
-
+            
+            Voxel& v = get(pos);
+            v.active = active;
+            v.color = color;
+            v.alpha = alpha;
+            updateChunkStatus(pos, active);
+        }
+    }
+    
+    void setBatch(const std::vector<Vec3i>& positions, bool active, Vec3ui8 color, float alpha = 1.0f) {
+        // First, ensure grid is large enough
+        Vec3i maxPos(0,0,0);
+        for (const auto& pos : positions) {
+            maxPos = maxPos.max(pos);
+        }
+        
+        if (maxPos.AnyGTE(gridSize)) {
+            resize(maxPos);
+        }
+        
+        // Set all positions
+        for (const auto& pos : positions) {
             Voxel& v = get(pos);
             v.active = active;
             v.color = color;
@@ -242,21 +248,15 @@ public:
         }
     }
 
-    void set(Vec3i pos, Vec4ui8 rgbaval, float alpha = 1) {
-        set(pos, static_cast<float>(rgbaval.a / 255), rgbaval.toVec3(), alpha);
-    }
-
-    template<typename T>
-    bool inGrid(Vec3<T> voxl) const {
-        return (voxl >= 0 && voxl.x < gridSize.x && voxl.y < gridSize.y && voxl.z < gridSize.z);
+    bool inGrid(Vec3i voxl) const {
+        return voxl.AllGTE(0) && voxl.AllLT(gridSize);
     }
 
     void voxelTraverse(const Vec3f& origin, const Vec3f& end, Voxel& outVoxel, int maxDist = 10000000) const {
         Vec3i cv = origin.floorToI();
         Vec3i lv = end.floorToI();
         Vec3f ray = end - origin;
-        Vec3i step = Vec3i(ray.x >= 0 ? 1 : -1, ray.y >= 0 ? 1 : -1, ray.z >= 0 ? 1 : -1);
-
+        Vec3i step = end.mask([](float v, float zero) { return v >= zero; }, 0.0f) * 2 - Vec3i(1);
         Vec3f tDelta = Vec3f(ray.x != 0 ? std::abs(1.0f / ray.x) : INF,
                              ray.y != 0 ? std::abs(1.0f / ray.y) : INF,
                              ray.z != 0 ? std::abs(1.0f / ray.z) : INF);
@@ -282,7 +282,6 @@ public:
 
         float dist = 0.0f; 
         outVoxel.alpha = 0.0;
-        //Vec3f newC = (outVoxel.color / 255).toFloat();
         
         while (lv != cv && dist < 1.f && inGrid(cv) && outVoxel.alpha < 1.f) { 
             
@@ -341,18 +340,26 @@ public:
         TIME_FUNCTION;
         Vec3f forward = cam.forward();
         Vec3f right = cam.right();
-        //Vec3f upCor = right.cross(forward).normalized();
+        Vec3f up = cam.up;
+        
         float aspect = resolution.aspect();
         float fovRad = cam.fovRad();
-        float viewH = tan(cam.fov / 2.f);
+        float viewH = tan(cam.fov * 0.5f);
         float viewW = viewH * aspect;
         float maxDist = std::sqrt(gridSize.lengthSquared());
+        
         frame outFrame(resolution.x, resolution.y, colorformat);
-        std::vector<uint8_t> colorBuffer(resolution.x * resolution.y * 3);
+        std::vector<uint8_t> colorBuffer;
+        if (colorformat == frame::colormap::RGB) {
+            colorBuffer.resize(resolution.x * resolution.y * 3);
+        } else {
+            colorBuffer.resize(resolution.x * resolution.y * 4);
+        }
+
         #pragma omp parallel for
         for (int y = 0; y < resolution.y; y++) {
             float v = (1.f - 2.f * (y+0.5f) / resolution.y) * viewH;
-            Vec3f vup = cam.up * v;
+            Vec3f vup = up * v;
             for (int x = 0; x < resolution.x; x++) {
                 Voxel outVoxel(0, false, 0.f, Vec3ui8(10, 10, 255));
                 float u = (2.f * (x+0.5f)/resolution.x - 1.f) * viewW;
@@ -374,7 +381,7 @@ public:
                     case frame::colormap::RGB:
                     default: {
                         int idx = (y * resolution.y + x) * 3;
-                        colorBuffer[idx + 0] = hitColor.x;
+                        colorBuffer[idx] = hitColor.x;
                         colorBuffer[idx + 1] = hitColor.y;
                         colorBuffer[idx + 2] = hitColor.z;
                         break;
@@ -411,48 +418,7 @@ public:
         std::cout << "Memory usage (approx): " << (voxels.size() * sizeof(Voxel)) / 1024 << " KB" << std::endl;
         std::cout << "============================" << std::endl;
     }
-
-private:
-    // Helper function to check if a voxel is on the surface
-    bool isSurfaceVoxel(int x, int y, int z) const {
-        if (!inGrid(Vec3i(x, y, z))) return false;
-        if (!get(x, y, z).active) return false;
-        
-        // Check all 6 neighbors
-        static const std::array<Vec3i, 6> neighbors = {{
-            Vec3i(1, 0, 0), Vec3i(-1, 0, 0),
-            Vec3i(0, 1, 0), Vec3i(0, -1, 0),
-            Vec3i(0, 0, 1), Vec3i(0, 0, -1)
-        }};
-        
-        for (const auto& n : neighbors) {
-            Vec3i neighborPos(x + n.x, y + n.y, z + n.z);
-            if (!inGrid(neighborPos) || !get(neighborPos).active) {
-                return true; // At least one empty neighbor means this is a surface voxel
-            }
-        }
-        
-        return false;
-    }
     
-    // Get normal for a surface voxel
-    Vec3f calculateVoxelNormal(int x, int y, int z) const {
-        Vec3f normal(0, 0, 0);
-        
-        // Simple gradient-based normal calculation
-        if (inGrid(Vec3i(x+1, y, z)) && !get(x+1, y, z).active) normal.x += 1;
-        if (inGrid(Vec3i(x-1, y, z)) && !get(x-1, y, z).active) normal.x -= 1;
-        if (inGrid(Vec3i(x, y+1, z)) && !get(x, y+1, z).active) normal.y += 1;
-        if (inGrid(Vec3i(x, y-1, z)) && !get(x, y-1, z).active) normal.y -= 1;
-        if (inGrid(Vec3i(x, y, z+1)) && !get(x, y, z+1).active) normal.z += 1;
-        if (inGrid(Vec3i(x, y, z-1)) && !get(x, y, z-1).active) normal.z -= 1;
-        
-        if (normal.lengthSquared() > 0) {
-            return normal.normalized();
-        }
-        return Vec3f(0, 1, 0); // Default up normal
-    }
-public:
     std::vector<frame> genSlices(frame::colormap colorFormat = frame::colormap::RGB) const {
         TIME_FUNCTION;
         int colors;
@@ -534,8 +500,6 @@ public:
         }
         return outframes;
     }
-    
- 
 };
 //#include "g3_serialization.hpp" needed to be usable
 

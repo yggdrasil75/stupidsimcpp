@@ -7,14 +7,16 @@
 #include <ostream>
 #include <cstdint>
 #include <stdfloat>
+#include <cstring>
 #include "vec2.hpp"
+#include "../basicdefines.hpp"
 
 #ifdef __SSE__
 #include <xmmintrin.h>
 #endif
 
 template<typename T>
-class Vec3 {
+class alignas(16) Vec3 {
 public:
     struct{ T x, y, z; };
     
@@ -22,8 +24,11 @@ public:
     Vec3(T x, T y, T z) : x(x), y(y), z(z) {}
     Vec3(T scalar) : x(scalar), y(scalar), z(scalar) {}
     Vec3(float acd[3]) : x(acd[0]), y(acd[1]), z(acd[2]) {}
-
-    Vec3(const class Vec2<T>& vec2, T z = 0);
+    template<typename U>
+    Vec3(const Vec3<U>& other) : x(static_cast<T>(other.x)), y(static_cast<T>(other.y)), z(static_cast<T>(other.z)) {}
+    
+    template<typename U>
+    Vec3(const class Vec2<U>& vec2, U z = 0) : x(static_cast<T>(vec2.x)), y(static_cast<T>(vec2.y)), z(static_cast<T>(z)) {}
     
     Vec3& move(const Vec3& newpos) {
         x = newpos.x;
@@ -36,13 +41,6 @@ public:
     template<typename U>
     Vec3 operator+(const Vec3<U>& other) const {
         return Vec3(x + other.x, y + other.y, z + other.z);
-    }
-
-    Vec3 addMulti(Vec3* result, const Vec3* a, const Vec3* b, size_t count) noexcept {
-        for (size_t i = 0; i < count; ++i) {
-            result[i] = a[i] + b[i];
-        }
-        return *this;
     }
     
     template<typename U>
@@ -77,7 +75,8 @@ public:
     }
 
     Vec3 operator/(T scalar) const {
-        return Vec3(x / scalar, y / scalar, z / scalar);
+        T invScalar = T(1) / scalar;
+        return Vec3(x * invScalar, y * invScalar, z * invScalar);
     }
 
     Vec3& operator=(T scalar) {
@@ -135,9 +134,10 @@ public:
     }
     
     Vec3& operator/=(T scalar) {
-        x /= scalar;
-        y /= scalar;
-        z /= scalar;
+        T invScalar = T(1) / scalar;
+        x *= invScalar;
+        y *= invScalar;
+        z *= invScalar;
         return *this;
     }
 
@@ -155,7 +155,6 @@ public:
 
     T length() const {
         return std::sqrt(x * x + y * y + z * z);
-        //return static_cast<T>(std::sqrt(static_cast<double>(x * x + y * y + z * z)));
     }
     
     // Fast inverse length (Quake III algorithm)
@@ -165,21 +164,21 @@ public:
         
         // Fast inverse square root approximation
         const T half = T(0.5) * lenSq;
-        T y = lenSq;
+        T o = lenSq;
         
         // Type punning for float/double
         if constexpr (std::is_same_v<T, float>) {
-            long i = *(long*)&y;
+            long i = *(long*)&o;
             i = 0x5f3759df - (i >> 1);
-            y = *(float*)&i;
+            o = *(float*)&i;
         } else if constexpr (std::is_same_v<T, double>) {
-            long long i = *(long long*)&y;
+            long long i = *(long long*)&o;
             i = 0x5fe6eb50c7b537a9 - (i >> 1);
-            y = *(double*)&i;
+            o = *(double*)&i;
         }
         
-        y = y * (T(1.5) - (half * y * y));
-        return y;
+        o = o * (T(1.5) - (half * o * o));
+        return o;
     }
     
     T lengthSquared() const {
@@ -192,13 +191,28 @@ public:
     
     T distanceSquared(const Vec3& other) const {
         Vec3 diff = *this - other;
-        return diff.x * diff.x + diff.y * diff.y + diff.z * diff.z;
+        return diff.lengthSquared();
     }
 
+    // Normalized with SSE optimization
     Vec3 normalized() const {
         const T invLen = invLength();
         if (invLen > 0) {
-            return Vec3(x * invLen, y * invLen, z * invLen);
+            #ifdef __SSE__
+                if constexpr (std::is_same_v<T, float>) {
+                    __m128 vec = _mm_set_ps(0.0f, z, y, x);
+                    __m128 inv = _mm_set1_ps(invLen);
+                    __m128 result = _mm_mul_ps(vec, inv);
+                    
+                    alignas(16) float components[4];
+                    _mm_store_ps(components, result);
+                    return Vec3(components[0], components[1], components[2]);
+                } else
+            #endif
+            {
+                // Fallback to scalar operations
+                return Vec3(x * invLen, y * invLen, z * invLen);
+            }
         }
         return *this;
     }
@@ -243,35 +257,35 @@ public:
         return (x >= scalar && y >= scalar && z >= scalar);
     }
     
-    bool AllLT(const Vec3& other) {
+    bool AllLT(const Vec3& other) const {
         return x < other.x && y < other.y && z < other.z;
     }
     
-    bool AllGT(const Vec3& other) {
+    bool AllGT(const Vec3& other) const {
         return x > other.x && y > other.y && z > other.z;
     }
     
-    bool AllLTE(const Vec3& other) {
+    bool AllLTE(const Vec3& other) const {
         return x <= other.x && y <= other.y && z <= other.z;
     }
     
-    bool AllGTE(const Vec3& other) {
+    bool AllGTE(const Vec3& other) const {
         return x >= other.x && y >= other.y && z >= other.z;
     }
     
-    bool AnyLT(const Vec3& other) {
+    bool AnyLT(const Vec3& other) const {
         return x < other.x || y < other.y || z < other.z;
     }
     
-    bool AnyGT(const Vec3& other) {
+    bool AnyGT(const Vec3& other) const {
         return x > other.x || y > other.y || z > other.z;
     }
     
-    bool AnyLTE(const Vec3& other) {
+    bool AnyLTE(const Vec3& other) const {
         return x <= other.x || y <= other.y || z <= other.z;
     }
     
-    bool AnyGTE(const Vec3& other) {
+    bool AnyGTE(const Vec3& other) const {
         return x >= other.x || y >= other.y || z >= other.z;
     }
 
@@ -298,11 +312,11 @@ public:
     }
 
     Vec3<uint8_t> floorToI8() const {
-        return Vec3<uint8_t>(static_cast<uint8_t>(std::floor(x)), static_cast<uint8_t>(std::floor(y)), static_cast<uint8_t>(std::floor(z)));
+        return Vec3<uint8_t>(static_cast<uint8_t>(std::max(T(0), std::floor(x))), static_cast<uint8_t>(std::max(T(0), std::floor(y))), static_cast<uint8_t>(std::max(T(0), std::floor(z))));
     }
     
     Vec3<size_t> floorToT() const {
-        return Vec3<size_t>(static_cast<size_t>(std::floor(x)), static_cast<size_t>(std::floor(y)), static_cast<size_t>(std::floor(z)));
+        return Vec3<size_t>(static_cast<size_t>(std::max(T(0), std::floor(x))), static_cast<size_t>(std::max(T(0), std::floor(y))), static_cast<size_t>(std::max(T(0), std::floor(z))));
     }
 
     Vec3<float> toFloat() const {
@@ -330,23 +344,16 @@ public:
     }
     
     Vec3 clamp(const Vec3& minVal, const Vec3& maxVal) const {
-        return Vec3(
-            std::clamp(x, minVal.x, maxVal.x),
-            std::clamp(y, minVal.y, maxVal.y),
-            std::clamp(z, minVal.z, maxVal.z)
-        );
+        return this->max(minVal).min(maxVal);
     }
     
     Vec3 clamp(T minVal, T maxVal) const {
-        return Vec3(
-            std::clamp(x, minVal, maxVal),
-            std::clamp(y, minVal, maxVal),
-            std::clamp(z, minVal, maxVal)
-        );
+        return this->max(Vec3(minVal)).min(Vec3(maxVal));
     }
     
-    bool isZero(float epsilon = 1e-10f) const {
-        return std::abs(x) < epsilon && std::abs(y) < epsilon && std::abs(z) < epsilon;
+    bool isZero() const {
+        return length() < EPSILON;
+        //return std::abs(x) < epsilon && std::abs(y) < epsilon && std::abs(z) < epsilon;
     }
     
     bool equals(const Vec3& other, float epsilon = 1e-10f) const {
@@ -388,37 +395,49 @@ public:
     }
     
     Vec3 lerp(const Vec3& other, T t) const {
-        t = std::clamp(t, 0.0f, 1.0f);
+        t = std::clamp(t, T(0), T(1));
         return *this + (other - *this) * t;
     }
     
+    Vec3 fastLerp(const Vec3& other, T t) const {
+        return *this + (other - *this) * t;
+    }
+
+    Vec3 fmaLerp(const Vec3& other, T t) const {
+        return Vec3(
+            std::fma(t, other.x - x, x),
+            std::fma(t, other.y - y, y),
+            std::fma(t, other.z - z, z)
+        );
+    }
+    
     Vec3 slerp(const Vec3& other, T t) const {
-        t = std::clamp(t, 0.0f, 1.0f);
-        T dot = this->dot(other);
-        dot = std::clamp(dot, -1.0f, 1.0f);
+        t = std::clamp(t, T(0), T(1));
+        T dotVal = this->dot(other);
+        dotVal = std::clamp(dotVal, T(-1), T(1));
         
-        T theta = std::acos(dot) * t;
-        Vec3 relative = other - *this * dot;
+        T theta = std::acos(dotVal) * t;
+        Vec3 relative = other - *this * dotVal;
         relative = relative.normalized();
         
         return (*this * std::cos(theta)) + (relative * std::sin(theta));
     }
     
-    Vec3 rotateX(float angle) const {
-        float cosA = std::cos(angle);
-        float sinA = std::sin(angle);
+    Vec3 rotateX(T angle) const {
+        T cosA = std::cos(angle);
+        T sinA = std::sin(angle);
         return Vec3(x, y * cosA - z * sinA, y * sinA + z * cosA);
     }
     
-    Vec3 rotateY(float angle) const {
-        float cosA = std::cos(angle);
-        float sinA = std::sin(angle);
+    Vec3 rotateY(T angle) const {
+        T cosA = std::cos(angle);
+        T sinA = std::sin(angle);
         return Vec3(x * cosA + z * sinA, y, -x * sinA + z * cosA);
     }
     
-    Vec3 rotateZ(float angle) const {
-        float cosA = std::cos(angle);
-        float sinA = std::sin(angle);
+    Vec3 rotateZ(T angle) const {
+        T cosA = std::cos(angle);
+        T sinA = std::sin(angle);
         return Vec3(x * cosA - y * sinA, x * sinA + y * cosA, z);
     }
 
@@ -461,27 +480,27 @@ public:
         return (&x)[index];
     }
     
-    Vec3 safeInverse(float epsilon = 1e-10f) const {
+    Vec3 safeInverse() const {
         return Vec3(
-            1 / (std::abs(x) < epsilon ? std::copysign(epsilon, x) : x),
-            1 / (std::abs(y) < epsilon ? std::copysign(epsilon, y) : y),
-            1 / (std::abs(z) < epsilon ? std::copysign(epsilon, z) : z)
+            1 / (std::abs(x) < EPSILON ? std::copysign(EPSILON, x) : x),
+            1 / (std::abs(y) < EPSILON ? std::copysign(EPSILON, y) : y),
+            1 / (std::abs(z) < EPSILON ? std::copysign(EPSILON, z) : z)
         );
     }
 
     uint8_t calculateOctantMask() const {
         uint8_t mask = 0;
-        if (x > 0.0f) mask |= 1;
-        if (y > 0.0f) mask |= 2;
-        if (z > 0.0f) mask |= 4;
+        if (x > 0.f) mask |= 1;
+        if (y > 0.f) mask |= 2;
+        if (z > 0.f) mask |= 4;
         return mask;
     }
     
-    float maxComp() const { 
+    T maxComp() const { 
         return std::max({x, y, z}); 
     }
     
-    float minComp() const { 
+    T minComp() const { 
         return std::min({x, y, z}); 
     }
 
@@ -496,12 +515,12 @@ public:
     };
 
     Vec2<T> toLatLon() const {
-        float r = length();
-        if (r == 0) return Vec2<T>(0, 0);
-        float θ = std::acos(z / r);
-        float lat = static_cast<T>(M_PI/2.0 - θ);
-        
-        float lon = static_cast<T>(std::atan2(y, x));
+        T r = length();
+        if (r == T(0)) return Vec2<T>(0, 0);
+        T θ = std::acos(z / r);
+        T lat = static_cast<T>(M_PI/2.0) - θ;
+
+        T lon = std::atan2(y, x);
         return Vec2<T>(lat, lon);
     }
 
@@ -519,12 +538,50 @@ public:
     }
 };
 
-//use a smaller format first instead of larger format.
-#ifdef std::float16_t
-using Vec3f = Vec3<std::float16_t>;
-#else 
-using Vec3f = Vec3<float>;
+#ifdef __SSE__
+// SSE-optimized version for float types
+template<>
+inline Vec3<float> Vec3<float>::normalized() const {
+    float lenSq = lengthSquared();
+    if (lenSq > 0.0f) {
+        // Load vector into SSE register
+        __m128 vec = _mm_set_ps(0.0f, z, y, x);  // w=0, z, y, x
+        
+        // Fast inverse square root using SSE
+        __m128 lenSq128 = _mm_set1_ps(lenSq);
+        
+        // Quake III fast inverse sqrt SSE version
+        __m128 half = _mm_mul_ps(lenSq128, _mm_set1_ps(0.5f));
+        __m128 three = _mm_set1_ps(1.5f);
+        
+        __m128 y = lenSq128;
+        __m128i i = _mm_castps_si128(y);
+        i = _mm_sub_epi32(_mm_set1_epi32(0x5f3759df), 
+                          _mm_srai_epi32(i, 1));
+        y = _mm_castsi128_ps(i);
+        
+        y = _mm_mul_ps(y, _mm_sub_ps(three, _mm_mul_ps(half, _mm_mul_ps(y, y))));
+        
+        // Multiply vector by inverse length
+        __m128 invLen128 = y;
+        __m128 result = _mm_mul_ps(vec, invLen128);
+        
+        // Extract results
+        alignas(16) float resultArr[4];
+        _mm_store_ps(resultArr, result);
+        
+        return Vec3<float>(resultArr[0], resultArr[1], resultArr[2]);
+    }
+    return *this;
+};
 #endif
+
+//use a smaller format first instead of larger format.
+//#ifdef std::float16_t
+//using Vec3f = Vec3<std::float16_t>;
+//#else 
+using Vec3f = Vec3<float>;
+//#endif
 using Vec3d = Vec3<double>;
 using Vec3i = Vec3<int>;
 using Vec3i32 = Vec3<uint32_t>;
