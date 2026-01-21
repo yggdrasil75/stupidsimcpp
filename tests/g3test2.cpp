@@ -148,8 +148,7 @@ void createGreenSphere(defaults config, VoxelGrid& grid) {
                 }
                 
                 if (shouldSet) {
-                    grid.set(Vec3i(x, y, z), true, 
-                             Vec3ui8(sphereConfig.r, sphereConfig.g, sphereConfig.b));
+                    grid.set(Vec3i(x, y, z), true, Vec3ui8(sphereConfig.r, sphereConfig.g, sphereConfig.b), 0.25);
                 }
             }
         }

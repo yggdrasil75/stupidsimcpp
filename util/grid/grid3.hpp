@@ -218,11 +218,11 @@ public:
         resize(newsize.x, newsize.y, newsize.z);
     }
 
-    void set(int x, int y, int z, bool active, Vec3ui8 color) {
-        set(Vec3i(x,y,z), active, color);
+    void set(int x, int y, int z, bool active, Vec3ui8 color, float alpha = 1) {
+        set(Vec3i(x,y,z), active, color, alpha);
     }
 
-    void set(Vec3i pos, bool active, Vec3ui8 color) {
+    void set(Vec3i pos, bool active, Vec3ui8 color, float alpha = 1) {
         if (pos.x >= 0 && pos.y >= 0 && pos.z >= 0) {
             if (!(pos.x < gridSize.x)) {
                 resize(pos.x, gridSize.y, gridSize.z);
@@ -237,12 +237,13 @@ public:
             Voxel& v = get(pos);
             v.active = active;
             v.color = color;
+            v.alpha = alpha;
             updateChunkStatus(pos, active);
         }
     }
 
-    void set(Vec3i pos, Vec4ui8 rgbaval) {
-        set(pos, static_cast<float>(rgbaval.a / 255), rgbaval.toVec3());
+    void set(Vec3i pos, Vec4ui8 rgbaval, float alpha = 1) {
+        set(pos, static_cast<float>(rgbaval.a / 255), rgbaval.toVec3(), alpha);
     }
 
     template<typename T>
@@ -255,52 +256,64 @@ public:
         Vec3i lv = end.floorToI();
         Vec3f ray = end - origin;
         Vec3i step = Vec3i(ray.x >= 0 ? 1 : -1, ray.y >= 0 ? 1 : -1, ray.z >= 0 ? 1 : -1);
-        Vec3i nextVox = cv + step;
-        
-        Vec3f tMax = Vec3f(ray.x != 0 ? (nextVox.x - origin.x) / ray.x : INF,
-                           ray.y != 0 ? (nextVox.y - origin.y) / ray.y : INF,
-                           ray.z != 0 ? (nextVox.z - origin.z) / ray.z : INF);
-        Vec3f tDelta = Vec3f(ray.x != 0 ? 1 / ray.x * static_cast<float>(step.x) : INF,
-                             ray.y != 0 ? 1 / ray.y * static_cast<float>(step.y) : INF,
-                             ray.z != 0 ? 1 / ray.z * static_cast<float>(step.z) : INF);
 
-        float dist = 0;
-        outVoxel.alpha = 0.0;
-        //float alphaDiff = 1;
+        Vec3f tDelta = Vec3f(ray.x != 0 ? std::abs(1.0f / ray.x) : INF,
+                             ray.y != 0 ? std::abs(1.0f / ray.y) : INF,
+                             ray.z != 0 ? std::abs(1.0f / ray.z) : INF);
+
+        Vec3f tMax;
+        if (ray.x > 0) {
+            tMax.x = (std::floor(origin.x) + 1.0f - origin.x) / ray.x;
+        } else if (ray.x < 0) {
+            tMax.x = (origin.x - std::floor(origin.x)) / -ray.x;
+        } else tMax.x = INF;
+
+        if (ray.y > 0) { 
+            tMax.y = (std::floor(origin.y) + 1.0f - origin.y) / ray.y;
+        } else if (ray.y < 0) {
+            tMax.y = (origin.y - std::floor(origin.y)) / -ray.y;
+        } else tMax.y = INF;
+
+        if (ray.z > 0) {
+            tMax.z = (std::floor(origin.z) + 1.0f - origin.z) / ray.z;
+        } else if (ray.z < 0) {
+            tMax.z = (origin.z - std::floor(origin.z)) / -ray.z;
+        } else tMax.z = INF;
+
+        float dist = 0.0f; 
         
-        while (lv != cv && outVoxel.alpha < 1 && dist < maxDist && inGrid(cv)) {
+        outVoxel.alpha = 0.0;
+        
+        while (lv != cv && dist < 1.f && inGrid(cv)) { 
             
-            //Vec3i currentChunk = getChunkCoord(cv);
-            
-            //auto it = activeChunks.find(currentChunk);
-            //bool isChunkActive = (it != activeChunks.end() && it->second);
-            Voxel curv = get(cv);
+            const Voxel& curv = get(cv);
             if (curv.active) {
                 outVoxel.active = true;
-                outVoxel.color = curv.color;
-                outVoxel.alpha = curv.alpha;
-                // float covCon = curv.alpha * alphaDiff;
-                // outVoxel.color = outVoxel.color + curv.color * covCon;
-                // outVoxel.alpha += covCon;
-                // alphaDiff *= (1.f-curv.alpha);
-            } 
+                float remainingOpacity = 1.f - outVoxel.alpha;
+                float contribution = curv.alpha * remainingOpacity;
+                
+                outVoxel.color = outVoxel.color * outVoxel.alpha + (curv.color * remainingOpacity);
+                outVoxel.alpha += contribution;
+            }
+            
+            // Step Logic
             if (tMax.x < tMax.y) {
                 if (tMax.x < tMax.z) {
-                    dist += tDelta.x;
+                    dist = tMax.x;
                     cv.x += step.x;
                     tMax.x += tDelta.x;
                 } else {
-                    dist += tDelta.z;
+                    dist = tMax.z;
                     cv.z += step.z;
                     tMax.z += tDelta.z;
                 }
             } else {
                 if (tMax.y < tMax.z) {
-                    dist += tDelta.y;
+                    dist = tMax.y;
                     cv.y += step.y;
                     tMax.y += tDelta.y;
                 } else {
-                    dist += tDelta.z;
+                    dist = tMax.z;
                     cv.z += step.z;
                     tMax.z += tDelta.z;
                 }
@@ -335,7 +348,7 @@ public:
         for (int y = 0; y < resolution.y; y++) {
             float v = (1.f - 2.f * (y+0.5f) / resolution.y) * viewH;    
             for (int x = 0; x < resolution.x; x++) {
-                Voxel outVoxel(0,false,0.f,Vec3ui8(10, 10, 255));
+                Voxel outVoxel(0, false, 0.f, Vec3ui8(10, 10, 255));
                 float u = (2.f * (x+0.5f)/resolution.x - 1.f) * viewW;
                 Vec3f rayDirWorld = (forward + right * u + cam.up * v).normalized();
                 Vec3f rayStartGrid = cam.posfor.origin;
