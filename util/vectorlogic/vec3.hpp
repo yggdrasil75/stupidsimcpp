@@ -6,6 +6,7 @@
 #include <string>
 #include <ostream>
 #include <cstdint>
+#include <stdfloat>
 #include "vec2.hpp"
 
 #ifdef __SSE__
@@ -41,6 +42,7 @@ public:
         for (size_t i = 0; i < count; ++i) {
             result[i] = a[i] + b[i];
         }
+        return *this;
     }
     
     template<typename U>
@@ -517,83 +519,12 @@ public:
     }
 };
 
-// #ifdef __SSE__
-// template<>
-// class Vec3<float> {
-//     union {
-//         __m128 simd;
-//         struct { float x, y, z, w; };
-//     }
-// public: 
-    
-//     Vec3() noexcept : simd(_mm_setzero_ps()) {}
-    
-//     Vec3(float x, float y, float z) noexcept {
-//         simd = _mm_set_ps(0.0f, z, y, x);
-//     }
-    
-//     Vec3(float scalar) noexcept {
-//         simd = _mm_set_ps(0.0f, scalar, scalar, scalar);
-//     }
-    
-//     Vec3(const Vec3<float>& other) noexcept : simd(other.simd) {}
-    
-//     Vec3<float>& operator=(const Vec3<float>& other) noexcept {
-//         simd = other.simd;
-//         return *this;
-//     }
-    
-//     Vec3<float> operator+(const Vec3<float>& other) const noexcept {
-//         Vec3<float> result;
-//         result.simd = _mm_add_ps(simd, other.simd);
-//         return result;
-//     }
-    
-//     Vec3<float> operator-(const Vec3<float>& other) const noexcept {
-//         Vec3<float> result;
-//         result.simd = _mm_sub_ps(simd, other.simd);
-//         return result;
-//     }
-    
-//     Vec3<float> operator*(const Vec3<float>& other) const noexcept {
-//         Vec3<float> result;
-//         result.simd = _mm_mul_ps(simd, other.simd);
-//         return result;
-//     }
-    
-//     Vec3<float> operator*(float scalar) const noexcept {
-//         Vec3<float> result;
-//         __m128 scalar_vec = _mm_set1_ps(scalar);
-//         result.simd = _mm_mul_ps(simd, scalar_vec);
-//         return result;
-//     }
-    
-//     float dot(const Vec3<float>& other) const noexcept {
-//         __m128 mul = _mm_mul_ps(simd, other.simd);
-//         __m128 shuf = _mm_movehdup_ps(mul);
-//         __m128 sums = _mm_add_ps(mul, shuf);
-//         shuf = _mm_movehl_ps(shuf, sums);
-//         sums = _mm_add_ss(sums, shuf);
-//         return _mm_cvtss_f32(sums);
-//     }
-    
-//     // Add other necessary methods for the specialization
-//     float length() const {
-//         float len_sq = dot(*this);
-//         return std::sqrt(len_sq);
-//     }
-    
-//     Vec3<float> normalized() const {
-//         float len = length();
-//         if (len > 0) {
-//             return *this * (1.0f / len);
-//         }
-//         return *this;
-//     }
-// };
-// #endif
-
+//use a smaller format first instead of larger format.
+#ifdef std::float16_t
+using Vec3f = Vec3<std::float16_t>;
+#else 
 using Vec3f = Vec3<float>;
+#endif
 using Vec3d = Vec3<double>;
 using Vec3i = Vec3<int>;
 using Vec3i32 = Vec3<uint32_t>;
