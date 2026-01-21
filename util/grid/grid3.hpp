@@ -281,18 +281,22 @@ public:
         } else tMax.z = INF;
 
         float dist = 0.0f; 
-        
         outVoxel.alpha = 0.0;
+        //Vec3f newC = (outVoxel.color / 255).toFloat();
         
-        while (lv != cv && dist < 1.f && inGrid(cv)) { 
+        while (lv != cv && dist < 1.f && inGrid(cv) && outVoxel.alpha < 1.f) { 
             
             const Voxel& curv = get(cv);
             if (curv.active) {
                 outVoxel.active = true;
                 float remainingOpacity = 1.f - outVoxel.alpha;
                 float contribution = curv.alpha * remainingOpacity;
-                
-                outVoxel.color = outVoxel.color * outVoxel.alpha + (curv.color * remainingOpacity);
+                //Vec3f curC = curv.color.toFloat();
+                if (outVoxel.alpha < EPSILON) {
+                    outVoxel.color = curv.color;
+                } else {
+                    outVoxel.color = outVoxel.color + (curv.color * remainingOpacity);
+                }
                 outVoxel.alpha += contribution;
             }
             
@@ -319,6 +323,7 @@ public:
                 }
             }
         }
+        //outVoxel.color = newC 
         return;
     }
 
