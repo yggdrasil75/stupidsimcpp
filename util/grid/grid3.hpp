@@ -143,17 +143,8 @@ private:
             chunkList[chunkCoord].active = true;
         }
     }
-    size_t mortonEncode1(int x,int y, int z) const {
-        //TIME_FUNCTION;
-        size_t result = 0;
-         for (int i = 0; i < 21; i++) {
-            result |= ((x & (1 << i)) << (2 * i)) |
-                    ((y & (1 << i)) << (2 * i + 1)) |
-                    ((z & (1 << i)) << (2 * i + 2));
-        }
-        return result;
-    }
-    size_t mortonEncode2(int x,int y, int z) const {
+    
+    size_t mortonEncode(int x, int y, int z) const {
         //TIME_FUNCTION;
         size_t result = 0;
         uint64_t xx = x & 0x1FFFFF;  // Mask to 21 bits
@@ -180,97 +171,6 @@ private:
         zz = (zz | (zz << 2)) & 0x1249249249249249;
 
         result = xx | (yy << 1) | (zz << 2);
-        return result;
-    }
-    size_t mortonEncode3(int x,int y, int z) const {
-        //TIME_FUNCTION;
-        size_t result = 0;
-        uint64_t xx = x & 0x1FFFFF;  // 21 bits: 2,097,152 values
-        uint64_t yy = y & 0x1FFFFF;
-        uint64_t zz = z & 0x1FFFFF;
-        
-        // Spread bits using optimized shifts and masks
-        xx = (xx * 0x100000) & 0xFFC00000000;
-        xx = (xx * 0x40000)  & 0x30000FF0000FF;
-        xx = (xx * 0x100)    & 0x300F00F00F00F00F;
-        xx = (xx * 0x10)     & 0xC30C30C30C30C30C3;
-        xx = (xx * 0x4)      & 0x49249249249249249;
-        
-        yy = (yy * 0x100000) & 0xFFC00000000;
-        yy = (yy * 0x40000) & 0x30000FF0000FF;
-        yy = (yy * 0x100) & 0x300F00F00F00F00F;
-        yy = (yy * 0x10) & 0xC30C30C30C30C30C3;
-        yy = (yy * 0x4) & 0x49249249249249249;
-        
-        zz = (zz * 0x100000) & 0xFFC00000000;
-        zz = (zz * 0x40000) & 0x30000FF0000FF;
-        zz = (zz * 0x100) & 0x300F00F00F00F00F;
-        zz = (zz * 0x10) & 0xC30C30C30C30C30C3;
-        zz = (zz * 0x4) & 0x49249249249249249;
-        result = xx | (yy << 1) | (zz << 2);
-        return result;
-    }
-    size_t mortonEncode4(int x,int y, int z) const {
-        //TIME_FUNCTION;
-        size_t result = 0;
-        auto spread21 = [](uint64_t n) -> uint64_t {
-            n &= 0x1FFFFF;  // Keep only 21 bits
-            n = (n | (n << 32)) & 0x1F00000000FFFF;
-            n = (n | (n << 16)) & 0x1F0000FF0000FF;
-            n = (n | (n << 8)) & 0x100F00F00F00F00F;
-            n = (n | (n << 4)) & 0x10C30C30C30C30C3;
-            n = (n | (n << 2)) & 0x1249249249249249;
-            return n;
-        };
-        result = spread21(x) | (spread21(y) << 1) | (spread21(z) << 2);
-        return result;
-    }
-    size_t mortonEncode5(int x,int y, int z) const {
-        //TIME_FUNCTION;
-        size_t result = 0;
-        uint64_t xx = x & 0x1FFFFF;
-        uint64_t yy = y & 0x1FFFFF;
-        uint64_t zz = z & 0x1FFFFF;
-        
-    #ifdef __BMI2__
-        // Use PDEP instruction if available (Intel/AMD CPUs with BMI2)
-        uint64_t spread_x = _pdep_u64(xx, 0x9249249249249249);
-        uint64_t spread_y = _pdep_u64(yy, 0x9249249249249249);
-        uint64_t spread_z = _pdep_u64(zz, 0x9249249249249249);
-        return spread_x | (spread_y << 1) | (spread_z << 2);
-    #else
-        // Fallback to manual bit spreading
-        auto spread = [](uint64_t n) -> uint64_t {
-            n = (n | (n << 32)) & 0x1F00000000FFFF;
-            n = (n | (n << 16)) & 0x1F0000FF0000FF;
-            n = (n | (n << 8)) & 0x100F00F00F00F00F;
-            n = (n | (n << 4)) & 0x10C30C30C30C30C3;
-            n = (n | (n << 2)) & 0x1249249249249249;
-            return n;
-        };
-        return spread(xx) | (spread(yy) << 1) | (spread(zz) << 2);
-    #endif
-        return result;
-    }
-    size_t mortonEncodefallback(int x,int y, int z) const {
-        TIME_FUNCTION;
-        size_t result = 0;
-        result = z * xyPlane + y * gridSize.x + x;
-        return result;
-    }
-
-    size_t mortonEncode(int x, int y, int z) const {
-        size_t result = 0;
-        //                                      Total (s)   Avg (s)     Min (s)     Median (s)  P99 (s)     P99.9 (s)   Max (s)
-        //result = mortonEncode1(x,y,z); // (5) 119.849897  23.969979   23.405616   23.535808   25.063036   25.063036   25.063036
-        result = mortonEncode2(x,y,z); // (5) 51.146427   10.229285   9.930608    10.030483   11.166704   11.166704   11.166704
-        //result = mortonEncode3(x,y,z); broken
-        //result = mortonEncode4(x,y,z); // (5) 55.926195   11.185239   10.567710   10.856774   12.258461   12.258461   12.258461
-        //result = mortonEncode5(x,y,z); // (5) 53.964580   10.792916   10.475732   10.680918   11.422500   11.422500   11.422500
-        //result = mortonEncodefallback(x,y,z);
-
-        //alternative:
-        //result = z * xyPlane + y * gridSize.x + x;
         return result;
     }
 
@@ -409,11 +309,11 @@ public:
         return voxl.AllGTE(0) && voxl.AllLT(gridSize);
     }
 
-    void voxelTraverse(const Vec3f& origin, const Vec3f& end, Voxel& outVoxel, Vec3i& step, int maxDist = 10000000) const {
+    void voxelTraverse(const Vec3f& origin, const Vec3f& end, Voxel& outVoxel, int maxDist = 10000000) const {
         Vec3i cv = origin.floorToI();
         Vec3i lv = end.floorToI();
         Vec3f ray = end - origin;
-        step = Vec3i(ray.x >= 0 ? 1 : -1, ray.y >= 0 ? 1 : -1, ray.z >= 0 ? 1 : -1);
+        Vec3i step = Vec3i(ray.x >= 0 ? 1 : -1, ray.y >= 0 ? 1 : -1, ray.z >= 0 ? 1 : -1);
         Vec3f tDelta = Vec3f(ray.x != 0 ? std::abs(1.0f / ray.x) : INF,
                              ray.y != 0 ? std::abs(1.0f / ray.y) : INF,
                              ray.z != 0 ? std::abs(1.0f / ray.z) : INF);
@@ -500,52 +400,22 @@ public:
         float viewH = tan(cam.fov * 0.5f);
         float viewW = viewH * aspect;
         float maxDist = std::sqrt(gridSize.lengthSquared());
-        Vec3i step;
-        
-        // Defines the bounds of the grid for AABB checking
         Vec3f gridMin(0, 0, 0);
-        std::array<Vec3i, 8> precomputedSteps;
-        int baseQuadrant = 0;
-        
-        baseQuadrant = forward.calculateInvOctantMask();
-        
-        precomputedSteps[0] = Vec3i(1, 1, 1);   // +++
-        precomputedSteps[1] = Vec3i(-1, 1, 1);  // -++
-        precomputedSteps[2] = Vec3i(1, -1, 1);  // +-+
-        precomputedSteps[3] = Vec3i(-1, -1, 1); // --+
-        precomputedSteps[4] = Vec3i(1, 1, -1);  // ++-
-        precomputedSteps[5] = Vec3i(-1, 1, -1); // -+-
-        precomputedSteps[6] = Vec3i(1, -1, -1); // +--
-        precomputedSteps[7] = Vec3i(-1, -1, -1);// ---
-        std::array<Vec3f, 8> precomputedTMax;
-                
-        // Vec3f floored = cam.posfor.origin.floor();
-        // Vec3f dNext = floored + 1.f - cam.posfor.origin;
-        // Vec3f dPrev = cam.posfor.origin - floored;
-        
-        // precomputedTMax[0] = Vec3f(dNext.x, dNext.y, dNext.z);
-        // precomputedTMax[1] = Vec3f(dPrev.x, dNext.y, dNext.z);
-        // precomputedTMax[2] = Vec3f(dNext.x, dPrev.y, dNext.z);
-        // precomputedTMax[3] = Vec3f(dPrev.x, dPrev.y, dNext.z);
-        // precomputedTMax[4] = Vec3f(dNext.x, dNext.y, dPrev.z);
-        // precomputedTMax[5] = Vec3f(dPrev.x, dNext.y, dPrev.z);
-        // precomputedTMax[6] = Vec3f(dNext.x, dPrev.y, dPrev.z);
-        // precomputedTMax[7] = Vec3f(dPrev.x, dPrev.y, dPrev.z);
 
         frame outFrame(resolution.x, resolution.y, colorformat);
         std::vector<uint8_t> colorBuffer;
+        int channels;
         if (colorformat == frame::colormap::RGB) {
-            colorBuffer.resize(resolution.x * resolution.y * 3);
+            channels = 3;
         } else {
-            colorBuffer.resize(resolution.x * resolution.y * 4);
+            channels - 4;
         }
+        colorBuffer.resize(resolution.x * resolution.y * channels);
 
         #pragma omp parallel for
         for (int y = 0; y < resolution.y; y++) {
             float v = (1.f - 2.f * (y+0.5f) / resolution.y) * viewH;
             Vec3f vup = up * v;
-            int yQuad = baseQuadrant;
-            if (v < 0) yQuad ^= 2;
             for (int x = 0; x < resolution.x; x++) {
                 Voxel outVoxel(0, false, 0.f, Vec3ui8(10, 10, 255));
                 float u = (2.f * (x+0.5f)/resolution.x - 1.f) * viewW;
@@ -578,20 +448,11 @@ public:
                     continue;
                 }
 
-                Vec3f rayStartGrid = cam.posfor.origin; //  + rayDirWorld * tNear;
+                Vec3f rayStartGrid = cam.posfor.origin;
                 Vec3f rayEnd = rayStartGrid + rayDirWorld * tFar;
-                int xQuad = yQuad;
-                if (u < 0) xQuad ^= 1;
-                step = precomputedSteps[xQuad];
-                //Vec3f tMaxBase = precomputedTMax[xQuad];
                 Vec3f ray = rayEnd - rayStartGrid;
-                // Vec3f tMax(
-                //     ray.x != 0 ? tMaxBase.x / std::abs(ray.x) : INF,
-                //     ray.y != 0 ? tMaxBase.y / std::abs(ray.y) : INF,
-                //     ray.z != 0 ? tMaxBase.z / std::abs(ray.z) : INF
-                // );
 
-                voxelTraverse(rayStartGrid, rayEnd, outVoxel, step, maxDist);
+                voxelTraverse(rayStartGrid, rayEnd, outVoxel, maxDist);
                 Vec3ui8 hitColor = outVoxel.color;
                 // Set pixel color in buffer
                 switch (colorformat) {
