@@ -13,7 +13,7 @@
 #include "../output/frame.hpp"
 #include "../noise/pnoise2.hpp"
 #include "../vecmat/mat4.hpp"
-//#include "../vecmat/mat3.hpp"
+#include "../vecmat/mat3.hpp"
 #include <vector>
 #include <algorithm>
 #include "../basicdefines.hpp"
@@ -125,6 +125,7 @@ class VoxelGrid {
 private:
     Vec3i gridSize;
     std::vector<Voxel> voxels;
+    std::vector<bool> activeVoxels;
     std::unordered_map<Vec3i, Chunk, Vec3i::Hash> chunkList;
     int xyPlane;
     
@@ -202,6 +203,39 @@ private:
         return tMax >= tMin && tMax >= 0.0f;
     }
 
+    std::vector<Vec3f> precomputeRayDirs(const Camera& cam, Vec2i res) const {
+        std::vector<Vec3f> dirs(res.x * res.y);
+        #pragma omp parallel for
+        int rest = res.x * res.y;
+        for (int i = 0; i < rest; i++) {
+            int x = i % res.x;
+            int y = i / res.x;
+            float aspect = static_cast<float>(res.x) / res.y;
+            float tanHalfFOV = tan(cam.fov * 0.5f);
+            
+            // Convert to normalized device coordinates [-1, 1]
+            float ndcX = (2.0f * (x + 0.5f) / res.x - 1.0f) * aspect * tanHalfFOV;
+            float ndcY = (1.0f - 2.0f * (y + 0.5f) / res.y) * tanHalfFOV;
+            
+            Vec3f rayDirCameraSpace = Vec3f(ndcX, ndcY, -1.0f).normalized();
+            
+            // Transform to world space
+            Vec3f forward = cam.forward();
+            Vec3f right = cam.right();
+            Vec3f up = cam.up;
+            
+            // Camera-to-world rotation matrix
+            Mat3f cameraToWorld(
+                right.x, up.x, -forward.x,
+                right.y, up.y, -forward.y,
+                right.z, up.z, -forward.z
+            );
+            // Compute ray direction once
+            dirs[i] = (cameraToWorld * rayDirCameraSpace).normalized();
+        }
+        return dirs;
+    }
+
 public:
     VoxelGrid() : gridSize(0,0,0) {
         std::cout << "creating empty grid." << std::endl;
@@ -209,6 +243,7 @@ public:
 
     VoxelGrid(int w, int h, int d) : gridSize(w,h,d) {
         voxels.resize(w * h * d);
+        activeVoxels.resize(w * h * d, false);
     }
     
     bool serializeToFile(const std::string& filename);
@@ -230,9 +265,23 @@ public:
     const Voxel& get(const Vec3i& xyz) const {
         return get(xyz.x, xyz.y, xyz.z);
     }
+    
+    bool isActive(int x, int y, int z) const {
+        return activeVoxels[mortonEncode(x,y,z)];
+    }
+    
+    bool isActive(const Vec3i& xyz) const {
+        return isActive(xyz.x, xyz.y, xyz.z);
+    }
+    
+    bool isActive(size_t index) const {
+        return activeVoxels[index];
+    }
 
     void resize(int newW, int newH, int newD) {
-        std::vector<Voxel> newVoxels(newW * newH * newD);
+        size_t newSize = newW * newH * newD;
+        std::vector<Voxel> newVoxels(newSize);
+        std::vector<bool> newActiveVoxels(newSize, false);
         
         std::unordered_map<Vec3i, Chunk, Vec3i::Hash> chunklist;
 
@@ -249,15 +298,23 @@ public:
                     voxels.begin() + oldRowStart + copyW, 
                     newVoxels.begin() + newRowStart
                 );
+                
+                std::copy(
+                    activeVoxels.begin() + oldRowStart, 
+                    activeVoxels.begin() + oldRowStart + copyW, 
+                    newActiveVoxels.begin() + newRowStart
+                );
 
                 for (int x = 0; x < copyW; ++x) {
-                    if (voxels[oldRowStart + x].active) {
+                    if (activeVoxels[oldRowStart + x]) {
                         Vec3i cc(x / CHUNK_THRESHOLD, y / CHUNK_THRESHOLD, z / CHUNK_THRESHOLD);
+                        
                     }
                 }
             }
         }
         voxels = std::move(newVoxels);
+        activeVoxels = std::move(newActiveVoxels);
         gridSize = Vec3i(newW, newH, newD);
         xyPlane = gridSize.x * gridSize.y;
     }
@@ -276,10 +333,12 @@ public:
                 resize(gridSize.max(pos));
             }
             
-            Voxel& v = get(pos);
+            size_t idx = mortonEncode(pos.x, pos.y, pos.z);
+            Voxel& v = voxels[idx];
             v.active = active;
             v.color = color;
             v.alpha = alpha;
+            activeVoxels[idx] = active;
             updateChunkStatus(pos, active);
         }
     }
@@ -297,10 +356,12 @@ public:
         
         // Set all positions
         for (const auto& pos : positions) {
-            Voxel& v = get(pos);
+            size_t idx = mortonEncode(pos.x, pos.y, pos.z);
+            Voxel& v = voxels[idx];
             v.active = active;
             v.color = color;
             v.alpha = alpha;
+            activeVoxels[idx] = active;
             updateChunkStatus(pos, active);
         }
     }
@@ -313,11 +374,11 @@ public:
         Vec3i cv = origin.floorToI();
         Vec3i lv = end.floorToI();
         Vec3f ray = end - origin;
-        Vec3i step = Vec3i(ray.x >= 0 ? 1 : -1, ray.y >= 0 ? 1 : -1, ray.z >= 0 ? 1 : -1);
+        Vec3<int8_t> step = Vec3<int8_t>(ray.x >= 0 ? 1 : -1, ray.y >= 0 ? 1 : -1, ray.z >= 0 ? 1 : -1);
         Vec3f tDelta = Vec3f(ray.x != 0 ? std::abs(1.0f / ray.x) : INF,
-                             ray.y != 0 ? std::abs(1.0f / ray.y) : INF,
-                             ray.z != 0 ? std::abs(1.0f / ray.z) : INF);
-
+                            ray.y != 0 ? std::abs(1.0f / ray.y) : INF,
+                            ray.z != 0 ? std::abs(1.0f / ray.z) : INF);
+        
         Vec3f tMax;
         if (ray.x > 0) {
             tMax.x = (std::floor(origin.x) + 1.0f - origin.x) / ray.x;
@@ -337,26 +398,18 @@ public:
             tMax.z = (origin.z - std::floor(origin.z)) / -ray.z;
         } else tMax.z = INF;
 
-        float dist = 0.0f; 
-        outVoxel.alpha = 0.0;
+        std::vector<size_t> activeIndices;
+        activeIndices.reserve(16);
         
-        while (lv != cv && inGrid(cv) && outVoxel.alpha < 1.f) { 
+        while (cv != lv && inGrid(cv) && activeIndices.size() < 16) {
+            size_t idx = mortonEncode(cv.x, cv.y, cv.z);
             
-            const Voxel& curv = get(cv);
-            if (curv.active) {
-                outVoxel.active = true;
-                float remainingOpacity = 1.f - outVoxel.alpha;
-                float contribution = curv.alpha * remainingOpacity;
-                //Vec3f curC = curv.color.toFloat();
-                if (outVoxel.alpha < EPSILON) {
-                    outVoxel.color = curv.color;
-                } else {
-                    outVoxel.color = outVoxel.color + (curv.color * remainingOpacity);
-                }
-                outVoxel.alpha += contribution;
+
+            if (voxels[idx].active) {
+                activeIndices.push_back(idx);
             }
             
-            // Step Logic
+            
             int axis = (tMax.x < tMax.y) ? 
                     ((tMax.x < tMax.z) ? 0 : 2) :
                     ((tMax.y < tMax.z) ? 1 : 2);
@@ -374,10 +427,27 @@ public:
                     tMax.z += tDelta.z; 
                     cv.z += step.z; 
                     break;
-                }
+            }
         }
-        //outVoxel.color = newC 
-        return;
+        
+        // Second pass: process only active voxels
+        outVoxel.alpha = 0.0f;
+        outVoxel.active = !activeIndices.empty();
+        
+        for (size_t idx : activeIndices) {
+            if (outVoxel.alpha >= 1.0f) break;
+            
+            const Voxel& curVoxel = voxels[idx];
+            float remainingOpacity = 1.0f - outVoxel.alpha;
+            float contribution = curVoxel.alpha * remainingOpacity;
+            
+            if (outVoxel.alpha < EPSILON) {
+                outVoxel.color = curVoxel.color;
+            } else {
+                outVoxel.color = outVoxel.color + (curVoxel.color * remainingOpacity);
+            }
+            outVoxel.alpha += contribution;
+        }
     }
 
     int getWidth() const {
@@ -392,13 +462,6 @@ public:
     
     frame renderFrame(const Camera& cam, Vec2i resolution, frame::colormap colorformat = frame::colormap::RGB) const {
         TIME_FUNCTION;
-        Vec3f forward = cam.forward();
-        Vec3f right = cam.right();
-        Vec3f up = cam.up;
-        
-        float aspect = resolution.aspect();
-        float viewH = tan(cam.fov * 0.5f);
-        float viewW = viewH * aspect;
         float maxDist = std::sqrt(gridSize.lengthSquared());
         Vec3f gridMin(0, 0, 0);
 
@@ -408,56 +471,29 @@ public:
         if (colorformat == frame::colormap::RGB) {
             channels = 3;
         } else {
-            channels - 4;
+            channels = 4;
         }
         colorBuffer.resize(resolution.x * resolution.y * channels);
+        std::vector<Vec3f> dirs = precomputeRayDirs(cam, resolution);
+        int rest = resolution.x * resolution.y;
 
         #pragma omp parallel for
-        for (int y = 0; y < resolution.y; y++) {
-            float v = (1.f - 2.f * (y+0.5f) / resolution.y) * viewH;
-            Vec3f vup = up * v;
-            for (int x = 0; x < resolution.x; x++) {
-                Voxel outVoxel(0, false, 0.f, Vec3ui8(10, 10, 255));
-                float u = (2.f * (x+0.5f)/resolution.x - 1.f) * viewW;
-                Vec3f rayDirWorld = (forward + right * u + vup).normalized();
-                float tNear = 0.0f;
-                float tFar = maxDist;
-                bool hit = intersectRayAABB(cam.posfor.origin, rayDirWorld, gridMin, gridSize, tNear, tFar);
-                if (!hit) {
-                    Vec3ui8 hitColor = outVoxel.color;
-                    
-                    // Set pixel color in buffer
-                    switch (colorformat) {
-                        case frame::colormap::BGRA: {
-                            int idx = (y * resolution.y + x) * 4;
-                            colorBuffer[idx + 3] = hitColor.x;
-                            colorBuffer[idx + 2] = hitColor.y;
-                            colorBuffer[idx + 1] = hitColor.z;
-                            colorBuffer[idx + 0] = 255;
-                            break;
-                        }
-                        case frame::colormap::RGB:
-                        default: {
-                            int idx = (y * resolution.y + x) * 3;
-                            colorBuffer[idx] = hitColor.x;
-                            colorBuffer[idx + 1] = hitColor.y;
-                            colorBuffer[idx + 2] = hitColor.z;
-                            break;
-                        }
-                    }
-                    continue;
-                }
-
-                Vec3f rayStartGrid = cam.posfor.origin;
-                Vec3f rayEnd = rayStartGrid + rayDirWorld * tFar;
-                Vec3f ray = rayEnd - rayStartGrid;
-
-                voxelTraverse(rayStartGrid, rayEnd, outVoxel, maxDist);
+        for (int idx = 0; idx < rest; idx++) {
+            int x = idx % resolution.x;
+            int y = idx / resolution.x;
+            int resy = y * resolution.x;
+            Voxel outVoxel(0, false, 0.f, Vec3ui8(10, 10, 255));
+            Vec3f rayDirWorld = dirs[idx];
+            float tNear = 0.0f;
+            float tFar = maxDist;
+            bool hit = intersectRayAABB(cam.posfor.origin, rayDirWorld, gridMin, gridSize, tNear, tFar);
+            if (!hit) {
                 Vec3ui8 hitColor = outVoxel.color;
+                
                 // Set pixel color in buffer
                 switch (colorformat) {
                     case frame::colormap::BGRA: {
-                        int idx = (y * resolution.y + x) * 4;
+                        int idx = (resy + x) * 4;
                         colorBuffer[idx + 3] = hitColor.x;
                         colorBuffer[idx + 2] = hitColor.y;
                         colorBuffer[idx + 1] = hitColor.z;
@@ -466,12 +502,39 @@ public:
                     }
                     case frame::colormap::RGB:
                     default: {
-                        int idx = (y * resolution.y + x) * 3;
+                        int idx = (resy + x) * 3;
                         colorBuffer[idx] = hitColor.x;
                         colorBuffer[idx + 1] = hitColor.y;
                         colorBuffer[idx + 2] = hitColor.z;
                         break;
                     }
+                }
+                continue;
+            }
+
+            Vec3f rayStartGrid = cam.posfor.origin;
+            Vec3f rayEnd = rayStartGrid + rayDirWorld * tFar;
+            Vec3f ray = rayEnd - rayStartGrid;
+
+            voxelTraverse(rayStartGrid, rayEnd, outVoxel, maxDist);
+            Vec3ui8 hitColor = outVoxel.color;
+            // Set pixel color in buffer
+            switch (colorformat) {
+                case frame::colormap::BGRA: {
+                    int idx = (resy + x) * 4;
+                    colorBuffer[idx + 3] = hitColor.x;
+                    colorBuffer[idx + 2] = hitColor.y;
+                    colorBuffer[idx + 1] = hitColor.z;
+                    colorBuffer[idx + 0] = 255;
+                    break;
+                }
+                case frame::colormap::RGB:
+                default: {
+                    int idx = (resy + x) * 3;
+                    colorBuffer[idx] = hitColor.x;
+                    colorBuffer[idx + 1] = hitColor.y;
+                    colorBuffer[idx + 2] = hitColor.z;
+                    break;
                 }
             }
         }
@@ -482,25 +545,25 @@ public:
 
     void printStats() const {
         int totalVoxels = gridSize.x * gridSize.y * gridSize.z;
-        int activeVoxels = 0;
+        int activeVoxelsCount = 0;
         
-        // Count active voxels
-        for (const Voxel& voxel : voxels) {
-            if (voxel.active) {
-                activeVoxels++;
+        // Count active voxels using activeVoxels array
+        for (bool isActive : activeVoxels) {
+            if (isActive) {
+                activeVoxelsCount++;
             }
         }
         
         float activePercentage = (totalVoxels > 0) ? 
-            (static_cast<float>(activeVoxels) / static_cast<float>(totalVoxels)) * 100.0f : 0.0f;
+            (static_cast<float>(activeVoxelsCount) / static_cast<float>(totalVoxels)) * 100.0f : 0.0f;
         
         std::cout << "=== Voxel Grid Statistics ===" << std::endl;
         std::cout << "Grid dimensions: " << gridSize.x << " x " << gridSize.y << " x " << gridSize.z << std::endl;
         std::cout << "Total voxels: " << totalVoxels << std::endl;
-        std::cout << "Active voxels: " << activeVoxels << std::endl;
-        std::cout << "Inactive voxels: " << (totalVoxels - activeVoxels) << std::endl;
+        std::cout << "Active voxels: " << activeVoxelsCount << std::endl;
+        std::cout << "Inactive voxels: " << (totalVoxels - activeVoxelsCount) << std::endl;
         std::cout << "Active percentage: " << activePercentage << "%" << std::endl;
-        std::cout << "Memory usage (approx): " << (voxels.size() * sizeof(Voxel)) / 1024 << " KB" << std::endl;
+        std::cout << "Memory usage (approx): " << (voxels.size() * sizeof(Voxel) + activeVoxels.size() * sizeof(bool)) / 1024 << " KB" << std::endl;
         std::cout << "============================" << std::endl;
     }
     
@@ -535,10 +598,11 @@ public:
                 for (int x = 0; x < gridSize.x; x++)  {
                     int vidx = yMult + x;
                     int pidx = (y * gridSize.x + x) * colors;
+                    bool isActive = activeVoxels[vidx];
                     Voxel cv = voxels[vidx];
                     Vec3ui8 cvColor;
                     float cvAlpha;
-                    if (cv.active) {
+                    if (isActive) {
                         cvColor = cv.color;
                         cvAlpha = cv.alpha;
                     } else {

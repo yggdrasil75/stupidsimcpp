@@ -1,20 +1,23 @@
 #ifndef MAT3_HPP
 #define MAT3_HPP
 
-#include "Vec3.hpp"
+#include "../vectorlogic/vec3.hpp"
 #include <array>
 #include <cmath>
+#include <string>
+#include <iostream>
 
+template<typename T>
 class Mat3 {
 public:
     union {
         struct {
-            float m00, m01, m02,
-                  m10, m11, m12,
-                  m20, m21, m22;
+            T m00, m01, m02,
+              m10, m11, m12,
+              m20, m21, m22;
         };
-        float data[9];
-        float m[3][3];
+        T data[9];
+        T m[3][3];
     };
     
     // Constructors
@@ -22,13 +25,13 @@ public:
              m10(0), m11(1), m12(0),
              m20(0), m21(0), m22(1) {}
              
-    Mat3(float scalar) : m00(scalar), m01(scalar), m02(scalar),
-                         m10(scalar), m11(scalar), m12(scalar),
-                         m20(scalar), m21(scalar), m22(scalar) {}
+    Mat3(T scalar) : m00(scalar), m01(scalar), m02(scalar),
+                     m10(scalar), m11(scalar), m12(scalar),
+                     m20(scalar), m21(scalar), m22(scalar) {}
     
-    Mat3(float m00, float m01, float m02,
-         float m10, float m11, float m12,
-         float m20, float m21, float m22) : 
+    Mat3(T m00, T m01, T m02,
+         T m10, T m11, T m12,
+         T m20, T m21, T m22) : 
          m00(m00), m01(m01), m02(m02),
          m10(m10), m11(m11), m12(m12),
          m20(m20), m21(m21), m22(m22) {}
@@ -44,32 +47,32 @@ public:
     static Mat3 zero() { return Mat3(0); }
     
     // Rotation matrices
-    static Mat3 rotationX(float angle) {
-        float cosA = std::cos(angle);
-        float sinA = std::sin(angle);
+    static Mat3 rotationX(T angle) {
+        T cosA = std::cos(angle);
+        T sinA = std::sin(angle);
         return Mat3(1, 0, 0,
                    0, cosA, -sinA,
                    0, sinA, cosA);
     }
     
-    static Mat3 rotationY(float angle) {
-        float cosA = std::cos(angle);
-        float sinA = std::sin(angle);
+    static Mat3 rotationY(T angle) {
+        T cosA = std::cos(angle);
+        T sinA = std::sin(angle);
         return Mat3(cosA, 0, sinA,
                    0, 1, 0,
                    -sinA, 0, cosA);
     }
     
-    static Mat3 rotationZ(float angle) {
-        float cosA = std::cos(angle);
-        float sinA = std::sin(angle);
+    static Mat3 rotationZ(T angle) {
+        T cosA = std::cos(angle);
+        T sinA = std::sin(angle);
         return Mat3(cosA, -sinA, 0,
                    sinA, cosA, 0,
                    0, 0, 1);
     }
     
     // Scaling matrix
-    static Mat3 scaling(const Vec3& scale) {
+    static Mat3 scaling(const Vec3<T>& scale) {
         return Mat3(scale.x, 0, 0,
                    0, scale.y, 0,
                    0, 0, scale.z);
@@ -104,20 +107,20 @@ public:
         );
     }
     
-    Mat3 operator*(float scalar) const {
+    Mat3 operator*(T scalar) const {
         return Mat3(m00 * scalar, m01 * scalar, m02 * scalar,
                    m10 * scalar, m11 * scalar, m12 * scalar,
                    m20 * scalar, m21 * scalar, m22 * scalar);
     }
     
-    Mat3 operator/(float scalar) const {
+    Mat3 operator/(T scalar) const {
         return Mat3(m00 / scalar, m01 / scalar, m02 / scalar,
                    m10 / scalar, m11 / scalar, m12 / scalar,
                    m20 / scalar, m21 / scalar, m22 / scalar);
     }
     
-    Vec3 operator*(const Vec3& vec) const {
-        return Vec3(
+    Vec3<T> operator*(const Vec3<T>& vec) const {
+        return Vec3<T>(
             m00 * vec.x + m01 * vec.y + m02 * vec.z,
             m10 * vec.x + m11 * vec.y + m12 * vec.z,
             m20 * vec.x + m21 * vec.y + m22 * vec.z
@@ -139,12 +142,12 @@ public:
         return *this;
     }
     
-    Mat3& operator*=(float scalar) {
+    Mat3& operator*=(T scalar) {
         *this = *this * scalar;
         return *this;
     }
     
-    Mat3& operator/=(float scalar) {
+    Mat3& operator/=(T scalar) {
         *this = *this / scalar;
         return *this;
     }
@@ -161,7 +164,7 @@ public:
     }
     
     // Matrix operations
-    float determinant() const {
+    T determinant() const {
         return m00 * (m11 * m22 - m12 * m21)
              - m01 * (m10 * m22 - m12 * m20)
              + m02 * (m10 * m21 - m11 * m20);
@@ -174,12 +177,12 @@ public:
     }
     
     Mat3 inverse() const {
-        float det = determinant();
-        if (std::abs(det) < 1e-10f) {
+        T det = determinant();
+        if (std::abs(det) < static_cast<T>(1e-10)) {
             return Mat3(); // Return identity if not invertible
         }
         
-        float invDet = 1.0f / det;
+        T invDet = static_cast<T>(1) / det;
         
         return Mat3(
             (m11 * m22 - m12 * m21) * invDet,
@@ -197,19 +200,19 @@ public:
     }
     
     // Access operators
-    float& operator()(int row, int col) {
+    T& operator()(int row, int col) {
         return m[row][col];
     }
     
-    const float& operator()(int row, int col) const {
+    const T& operator()(int row, int col) const {
         return m[row][col];
     }
     
-    float& operator[](int index) {
+    T& operator[](int index) {
         return data[index];
     }
     
-    const float& operator[](int index) const {
+    const T& operator[](int index) const {
         return data[index];
     }
     
@@ -220,12 +223,21 @@ public:
     }
 };
 
-inline std::ostream& operator<<(std::ostream& os, const Mat3& mat) {
+using Mat3f = Mat3<float>;
+using Mat3d = Mat3<double>;
+using Mat3i = Mat3<int>;
+using Mat3i8 = Mat3<int8_t>;
+using Mat3ui8 = Mat3<uint8_t>;
+using Mat3b = Mat3<bool>;
+
+template<typename T>
+inline std::ostream& operator<<(std::ostream& os, const Mat3<T>& mat) {
     os << mat.toString();
     return os;
 }
 
-inline Mat3 operator*(float scalar, const Mat3& mat) {
+template<typename T>
+inline Mat3<T> operator*(T scalar, const Mat3<T>& mat) {
     return mat * scalar;
 }
 
