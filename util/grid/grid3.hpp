@@ -112,6 +112,7 @@ struct Camera {
 
 struct Chunk {
     Voxel reprVoxel; //average of all voxels in chunk for LOD rendering
+    std::vector<bool> activeVoxels; //use this to specify active voxels in this chunk. 
     //std::vector<Voxel> voxels; //list of all voxels in chunk.
     std::vector<Chunk> children; //list of all chunks in chunk
     bool active; //active if any child chunk or child voxel is active. used to efficiently find active voxels by only going down when an active chunk is found.
@@ -125,7 +126,6 @@ private:
     Vec3i gridSize;
     std::vector<Voxel> voxels;
     std::unordered_map<Vec3i, Chunk, Vec3i::Hash> chunkList;
-    std::unordered_map<Vec3i, bool, Vec3i::Hash> activeChunks;
     int xyPlane;
     
     float radians(float rads) {
@@ -141,8 +141,137 @@ private:
 
         if (isActive) {
             chunkList[chunkCoord].active = true;
-            activeChunks[chunkCoord] = true;
         }
+    }
+    size_t mortonEncode1(int x,int y, int z) const {
+        //TIME_FUNCTION;
+        size_t result = 0;
+         for (int i = 0; i < 21; i++) {
+            result |= ((x & (1 << i)) << (2 * i)) |
+                    ((y & (1 << i)) << (2 * i + 1)) |
+                    ((z & (1 << i)) << (2 * i + 2));
+        }
+        return result;
+    }
+    size_t mortonEncode2(int x,int y, int z) const {
+        //TIME_FUNCTION;
+        size_t result = 0;
+        uint64_t xx = x & 0x1FFFFF;  // Mask to 21 bits
+        uint64_t yy = y & 0x1FFFFF;
+        uint64_t zz = z & 0x1FFFFF;
+        
+        // Spread bits using parallel bit deposit operations
+        xx = (xx | (xx << 32)) & 0x1F00000000FFFF;
+        xx = (xx | (xx << 16)) & 0x1F0000FF0000FF;
+        xx = (xx | (xx << 8)) & 0x100F00F00F00F00F;
+        xx = (xx | (xx << 4)) & 0x10C30C30C30C30C3;
+        xx = (xx | (xx << 2)) & 0x1249249249249249;
+        
+        yy = (yy | (yy << 32)) & 0x1F00000000FFFF;
+        yy = (yy | (yy << 16)) & 0x1F0000FF0000FF;
+        yy = (yy | (yy << 8)) & 0x100F00F00F00F00F;
+        yy = (yy | (yy << 4)) & 0x10C30C30C30C30C3;
+        yy = (yy | (yy << 2)) & 0x1249249249249249;
+        
+        zz = (zz | (zz << 32)) & 0x1F00000000FFFF;
+        zz = (zz | (zz << 16)) & 0x1F0000FF0000FF;
+        zz = (zz | (zz << 8)) & 0x100F00F00F00F00F;
+        zz = (zz | (zz << 4)) & 0x10C30C30C30C30C3;
+        zz = (zz | (zz << 2)) & 0x1249249249249249;
+
+        result = xx | (yy << 1) | (zz << 2);
+        return result;
+    }
+    size_t mortonEncode3(int x,int y, int z) const {
+        //TIME_FUNCTION;
+        size_t result = 0;
+        uint64_t xx = x & 0x1FFFFF;  // 21 bits: 2,097,152 values
+        uint64_t yy = y & 0x1FFFFF;
+        uint64_t zz = z & 0x1FFFFF;
+        
+        // Spread bits using optimized shifts and masks
+        xx = (xx * 0x100000) & 0xFFC00000000;
+        xx = (xx * 0x40000)  & 0x30000FF0000FF;
+        xx = (xx * 0x100)    & 0x300F00F00F00F00F;
+        xx = (xx * 0x10)     & 0xC30C30C30C30C30C3;
+        xx = (xx * 0x4)      & 0x49249249249249249;
+        
+        yy = (yy * 0x100000) & 0xFFC00000000;
+        yy = (yy * 0x40000) & 0x30000FF0000FF;
+        yy = (yy * 0x100) & 0x300F00F00F00F00F;
+        yy = (yy * 0x10) & 0xC30C30C30C30C30C3;
+        yy = (yy * 0x4) & 0x49249249249249249;
+        
+        zz = (zz * 0x100000) & 0xFFC00000000;
+        zz = (zz * 0x40000) & 0x30000FF0000FF;
+        zz = (zz * 0x100) & 0x300F00F00F00F00F;
+        zz = (zz * 0x10) & 0xC30C30C30C30C30C3;
+        zz = (zz * 0x4) & 0x49249249249249249;
+        result = xx | (yy << 1) | (zz << 2);
+        return result;
+    }
+    size_t mortonEncode4(int x,int y, int z) const {
+        //TIME_FUNCTION;
+        size_t result = 0;
+        auto spread21 = [](uint64_t n) -> uint64_t {
+            n &= 0x1FFFFF;  // Keep only 21 bits
+            n = (n | (n << 32)) & 0x1F00000000FFFF;
+            n = (n | (n << 16)) & 0x1F0000FF0000FF;
+            n = (n | (n << 8)) & 0x100F00F00F00F00F;
+            n = (n | (n << 4)) & 0x10C30C30C30C30C3;
+            n = (n | (n << 2)) & 0x1249249249249249;
+            return n;
+        };
+        result = spread21(x) | (spread21(y) << 1) | (spread21(z) << 2);
+        return result;
+    }
+    size_t mortonEncode5(int x,int y, int z) const {
+        //TIME_FUNCTION;
+        size_t result = 0;
+        uint64_t xx = x & 0x1FFFFF;
+        uint64_t yy = y & 0x1FFFFF;
+        uint64_t zz = z & 0x1FFFFF;
+        
+    #ifdef __BMI2__
+        // Use PDEP instruction if available (Intel/AMD CPUs with BMI2)
+        uint64_t spread_x = _pdep_u64(xx, 0x9249249249249249);
+        uint64_t spread_y = _pdep_u64(yy, 0x9249249249249249);
+        uint64_t spread_z = _pdep_u64(zz, 0x9249249249249249);
+        return spread_x | (spread_y << 1) | (spread_z << 2);
+    #else
+        // Fallback to manual bit spreading
+        auto spread = [](uint64_t n) -> uint64_t {
+            n = (n | (n << 32)) & 0x1F00000000FFFF;
+            n = (n | (n << 16)) & 0x1F0000FF0000FF;
+            n = (n | (n << 8)) & 0x100F00F00F00F00F;
+            n = (n | (n << 4)) & 0x10C30C30C30C30C3;
+            n = (n | (n << 2)) & 0x1249249249249249;
+            return n;
+        };
+        return spread(xx) | (spread(yy) << 1) | (spread(zz) << 2);
+    #endif
+        return result;
+    }
+    size_t mortonEncodefallback(int x,int y, int z) const {
+        TIME_FUNCTION;
+        size_t result = 0;
+        result = z * xyPlane + y * gridSize.x + x;
+        return result;
+    }
+
+    size_t mortonEncode(int x, int y, int z) const {
+        size_t result = 0;
+        //                                      Total (s)   Avg (s)     Min (s)     Median (s)  P99 (s)     P99.9 (s)   Max (s)
+        //result = mortonEncode1(x,y,z); // (5) 119.849897  23.969979   23.405616   23.535808   25.063036   25.063036   25.063036
+        result = mortonEncode2(x,y,z); // (5) 51.146427   10.229285   9.930608    10.030483   11.166704   11.166704   11.166704
+        //result = mortonEncode3(x,y,z); broken
+        //result = mortonEncode4(x,y,z); // (5) 55.926195   11.185239   10.567710   10.856774   12.258461   12.258461   12.258461
+        //result = mortonEncode5(x,y,z); // (5) 53.964580   10.792916   10.475732   10.680918   11.422500   11.422500   11.422500
+        //result = mortonEncodefallback(x,y,z);
+
+        //alternative:
+        //result = z * xyPlane + y * gridSize.x + x;
+        return result;
     }
 
     // Slab method for AABB intersection
@@ -187,11 +316,11 @@ public:
     static std::unique_ptr<VoxelGrid> deserializeFromFile(const std::string& filename);
     
     Voxel& get(int x, int y, int z) {
-        return voxels[z * xyPlane + y * gridSize.x + x];
+        return voxels[mortonEncode(x,y,z)];
     }
 
     const Voxel& get(int x, int y, int z) const {
-        return voxels[z * xyPlane + y * gridSize.x + x];
+        return voxels[mortonEncode(x,y,z)];
     }
 
     Voxel& get(const Vec3i& xyz) {
@@ -206,7 +335,6 @@ public:
         std::vector<Voxel> newVoxels(newW * newH * newD);
         
         std::unordered_map<Vec3i, Chunk, Vec3i::Hash> chunklist;
-        std::unordered_map<Vec3i, bool, Vec3i::Hash> newActiveChunks;
 
         int copyW = std::min(static_cast<int>(gridSize.x), newW);
         int copyH = std::min(static_cast<int>(gridSize.y), newH);
@@ -225,13 +353,11 @@ public:
                 for (int x = 0; x < copyW; ++x) {
                     if (voxels[oldRowStart + x].active) {
                         Vec3i cc(x / CHUNK_THRESHOLD, y / CHUNK_THRESHOLD, z / CHUNK_THRESHOLD);
-                        newActiveChunks[cc] = true;
                     }
                 }
             }
         }
         voxels = std::move(newVoxels);
-        activeChunks = std::move(newActiveChunks);
         gridSize = Vec3i(newW, newH, newD);
         xyPlane = gridSize.x * gridSize.y;
     }
@@ -283,13 +409,33 @@ public:
         return voxl.AllGTE(0) && voxl.AllLT(gridSize);
     }
 
-    void voxelTraverse(const Vec3f& origin, const Vec3f& end, Voxel& outVoxel, Vec3i& step, const Vec3f& ray, Vec3f& tMax, int maxDist = 10000000) const {
+    void voxelTraverse(const Vec3f& origin, const Vec3f& end, Voxel& outVoxel, Vec3i& step, int maxDist = 10000000) const {
         Vec3i cv = origin.floorToI();
         Vec3i lv = end.floorToI();
+        Vec3f ray = end - origin;
         step = Vec3i(ray.x >= 0 ? 1 : -1, ray.y >= 0 ? 1 : -1, ray.z >= 0 ? 1 : -1);
         Vec3f tDelta = Vec3f(ray.x != 0 ? std::abs(1.0f / ray.x) : INF,
                              ray.y != 0 ? std::abs(1.0f / ray.y) : INF,
                              ray.z != 0 ? std::abs(1.0f / ray.z) : INF);
+
+        Vec3f tMax;
+        if (ray.x > 0) {
+            tMax.x = (std::floor(origin.x) + 1.0f - origin.x) / ray.x;
+        } else if (ray.x < 0) {
+            tMax.x = (origin.x - std::floor(origin.x)) / -ray.x;
+        } else tMax.x = INF;
+
+        if (ray.y > 0) { 
+            tMax.y = (std::floor(origin.y) + 1.0f - origin.y) / ray.y;
+        } else if (ray.y < 0) {
+            tMax.y = (origin.y - std::floor(origin.y)) / -ray.y;
+        } else tMax.y = INF;
+
+        if (ray.z > 0) {
+            tMax.z = (std::floor(origin.z) + 1.0f - origin.z) / ray.z;
+        } else if (ray.z < 0) {
+            tMax.z = (origin.z - std::floor(origin.z)) / -ray.z;
+        } else tMax.z = INF;
 
         float dist = 0.0f; 
         outVoxel.alpha = 0.0;
@@ -373,18 +519,18 @@ public:
         precomputedSteps[7] = Vec3i(-1, -1, -1);// ---
         std::array<Vec3f, 8> precomputedTMax;
                 
-        Vec3f floored = cam.posfor.origin.floor();
-        Vec3f dNext = floored + 1.f - cam.posfor.origin;
-        Vec3f dPrev = cam.posfor.origin - floored;
+        // Vec3f floored = cam.posfor.origin.floor();
+        // Vec3f dNext = floored + 1.f - cam.posfor.origin;
+        // Vec3f dPrev = cam.posfor.origin - floored;
         
-        precomputedTMax[0] = Vec3f(dNext.x, dNext.y, dNext.z);
-        precomputedTMax[1] = Vec3f(dPrev.x, dNext.y, dNext.z);
-        precomputedTMax[2] = Vec3f(dNext.x, dPrev.y, dNext.z);
-        precomputedTMax[3] = Vec3f(dPrev.x, dPrev.y, dNext.z);
-        precomputedTMax[4] = Vec3f(dNext.x, dNext.y, dPrev.z);
-        precomputedTMax[5] = Vec3f(dPrev.x, dNext.y, dPrev.z);
-        precomputedTMax[6] = Vec3f(dNext.x, dPrev.y, dPrev.z);
-        precomputedTMax[7] = Vec3f(dPrev.x, dPrev.y, dPrev.z);
+        // precomputedTMax[0] = Vec3f(dNext.x, dNext.y, dNext.z);
+        // precomputedTMax[1] = Vec3f(dPrev.x, dNext.y, dNext.z);
+        // precomputedTMax[2] = Vec3f(dNext.x, dPrev.y, dNext.z);
+        // precomputedTMax[3] = Vec3f(dPrev.x, dPrev.y, dNext.z);
+        // precomputedTMax[4] = Vec3f(dNext.x, dNext.y, dPrev.z);
+        // precomputedTMax[5] = Vec3f(dPrev.x, dNext.y, dPrev.z);
+        // precomputedTMax[6] = Vec3f(dNext.x, dPrev.y, dPrev.z);
+        // precomputedTMax[7] = Vec3f(dPrev.x, dPrev.y, dPrev.z);
 
         frame outFrame(resolution.x, resolution.y, colorformat);
         std::vector<uint8_t> colorBuffer;
@@ -437,15 +583,15 @@ public:
                 int xQuad = yQuad;
                 if (u < 0) xQuad ^= 1;
                 step = precomputedSteps[xQuad];
-                Vec3f tMaxBase = precomputedTMax[xQuad];
+                //Vec3f tMaxBase = precomputedTMax[xQuad];
                 Vec3f ray = rayEnd - rayStartGrid;
-                Vec3f tMax(
-                    ray.x != 0 ? tMaxBase.x / std::abs(ray.x) : INF,
-                    ray.y != 0 ? tMaxBase.y / std::abs(ray.y) : INF,
-                    ray.z != 0 ? tMaxBase.z / std::abs(ray.z) : INF
-                );
+                // Vec3f tMax(
+                //     ray.x != 0 ? tMaxBase.x / std::abs(ray.x) : INF,
+                //     ray.y != 0 ? tMaxBase.y / std::abs(ray.y) : INF,
+                //     ray.z != 0 ? tMaxBase.z / std::abs(ray.z) : INF
+                // );
 
-                voxelTraverse(rayStartGrid, rayEnd, outVoxel, step, ray, tMax, maxDist);
+                voxelTraverse(rayStartGrid, rayEnd, outVoxel, step, maxDist);
                 Vec3ui8 hitColor = outVoxel.color;
                 // Set pixel color in buffer
                 switch (colorformat) {
@@ -492,7 +638,6 @@ public:
         std::cout << "Total voxels: " << totalVoxels << std::endl;
         std::cout << "Active voxels: " << activeVoxels << std::endl;
         std::cout << "Inactive voxels: " << (totalVoxels - activeVoxels) << std::endl;
-        std::cout << "Active chunks (map size): " << activeChunks.size() << std::endl;
         std::cout << "Active percentage: " << activePercentage << "%" << std::endl;
         std::cout << "Memory usage (approx): " << (voxels.size() * sizeof(Voxel)) / 1024 << " KB" << std::endl;
         std::cout << "============================" << std::endl;
