@@ -17,6 +17,7 @@
 #include <vector>
 #include <algorithm>
 #include "../basicdefines.hpp"
+#include <cfloat> 
 
 //constexpr char magic[4] = {'Y', 'G', 'G', '3'};
 static constexpr int CHUNK_THRESHOLD = 16; //at this size, subdivide.
@@ -125,6 +126,7 @@ private:
     std::vector<Voxel> voxels;
     std::unordered_map<Vec3i, Chunk, Vec3i::Hash> chunkList;
     std::unordered_map<Vec3i, bool, Vec3i::Hash> activeChunks;
+    int xyPlane;
     
     float radians(float rads) {
         return rads * (M_PI / 180);
@@ -143,6 +145,34 @@ private:
         }
     }
 
+    // Slab method for AABB intersection
+    bool intersectRayAABB(const Vec3f& origin, const Vec3f& dir, const Vec3f& boxMin, const Vec3f& boxMax, float& tNear, float& tFar) const {
+        Vec3f invDir(1.0f / dir.x, 1.0f / dir.y, 1.0f / dir.z);
+        
+        float t1 = (boxMin.x - origin.x) * invDir.x;
+        float t2 = (boxMax.x - origin.x) * invDir.x;
+        
+        float tMin = std::min(t1, t2);
+        float tMax = std::max(t1, t2);
+        
+        t1 = (boxMin.y - origin.y) * invDir.y;
+        t2 = (boxMax.y - origin.y) * invDir.y;
+        
+        tMin = std::max(tMin, std::min(t1, t2));
+        tMax = std::min(tMax, std::max(t1, t2));
+        
+        t1 = (boxMin.z - origin.z) * invDir.z;
+        t2 = (boxMax.z - origin.z) * invDir.z;
+        
+        tMin = std::max(tMin, std::min(t1, t2));
+        tMax = std::min(tMax, std::max(t1, t2));
+        
+        tNear = tMin;
+        tFar = tMax;
+        
+        return tMax >= tMin && tMax >= 0.0f;
+    }
+
 public:
     VoxelGrid() : gridSize(0,0,0) {
         std::cout << "creating empty grid." << std::endl;
@@ -157,11 +187,11 @@ public:
     static std::unique_ptr<VoxelGrid> deserializeFromFile(const std::string& filename);
     
     Voxel& get(int x, int y, int z) {
-        return voxels[z * gridSize.x * gridSize.y + y * gridSize.x + x];
+        return voxels[z * xyPlane + y * gridSize.x + x];
     }
 
     const Voxel& get(int x, int y, int z) const {
-        return voxels[z * gridSize.x * gridSize.y + y * gridSize.x + x];
+        return voxels[z * xyPlane + y * gridSize.x + x];
     }
 
     Voxel& get(const Vec3i& xyz) {
@@ -203,6 +233,7 @@ public:
         voxels = std::move(newVoxels);
         activeChunks = std::move(newActiveChunks);
         gridSize = Vec3i(newW, newH, newD);
+        xyPlane = gridSize.x * gridSize.y;
     }
 
     void resize(Vec3i newsize) {
@@ -252,38 +283,18 @@ public:
         return voxl.AllGTE(0) && voxl.AllLT(gridSize);
     }
 
-    void voxelTraverse(const Vec3f& origin, const Vec3f& end, Voxel& outVoxel, int maxDist = 10000000) const {
+    void voxelTraverse(const Vec3f& origin, const Vec3f& end, Voxel& outVoxel, Vec3i& step, const Vec3f& ray, Vec3f& tMax, int maxDist = 10000000) const {
         Vec3i cv = origin.floorToI();
         Vec3i lv = end.floorToI();
-        Vec3f ray = end - origin;
-        Vec3i step = end.mask([](float v, float zero) { return v >= zero; }, 0.0f) * 2 - Vec3i(1);
+        step = Vec3i(ray.x >= 0 ? 1 : -1, ray.y >= 0 ? 1 : -1, ray.z >= 0 ? 1 : -1);
         Vec3f tDelta = Vec3f(ray.x != 0 ? std::abs(1.0f / ray.x) : INF,
                              ray.y != 0 ? std::abs(1.0f / ray.y) : INF,
                              ray.z != 0 ? std::abs(1.0f / ray.z) : INF);
 
-        Vec3f tMax;
-        if (ray.x > 0) {
-            tMax.x = (std::floor(origin.x) + 1.0f - origin.x) / ray.x;
-        } else if (ray.x < 0) {
-            tMax.x = (origin.x - std::floor(origin.x)) / -ray.x;
-        } else tMax.x = INF;
-
-        if (ray.y > 0) { 
-            tMax.y = (std::floor(origin.y) + 1.0f - origin.y) / ray.y;
-        } else if (ray.y < 0) {
-            tMax.y = (origin.y - std::floor(origin.y)) / -ray.y;
-        } else tMax.y = INF;
-
-        if (ray.z > 0) {
-            tMax.z = (std::floor(origin.z) + 1.0f - origin.z) / ray.z;
-        } else if (ray.z < 0) {
-            tMax.z = (origin.z - std::floor(origin.z)) / -ray.z;
-        } else tMax.z = INF;
-
         float dist = 0.0f; 
         outVoxel.alpha = 0.0;
         
-        while (lv != cv && dist < 1.f && inGrid(cv) && outVoxel.alpha < 1.f) { 
+        while (lv != cv && inGrid(cv) && outVoxel.alpha < 1.f) { 
             
             const Voxel& curv = get(cv);
             if (curv.active) {
@@ -300,27 +311,24 @@ public:
             }
             
             // Step Logic
-            if (tMax.x < tMax.y) {
-                if (tMax.x < tMax.z) {
-                    dist = tMax.x;
-                    cv.x += step.x;
-                    tMax.x += tDelta.x;
-                } else {
-                    dist = tMax.z;
-                    cv.z += step.z;
-                    tMax.z += tDelta.z;
+            int axis = (tMax.x < tMax.y) ? 
+                    ((tMax.x < tMax.z) ? 0 : 2) :
+                    ((tMax.y < tMax.z) ? 1 : 2);
+            
+            switch(axis) {
+                case 0: 
+                    tMax.x += tDelta.x; 
+                    cv.x += step.x; 
+                    break;
+                case 1: 
+                    tMax.y += tDelta.y; 
+                    cv.y += step.y; 
+                    break;
+                case 2: 
+                    tMax.z += tDelta.z; 
+                    cv.z += step.z; 
+                    break;
                 }
-            } else {
-                if (tMax.y < tMax.z) {
-                    dist = tMax.y;
-                    cv.y += step.y;
-                    tMax.y += tDelta.y;
-                } else {
-                    dist = tMax.z;
-                    cv.z += step.z;
-                    tMax.z += tDelta.z;
-                }
-            }
         }
         //outVoxel.color = newC 
         return;
@@ -343,11 +351,41 @@ public:
         Vec3f up = cam.up;
         
         float aspect = resolution.aspect();
-        float fovRad = cam.fovRad();
         float viewH = tan(cam.fov * 0.5f);
         float viewW = viewH * aspect;
         float maxDist = std::sqrt(gridSize.lengthSquared());
+        Vec3i step;
         
+        // Defines the bounds of the grid for AABB checking
+        Vec3f gridMin(0, 0, 0);
+        std::array<Vec3i, 8> precomputedSteps;
+        int baseQuadrant = 0;
+        
+        baseQuadrant = forward.calculateInvOctantMask();
+        
+        precomputedSteps[0] = Vec3i(1, 1, 1);   // +++
+        precomputedSteps[1] = Vec3i(-1, 1, 1);  // -++
+        precomputedSteps[2] = Vec3i(1, -1, 1);  // +-+
+        precomputedSteps[3] = Vec3i(-1, -1, 1); // --+
+        precomputedSteps[4] = Vec3i(1, 1, -1);  // ++-
+        precomputedSteps[5] = Vec3i(-1, 1, -1); // -+-
+        precomputedSteps[6] = Vec3i(1, -1, -1); // +--
+        precomputedSteps[7] = Vec3i(-1, -1, -1);// ---
+        std::array<Vec3f, 8> precomputedTMax;
+                
+        Vec3f floored = cam.posfor.origin.floor();
+        Vec3f dNext = floored + 1.f - cam.posfor.origin;
+        Vec3f dPrev = cam.posfor.origin - floored;
+        
+        precomputedTMax[0] = Vec3f(dNext.x, dNext.y, dNext.z);
+        precomputedTMax[1] = Vec3f(dPrev.x, dNext.y, dNext.z);
+        precomputedTMax[2] = Vec3f(dNext.x, dPrev.y, dNext.z);
+        precomputedTMax[3] = Vec3f(dPrev.x, dPrev.y, dNext.z);
+        precomputedTMax[4] = Vec3f(dNext.x, dNext.y, dPrev.z);
+        precomputedTMax[5] = Vec3f(dPrev.x, dNext.y, dPrev.z);
+        precomputedTMax[6] = Vec3f(dNext.x, dPrev.y, dPrev.z);
+        precomputedTMax[7] = Vec3f(dPrev.x, dPrev.y, dPrev.z);
+
         frame outFrame(resolution.x, resolution.y, colorformat);
         std::vector<uint8_t> colorBuffer;
         if (colorformat == frame::colormap::RGB) {
@@ -360,13 +398,54 @@ public:
         for (int y = 0; y < resolution.y; y++) {
             float v = (1.f - 2.f * (y+0.5f) / resolution.y) * viewH;
             Vec3f vup = up * v;
+            int yQuad = baseQuadrant;
+            if (v < 0) yQuad ^= 2;
             for (int x = 0; x < resolution.x; x++) {
                 Voxel outVoxel(0, false, 0.f, Vec3ui8(10, 10, 255));
                 float u = (2.f * (x+0.5f)/resolution.x - 1.f) * viewW;
                 Vec3f rayDirWorld = (forward + right * u + vup).normalized();
-                Vec3f rayStartGrid = cam.posfor.origin;
-                Vec3f rayEnd = rayStartGrid + rayDirWorld * maxDist;
-                voxelTraverse(rayStartGrid, rayEnd, outVoxel, maxDist);
+                float tNear = 0.0f;
+                float tFar = maxDist;
+                bool hit = intersectRayAABB(cam.posfor.origin, rayDirWorld, gridMin, gridSize, tNear, tFar);
+                if (!hit) {
+                    Vec3ui8 hitColor = outVoxel.color;
+                    
+                    // Set pixel color in buffer
+                    switch (colorformat) {
+                        case frame::colormap::BGRA: {
+                            int idx = (y * resolution.y + x) * 4;
+                            colorBuffer[idx + 3] = hitColor.x;
+                            colorBuffer[idx + 2] = hitColor.y;
+                            colorBuffer[idx + 1] = hitColor.z;
+                            colorBuffer[idx + 0] = 255;
+                            break;
+                        }
+                        case frame::colormap::RGB:
+                        default: {
+                            int idx = (y * resolution.y + x) * 3;
+                            colorBuffer[idx] = hitColor.x;
+                            colorBuffer[idx + 1] = hitColor.y;
+                            colorBuffer[idx + 2] = hitColor.z;
+                            break;
+                        }
+                    }
+                    continue;
+                }
+
+                Vec3f rayStartGrid = cam.posfor.origin; //  + rayDirWorld * tNear;
+                Vec3f rayEnd = rayStartGrid + rayDirWorld * tFar;
+                int xQuad = yQuad;
+                if (u < 0) xQuad ^= 1;
+                step = precomputedSteps[xQuad];
+                Vec3f tMaxBase = precomputedTMax[xQuad];
+                Vec3f ray = rayEnd - rayStartGrid;
+                Vec3f tMax(
+                    ray.x != 0 ? tMaxBase.x / std::abs(ray.x) : INF,
+                    ray.y != 0 ? tMaxBase.y / std::abs(ray.y) : INF,
+                    ray.z != 0 ? tMaxBase.z / std::abs(ray.z) : INF
+                );
+
+                voxelTraverse(rayStartGrid, rayEnd, outVoxel, step, ray, tMax, maxDist);
                 Vec3ui8 hitColor = outVoxel.color;
                 // Set pixel color in buffer
                 switch (colorformat) {

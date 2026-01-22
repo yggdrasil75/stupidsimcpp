@@ -495,6 +495,14 @@ public:
         if (z > 0.f) mask |= 4;
         return mask;
     }
+
+    uint8_t calculateInvOctantMask() const {
+        uint8_t mask = 0;
+        if (x < 0.f) mask |= 1;
+        if (y < 0.f) mask |= 2;
+        if (z < 0.f) mask |= 4;
+        return mask;
+    }
     
     T maxComp() const { 
         return std::max({x, y, z}); 
