@@ -114,7 +114,7 @@ struct Chunk {
     Voxel reprVoxel; //average of all voxels in chunk for LOD rendering
     std::vector<bool> activeVoxels; //use this to specify active voxels in this chunk. 
     //std::vector<Voxel> voxels; //list of all voxels in chunk.
-    std::vector<size_t> voxelIndices;
+    std::vector<size_t> voxelIndices; //indices of voxels in the voxelGrid class
     //std::vector<Chunk> children; //list of all chunks in chunk. for future use.
     bool active; //active if any child chunk or child voxel is active. used to efficiently find active voxels by only going down when an active chunk is found.
     int chunkSize; //should be (CHUNK_THRESHOLD/2) * 2 ^ depth I think. (ie: 1 depth will be (16/2)*(2^1) or 16, second will be (16/2)*(2^2) or 8*4=32)
@@ -141,17 +141,15 @@ struct Chunk {
     }
     
     // Convert local chunk position to index
-    size_t mortonIndex(const Vec3i& localPos) const {
+    static size_t mortonIndex(const Vec3i& localPos) {
         uint8_t x = static_cast<uint8_t>(localPos.x) & 0x0F;
         uint8_t y = static_cast<uint8_t>(localPos.y) & 0x0F;
         uint8_t z = static_cast<uint8_t>(localPos.z) & 0x0F;
         
-        // Spread 4 bits using lookup tables or bit operations
-        // For 4 bits: x = abcd -> a000b000c000d
         uint16_t xx = x;
-        xx = (xx | (xx << 4)) & 0x0F0F;  // 0000abcd -> 0000abcd0000abcd
-        xx = (xx | (xx << 2)) & 0x3333;  // -> 00ab00cd00ab00cd
-        xx = (xx | (xx << 1)) & 0x5555;  // -> 0a0b0c0d0a0b0c0d
+        xx = (xx | (xx << 4)) & 0x0F0F;
+        xx = (xx | (xx << 2)) & 0x3333;
+        xx = (xx | (xx << 1)) & 0x5555;
         
         uint16_t yy = y;
         yy = (yy | (yy << 4)) & 0x0F0F;
@@ -163,27 +161,26 @@ struct Chunk {
         zz = (zz | (zz << 2)) & 0x3333;
         zz = (zz | (zz << 1)) & 0x5555;
         
-        // Combine: x in bit 0, y in bit 1, z in bit 2
         return xx | (yy << 1) | (zz << 2);
     }
     
-    // Get voxel at world position
-    Voxel& getWVoxel(const Vec3i& worldPos) {
+    // Get local index at world position
+    size_t getWIndex(const Vec3i& worldPos) {
         Vec3i local = worldToLocal(worldPos);
         return voxelIndices[mortonIndex(local)];
     }
     
-    const Voxel& getWVoxel(const Vec3i& worldPos) const {
+    const size_t getWIndex(const Vec3i& worldPos) const {
         Vec3i local = worldToLocal(worldPos);
         return voxelIndices[mortonIndex(local)];
     }
 
-    Voxel& getLVoxel(const Vec3i& localPos) {
-        return voxelIndices[mortonIndex(localPos)];
+    size_t getLIndex(const Vec3i& localPos) {
+        return mortonIndex(localPos);
     }
     
-    const Voxel& getLVoxel(const Vec3i& localPos) const {
-        return voxelIndices[mortonIndex(localPos)];
+    const size_t getLIndex(const Vec3i& localPos) const {
+        return mortonIndex(localPos);
     }
     
     // Set voxel at world position
@@ -210,61 +207,60 @@ struct Chunk {
     }
     
     // Ray bypass - calculate where ray exits this chunk
-    bool rayBypass(const Vec3f& rayOrigin, const Vec3f& rayDir, float& tExit) const {
+    bool rayBypass(const Vec3f& rayOrigin, const Vec3f& rayDir, float& tEntry, float& tExit) const {
         Vec3f invDir = rayDir.safeInverse();
         Vec3f t1 = (minCorner.toFloat() - rayOrigin) * invDir;
         Vec3f t2 = (maxCorner.toFloat() - rayOrigin) * invDir;
+        Vec3f tMinVec = t1.min(t2);
+        Vec3f tMaxVec = t1.max(t2);
+        float tNear = tMinVec.maxComp();
+        float tFar = tMaxVec.minComp();
         
-        Vec3f tMin = t1.min(t2);
-        Vec3f tMax = t1.max(t2);
-        
-        float tNear = tMin.maxComp();
-        tExit = tMax.minComp();
-        
-        return tMax >= tMin && tMax >= 0.0f;
+        tEntry = tNear;
+        tExit = tFar;
+
+        return tFar >= tNear && tFar >= 0.0f;
+    }
+
+    bool inChunk(Vec3i voxl) const {
+        return voxl.AllGTE(0) && voxl.AllLT(chunkSize);
     }
     
-    // Ray traverse within this chunk
-    bool rayTraverse(const Vec3f& origin, const Vec3f& end, Voxel& outVoxel, std::vector<size_t>& hitIndices) const {
-        Vec3i cv = origin.floorToI();
-        Vec3i lv = end.floorToI();
-        Vec3f ray = end - origin;
-        Vec3<int8_t> step = Vec3<int8_t>(ray.x >= 0 ? 1 : -1, ray.y >= 0 ? 1 : -1, ray.z >= 0 ? 1 : -1);
-        Vec3f tDelta = Vec3f(ray.x != 0 ? std::abs(1.0f / ray.x) : INF,
-                            ray.y != 0 ? std::abs(1.0f / ray.y) : INF,
-                            ray.z != 0 ? std::abs(1.0f / ray.z) : INF);
-        
-        Vec3f tMax;
-        if (ray.x > 0) {
-            tMax.x = (std::floor(origin.x) + 1.0f - origin.x) / ray.x;
-        } else if (ray.x < 0) {
-            tMax.x = (origin.x - std::floor(origin.x)) / -ray.x;
-        } else tMax.x = INF;
+    ///TODO: get this to actually work.
+    bool rayTraverse(const Vec3f& origin, const Vec3f& end, Vec3f tDelta, Vec3<int8_t> step, Vec3f tMax, std::vector<size_t>& activeIndices, Vec3i& cv) const {
+        cv -= minCorner;
+        //lv -= minCorner;
+        //Vec3f localOrigin = origin - minCorner.toFloat();
+        //Vec3<int8_t> cv = localOrigin.floorToI();
+        Vec3f localEnd = end - minCorner.toFloat();
+        Vec3i lv = localEnd.floorToI();
+        //Vec3f ray = localEnd - localOrigin;
 
-        if (ray.y > 0) { 
-            tMax.y = (std::floor(origin.y) + 1.0f - origin.y) / ray.y;
-        } else if (ray.y < 0) {
-            tMax.y = (origin.y - std::floor(origin.y)) / -ray.y;
-        } else tMax.y = INF;
+        // Vec3f tMax;
+        // if (ray.x > 0) {
+        //     tMax.x = (std::floor(localOrigin.x) + 1.0f - localOrigin.x) / ray.x;
+        // } else if (ray.x < 0) {
+        //     tMax.x = (localOrigin.x - std::floor(localOrigin.x)) / -ray.x;
+        // } else tMax.x = INF;
 
-        if (ray.z > 0) {
-            tMax.z = (std::floor(origin.z) + 1.0f - origin.z) / ray.z;
-        } else if (ray.z < 0) {
-            tMax.z = (origin.z - std::floor(origin.z)) / -ray.z;
-        } else tMax.z = INF;
+        // if (ray.y > 0) { 
+        //     tMax.y = (std::floor(localOrigin.y) + 1.0f - localOrigin.y) / ray.y;
+        // } else if (ray.y < 0) {
+        //     tMax.y = (localOrigin.y - std::floor(localOrigin.y)) / -ray.y;
+        // } else tMax.y = INF;
 
-        std::vector<size_t> activeIndices;
-        activeIndices.reserve(16);
-        
-        while (cv != lv && inChunk(cv)) {
-            size_t idx = mortonIndex(cv.x, cv.y, cv.z);
-            
+        // if (ray.z > 0) {
+        //     tMax.z = (std::floor(localOrigin.z) + 1.0f - localOrigin.z) / ray.z;
+        // } else if (ray.z < 0) {
+        //     tMax.z = (localOrigin.z - std::floor(localOrigin.z)) / -ray.z;
+        // } else tMax.z = INF;
 
-            if (voxels[idx].active) {
-                activeIndices.push_back(idx);
+        while (cv != lv && activeIndices.size() < 16 && inChunk(cv)) {
+            size_t idx = mortonIndex(cv);
+            if (activeVoxels[idx]) {
+                activeIndices.push_back(voxelIndices[idx]);
             }
-            
-            
+
             int axis = (tMax.x < tMax.y) ? 
                     ((tMax.x < tMax.z) ? 0 : 2) :
                     ((tMax.y < tMax.z) ? 1 : 2);
@@ -284,29 +280,13 @@ struct Chunk {
                     break;
             }
         }
+        cv += minCorner;
         
-        // Second pass: process only active voxels
-        outVoxel.alpha = 0.0f;
-        outVoxel.active = !activeIndices.empty();
-        
-        for (size_t idx : activeIndices) {
-            if (outVoxel.alpha >= 1.0f) break;
-            
-            const Voxel& curVoxel = voxels[idx];
-            float remainingOpacity = 1.0f - outVoxel.alpha;
-            float contribution = curVoxel.alpha * remainingOpacity;
-            
-            if (outVoxel.alpha < EPSILON) {
-                outVoxel.color = curVoxel.color;
-            } else {
-                outVoxel.color = outVoxel.color + (curVoxel.color * remainingOpacity);
-            }
-            outVoxel.alpha += contribution;
-        }
+        return true;
     }
     
     // Build representation voxel (average of all active voxels)
-    void buildReprVoxel() {
+    void buildReprVoxel(const std::vector<Voxel>& voxels) {
         if (!active) {
             reprVoxel = Voxel();
             return;
@@ -330,11 +310,7 @@ struct Chunk {
         }
         
         if (activeCount > 0) {
-            reprVoxel.color = Vec3ui8(
-                static_cast<uint8_t>(accumColor.x / activeCount),
-                static_cast<uint8_t>(accumColor.y / activeCount),
-                static_cast<uint8_t>(accumColor.z / activeCount)
-            );
+            reprVoxel.color = accumColor / activeCount;
             reprVoxel.alpha = accumAlpha / activeCount;
             reprVoxel.weight = accumWeight / activeCount;
             reprVoxel.active = true;
@@ -349,7 +325,8 @@ private:
     Vec3i gridSize;
     std::vector<Voxel> voxels;
     std::vector<bool> activeVoxels;
-    std::unordered_map<Vec3i, Chunk, Vec3i::Hash> chunkList;
+    std::vector<Chunk> chunks;
+    std::vector<bool> activeChunks;
     int xyPlane;
     
     float radians(float rads) {
@@ -362,14 +339,40 @@ private:
 
     void updateChunkStatus(const Vec3i& pos, bool isActive) {
         Vec3i chunkCoord = getChunkCoord(pos);
-
+        size_t chunkIdx = chunkMortonIndex(chunkCoord);
+        
+        // If chunk doesn't exist, create it
+        if (chunks.size() >= chunkIdx) {
+            Vec3i chunkMin = chunkCoord * CHUNK_THRESHOLD;
+            chunks[chunkIdx] = Chunk(chunkMin, CHUNK_THRESHOLD, 0);
+        }
+        
+        // Update chunk active status
         if (isActive) {
-            chunkList[chunkCoord].active = true;
+            chunks[chunkIdx].active = true;
+            activeChunks[chunkIdx] = true;
         }
     }
     
+    void removeInactiveChunks() {
+        // Remove chunks that are no longer active
+        for (size_t i = 0; i < activeChunks.size(); ++i) {
+            if (!activeChunks[i]) {
+                if (i < chunks.size()) {
+                    // Reset the chunk to inactive state and clear its data
+                    chunks[i].active = false;
+                    chunks[i].activeVoxels.assign(chunks[i].activeVoxels.size(), false);
+                    chunks[i].reprVoxel = Voxel();
+                }
+            }
+        }
+    }
+
+    size_t mortonEncode(Vec3i pos) const {
+        return mortonEncode(pos.x, pos.y, pos.z);
+    }
+    
     size_t mortonEncode(int x, int y, int z) const {
-        //TIME_FUNCTION;
         size_t result = 0;
         uint64_t xx = x & 0x1FFFFF;  // Mask to 21 bits
         uint64_t yy = y & 0x1FFFFF;
@@ -396,6 +399,29 @@ private:
 
         result = xx | (yy << 1) | (zz << 2);
         return result;
+    }
+    
+    static size_t chunkMortonIndex(const Vec3i& chunkpos) {
+        uint8_t x = static_cast<uint8_t>(chunkpos.x) & 0x0F;
+        uint8_t y = static_cast<uint8_t>(chunkpos.y) & 0x0F;
+        uint8_t z = static_cast<uint8_t>(chunkpos.z) & 0x0F;
+        
+        uint16_t xx = x;
+        xx = (xx | (xx << 4)) & 0x0F0F;
+        xx = (xx | (xx << 2)) & 0x3333;
+        xx = (xx | (xx << 1)) & 0x5555;
+        
+        uint16_t yy = y;
+        yy = (yy | (yy << 4)) & 0x0F0F;
+        yy = (yy | (yy << 2)) & 0x3333;
+        yy = (yy | (yy << 1)) & 0x5555;
+        
+        uint16_t zz = z;
+        zz = (zz | (zz << 4)) & 0x0F0F;
+        zz = (zz | (zz << 2)) & 0x3333;
+        zz = (zz | (zz << 1)) & 0x5555;
+        
+        return xx | (yy << 1) | (zz << 2);
     }
 
     bool intersectRayAABB(const Vec3f& origin, const Vec3f& dir, const Vec3f& boxMin, const Vec3f& boxMax, float& tNear, float& tFar) const {
@@ -446,6 +472,81 @@ private:
         return dirs;
     }
 
+    void rebuildChunks() {
+        chunks.clear();
+        activeChunks.clear();
+        
+        // Pre-allocate chunks
+        Vec3i chunkGridSize = (gridSize + CHUNK_THRESHOLD - 1) / CHUNK_THRESHOLD;
+        Vec3i maxChunkPos = chunkGridSize - 1;
+        size_t maxChunkIdx = chunkMortonIndex(maxChunkPos);
+        chunks.resize(maxChunkIdx + 1);
+        activeChunks.resize(maxChunkIdx + 1, false);
+
+        for (int z = 0; z < gridSize.z; ++z) {
+            //if z mod 16 then make a new chunk
+            for (int y = 0; y < gridSize.y; ++y) {
+                //if y mod 16, then make a new chunk
+                for (int x = 0; x < gridSize.x; ++x) {
+                    //if x mod 16 then make a new chunk
+                    Vec3i pos(x,y,z);
+                    Vec3i chunkPos = getChunkCoord(pos);
+                    size_t idx = mortonEncode(pos);
+                    size_t chunkidx = chunkMortonIndex(chunkPos);
+                    
+                    if (chunkidx >= chunks.size()) {
+                        chunks.resize(chunkidx + 1);
+                        activeChunks.resize(chunkidx + 1, false);
+                    }
+                    
+                    // Initialize chunk if it's empty/uninitialized
+                    if (chunks[chunkidx].chunkSize == 0) {
+                        chunks[chunkidx] = Chunk(chunkPos * CHUNK_THRESHOLD, CHUNK_THRESHOLD, 0);
+                    }
+
+                    if (activeVoxels[idx]) {
+                        chunks[chunkidx].setVoxel(pos, voxels[idx], idx);
+                        activeChunks[chunkidx] = true;
+                    }
+                }
+            }
+        }
+        removeInactiveChunks();
+    }
+
+    // Get chunk at position
+    const Chunk* getChunk(const Vec3i& worldPos) const {
+        Vec3i chunkCoord = getChunkCoord(worldPos);
+        size_t chunkIdx = chunkMortonIndex(chunkCoord);
+        if (chunkIdx < chunks.size()) {
+            return &chunks[chunkIdx];
+        }
+        return nullptr;
+    }
+    
+    // Get all active chunks
+    std::vector<const Chunk*> getActiveChunks() const {
+        std::vector<const Chunk*> result;
+        result.reserve(activeChunks.size());
+        for (size_t i = 0; i < chunks.size(); ++i) {
+            if (i < activeChunks.size() && activeChunks[i]) {
+                result.push_back(&chunks[i]);
+            }
+        }
+        return result;
+    }
+    
+    // Get chunk count
+    size_t getChunkCount() const {
+        return chunks.size();
+    }
+    
+    // Clear all chunks (call after major changes)
+    void clearChunks() {
+        chunks.clear();
+        activeChunks.clear();
+    }
+
 public:
     VoxelGrid() : gridSize(0,0,0) {
         std::cout << "creating empty grid." << std::endl;
@@ -454,6 +555,7 @@ public:
     VoxelGrid(int w, int h, int d) : gridSize(w,h,d) {
         voxels.resize(w * h * d);
         activeVoxels.resize(w * h * d, false);
+        rebuildChunks();
     }
     
     bool serializeToFile(const std::string& filename);
@@ -493,8 +595,6 @@ public:
         std::vector<Voxel> newVoxels(newSize);
         std::vector<bool> newActiveVoxels(newSize, false);
         
-        std::unordered_map<Vec3i, Chunk, Vec3i::Hash> chunklist;
-
         int copyW = std::min(static_cast<int>(gridSize.x), newW);
         int copyH = std::min(static_cast<int>(gridSize.y), newH);
         int copyD = std::min(static_cast<int>(gridSize.z), newD);
@@ -514,19 +614,15 @@ public:
                     activeVoxels.begin() + oldRowStart + copyW, 
                     newActiveVoxels.begin() + newRowStart
                 );
-
-                for (int x = 0; x < copyW; ++x) {
-                    if (activeVoxels[oldRowStart + x]) {
-                        Vec3i cc(x / CHUNK_THRESHOLD, y / CHUNK_THRESHOLD, z / CHUNK_THRESHOLD);
-                        
-                    }
-                }
             }
         }
         voxels = std::move(newVoxels);
         activeVoxels = std::move(newActiveVoxels);
         gridSize = Vec3i(newW, newH, newD);
         xyPlane = gridSize.x * gridSize.y;
+        
+        // Rebuild chunks after resize
+        rebuildChunks();
     }
 
     void resize(Vec3i newsize) {
@@ -572,8 +668,8 @@ public:
             v.color = color;
             v.alpha = alpha;
             activeVoxels[idx] = active;
-            updateChunkStatus(pos, active);
         }
+        rebuildChunks();
     }
 
     bool inGrid(Vec3i voxl) const {
@@ -610,33 +706,69 @@ public:
 
         std::vector<size_t> activeIndices;
         activeIndices.reserve(16);
+        int dist = 0;
         
-        while (cv != lv && inGrid(cv) && activeIndices.size() < 16) {
-            size_t idx = mortonEncode(cv.x, cv.y, cv.z);
-            
+        while (cv != lv && inGrid(cv) && activeIndices.size() < 16 && dist < maxDist) {
+            dist += 1;
+            Vec3i chunkCoord = getChunkCoord(cv);
+            size_t chunkIDX = chunkMortonIndex(chunkCoord);
+            if (!activeChunks[chunkIDX]) {
+                float tEntry, tExit;
+                // Calculate where the ray exits this empty chunk
+                if (chunks[chunkIDX].rayBypass(origin, ray, tEntry, tExit)) {
+                    
+                    float nextT = tExit + 0.0001f;
+                    
+                    // Calculate new position just outside the chunk
+                    Vec3f nextPos = origin + (ray * nextT);
+                    cv = nextPos.floorToI();
 
-            if (voxels[idx].active) {
-                activeIndices.push_back(idx);
-            }
-            
-            
-            int axis = (tMax.x < tMax.y) ? 
-                    ((tMax.x < tMax.z) ? 0 : 2) :
-                    ((tMax.y < tMax.z) ? 1 : 2);
-            
-            switch(axis) {
-                case 0: 
-                    tMax.x += tDelta.x; 
-                    cv.x += step.x; 
-                    break;
-                case 1: 
-                    tMax.y += tDelta.y; 
-                    cv.y += step.y; 
-                    break;
-                case 2: 
-                    tMax.z += tDelta.z; 
-                    cv.z += step.z; 
-                    break;
+                    // Re-calculate tMax for the DDA from this new position
+                    if (ray.x > 0) tMax.x = (std::floor(nextPos.x) + 1.0f - nextPos.x) / ray.x;
+                    else if (ray.x < 0) tMax.x = (nextPos.x - std::floor(nextPos.x)) / -ray.x;
+                    else tMax.x = INF;
+                    
+                    // if (ray.x != 0) tMax.x += nextT; // Adjust absolute T
+
+                    if (ray.y > 0) tMax.y = (std::floor(nextPos.y) + 1.0f - nextPos.y) / ray.y;
+                    else if (ray.y < 0) tMax.y = (nextPos.y - std::floor(nextPos.y)) / -ray.y;
+                    else tMax.y = INF;
+
+                    // if (ray.y != 0) tMax.y += nextT;
+
+                    if (ray.z > 0) tMax.z = (std::floor(nextPos.z) + 1.0f - nextPos.z) / ray.z;
+                    else if (ray.z < 0) tMax.z = (nextPos.z - std::floor(nextPos.z)) / -ray.z;
+                    else tMax.z = INF;
+                    
+                    // if (ray.z != 0) tMax.z += nextT;
+                    
+                }
+                continue;
+            } else {
+                size_t idx = mortonEncode(cv.x, cv.y, cv.z);
+                if (voxels[idx].active) {
+                    activeIndices.push_back(idx);
+                }
+                
+                int axis = (tMax.x < tMax.y) ? 
+                        ((tMax.x < tMax.z) ? 0 : 2) :
+                        ((tMax.y < tMax.z) ? 1 : 2);
+                
+                switch(axis) {
+                    case 0: 
+                        tMax.x += tDelta.x; 
+                        cv.x += step.x; 
+                        break;
+                    case 1: 
+                        tMax.y += tDelta.y; 
+                        cv.y += step.y; 
+                        break;
+                    case 2: 
+                        tMax.z += tDelta.z; 
+                        cv.z += step.z; 
+                        break;
+                }
+                continue;
             }
         }
         
@@ -726,7 +858,7 @@ public:
             Vec3f rayEnd = rayStartGrid + rayDirWorld * tFar;
             Vec3f ray = rayEnd - rayStartGrid;
 
-            voxelTraverse(rayStartGrid, rayEnd, outVoxel, maxDist);
+            voxelTraverse(rayStartGrid, rayEnd, outVoxel, 512);
             Vec3ui8 hitColor = outVoxel.color;
             // Set pixel color in buffer
             switch (colorformat) {
@@ -753,6 +885,29 @@ public:
         return outFrame;
     }
 
+    void updateChunkRepresentations() {
+        for(size_t i = 0; i < chunks.size(); ++i) {
+            if (activeChunks.size() > i && activeChunks[i] && chunks[i].chunkSize > 0) {
+                int vol = chunks[i].chunkSize * chunks[i].chunkSize * chunks[i].chunkSize;
+                std::vector<Voxel> localVoxels;
+                localVoxels.resize(vol);
+                
+                // Copy relevant voxels from the global grid to the temporary local vector
+                for(int j = 0; j < vol; ++j) {
+                    // Safety check: chunk's voxel index exists in global grid
+                    if(j < chunks[i].voxelIndices.size()) {
+                        size_t globalIdx = chunks[i].voxelIndices[j];
+                        if(globalIdx < voxels.size()) {
+                            localVoxels[j] = voxels[globalIdx];
+                        }
+                    }
+                }
+                
+                chunks[i].buildReprVoxel(localVoxels);
+            }
+        }
+    }
+
     void printStats() const {
         int totalVoxels = gridSize.x * gridSize.y * gridSize.z;
         int activeVoxelsCount = 0;
@@ -773,12 +928,14 @@ public:
         std::cout << "Active voxels: " << activeVoxelsCount << std::endl;
         std::cout << "Inactive voxels: " << (totalVoxels - activeVoxelsCount) << std::endl;
         std::cout << "Active percentage: " << activePercentage << "%" << std::endl;
+        std::cout << "Number of chunks: " << chunks.size() << std::endl;
+        std::cout << "Active chunks: " << activeChunks.size() << std::endl;
         std::cout << "Memory usage (approx): " << (voxels.size() * sizeof(Voxel) + activeVoxels.size() * sizeof(bool)) / 1024 << " KB" << std::endl;
         std::cout << "============================" << std::endl;
     }
     
     std::vector<frame> genSlices(frame::colormap colorFormat = frame::colormap::RGB) const {
-        TIME_FUNCTION;
+        //TIME_FUNCTION;
         int colors;
         std::vector<frame> outframes;
         switch (colorFormat) {

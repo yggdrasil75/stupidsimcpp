@@ -66,6 +66,7 @@ struct Shared {
 };
 
 void setup(defaults config, VoxelGrid& grid) {
+    TIME_FUNCTION;
     uint8_t threshold = 0.1 * 255;
     grid.resize(config.gridWidth, config.gridHeight, config.gridDepth);
     std::cout << "Generating grid of size " << config.gridWidth << "x" << config.gridHeight << "x" << config.gridDepth << std::endl;
@@ -83,10 +84,6 @@ void setup(defaults config, VoxelGrid& grid) {
     size_t aValh = config.gridHeight / 8;
     size_t aVald = config.gridDepth  / 8;
     
-    // Collect all positions to set
-    std::vector<Vec3i> positions;
-    positions.reserve(config.gridWidth * config.gridHeight * config.gridDepth / 10); // Estimate 10% will be active
-    
     for (int z = 0; z < config.gridDepth; ++z) {
         if (z % 64 == 0) {
             std::cout << "Processing layer " << z << " of " << config.gridDepth << std::endl;
@@ -99,21 +96,10 @@ void setup(defaults config, VoxelGrid& grid) {
                 uint8_t b = config.noise.permute(Vec3f(static_cast<float>(x) * bValw, static_cast<float>(y) * bValh, static_cast<float>(z) * bVald)) * 255;
                 uint8_t a = config.noise.permute(Vec3f(static_cast<float>(x) * aValw, static_cast<float>(y) * aValh, static_cast<float>(z) * aVald)) * 255;
                 if (a > threshold) {
-                    positions.emplace_back(x, y, z);
+                    grid.set(Vec3i(x, y, z), true, Vec3ui8(r,g,b));
                 }
             }
         }
-        
-        // Process in batches every few layers to manage memory
-        if (z % 8 == 0 && !positions.empty()) {
-            grid.setBatch(positions, true, Vec3ui8(255, 255, 255), 1.0f);
-            positions.clear();
-        }
-    }
-    
-    // Process any remaining positions
-    if (!positions.empty()) {
-        grid.setBatch(positions, true, Vec3ui8(255, 255, 255), 1.0f);
     }
     
     std::cout << "Noise grid generation complete!" << std::endl;
@@ -121,6 +107,7 @@ void setup(defaults config, VoxelGrid& grid) {
 }
 
 void createGreenSphere(defaults config, VoxelGrid& grid) {
+    TIME_FUNCTION;
     grid.resize(config.gridWidth, config.gridHeight, config.gridDepth);
     std::cout << "Creating green sphere of size " << config.gridWidth << "x" << config.gridHeight << "x" << config.gridDepth << std::endl;
     
@@ -174,12 +161,14 @@ void createGreenSphere(defaults config, VoxelGrid& grid) {
             }
         }
         
-        // Process in batches to manage memory
-        if (z % 4 == 0 && !positions.empty()) {
-            grid.setBatch(positions, true, Vec3ui8(sphereConfig.r, sphereConfig.g, sphereConfig.b), 0.25f);
-            positions.clear();
-        }
+        // // Process in batches to manage memory
+        // if (z % 16 == 0 && !positions.empty()) {
+        //     grid.setBatch(positions, true, Vec3ui8(sphereConfig.r, sphereConfig.g, sphereConfig.b), 0.25f);
+        //     positions.clear();
+        // }
     }
+    grid.setBatch(positions, true, Vec3ui8(sphereConfig.r, sphereConfig.g, sphereConfig.b), 0.25f);
+    positions.clear();
     
     // Process any remaining positions
     if (!positions.empty()) {
@@ -247,6 +236,7 @@ void startAVIRecording(int frameCount) {
 }
 
 void stopAndSaveAVI(defaults& config, const std::string& filename) {
+    TIME_FUNCTION;
     std::lock_guard<std::mutex> lock(recordingMutex);
     
     if (!recordedFrames.empty()) {
@@ -272,6 +262,7 @@ void stopAndSaveAVI(defaults& config, const std::string& filename) {
 }
 
 void saveSlices(const defaults& config, VoxelGrid& grid) {
+    TIME_FUNCTION;
     std::vector<frame> frames = grid.genSlices(frame::colormap::RGB);
     for (int i = 0; i < frames.size(); i++) {
         std::string filename = "output/slices/" + std::to_string(i) + ".bmp";
