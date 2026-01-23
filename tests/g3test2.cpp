@@ -20,6 +20,7 @@
 #include <GLFW/glfw3.h>
 #include "../stb/stb_image.h"
 
+// theoretical max size: 16384. but it segfaults above 512.
 struct defaults {
     int outWidth = 512;
     int outHeight = 512;
@@ -106,7 +107,7 @@ void setup(defaults config, VoxelGrid& grid) {
     grid.printStats();
 }
 
-void createGreenSphere(defaults config, VoxelGrid& grid) {
+void createSphere(defaults config, VoxelGrid& grid) {
     TIME_FUNCTION;
     grid.resize(config.gridWidth, config.gridHeight, config.gridDepth);
     std::cout << "Creating green sphere of size " << config.gridWidth << "x" << config.gridHeight << "x" << config.gridDepth << std::endl;
@@ -369,7 +370,7 @@ int main() {
     float rotationSpeedZ = 0.05f;  // Speed for Z rotation
     float autoRotationTime = 0.0f;  // Timer for auto-rotation
     Vec3f initialViewDir = Vec3f(0, 0, 1);  // Initial view direction
-    float rotationRadius = 50.0f;  // Distance from center for rotation
+    float rotationRadius = 255.0f;  // Distance from center for rotation
     float yawSpeed = 0.5f;                  // Horizontal rotation speed (degrees per second)
     float pitchSpeed = 0.3f;                // Vertical rotation speed
     float rollSpeed = 0.2f;                 // Roll rotation speed (optional)
@@ -436,9 +437,9 @@ int main() {
             }
 
             if (ImGui::CollapsingHeader("Grid Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
-                ImGui::SliderInt("#Width", &config.gridWidth, 64, 512);
-                ImGui::SliderInt("#Height", &config.gridHeight, 64, 512);
-                ImGui::SliderInt("#Depth", &config.gridDepth, 64, 512);
+                ImGui::SliderInt("#Width", &config.gridWidth, 64, 1024);
+                ImGui::SliderInt("#Height", &config.gridHeight, 64, 1024);
+                ImGui::SliderInt("#Depth", &config.gridDepth, 64, 1024);
             }
 
             ImGui::Separator();
@@ -461,13 +462,13 @@ int main() {
             
             // Add the new green sphere button
             if (ImGui::Button("Create Green Sphere")) {
-                createGreenSphere(config, grid);
+                createSphere(config, grid);
                 gridInitialized = true;
                 
-                // Reset camera to center of grid
-                camX = config.gridWidth / 2.0f;
-                camY = config.gridHeight / 2.0f;
-                camZ = config.gridDepth / 2.0f;
+                // Reset camera to edge of grid
+                camX = config.gridWidth - 1;
+                camY = config.gridHeight - 1;
+                camZ = config.gridDepth -1;
                 
                 // Update camera position
                 cam.posfor.origin = Vec3f(camX, camY, camZ);

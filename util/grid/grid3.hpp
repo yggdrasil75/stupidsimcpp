@@ -334,7 +334,7 @@ private:
     }
     
     Vec3i getChunkCoord(const Vec3i& voxelPos) const {
-        return voxelPos / CHUNK_THRESHOLD;
+        return (voxelPos.toFloat() / CHUNK_THRESHOLD).floorToI();
     }
 
     void updateChunkStatus(const Vec3i& pos, bool isActive) {
@@ -402,26 +402,26 @@ private:
     }
     
     static size_t chunkMortonIndex(const Vec3i& chunkpos) {
-        uint8_t x = static_cast<uint8_t>(chunkpos.x) & 0x0F;
-        uint8_t y = static_cast<uint8_t>(chunkpos.y) & 0x0F;
-        uint8_t z = static_cast<uint8_t>(chunkpos.z) & 0x0F;
+        uint32_t x = static_cast<uint32_t>(chunkpos.x) & 0x03FF;
+        uint32_t y = static_cast<uint32_t>(chunkpos.y) & 0x03FF;
+        uint32_t z = static_cast<uint32_t>(chunkpos.z) & 0x03FF;
         
-        uint16_t xx = x;
-        xx = (xx | (xx << 4)) & 0x0F0F;
-        xx = (xx | (xx << 2)) & 0x3333;
-        xx = (xx | (xx << 1)) & 0x5555;
+        x = (x | (x << 16)) & 0x030000FF;
+        x = (x | (x << 8)) & 0x0300F00F;
+        x = (x | (x << 4)) & 0x030C30C3;
+        x = (x | (x << 2)) & 0x09249249;
         
-        uint16_t yy = y;
-        yy = (yy | (yy << 4)) & 0x0F0F;
-        yy = (yy | (yy << 2)) & 0x3333;
-        yy = (yy | (yy << 1)) & 0x5555;
+        y = (y | (y << 16)) & 0x030000FF;
+        y = (y | (y << 8)) & 0x0300F00F;
+        y = (y | (y << 4)) & 0x030C30C3;
+        y = (y | (y << 2)) & 0x09249249;
         
-        uint16_t zz = z;
-        zz = (zz | (zz << 4)) & 0x0F0F;
-        zz = (zz | (zz << 2)) & 0x3333;
-        zz = (zz | (zz << 1)) & 0x5555;
+        z = (z | (z << 16)) & 0x030000FF;
+        z = (z | (z << 8)) & 0x0300F00F;
+        z = (z | (z << 4)) & 0x030C30C3;
+        z = (z | (z << 2)) & 0x09249249;
         
-        return xx | (yy << 1) | (zz << 2);
+        return x | (y << 1) | (z << 2);
     }
 
     bool intersectRayAABB(const Vec3f& origin, const Vec3f& dir, const Vec3f& boxMin, const Vec3f& boxMax, float& tNear, float& tFar) const {
@@ -479,9 +479,9 @@ private:
         // Pre-allocate chunks
         Vec3i chunkGridSize = (gridSize + CHUNK_THRESHOLD - 1) / CHUNK_THRESHOLD;
         Vec3i maxChunkPos = chunkGridSize - 1;
-        size_t maxChunkIdx = chunkMortonIndex(maxChunkPos);
-        chunks.resize(maxChunkIdx + 1);
-        activeChunks.resize(maxChunkIdx + 1, false);
+        //size_t maxChunkIdx = chunkMortonIndex(maxChunkPos);
+        chunks.resize(4096);
+        activeChunks.resize(4096, false);
 
         for (int z = 0; z < gridSize.z; ++z) {
             //if z mod 16 then make a new chunk
@@ -744,31 +744,29 @@ public:
                     
                 }
                 continue;
-            } else {
-                size_t idx = mortonEncode(cv.x, cv.y, cv.z);
-                if (voxels[idx].active) {
-                    activeIndices.push_back(idx);
-                }
-                
-                int axis = (tMax.x < tMax.y) ? 
-                        ((tMax.x < tMax.z) ? 0 : 2) :
-                        ((tMax.y < tMax.z) ? 1 : 2);
-                
-                switch(axis) {
-                    case 0: 
-                        tMax.x += tDelta.x; 
-                        cv.x += step.x; 
-                        break;
-                    case 1: 
-                        tMax.y += tDelta.y; 
-                        cv.y += step.y; 
-                        break;
-                    case 2: 
-                        tMax.z += tDelta.z; 
-                        cv.z += step.z; 
-                        break;
-                }
-                continue;
+            }
+            size_t idx = mortonEncode(cv.x, cv.y, cv.z);
+            if (voxels[idx].active) {
+                activeIndices.push_back(idx);
+            }
+            
+            int axis = (tMax.x < tMax.y) ? 
+                    ((tMax.x < tMax.z) ? 0 : 2) :
+                    ((tMax.y < tMax.z) ? 1 : 2);
+            
+            switch(axis) {
+                case 0: 
+                    tMax.x += tDelta.x; 
+                    cv.x += step.x; 
+                    break;
+                case 1: 
+                    tMax.y += tDelta.y; 
+                    cv.y += step.y; 
+                    break;
+                case 2: 
+                    tMax.z += tDelta.z; 
+                    cv.z += step.z; 
+                    break;
             }
         }
         
@@ -857,6 +855,7 @@ public:
             Vec3f rayStartGrid = cam.posfor.origin;
             Vec3f rayEnd = rayStartGrid + rayDirWorld * tFar;
             Vec3f ray = rayEnd - rayStartGrid;
+            //rayStartGrid = rayStartGrid + (tNear + 0.0001f);
 
             voxelTraverse(rayStartGrid, rayEnd, outVoxel, 512);
             Vec3ui8 hitColor = outVoxel.color;
