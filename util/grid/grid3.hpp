@@ -113,12 +113,276 @@ struct Camera {
 struct Chunk {
     Voxel reprVoxel; //average of all voxels in chunk for LOD rendering
     std::vector<bool> activeVoxels; //use this to specify active voxels in this chunk. 
-    //std::vector<Voxel> voxels; //list of all voxels in chunk.
-    std::vector<Chunk> children; //list of all chunks in chunk
+    std::vector<Voxel> voxels; //list of all voxels in chunk.
+    //std::vector<Chunk> children; //list of all chunks in chunk. for future use.
     bool active; //active if any child chunk or child voxel is active. used to efficiently find active voxels by only going down when an active chunk is found.
     int chunkSize; //should be (CHUNK_THRESHOLD/2) * 2 ^ depth I think. (ie: 1 depth will be (16/2)*(2^1) or 16, second will be (16/2)*(2^2) or 8*4=32)
     Vec3i minCorner; //position of chunk in world space.
-    int depth; //number of parent/child traversals to get here. 
+    Vec3i maxCorner;
+    int depth; //number of parent/child traversals to get here.
+
+    Chunk() : active(false), chunkSize(0), depth(0) {}
+    
+    Chunk(const Vec3i& minCorner, int chunkSize, int depth = 0) : minCorner(minCorner), chunkSize(chunkSize),
+          depth(depth), maxCorner(minCorner + chunkSize), active(false) {
+        int voxelCount = chunkSize * chunkSize * chunkSize;
+        activeVoxels.resize(voxelCount, false);
+        voxels.resize(voxelCount);
+    }
+    
+    // Convert world position to local chunk index
+    Vec3i worldToLocal(const Vec3i& worldPos) const {
+        return worldPos - minCorner;
+    }
+
+    Vec3i localToWorld(const Vec3i& localPos) const {
+        return localPos + minCorner;
+    }
+    
+    // Convert local chunk position to index
+    size_t mortonIndex(const Vec3i& localPos) const {
+        uint8_t x = static_cast<uint8_t>(localPos.x) & 0x0F;
+        uint8_t y = static_cast<uint8_t>(localPos.y) & 0x0F;
+        uint8_t z = static_cast<uint8_t>(localPos.z) & 0x0F;
+        
+        // Spread 4 bits using lookup tables or bit operations
+        // For 4 bits: x = abcd -> a000b000c000d
+        uint16_t xx = x;
+        xx = (xx | (xx << 4)) & 0x0F0F;  // 0000abcd -> 0000abcd0000abcd
+        xx = (xx | (xx << 2)) & 0x3333;  // -> 00ab00cd00ab00cd
+        xx = (xx | (xx << 1)) & 0x5555;  // -> 0a0b0c0d0a0b0c0d
+        
+        uint16_t yy = y;
+        yy = (yy | (yy << 4)) & 0x0F0F;
+        yy = (yy | (yy << 2)) & 0x3333;
+        yy = (yy | (yy << 1)) & 0x5555;
+        
+        uint16_t zz = z;
+        zz = (zz | (zz << 4)) & 0x0F0F;
+        zz = (zz | (zz << 2)) & 0x3333;
+        zz = (zz | (zz << 1)) & 0x5555;
+        
+        // Combine: x in bit 0, y in bit 1, z in bit 2
+        return xx | (yy << 1) | (zz << 2);
+    }
+    
+    // Get voxel at world position
+    Voxel& getWVoxel(const Vec3i& worldPos) {
+        Vec3i local = worldToLocal(worldPos);
+        return voxels[mortonIndex(local)];
+    }
+    
+    const Voxel& getWVoxel(const Vec3i& worldPos) const {
+        Vec3i local = worldToLocal(worldPos);
+        return voxels[mortonIndex(local)];
+    }
+
+    Voxel& getLVoxel(const Vec3i& localPos) {
+        return voxels[mortonIndex(localPos)];
+    }
+    
+    const Voxel& getLVoxel(const Vec3i& localPos) const {
+        return voxels[mortonIndex(localPos)];
+    }
+    
+    // Set voxel at world position
+    void setVoxel(const Vec3i& worldPos, const Voxel& voxel) {
+        Vec3i local = worldToLocal(worldPos);
+        size_t idx = mortonIndex(local);
+        voxels[idx] = voxel;
+        activeVoxels[idx] = voxel.active;
+        
+        // Update chunk active status
+        if (voxel.active && !active) {
+            active = true;
+        }
+    }
+    
+    // Check if a world position is inside this chunk
+    bool contains(const Vec3i& worldPos) const {
+        return worldPos.AllGTE(minCorner) && worldPos.AllLT(maxCorner);
+    }
+    
+    // Check if a point is inside this chunk
+    bool contains(const Vec3f& worldPos) const {
+        return worldPos.AllGTE(minCorner.toFloat()) && worldPos.AllLT(maxCorner.toFloat());
+    }
+    
+    // Ray bypass - calculate where ray exits this chunk
+    bool rayBypass(const Vec3f& rayOrigin, const Vec3f& rayDir, float& tExit) const {
+        Vec3f invDir = rayDir.safeInverse();
+        Vec3f t1 = (minCorner.toFloat() - rayOrigin) * invDir;
+        Vec3f t2 = (maxCorner.toFloat() - rayOrigin) * invDir;
+        
+        Vec3f tMin = t1.min(t2);
+        Vec3f tMax = t1.max(t2);
+        
+        float tNear = tMin.maxComp();
+        tExit = tMax.minComp();
+        
+        return tMax >= tMin && tMax >= 0.0f;
+    }
+    
+    // Ray traverse within this chunk
+    bool rayTraverse(const Vec3f& entryPoint, const Vec3f& exitPoint, 
+                    Voxel& outVoxel, std::vector<size_t>& hitIndices) const {
+        Vec3f ray = exitPoint - entryPoint;
+        
+        // Initialize DDA algorithm
+        Vec3i cv = entryPoint.floorToI();
+        Vec3i lv = exitPoint.floorToI();
+        
+        // Clamp to chunk bounds
+        cv = cv.max(minCorner).min(maxCorner - Vec3i(1, 1, 1));
+        lv = lv.max(minCorner).min(maxCorner - Vec3i(1, 1, 1));
+        
+        Vec3<int8_t> step = Vec3<int8_t>(
+            ray.x >= 0 ? 1 : -1,
+            ray.y >= 0 ? 1 : -1,
+            ray.z >= 0 ? 1 : -1
+        );
+        
+        Vec3f tDelta = Vec3f(
+            ray.x != 0 ? std::abs(1.0f / ray.x) : INF,
+            ray.y != 0 ? std::abs(1.0f / ray.y) : INF,
+            ray.z != 0 ? std::abs(1.0f / ray.z) : INF
+        );
+        
+        // Calculate initial tMax values
+        Vec3f tMax;
+        if (ray.x > 0) {
+            tMax.x = (std::floor(entryPoint.x) + 1.0f - entryPoint.x) / ray.x;
+        } else if (ray.x < 0) {
+            tMax.x = (entryPoint.x - std::floor(entryPoint.x)) / -ray.x;
+        } else {
+            tMax.x = INF;
+        }
+        
+        if (ray.y > 0) { 
+            tMax.y = (std::floor(entryPoint.y) + 1.0f - entryPoint.y) / ray.y;
+        } else if (ray.y < 0) {
+            tMax.y = (entryPoint.y - std::floor(entryPoint.y)) / -ray.y;
+        } else {
+            tMax.y = INF;
+        }
+        
+        if (ray.z > 0) {
+            tMax.z = (std::floor(entryPoint.z) + 1.0f - entryPoint.z) / ray.z;
+        } else if (ray.z < 0) {
+            tMax.z = (entryPoint.z - std::floor(entryPoint.z)) / -ray.z;
+        } else {
+            tMax.z = INF;
+        }
+        
+        // Clear hit indices
+        hitIndices.clear();
+        
+        // DDA traversal within chunk
+        while (cv != lv && contains(cv)) {
+            Vec3i local = worldToLocal(cv);
+            size_t idx = mortonIndex(local);
+            
+            if (activeVoxels[idx]) {
+                hitIndices.push_back(idx);
+            }
+            
+            // Find next voxel boundary
+            int axis = (tMax.x < tMax.y) ? 
+                      ((tMax.x < tMax.z) ? 0 : 2) :
+                      ((tMax.y < tMax.z) ? 1 : 2);
+            
+            switch(axis) {
+                case 0: 
+                    tMax.x += tDelta.x; 
+                    cv.x += step.x; 
+                    break;
+                case 1: 
+                    tMax.y += tDelta.y; 
+                    cv.y += step.y; 
+                    break;
+                case 2: 
+                    tMax.z += tDelta.z; 
+                    cv.z += step.z; 
+                    break;
+            }
+        }
+        
+        // Check the last voxel
+        if (contains(cv)) {
+            Vec3i local = worldToLocal(cv);
+            size_t idx = mortonIndex(local);
+            if (activeVoxels[idx]) {
+                hitIndices.push_back(idx);
+            }
+        }
+        
+        // Process hits if any
+        if (!hitIndices.empty()) {
+            outVoxel.alpha = 0.0f;
+            outVoxel.active = true;
+            
+            for (size_t idx : hitIndices) {
+                if (outVoxel.alpha >= 1.0f) break;
+                
+                const Voxel& curVoxel = voxels[idx];
+                float remainingOpacity = 1.0f - outVoxel.alpha;
+                float contribution = curVoxel.alpha * remainingOpacity;
+                
+                if (outVoxel.alpha < EPSILON) {
+                    outVoxel.color = curVoxel.color;
+                } else {
+                    // Blend colors
+                    outVoxel.color = Vec3ui8(
+                        static_cast<uint8_t>(outVoxel.color.x + (curVoxel.color.x * remainingOpacity)),
+                        static_cast<uint8_t>(outVoxel.color.y + (curVoxel.color.y * remainingOpacity)),
+                        static_cast<uint8_t>(outVoxel.color.z + (curVoxel.color.z * remainingOpacity))
+                    );
+                }
+                outVoxel.alpha += contribution;
+            }
+            return true;
+        }
+        
+        return false;
+    }
+    
+    // Build representation voxel (average of all active voxels)
+    void buildReprVoxel() {
+        if (!active) {
+            reprVoxel = Voxel();
+            return;
+        }
+        
+        int activeCount = 0;
+        Vec3f accumColor(0, 0, 0);
+        float accumAlpha = 0.0f;
+        float accumWeight = 0.0f;
+        
+        for (size_t i = 0; i < voxels.size(); ++i) {
+            if (activeVoxels[i]) {
+                const Voxel& v = voxels[i];
+                accumColor.x += v.color.x;
+                accumColor.y += v.color.y;
+                accumColor.z += v.color.z;
+                accumAlpha += v.alpha;
+                accumWeight += v.weight;
+                activeCount++;
+            }
+        }
+        
+        if (activeCount > 0) {
+            reprVoxel.color = Vec3ui8(
+                static_cast<uint8_t>(accumColor.x / activeCount),
+                static_cast<uint8_t>(accumColor.y / activeCount),
+                static_cast<uint8_t>(accumColor.z / activeCount)
+            );
+            reprVoxel.alpha = accumAlpha / activeCount;
+            reprVoxel.weight = accumWeight / activeCount;
+            reprVoxel.active = true;
+        } else {
+            reprVoxel = Voxel();
+        }
+    }
 };
 
 class VoxelGrid {
@@ -175,30 +439,17 @@ private:
         return result;
     }
 
-    // Slab method for AABB intersection
     bool intersectRayAABB(const Vec3f& origin, const Vec3f& dir, const Vec3f& boxMin, const Vec3f& boxMax, float& tNear, float& tFar) const {
-        Vec3f invDir(1.0f / dir.x, 1.0f / dir.y, 1.0f / dir.z);
+        Vec3f invDir = dir.safeInverse();
         
-        float t1 = (boxMin.x - origin.x) * invDir.x;
-        float t2 = (boxMax.x - origin.x) * invDir.x;
+        Vec3f t1 = (boxMin - origin) * invDir;
+        Vec3f t2 = (boxMax - origin) * invDir;
         
-        float tMin = std::min(t1, t2);
-        float tMax = std::max(t1, t2);
+        Vec3f tMin = t1.min(t2);
+        Vec3f tMax = t1.max(t2);
         
-        t1 = (boxMin.y - origin.y) * invDir.y;
-        t2 = (boxMax.y - origin.y) * invDir.y;
-        
-        tMin = std::max(tMin, std::min(t1, t2));
-        tMax = std::min(tMax, std::max(t1, t2));
-        
-        t1 = (boxMin.z - origin.z) * invDir.z;
-        t2 = (boxMax.z - origin.z) * invDir.z;
-        
-        tMin = std::max(tMin, std::min(t1, t2));
-        tMax = std::min(tMax, std::max(t1, t2));
-        
-        tNear = tMin;
-        tFar = tMax;
+        tNear = tMin.maxComp();
+        tFar = tMax.minComp();
         
         return tMax >= tMin && tMax >= 0.0f;
     }

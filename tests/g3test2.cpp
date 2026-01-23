@@ -69,6 +69,7 @@ void setup(defaults config, VoxelGrid& grid) {
     uint8_t threshold = 0.1 * 255;
     grid.resize(config.gridWidth, config.gridHeight, config.gridDepth);
     std::cout << "Generating grid of size " << config.gridWidth << "x" << config.gridHeight << "x" << config.gridDepth << std::endl;
+    
     size_t rValw = config.gridWidth  / 64;
     size_t rValh = config.gridHeight / 64;
     size_t rVald = config.gridDepth  / 64;
@@ -81,6 +82,11 @@ void setup(defaults config, VoxelGrid& grid) {
     size_t aValw = config.gridWidth  / 8;
     size_t aValh = config.gridHeight / 8;
     size_t aVald = config.gridDepth  / 8;
+    
+    // Collect all positions to set
+    std::vector<Vec3i> positions;
+    positions.reserve(config.gridWidth * config.gridHeight * config.gridDepth / 10); // Estimate 10% will be active
+    
     for (int z = 0; z < config.gridDepth; ++z) {
         if (z % 64 == 0) {
             std::cout << "Processing layer " << z << " of " << config.gridDepth << std::endl;
@@ -93,13 +99,24 @@ void setup(defaults config, VoxelGrid& grid) {
                 uint8_t b = config.noise.permute(Vec3f(static_cast<float>(x) * bValw, static_cast<float>(y) * bValh, static_cast<float>(z) * bVald)) * 255;
                 uint8_t a = config.noise.permute(Vec3f(static_cast<float>(x) * aValw, static_cast<float>(y) * aValh, static_cast<float>(z) * aVald)) * 255;
                 if (a > threshold) {
-                    grid.set(Vec3i(x, y, z), true, Vec3ui8(r,g,b));
+                    positions.emplace_back(x, y, z);
                 }
             }
         }
+        
+        // Process in batches every few layers to manage memory
+        if (z % 8 == 0 && !positions.empty()) {
+            grid.setBatch(positions, true, Vec3ui8(255, 255, 255), 1.0f);
+            positions.clear();
+        }
     }
+    
+    // Process any remaining positions
+    if (!positions.empty()) {
+        grid.setBatch(positions, true, Vec3ui8(255, 255, 255), 1.0f);
+    }
+    
     std::cout << "Noise grid generation complete!" << std::endl;
-    grid.serializeToFile("output/gridsave.ygg3");
     grid.printStats();
 }
 
@@ -114,6 +131,10 @@ void createGreenSphere(defaults config, VoxelGrid& grid) {
                                  (sphereConfig.radius + sphereConfig.outlineThickness);
     
     int progressStep = std::max(1, config.gridDepth / 10);
+    
+    // Collect all positions to set
+    std::vector<Vec3i> positions;
+    positions.reserve(static_cast<size_t>(4.0/3.0 * M_PI * sphereConfig.radius * sphereConfig.radius * sphereConfig.radius));
     
     for (int z = 0; z < config.gridDepth; ++z) {
         if (z % progressStep == 0) {
@@ -148,10 +169,21 @@ void createGreenSphere(defaults config, VoxelGrid& grid) {
                 }
                 
                 if (shouldSet) {
-                    grid.set(Vec3i(x, y, z), true, Vec3ui8(sphereConfig.r, sphereConfig.g, sphereConfig.b), 0.25);
+                    positions.emplace_back(x, y, z);
                 }
             }
         }
+        
+        // Process in batches to manage memory
+        if (z % 4 == 0 && !positions.empty()) {
+            grid.setBatch(positions, true, Vec3ui8(sphereConfig.r, sphereConfig.g, sphereConfig.b), 0.25f);
+            positions.clear();
+        }
+    }
+    
+    // Process any remaining positions
+    if (!positions.empty()) {
+        grid.setBatch(positions, true, Vec3ui8(sphereConfig.r, sphereConfig.g, sphereConfig.b), 0.25f);
     }
     
     std::cout << "Green sphere generation complete!" << std::endl;
@@ -159,7 +191,6 @@ void createGreenSphere(defaults config, VoxelGrid& grid) {
               << sphereConfig.centerY << ", " << sphereConfig.centerZ << ")" << std::endl;
     std::cout << "Sphere radius: " << sphereConfig.radius << std::endl;
     
-    grid.serializeToFile("output/sphere_grid.ygg3");
     grid.printStats();
 }
 
@@ -318,14 +349,14 @@ int main() {
     defaults config;
     VoxelGrid grid;
     bool gridInitialized = false;
-    auto supposedGrid = VoxelGrid::deserializeFromFile("output/gridsave.ygg3");
-    if (supposedGrid) {
-        grid = std::move(*supposedGrid);
-        gridInitialized = true;
-        config.gridDepth = grid.getDepth();
-        config.gridHeight = grid.getHeight();
-        config.gridWidth = grid.getWidth();
-    }
+    //auto supposedGrid = VoxelGrid::deserializeFromFile("output/gridsave.ygg3");
+    // if (supposedGrid) {
+    //     grid = std::move(*supposedGrid);
+    //     gridInitialized = true;
+    //     config.gridDepth = grid.getDepth();
+    //     config.gridHeight = grid.getHeight();
+    //     config.gridWidth = grid.getWidth();
+    // }
     
     
     
