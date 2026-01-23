@@ -401,27 +401,28 @@ private:
         return result;
     }
     
-    static size_t chunkMortonIndex(const Vec3i& chunkpos) {
-        uint32_t x = static_cast<uint32_t>(chunkpos.x) & 0x03FF;
-        uint32_t y = static_cast<uint32_t>(chunkpos.y) & 0x03FF;
-        uint32_t z = static_cast<uint32_t>(chunkpos.z) & 0x03FF;
+    size_t chunkMortonIndex(const Vec3i& chunkpos) const {
+        return mortonEncode(chunkpos.x, chunkpos.y, chunkpos.z);
+        // uint32_t x = static_cast<uint32_t>(chunkpos.x) & 0x03FF;
+        // uint32_t y = static_cast<uint32_t>(chunkpos.y) & 0x03FF;
+        // uint32_t z = static_cast<uint32_t>(chunkpos.z) & 0x03FF;
         
-        x = (x | (x << 16)) & 0x030000FF;
-        x = (x | (x << 8)) & 0x0300F00F;
-        x = (x | (x << 4)) & 0x030C30C3;
-        x = (x | (x << 2)) & 0x09249249;
+        // x = (x | (x << 16)) & 0x030000FF;
+        // x = (x | (x << 8)) & 0x0300F00F;
+        // x = (x | (x << 4)) & 0x030C30C3;
+        // x = (x | (x << 2)) & 0x09249249;
         
-        y = (y | (y << 16)) & 0x030000FF;
-        y = (y | (y << 8)) & 0x0300F00F;
-        y = (y | (y << 4)) & 0x030C30C3;
-        y = (y | (y << 2)) & 0x09249249;
+        // y = (y | (y << 16)) & 0x030000FF;
+        // y = (y | (y << 8)) & 0x0300F00F;
+        // y = (y | (y << 4)) & 0x030C30C3;
+        // y = (y | (y << 2)) & 0x09249249;
         
-        z = (z | (z << 16)) & 0x030000FF;
-        z = (z | (z << 8)) & 0x0300F00F;
-        z = (z | (z << 4)) & 0x030C30C3;
-        z = (z | (z << 2)) & 0x09249249;
+        // z = (z | (z << 16)) & 0x030000FF;
+        // z = (z | (z << 8)) & 0x0300F00F;
+        // z = (z | (z << 4)) & 0x030C30C3;
+        // z = (z | (z << 2)) & 0x09249249;
         
-        return x | (y << 1) | (z << 2);
+        // return x | (y << 1) | (z << 2);
     }
 
     bool intersectRayAABB(const Vec3f& origin, const Vec3f& dir, const Vec3f& boxMin, const Vec3f& boxMax, float& tNear, float& tFar) const {
@@ -479,9 +480,9 @@ private:
         // Pre-allocate chunks
         Vec3i chunkGridSize = (gridSize + CHUNK_THRESHOLD - 1) / CHUNK_THRESHOLD;
         Vec3i maxChunkPos = chunkGridSize - 1;
-        //size_t maxChunkIdx = chunkMortonIndex(maxChunkPos);
-        chunks.resize(4096);
-        activeChunks.resize(4096, false);
+        Vec3i totalChunks = (gridSize / CHUNK_THRESHOLD);
+        chunks.resize(totalChunks.x * totalChunks.y * totalChunks.z);
+        activeChunks.resize(totalChunks.x * totalChunks.y * totalChunks.z, false);
 
         for (int z = 0; z < gridSize.z; ++z) {
             //if z mod 16 then make a new chunk
@@ -724,20 +725,20 @@ public:
                     cv = nextPos.floorToI();
 
                     // Re-calculate tMax for the DDA from this new position
-                    if (ray.x > 0) tMax.x = (std::floor(nextPos.x) + 1.0f - nextPos.x) / ray.x;
-                    else if (ray.x < 0) tMax.x = (nextPos.x - std::floor(nextPos.x)) / -ray.x;
+                    if (ray.x > 0) tMax.x = ((std::floor(nextPos.x) + 1.0f - nextPos.x) / ray.x) + nextT;
+                    else if (ray.x < 0) tMax.x = ((nextPos.x - std::floor(nextPos.x)) / -ray.x) + nextT;
                     else tMax.x = INF;
                     
                     // if (ray.x != 0) tMax.x += nextT; // Adjust absolute T
 
-                    if (ray.y > 0) tMax.y = (std::floor(nextPos.y) + 1.0f - nextPos.y) / ray.y;
-                    else if (ray.y < 0) tMax.y = (nextPos.y - std::floor(nextPos.y)) / -ray.y;
+                    if (ray.y > 0) tMax.y = ((std::floor(nextPos.y) + 1.0f - nextPos.y) / ray.y) + nextT;
+                    else if (ray.y < 0) tMax.y = ((nextPos.y - std::floor(nextPos.y)) / -ray.y) + nextT;
                     else tMax.y = INF;
 
                     // if (ray.y != 0) tMax.y += nextT;
 
-                    if (ray.z > 0) tMax.z = (std::floor(nextPos.z) + 1.0f - nextPos.z) / ray.z;
-                    else if (ray.z < 0) tMax.z = (nextPos.z - std::floor(nextPos.z)) / -ray.z;
+                    if (ray.z > 0) tMax.z = ((std::floor(nextPos.z) + 1.0f - nextPos.z) / ray.z) + nextT;
+                    else if (ray.z < 0) tMax.z = ((nextPos.z - std::floor(nextPos.z)) / -ray.z) + nextT;
                     else tMax.z = INF;
                     
                     // if (ray.z != 0) tMax.z += nextT;
