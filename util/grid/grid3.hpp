@@ -14,6 +14,7 @@
 #include "../noise/pnoise2.hpp"
 #include "../vecmat/mat4.hpp"
 #include "../vecmat/mat3.hpp"
+#include "camera.hpp"
 #include <vector>
 #include <algorithm>
 #include "../basicdefines.hpp"
@@ -21,38 +22,6 @@
 
 //constexpr char magic[4] = {'Y', 'G', 'G', '3'};
 static constexpr int CHUNK_THRESHOLD = 16; //at this size, subdivide.
-
-Mat4f lookAt(const Vec3f& eye, const Vec3f& center, const Vec3f& up) {
-    Vec3f const f = (center - eye).normalized();
-    Vec3f const s = f.cross(up).normalized();
-    Vec3f const u = s.cross(f);
-
-    Mat4f Result = Mat4f::identity();
-    Result(0, 0) = s.x;
-    Result(1, 0) = s.y;
-    Result(2, 0) = s.z;
-    Result(3, 0) = -s.dot(eye);
-    Result(0, 1) = u.x;
-    Result(1, 1) = u.y;
-    Result(2, 1) = u.z;
-    Result(3, 1) = -u.dot(eye);
-    Result(0, 2) = -f.x;
-    Result(1, 2) = -f.y;
-    Result(2, 2) = -f.z;
-    Result(3, 2) = f.dot(eye);
-    return Result;
-}
-
-Mat4f perspective(float fovy, float aspect, float zNear, float zfar) {
-    float const tanhalfF = tan(fovy / 2);
-    Mat4f Result = 0;
-    Result(0,0) = 1 / (aspect * tanhalfF);
-    Result(1,1) = 1 / tanhalfF;
-    Result(2,2) = zfar / (zNear - zfar);
-    Result(2,3) = -1;
-    Result(3,2) = -(zfar * zNear) / (zfar - zNear);
-    return Result;
-}
 
 struct Voxel {
     float weight = 1.0;
@@ -68,45 +37,6 @@ struct Voxel {
     
     auto members() -> std::tuple<float&, bool&, float&, Vec3ui8&> {
         return std::tie(weight, active, alpha, color);
-    }
-};
-
-struct Camera {
-    Ray3f posfor;
-    Vec3f up;
-    float fov;
-    Camera(Vec3f pos, Vec3f viewdir, Vec3f up, float fov = 80) : posfor(Ray3f(pos, viewdir)), up(up), fov(fov) {}
-    
-    void rotateYaw(float angle) {
-        float cosA = cos(angle);
-        float sinA = sin(angle);
-        
-        Vec3f right = posfor.direction.cross(up).normalized();
-        posfor.direction = posfor.direction * cosA + right * sinA;
-        posfor.direction = posfor.direction.normalized();
-    }
-    
-    void rotatePitch(float angle) {
-        float cosA = cos(angle);
-        float sinA = sin(angle);
-        
-        Vec3f right = posfor.direction.cross(up).normalized();
-        posfor.direction = posfor.direction * cosA + up * sinA;
-        posfor.direction = posfor.direction.normalized();
-        
-        up = right.cross(posfor.direction).normalized();
-    }
-
-    Vec3f forward() const {
-        return (posfor.direction - posfor.origin).normalized();
-    }
-
-    Vec3f right() const {
-        return forward().cross(up).normalized();
-    }
-
-    float fovRad() const {
-        return fov * (M_PI / 180);
     }
 };
 
@@ -368,41 +298,51 @@ private:
         }
     }
 
-    size_t mortonEncode(Vec3i pos) const {
-        return mortonEncode(pos.x, pos.y, pos.z);
-    }
-    
-    size_t mortonEncode(int x, int y, int z) const {
-        size_t result = 0;
-        uint64_t xx = x & 0x1FFFFF;  // Mask to 21 bits
-        uint64_t yy = y & 0x1FFFFF;
-        uint64_t zz = z & 0x1FFFFF;
-        
-        // Spread bits using parallel bit deposit operations
-        xx = (xx | (xx << 32)) & 0x1F00000000FFFF;
-        xx = (xx | (xx << 16)) & 0x1F0000FF0000FF;
-        xx = (xx | (xx << 8)) & 0x100F00F00F00F00F;
-        xx = (xx | (xx << 4)) & 0x10C30C30C30C30C3;
-        xx = (xx | (xx << 2)) & 0x1249249249249249;
-        
-        yy = (yy | (yy << 32)) & 0x1F00000000FFFF;
-        yy = (yy | (yy << 16)) & 0x1F0000FF0000FF;
-        yy = (yy | (yy << 8)) & 0x100F00F00F00F00F;
-        yy = (yy | (yy << 4)) & 0x10C30C30C30C30C3;
-        yy = (yy | (yy << 2)) & 0x1249249249249249;
-        
-        zz = (zz | (zz << 32)) & 0x1F00000000FFFF;
-        zz = (zz | (zz << 16)) & 0x1F0000FF0000FF;
-        zz = (zz | (zz << 8)) & 0x100F00F00F00F00F;
-        zz = (zz | (zz << 4)) & 0x10C30C30C30C30C3;
-        zz = (zz | (zz << 2)) & 0x1249249249249249;
 
-        result = xx | (yy << 1) | (zz << 2);
+    size_t getIdx(Vec3i pos) const {
+        return getIdx(pos.x, pos.y, pos.z);
+    }
+
+    size_t resizegetIDX(int x, int y, int z, int a, int b, int c) {
+        size_t result = 0;
+        result = z * a*b + y * a + x;
+        return result;
+    }
+
+    size_t getIdx(int x, int y, int z) const {
+        size_t result = 0;
+
+        //I probably should integrate this properly, but apparently my resize broke because I didnt. so its removed.
+        // uint64_t xx = x & 0x1FFFFF;  // Mask to 21 bits
+        // uint64_t yy = y & 0x1FFFFF;
+        // uint64_t zz = z & 0x1FFFFF;
+        
+        // // Spread bits using parallel bit deposit operations
+        // xx = (xx | (xx << 32)) & 0x1F00000000FFFF;
+        // xx = (xx | (xx << 16)) & 0x1F0000FF0000FF;
+        // xx = (xx | (xx << 8)) & 0x100F00F00F00F00F;
+        // xx = (xx | (xx << 4)) & 0x10C30C30C30C30C3;
+        // xx = (xx | (xx << 2)) & 0x1249249249249249;
+        
+        // yy = (yy | (yy << 32)) & 0x1F00000000FFFF;
+        // yy = (yy | (yy << 16)) & 0x1F0000FF0000FF;
+        // yy = (yy | (yy << 8)) & 0x100F00F00F00F00F;
+        // yy = (yy | (yy << 4)) & 0x10C30C30C30C30C3;
+        // yy = (yy | (yy << 2)) & 0x1249249249249249;
+        
+        // zz = (zz | (zz << 32)) & 0x1F00000000FFFF;
+        // zz = (zz | (zz << 16)) & 0x1F0000FF0000FF;
+        // zz = (zz | (zz << 8)) & 0x100F00F00F00F00F;
+        // zz = (zz | (zz << 4)) & 0x10C30C30C30C30C3;
+        // zz = (zz | (zz << 2)) & 0x1249249249249249;
+
+        // result = xx | (yy << 1) | (zz << 2);
+        result = z * xyPlane + y * gridSize.x + x;
         return result;
     }
     
     size_t chunkMortonIndex(const Vec3i& chunkpos) const {
-        return mortonEncode(chunkpos.x, chunkpos.y, chunkpos.z);
+        return getIdx(chunkpos.x, chunkpos.y, chunkpos.z);
         // uint32_t x = static_cast<uint32_t>(chunkpos.x) & 0x03FF;
         // uint32_t y = static_cast<uint32_t>(chunkpos.y) & 0x03FF;
         // uint32_t z = static_cast<uint32_t>(chunkpos.z) & 0x03FF;
@@ -437,7 +377,13 @@ private:
         tNear = tMin.maxComp();
         tFar = tMax.minComp();
         
-        return tMax >= tMin && tMax >= 0.0f;
+        if (tNear > tFar) return false;
+        
+        if (tFar < 0) return false;
+        
+        if (tNear < 0) tNear = 0;
+        
+        return true;
     }
 
     std::vector<Vec3f> precomputeRayDirs(const Camera& cam, Vec2i res) const {
@@ -492,7 +438,7 @@ private:
                     //if x mod 16 then make a new chunk
                     Vec3i pos(x,y,z);
                     Vec3i chunkPos = getChunkCoord(pos);
-                    size_t idx = mortonEncode(pos);
+                    size_t idx = getIdx(pos);
                     size_t chunkidx = chunkMortonIndex(chunkPos);
                     
                     if (chunkidx >= chunks.size()) {
@@ -564,11 +510,11 @@ public:
     static std::unique_ptr<VoxelGrid> deserializeFromFile(const std::string& filename);
     
     Voxel& get(int x, int y, int z) {
-        return voxels[mortonEncode(x,y,z)];
+        return voxels[getIdx(x,y,z)];
     }
 
     const Voxel& get(int x, int y, int z) const {
-        return voxels[mortonEncode(x,y,z)];
+        return voxels[getIdx(x,y,z)];
     }
 
     Voxel& get(const Vec3i& xyz) {
@@ -580,7 +526,7 @@ public:
     }
     
     bool isActive(int x, int y, int z) const {
-        return activeVoxels[mortonEncode(x,y,z)];
+        return activeVoxels[getIdx(x,y,z)];
     }
     
     bool isActive(const Vec3i& xyz) const {
@@ -640,7 +586,7 @@ public:
                 resize(gridSize.max(pos));
             }
             
-            size_t idx = mortonEncode(pos.x, pos.y, pos.z);
+            size_t idx = getIdx(pos.x, pos.y, pos.z);
             Voxel& v = voxels[idx];
             v.active = active;
             v.color = color;
@@ -663,7 +609,7 @@ public:
         
         // Set all positions
         for (const auto& pos : positions) {
-            size_t idx = mortonEncode(pos.x, pos.y, pos.z);
+            size_t idx = getIdx(pos.x, pos.y, pos.z);
             Voxel& v = voxels[idx];
             v.active = active;
             v.color = color;
@@ -746,7 +692,7 @@ public:
                 }
                 continue;
             }
-            size_t idx = mortonEncode(cv.x, cv.y, cv.z);
+            size_t idx = getIdx(cv.x, cv.y, cv.z);
             if (voxels[idx].active) {
                 activeIndices.push_back(idx);
             }
@@ -856,9 +802,9 @@ public:
             Vec3f rayStartGrid = cam.posfor.origin;
             Vec3f rayEnd = rayStartGrid + rayDirWorld * tFar;
             Vec3f ray = rayEnd - rayStartGrid;
-            //rayStartGrid = rayStartGrid + (tNear + 0.0001f);
+            rayStartGrid = rayStartGrid + (rayDirWorld * tNear) + 0.0001f;
 
-            voxelTraverse(rayStartGrid, rayEnd, outVoxel, 512);
+            voxelTraverse(rayStartGrid, rayEnd, outVoxel);
             Vec3ui8 hitColor = outVoxel.color;
             // Set pixel color in buffer
             switch (colorformat) {
@@ -1016,6 +962,7 @@ public:
         }
         return outframes;
     }
+
 };
 //#include "g3_serialization.hpp" needed to be usable
 
