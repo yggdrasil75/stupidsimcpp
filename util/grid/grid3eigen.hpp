@@ -4,12 +4,14 @@
 #include "../../eigen/Eigen/Dense"
 #include "../timing_decorator.hpp"
 #include "../output/frame.hpp"
+#include "camera.hpp"
 #include <vector>
 #include <array>
 #include <memory>
 #include <algorithm>
 #include <limits>
 #include <cmath>
+#include <functional>
 
 #ifdef SSE
 #include <immintrin.h>
@@ -35,8 +37,8 @@ public:
         float refraction; 
         float reflection;
 
-        NodeData(const T& data, const PointType& pos, Eigen::Vector3f color, float size = 0.01f, bool active = true) :
-                 data(data), position(pos), active(active), color(color), size(size) {}
+        NodeData(const T& data, const PointType& pos, bool visible, Eigen::Vector3f color, float size = 0.01f, bool active = true) :
+                 data(data), position(pos), active(active), visible(visible), color(color), size(size) {}
     };
 
     struct OctreeNode {
@@ -120,7 +122,7 @@ private:
         if (node->isLeaf) {
             node->points.emplace_back(pointData);
             if (node->points.size() > maxPointsPerNode && depth < maxDepth) {
-                splitNode(node,depth);
+                splitNode(node, depth);
             }
             return true;
         } else {
@@ -254,8 +256,8 @@ public:
         root_(std::make_unique<OctreeNode>(minBound, maxBound)), maxPointsPerNode(maxPointsPerNode),
         maxDepth(maxDepth), size(0) {}
     
-    bool set(const T& data, const PointType& pos, Eigen::Vector3f color, float size, bool active) {
-        auto pointData = std::make_shared<NodeData>(data, pos, color, size, active);
+    bool set(const T& data, const PointType& pos, bool visible, Eigen::Vector3f color, float size, bool active) {
+        auto pointData = std::make_shared<NodeData>(data, pos, visible, color, size, active);
         if (insertRecursive(root_.get(), pointData, 0)) {
             size++;
             return true;
@@ -324,9 +326,12 @@ public:
         }
         return hits;
     }
-
-    frame renderFrame(const PointType& origin, PointType& dir, PointType& up, PointType& right, int height, 
-                      int width, frame::colormap colorformat = frame::colormap::RGB) {
+    
+    frame renderFrame(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB) {
+        PointType origin = cam.origin;
+        PointType dir = cam.direction.normalized();
+        PointType up = cam.up.normalized();
+        PointType right = cam.right();
         
         frame outFrame(width, height, colorformat);
         std::vector<uint8_t> colorBuffer;
@@ -340,12 +345,11 @@ public:
         }
         colorBuffer.resize(width * height * channels);
 
-        PointType viewDir = dir.normalized();
-        PointType upn = up.normalized();
-        PointType rightn = right.normalized();
         float aspect = static_cast<float>(width) / height;
-        float tanfovy = 1.f;
-        float tanfovx = tanfovy * aspect;
+        float fovRad = cam.fovRad();
+        float tanHalfFov = tan(fovRad * 0.5f);
+        float tanfovy = tanHalfFov;
+        float tanfovx = tanHalfFov * aspect;
 
         const Eigen::Vector3f defaultColor(0.1f, 0.2f, 0.4f);
         
@@ -355,7 +359,7 @@ public:
                 float px = (2.0f * (x + 0.5f) / width - 1.0f) * tanfovx;
                 float py = (1.0f - 2.0f * (y + 0.5f) / height) * tanfovy;
                 
-                PointType rayDir = viewDir + (rightn * px) + (upn * py);
+                PointType rayDir = dir + (right * px) + (up * py);
                 rayDir.normalize();
                 
                 std::vector<std::shared_ptr<NodeData>> hits = voxelTraverse(

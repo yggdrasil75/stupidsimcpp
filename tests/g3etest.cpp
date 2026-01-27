@@ -5,6 +5,7 @@
 #include <atomic>
 #include <mutex>
 #include <cmath>
+#include <random>
 
 #include "../util/grid/grid3eigen.hpp"
 #include "../util/output/bmpwriter.hpp"
@@ -52,41 +53,79 @@ int main() {
         
         // Set point data with larger size for visibility
         // Note: The third parameter is size, which should be radius squared for intersection test
-        octree.set(i, pos, greenColor, 1.f, true);
+        octree.set(i, pos, true, greenColor, 1.0, true);
         pointCount++;
     }
     
     std::cout << "Added " << pointCount << " points to the green sphere." << std::endl;
     
-    // Set camera parameters
-    PointType cameraPos(0.0f, 0.0f, 3.0f); // camera position
-    PointType lookDir(0.0f, 0.0f, -1.0f);  // looking at sphere
-    PointType upDir(0.0f, 1.0f, 0.0f);     // up direction
-    PointType rightDir(1.0f, 0.0f, 0.0f);  // right direction
-    
     // Render parameters
-    int width = 800;
-    int height = 600;
+    int width = 2048;
+    int height = 2048;
     
-    std::cout << "Rendering frame..." << std::endl;
+    // Set up random number generator for camera positions
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_real_distribution<float> angleDist(0.0f, 2.0f * M_PI);
+    std::uniform_real_distribution<float> elevationDist(0.1f, M_PI - 0.1f); // Avoid poles
+    std::uniform_real_distribution<float> radiusDist(2.0f, 4.0f); // Distance from sphere
     
-    // Render frame
-    frame renderedFrame = octree.renderFrame(cameraPos, lookDir, upDir, rightDir, height, width, frame::colormap::RGB);
+    // Generate and save 15 random views
+    const int numViews = 15;
     
-    std::cout << "Frame rendered. Dimensions: " 
-              << renderedFrame.getWidth() << "x" 
-              << renderedFrame.getHeight() << std::endl;
-    
-    // Save as BMP
-    std::string filename = "output/green_sphere.bmp";
-    std::cout << "Saving to " << filename << "..." << std::endl;
-    
-    if (BMPWriter::saveBMP(filename, renderedFrame)) {
-        std::cout << "Successfully saved green sphere to " << filename << std::endl;
-    } else {
-        std::cerr << "Failed to save BMP file!" << std::endl;
-        return 1;
+    for (int viewIndex = 0; viewIndex < numViews; ++viewIndex) {
+        std::cout << "\nRendering view " << (viewIndex + 1) << " of " << numViews << "..." << std::endl;
+        
+        // Generate random spherical coordinates for camera position
+        float azimuth = angleDist(gen);
+        float elevation = elevationDist(gen);
+        float camRadius = radiusDist(gen);
+        
+        // Convert to Cartesian coordinates for camera position
+        float camX = camRadius * sin(elevation) * cos(azimuth);
+        float camY = camRadius * sin(elevation) * sin(azimuth);
+        float camZ = camRadius * cos(elevation);
+        
+        // Camera looks at the origin (center of sphere)
+        Vector3f cameraPos(camX, camY, camZ);
+        Vector3f lookAt(0.0f, 0.0f, 0.0f);
+        
+        // Calculate camera direction (from position to lookAt)
+        Vector3f cameraDir = (lookAt - cameraPos).normalized();
+        
+        // Calculate up vector (avoid gimbal lock)
+        Vector3f worldUp(0.0f, 1.0f, 0.0f);
+        Vector3f right = cameraDir.cross(worldUp).normalized();
+        Vector3f cameraUp = right.cross(cameraDir).normalized();
+        
+        // Create camera
+        Camera cam(cameraPos, cameraDir, cameraUp, 80);
+        
+        // Render frame
+        frame renderedFrame = octree.renderFrame(cam, height, width, frame::colormap::RGB);
+        
+        std::cout << "Frame rendered. Dimensions: " 
+                  << renderedFrame.getWidth() << "x" 
+                  << renderedFrame.getHeight() << std::endl;
+        
+        // Save as BMP
+        std::string filename = "output/green_sphere_view_" + std::to_string(viewIndex + 1) + ".bmp";
+        std::cout << "Saving to " << filename << "..." << std::endl;
+        
+        if (BMPWriter::saveBMP(filename, renderedFrame)) {
+            std::cout << "Successfully saved view to " << filename << std::endl;
+            
+            // Print camera position for reference
+            std::cout << "Camera position: (" << camX << ", " << camY << ", " << camZ << ")" << std::endl;
+        } else {
+            std::cerr << "Failed to save BMP file: " << filename << std::endl;
+        }
+        
+        // Small delay to ensure unique random seeds
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
+    
+    std::cout << "\nAll " << numViews << " views have been saved to the output directory." << std::endl;
     
     return 0;
 }
