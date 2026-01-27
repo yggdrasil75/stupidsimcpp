@@ -34,7 +34,7 @@ int main() {
     Eigen::Vector3f greenColor(0.0f, 1.0f, 0.0f); // green
     
     // Add points on sphere surface (simplified representation)
-    for (int i = 0; i < 1000; ++i) {
+    for (int i = 0; i < 10000; ++i) {
         // Spherical coordinates
         float u = static_cast<float>(rand()) / RAND_MAX;
         float v = static_cast<float>(rand()) / RAND_MAX;
@@ -59,7 +59,7 @@ int main() {
     std::cout << "Added " << pointCount << " points to the green sphere." << std::endl;
     
     // Set camera parameters
-    PointType cameraPos(0.0f, 0.0f, 5.0f); // camera position
+    PointType cameraPos(0.0f, 0.0f, 3.0f); // camera position
     PointType lookDir(0.0f, 0.0f, -1.0f);  // looking at sphere
     PointType upDir(0.0f, 1.0f, 0.0f);     // up direction
     PointType rightDir(1.0f, 0.0f, 0.0f);  // right direction

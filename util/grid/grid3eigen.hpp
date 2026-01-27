@@ -4,6 +4,13 @@
 #include "../../eigen/Eigen/Dense"
 #include "../timing_decorator.hpp"
 #include "../output/frame.hpp"
+#include <vector>
+#include <array>
+#include <memory>
+#include <algorithm>
+#include <limits>
+#include <cmath>
+
 #ifdef SSE
 #include <immintrin.h>
 #endif
@@ -181,8 +188,6 @@ private:
                 arr[i].second = values[i];
                 arr[i].first = (uint8_t)indices[i];
             }
-            
-            
         #else
             auto a0 = arr[0], a1 = arr[1], a2 = arr[2], a3 = arr[3];
             auto a4 = arr[4], a5 = arr[5], a6 = arr[6], a7 = arr[7];
@@ -247,7 +252,7 @@ private:
 public:
     Octree(const PointType& minBound, const PointType& maxBound, size_t maxPointsPerNode=16, size_t maxDepth = 16) :
         root_(std::make_unique<OctreeNode>(minBound, maxBound)), maxPointsPerNode(maxPointsPerNode),
-        maxDepth(maxDepth), size(size) {}
+        maxDepth(maxDepth), size(0) {}
     
     bool set(const T& data, const PointType& pos, Eigen::Vector3f color, float size, bool active) {
         auto pointData = std::make_shared<NodeData>(data, pos, color, size, active);
@@ -269,20 +274,12 @@ public:
             if (!node || tMin > tMax) return;
             if (node->isLeaf) {
                 for (const auto& pointData : node->points) {
-                    //if (!pointData->active) continue;
-                    
-                    // Calculate intersection with axis-aligned cube
-                    float halfSize = pointData->size * 0.5f;
-                    PointType cubeMin = pointData->position - PointType::Constant(halfSize);
-                    PointType cubeMax = pointData->position + PointType::Constant(halfSize);
-                    
-                    // Ray-cube intersection test
-                    float cubeTMin = tMin;
-                    float cubeTMax = tMax;
-                    
-                    if (rayBoxIntersect(origin, dir, {cubeMin, cubeMax}, cubeTMin, cubeTMax)) {
-                        // Check if intersection is within max distance
-                        if (cubeTMin <= maxDist) {
+                    PointType toPoint = pointData->position - origin;
+                    float projection = toPoint.dot(dir);
+                    if (projection >= 0 && projection <= maxDist) {
+                        PointType closestPoint = origin + dir * projection;
+                        float distSq = (pointData->position - closestPoint).squaredNorm();
+                        if (distSq < pointData->size * pointData->size) {
                             hits.emplace_back(pointData);
                             if (stopAtFirstHit) return;
                         }
