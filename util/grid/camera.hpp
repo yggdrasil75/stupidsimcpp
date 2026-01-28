@@ -13,24 +13,23 @@ struct Camera {
     Vector3f direction;
     Vector3f up;
     float fov;
+    float movementSpeed;
+    float rotationSpeed;
     
-    Camera(const Vector3f& pos, const Vector3f& viewdir, const Vector3f& up, float fov = 80) 
-        : origin(pos), direction(viewdir), up(up.normalized()), fov(fov) {}
+    Camera(const Vector3f& pos, const Vector3f& viewdir, const Vector3f& up, float fov = 80,
+           float moveSpeed = 1.0f, float rotSpeed = 0.5f) 
+        : origin(pos), direction(viewdir.normalized()), up(up.normalized()), fov(fov), movementSpeed(moveSpeed), rotationSpeed(rotSpeed) {}
     
     void rotateYaw(float angle) {
-        float cosA = cos(angle);
-        float sinA = sin(angle);
-        
-        Vector3f right = direction.cross(up).normalized();
-        
-        // Rotate around up vector (yaw)
+        angle *= rotationSpeed;
         Matrix3f rotation;
         rotation = Eigen::AngleAxisf(angle, up);
         direction = rotation * direction;
+        direction.normalize();
     }
     
     void rotatePitch(float angle) {
-        // Clamp pitch to avoid gimbal lock
+        angle *= rotationSpeed;
         Vector3f right = direction.cross(up).normalized();
         
         // Rotate around right vector (pitch)
@@ -41,6 +40,30 @@ struct Camera {
         
         // Recalculate up vector to maintain orthogonality
         up = right.cross(direction).normalized();
+    }
+
+    void moveForward(float distance) {
+        origin += forward() * distance * movementSpeed;
+    }
+    
+    void moveBackward(float distance) {
+        origin -= forward() * distance * movementSpeed;
+    }
+    
+    void moveRight(float distance) {
+        origin += right() * distance * movementSpeed;
+    }
+    
+    void moveLeft(float distance) {
+        origin -= right() * distance * movementSpeed;
+    }
+    
+    void moveUp(float distance) {
+        origin += up * distance * movementSpeed;
+    }
+    
+    void moveDown(float distance) {
+        origin -= up * distance * movementSpeed;
     }
 
     Vector3f forward() const {
@@ -55,17 +78,32 @@ struct Camera {
         return fov * (M_PI / 180.0f);
     }
     
-    // Additional useful methods
-    void moveForward(float distance) {
-        origin += forward() * distance;
+    // Look at a specific point
+    void lookAt(const Vector3f& target) {
+        direction = (target - origin).normalized();
+        
+        // Recalculate up vector
+        Vector3f worldUp(0, 1, 0);
+        if (direction.cross(worldUp).norm() < 0.001f) {
+            worldUp = Vector3f(0, 0, 1);
+        }
+        
+        Vector3f right = direction.cross(worldUp).normalized();
+        up = right.cross(direction).normalized();
     }
     
-    void moveRight(float distance) {
-        origin += right() * distance;
+    // Set position directly
+    void setPosition(const Vector3f& pos) {
+        origin = pos;
     }
     
-    void moveUp(float distance) {
-        origin += up * distance;
+    // Set view direction directly
+    void setDirection(const Vector3f& dir) {
+        direction = dir.normalized();
+        // Recalculate up
+        Vector3f worldUp(0, 1, 0);
+        Vector3f right = direction.cross(worldUp).normalized();
+        up = right.cross(direction).normalized();
     }
     
     // Get view matrix (lookAt matrix)
@@ -88,7 +126,7 @@ struct Camera {
     }
     
     // Get projection matrix (perspective)
-    Eigen::Matrix4f getProjectionMatrix(float aspectRatio, float nearPlane = 0.1f, float farPlane = 100.0f) const {
+    Eigen::Matrix4f getProjectionMatrix(float aspectRatio, float nearPlane = 0.1f, float farPlane = 1000.0f) const {
         float fovrad = fovRad();
         float tanHalfFov = tan(fovrad / 2.0f);
         
@@ -101,6 +139,14 @@ struct Camera {
         projection(2, 3) = -(2.0f * farPlane * nearPlane) / (farPlane - nearPlane);
         
         return projection;
+    }
+    
+    void mouseLook(float deltaX, float deltaY) {
+        float yaw = -deltaX * 0.001f;
+        float pitch = -deltaY * 0.001f;
+        
+        rotateYaw(yaw);
+        rotatePitch(pitch);
     }
 };
 

@@ -14,6 +14,7 @@
 #include <functional>
 #include <iostream>
 #include <iomanip>
+#include <fstream>
 
 #ifdef SSE
 #include <immintrin.h>
@@ -44,6 +45,10 @@ public:
                  float reflection = 0.0f) : data(data), position(pos), active(active), visible(visible), 
                  color(color), size(size), light(light), emittance(emittance), refraction(refraction), 
                  reflection(reflection) {}
+        
+        // Default constructor for serialization
+        NodeData() : active(false), visible(false), size(0.0f), light(false), 
+                     emittance(0.0f), refraction(0.0f), reflection(0.0f) {}
     };
 
     struct OctreeNode {
@@ -137,6 +142,116 @@ private:
             }
         }
         return false;
+    }
+
+    template<typename V>
+    void writeVal(std::ofstream& out, const V& val) const {
+        out.write(reinterpret_cast<const char*>(&val), sizeof(V));
+    }
+
+    template<typename V>
+    void readVal(std::ifstream& in, V& val) {
+        in.read(reinterpret_cast<char*>(&val), sizeof(V));
+    }
+
+    void writeVec3(std::ofstream& out, const Eigen::Vector3f& vec) const {
+        writeVal(out, vec.x());
+        writeVal(out, vec.y());
+        writeVal(out, vec.z());
+    }
+
+    void readVec3(std::ifstream& in, Eigen::Vector3f& vec) {
+        float x, y, z;
+        readVal(in, x); readVal(in, y); readVal(in, z);
+        vec = Eigen::Vector3f(x, y, z);
+    }
+
+    void serializeNode(std::ofstream& out, const OctreeNode* node) const {
+        writeVal(out, node->isLeaf);
+
+        if (node->isLeaf) {
+            size_t pointCount = node->points.size();
+            writeVal(out, pointCount);
+            for (const auto& pt : node->points) {
+                // Write raw data T (Must be POD)
+                writeVal(out, pt->data);
+                // Write properties
+                writeVec3(out, pt->position);
+                writeVal(out, pt->active);
+                writeVal(out, pt->visible);
+                writeVal(out, pt->size);
+                writeVec3(out, pt->color);
+                writeVal(out, pt->light);
+                writeVal(out, pt->emittance);
+                writeVal(out, pt->refraction);
+                writeVal(out, pt->reflection);
+            }
+        } else {
+            // Write bitmask of active children
+            uint8_t childMask = 0;
+            for (int i = 0; i < 8; ++i) {
+                if (node->children[i] != nullptr) {
+                    childMask |= (1 << i);
+                }
+            }
+            writeVal(out, childMask);
+
+            // Recursively write only existing children
+            for (int i = 0; i < 8; ++i) {
+                if (node->children[i]) {
+                    serializeNode(out, node->children[i].get());
+                }
+            }
+        }
+    }
+
+    void deserializeNode(std::ifstream& in, OctreeNode* node) {
+        bool isLeaf;
+        readVal(in, isLeaf);
+        node->isLeaf = isLeaf;
+
+        if (isLeaf) {
+            size_t pointCount;
+            readVal(in, pointCount);
+            node->points.reserve(pointCount);
+            
+            for (size_t i = 0; i < pointCount; ++i) {
+                auto pt = std::make_shared<NodeData>();
+                readVal(in, pt->data);
+                readVec3(in, pt->position);
+                readVal(in, pt->active);
+                readVal(in, pt->visible);
+                readVal(in, pt->size);
+                readVec3(in, pt->color);
+                readVal(in, pt->light);
+                readVal(in, pt->emittance);
+                readVal(in, pt->refraction);
+                readVal(in, pt->reflection);
+                node->points.push_back(pt);
+            }
+        } else {
+            uint8_t childMask;
+            readVal(in, childMask);
+            
+            PointType center = node->center;
+
+            for (int i = 0; i < 8; ++i) {
+                if ((childMask >> i) & 1) {
+                    // Reconstruct bounds for child
+                    PointType childMin, childMax;
+                    for (int d = 0; d < Dim; ++d) {
+                        bool high = (i >> d) & 1;
+                        childMin[d] = high ? center[d] : node->bounds.first[d];
+                        childMax[d] = high ? node->bounds.second[d] : center[d];
+                    }
+                    
+                    node->children[i] = std::make_unique<OctreeNode>(childMin, childMax);
+                    deserializeNode(in, node->children[i].get());
+                } else {
+                    node->children[i] = nullptr;
+                }
+            }
+        }
     }
 
     void bitonic_sort_8(std::array<std::pair<int, float>, 8>& arr) const noexcept {
@@ -280,6 +395,8 @@ public:
         root_(std::make_unique<OctreeNode>(minBound, maxBound)), maxPointsPerNode(maxPointsPerNode),
         maxDepth(maxDepth), size(0) {}
     
+    Octree() : root_(nullptr), maxPointsPerNode(16), maxDepth(16), size(0) {}
+
     bool set(const T& data, const PointType& pos, bool visible, Eigen::Vector3f color, float size, bool active,
              bool light = false, float emittance = 0.0f, float refraction = 0.0f, float reflection = 0.0f) {
         auto pointData = std::make_shared<NodeData>(data, pos, visible, color, size, active, 
@@ -289,6 +406,53 @@ public:
             return true;
         }
         return false;
+    }
+
+    bool save(const std::string& filename) const {
+        if (!root_) return false;
+        std::ofstream out(filename, std::ios::binary);
+        if (!out) return false;
+
+        uint32_t magic = 0x79676733; 
+        writeVal(out, magic);
+        writeVal(out, maxDepth);
+        writeVal(out, maxPointsPerNode);
+        writeVal(out, size);
+        
+        writeVec3(out, root_->bounds.first);
+        writeVec3(out, root_->bounds.second);
+
+        serializeNode(out, root_.get());
+        
+        out.close();
+        return true;
+    }
+
+    // Load Octree from binary file
+    bool load(const std::string& filename) {
+        std::ifstream in(filename, std::ios::binary);
+        if (!in) return false;
+
+        uint32_t magic;
+        readVal(in, magic);
+        if (magic != 0x0C78E3) {
+            std::cerr << "Invalid Octree file format" << std::endl;
+            return false;
+        }
+
+        readVal(in, maxDepth);
+        readVal(in, maxPointsPerNode);
+        readVal(in, size);
+
+        PointType minBound, maxBound;
+        readVec3(in, minBound);
+        readVec3(in, maxBound);
+
+        root_ = std::make_unique<OctreeNode>(minBound, maxBound);
+        deserializeNode(in, root_.get());
+
+        in.close();
+        return true;
     }
 
     std::vector<std::shared_ptr<NodeData>> voxelTraverse(const PointType& origin, const PointType& direction,
@@ -580,6 +744,34 @@ public:
     }
 
     bool empty() const { return size == 0; }
+
+    void clear() {
+        if (!root_) return;
+        
+        std::function<void(OctreeNode*)> clearNode = [&](OctreeNode* node) {
+            if (!node) return;
+            
+            node->points.clear();
+            node->points.shrink_to_fit();
+            
+            for (int i = 0; i < 8; ++i) {
+                if (node->children[i]) {
+                    clearNode(node->children[i].get());
+                    node->children[i].reset(nullptr);
+                }
+            }
+            
+            node->isLeaf = true;
+        };
+        
+        clearNode(root_.get());
+        
+        PointType minBound = root_->bounds.first;
+        PointType maxBound = root_->bounds.second;
+        root_ = std::make_unique<OctreeNode>(minBound, maxBound);
+        
+        size = 0;
+    }
 };
 
 #endif
