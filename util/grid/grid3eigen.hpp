@@ -372,26 +372,33 @@ public:
                 
                 int idx = (y * width + x) * channels;
                 
-                if (colorformat == frame::colormap::B) {
-                     colorBuffer[idx] = static_cast<uint8_t>(color.mean() * 255.0f);
-                } else if (colorformat == frame::colormap::RGB) {
-                    colorBuffer[idx    ] = static_cast<uint8_t>(color[0] * 255.0f);
-                    colorBuffer[idx + 1] = static_cast<uint8_t>(color[1] * 255.0f);
-                    colorBuffer[idx + 2] = static_cast<uint8_t>(color[2] * 255.0f);
-                } else if (colorformat == frame::colormap::BGR) {
-                    colorBuffer[idx    ] = static_cast<uint8_t>(color[2] * 255.0f);
-                    colorBuffer[idx + 1] = static_cast<uint8_t>(color[1] * 255.0f);
-                    colorBuffer[idx + 2] = static_cast<uint8_t>(color[0] * 255.0f);
-                } else if (colorformat == frame::colormap::RGBA) {
-                    colorBuffer[idx    ] = static_cast<uint8_t>(color[0] * 255.0f);
-                    colorBuffer[idx + 1] = static_cast<uint8_t>(color[1] * 255.0f);
-                    colorBuffer[idx + 2] = static_cast<uint8_t>(color[2] * 255.0f);
-                    colorBuffer[idx + 3] = 255;
-                } else if (colorformat == frame::colormap::BGRA) {
-                    colorBuffer[idx    ] = static_cast<uint8_t>(color[2] * 255.0f);
-                    colorBuffer[idx + 1] = static_cast<uint8_t>(color[1] * 255.0f);
-                    colorBuffer[idx + 2] = static_cast<uint8_t>(color[0] * 255.0f);
-                    colorBuffer[idx + 3] = 255;
+                switch(colorformat) {
+                    case frame::colormap::B:
+                        colorBuffer[idx    ] = static_cast<uint8_t>(color.mean() * 255.0f);
+                        break;
+                    case frame::colormap::RGB:
+                        colorBuffer[idx    ] = static_cast<uint8_t>(color[0] * 255.0f);
+                        colorBuffer[idx + 1] = static_cast<uint8_t>(color[1] * 255.0f);
+                        colorBuffer[idx + 2] = static_cast<uint8_t>(color[2] * 255.0f);
+                        break;
+                    case frame::colormap::BGR:
+                        colorBuffer[idx    ] = static_cast<uint8_t>(color[2] * 255.0f);
+                        colorBuffer[idx + 1] = static_cast<uint8_t>(color[1] * 255.0f);
+                        colorBuffer[idx + 2] = static_cast<uint8_t>(color[0] * 255.0f);
+                        break;
+                    case frame::colormap::RGBA:
+                        colorBuffer[idx    ] = static_cast<uint8_t>(color[0] * 255.0f);
+                        colorBuffer[idx + 1] = static_cast<uint8_t>(color[1] * 255.0f);
+                        colorBuffer[idx + 2] = static_cast<uint8_t>(color[2] * 255.0f);
+                        colorBuffer[idx + 3] = 255;
+                        break;
+                    case frame::colormap::BGRA:
+                        colorBuffer[idx    ] = static_cast<uint8_t>(color[2] * 255.0f);
+                        colorBuffer[idx + 1] = static_cast<uint8_t>(color[1] * 255.0f);
+                        colorBuffer[idx + 2] = static_cast<uint8_t>(color[0] * 255.0f);
+                        colorBuffer[idx + 3] = 255;
+                        break;
+                    
                 }
             }
         }
