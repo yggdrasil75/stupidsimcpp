@@ -20,6 +20,7 @@
 #endif
 
 constexpr int Dim = 3;
+constexpr int maxBounces = 4;
 
 template<typename T>
 class Octree {
@@ -33,14 +34,16 @@ public:
         bool visible;
         float size;
         Eigen::Vector3f color;
-        ///TODO: dont add these just yet.
         bool light;
-        float emittance; //amount of light to emit
+        float emittance;
         float refraction; 
         float reflection;
 
-        NodeData(const T& data, const PointType& pos, bool visible, Eigen::Vector3f color, float size = 0.01f, bool active = true) :
-                 data(data), position(pos), active(active), visible(visible), color(color), size(size) {}
+        NodeData(const T& data, const PointType& pos, bool visible, Eigen::Vector3f color, float size = 0.01f,
+                 bool active = true, bool light = false, float emittance = 0.0f, float refraction = 0.0f, 
+                 float reflection = 0.0f) : data(data), position(pos), active(active), visible(visible), 
+                 color(color), size(size), light(light), emittance(emittance), refraction(refraction), 
+                 reflection(reflection) {}
     };
 
     struct OctreeNode {
@@ -253,13 +256,34 @@ private:
         return true;
     }
 
+    float randomValueNormalDistribution(uint32_t& state) {
+        std::mt19937 gen(state);
+        state = gen();
+        std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+        float θ = 2 * M_PI * dist(gen);
+        float ρ = sqrt(-2 * log(dist(gen)));
+        return ρ * cos(θ);
+    }
+
+    PointType randomInHemisphere(const PointType& normal, uint32_t& state) {
+        float x = randomValueNormalDistribution(state);
+        float y = randomValueNormalDistribution(state);
+        float z = randomValueNormalDistribution(state);
+        return PointType(x,y,z).normalized();
+    }
+
+    float rgbToGrayscale(const Eigen::Vector3f& color) const {
+        return 0.2126f * color[0] + 0.7152f * color[1] + 0.0722f * color[2];
+    }
 public:
     Octree(const PointType& minBound, const PointType& maxBound, size_t maxPointsPerNode=16, size_t maxDepth = 16) :
         root_(std::make_unique<OctreeNode>(minBound, maxBound)), maxPointsPerNode(maxPointsPerNode),
         maxDepth(maxDepth), size(0) {}
     
-    bool set(const T& data, const PointType& pos, bool visible, Eigen::Vector3f color, float size, bool active) {
-        auto pointData = std::make_shared<NodeData>(data, pos, visible, color, size, active);
+    bool set(const T& data, const PointType& pos, bool visible, Eigen::Vector3f color, float size, bool active,
+             bool light = false, float emittance = 0.0f, float refraction = 0.0f, float reflection = 0.0f) {
+        auto pointData = std::make_shared<NodeData>(data, pos, visible, color, size, active, 
+                                                    light, emittance, refraction, reflection);
         if (insertRecursive(root_.get(), pointData, 0)) {
             this->size++;
             return true;
@@ -353,7 +377,87 @@ public:
         float tanfovy = tanHalfFov;
         float tanfovx = tanHalfFov * aspect;
 
-        const Eigen::Vector3f defaultColor(0.1f, 0.2f, 0.4f);
+        const Eigen::Vector3f defaultColor(0.01f, 0.01f, 0.01f); 
+        float rayLength = std::numeric_limits<float>::max();
+        std::function<Eigen::Vector3f(const PointType&, const PointType&, int, uint32_t&)> traceRay = 
+            [&](const PointType& rayOrig, const PointType& rayDir, int bounces, uint32_t& rngState) -> Eigen::Vector3f {
+
+            if (bounces > maxBounces) return {0,0,0};
+
+            auto hits = voxelTraverse(rayOrig, rayDir, rayLength, true);
+            if (hits.empty() && bounces < 1) {
+                return defaultColor; 
+            } else if (hits.empty()) {
+                return {0,0,0};
+            }
+
+            auto obj = hits[0];
+            
+            PointType center = obj->position;
+            float radius = obj->size;
+            PointType L_vec = center - rayOrig;
+            float tca = L_vec.dot(rayDir);
+            float d2 = L_vec.dot(L_vec) - tca * tca;
+            float radius2 = radius * radius;
+
+            float t = tca;
+            if (d2 <= radius2) {
+                float thc = std::sqrt(radius2 - d2);
+                t = tca - thc; 
+                if (t < 0.001f) t = tca + thc;
+            }
+
+            PointType hitPoint = rayOrig + rayDir * t;
+            PointType normal = (hitPoint - center).normalized();
+
+            Eigen::Vector3f finalColor = {0,0,0};
+
+            if (obj->light) {
+                return obj->color * obj->emittance;
+            }
+
+            float refl = obj->reflection;
+            float refr = obj->refraction;
+            float diffuseProb = 1.0f - refl - refr;
+
+            if (diffuseProb > 0.001f) {
+                PointType scatterDir = randomInHemisphere(normal, rngState);
+                
+                Eigen::Vector3f incomingLight = traceRay(hitPoint + normal * 0.002f, scatterDir, bounces + 1, rngState);
+                
+                finalColor += obj->color.cwiseProduct(incomingLight) * diffuseProb;
+            }
+
+            if (refl > 0.001f) {
+                PointType rDir = (rayDir - 2.0f * rayDir.dot(normal) * normal).normalized();
+                finalColor += traceRay(hitPoint + normal * 0.002f, rDir, bounces + 1, rngState) * refl;
+            }
+
+            if (refr > 0.001f) {
+                float ior = 1.45f;
+                float η = 1.0f / ior;
+                float cosI = -normal.dot(rayDir);
+                PointType n_eff = normal;
+
+                if (cosI < 0) {
+                    cosI = -cosI;
+                    n_eff = -normal;
+                    η = ior;
+                }
+
+                float k = 1.0f - η * η * (1.0f - cosI * cosI);
+                PointType nextDir;
+                if (k >= 0.0f) {
+                    nextDir = (η * rayDir + (η * cosI - std::sqrt(k)) * n_eff).normalized();
+                    finalColor += traceRay(hitPoint - n_eff * 0.002f, nextDir, bounces + 1, rngState) * refr;
+                } else {
+                    nextDir = (rayDir - 2.0f * rayDir.dot(n_eff) * n_eff).normalized();
+                    finalColor += traceRay(hitPoint + n_eff * 0.002f, nextDir, bounces + 1, rngState) * refr;
+                }
+            }
+
+            return finalColor;
+        };
         
         #pragma omp parallel for schedule(dynamic) collapse(2)
         for (int y = 0; y < height; ++y) {
@@ -364,17 +468,18 @@ public:
                 PointType rayDir = dir + (right * px) + (up * py);
                 rayDir.normalize();
                 
-                std::vector<std::shared_ptr<NodeData>> hits = voxelTraverse(
-                    origin, rayDir, std::numeric_limits<float>::max(), true);
-                Eigen::Vector3f color = hits.empty() ? defaultColor : hits[0]->color;
+                int pidx = (y * width + x);
+                uint32_t seed = pidx * 1973 + 9277;
+                int idx = pidx * channels;
+                
+                Eigen::Vector3f color = traceRay(origin, rayDir, 0, seed);
                 
                 color = color.cwiseMax(0.0f).cwiseMin(1.0f);
                 
-                int idx = (y * width + x) * channels;
                 
                 switch(colorformat) {
                     case frame::colormap::B:
-                        colorBuffer[idx    ] = static_cast<uint8_t>(color.mean() * 255.0f);
+                        colorBuffer[idx    ] = static_cast<uint8_t>(rgbToGrayscale(color) * 255.0f);
                         break;
                     case frame::colormap::RGB:
                         colorBuffer[idx    ] = static_cast<uint8_t>(color[0] * 255.0f);
@@ -446,10 +551,6 @@ public:
         if (leafNodes == 0) minPointsInLeaf = 0;
         double avgPointsPerLeaf = leafNodes > 0 ? (double)actualPoints / leafNodes : 0.0;
         
-        // Approximate memory usage (overhead of nodes + data payload)
-        // OctreeNode: bounds(24) + vector(24) + children array(8*8=64) + center(12) + bool(1) + padding ~ 128 bytes
-        // NodeData: T + Vec3f(12) + bool(1) + bool(1) + float(4) + Vec3f(12) + padding ~ 32+sizeof(T)
-        // SharedPtr overhead: ~16 bytes
         size_t nodeMem = totalNodes * sizeof(OctreeNode);
         size_t dataMem = actualPoints * (sizeof(NodeData) + 16); 
 
