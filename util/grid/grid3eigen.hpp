@@ -12,6 +12,8 @@
 #include <limits>
 #include <cmath>
 #include <functional>
+#include <iostream>
+#include <iomanip>
 
 #ifdef SSE
 #include <immintrin.h>
@@ -134,7 +136,7 @@ private:
         return false;
     }
 
-    void bitonic_sort_8(std::array<std::pair<int, float>, 8>& arr) noexcept {
+    void bitonic_sort_8(std::array<std::pair<int, float>, 8>& arr) const noexcept {
         #ifdef SSE
             alignas(32) float values[8];
             alignas(32) uint32_t indices[8];
@@ -242,7 +244,7 @@ private:
                 float t1 = (box.first[i] - origin[i]) * invD;
                 float t2 = (box.second[i] - origin[i]) * invD;
                 
-                if (t1>t2) std::swap(t1,t2);
+                if (t1 > t2) std::swap(t1, t2);
                 tMin = std::max(tMin, t1);
                 tMax = std::min(tMax, t2);
                 if (tMin > tMax) return false;
@@ -259,7 +261,7 @@ public:
     bool set(const T& data, const PointType& pos, bool visible, Eigen::Vector3f color, float size, bool active) {
         auto pointData = std::make_shared<NodeData>(data, pos, visible, color, size, active);
         if (insertRecursive(root_.get(), pointData, 0)) {
-            size++;
+            this->size++;
             return true;
         }
         return false;
@@ -364,45 +366,109 @@ public:
                 
                 std::vector<std::shared_ptr<NodeData>> hits = voxelTraverse(
                     origin, rayDir, std::numeric_limits<float>::max(), true);
-                
                 Eigen::Vector3f color = hits.empty() ? defaultColor : hits[0]->color;
                 
                 color = color.cwiseMax(0.0f).cwiseMin(1.0f);
                 
                 int idx = (y * width + x) * channels;
                 
-                switch(colorformat) {
-                    case frame::colormap::B:
-                        colorBuffer[idx    ] = static_cast<uint8_t>(color.mean() * 255.0f);
-                        break;
-                    case frame::colormap::RGB:
-                        colorBuffer[idx    ] = static_cast<uint8_t>(color[0] * 255.0f);
-                        colorBuffer[idx + 1] = static_cast<uint8_t>(color[1] * 255.0f);
-                        colorBuffer[idx + 2] = static_cast<uint8_t>(color[2] * 255.0f);
-                        break;
-                    case frame::colormap::BGR:
-                        colorBuffer[idx    ] = static_cast<uint8_t>(color[2] * 255.0f);
-                        colorBuffer[idx + 1] = static_cast<uint8_t>(color[1] * 255.0f);
-                        colorBuffer[idx + 2] = static_cast<uint8_t>(color[0] * 255.0f);
-                        break;
-                    case frame::colormap::RGBA:
-                        colorBuffer[idx    ] = static_cast<uint8_t>(color[0] * 255.0f);
-                        colorBuffer[idx + 1] = static_cast<uint8_t>(color[1] * 255.0f);
-                        colorBuffer[idx + 2] = static_cast<uint8_t>(color[2] * 255.0f);
-                        colorBuffer[idx + 3] = 255;
-                        break;
-                    case frame::colormap::BGRA:
-                        colorBuffer[idx    ] = static_cast<uint8_t>(color[2] * 255.0f);
-                        colorBuffer[idx + 1] = static_cast<uint8_t>(color[1] * 255.0f);
-                        colorBuffer[idx + 2] = static_cast<uint8_t>(color[0] * 255.0f);
-                        colorBuffer[idx + 3] = 255;
-                        break;
+                if (colorformat == frame::colormap::B) {
+                     colorBuffer[idx] = static_cast<uint8_t>(color.mean() * 255.0f);
+                } else if (colorformat == frame::colormap::RGB) {
+                    colorBuffer[idx    ] = static_cast<uint8_t>(color[0] * 255.0f);
+                    colorBuffer[idx + 1] = static_cast<uint8_t>(color[1] * 255.0f);
+                    colorBuffer[idx + 2] = static_cast<uint8_t>(color[2] * 255.0f);
+                } else if (colorformat == frame::colormap::BGR) {
+                    colorBuffer[idx    ] = static_cast<uint8_t>(color[2] * 255.0f);
+                    colorBuffer[idx + 1] = static_cast<uint8_t>(color[1] * 255.0f);
+                    colorBuffer[idx + 2] = static_cast<uint8_t>(color[0] * 255.0f);
+                } else if (colorformat == frame::colormap::RGBA) {
+                    colorBuffer[idx    ] = static_cast<uint8_t>(color[0] * 255.0f);
+                    colorBuffer[idx + 1] = static_cast<uint8_t>(color[1] * 255.0f);
+                    colorBuffer[idx + 2] = static_cast<uint8_t>(color[2] * 255.0f);
+                    colorBuffer[idx + 3] = 255;
+                } else if (colorformat == frame::colormap::BGRA) {
+                    colorBuffer[idx    ] = static_cast<uint8_t>(color[2] * 255.0f);
+                    colorBuffer[idx + 1] = static_cast<uint8_t>(color[1] * 255.0f);
+                    colorBuffer[idx + 2] = static_cast<uint8_t>(color[0] * 255.0f);
+                    colorBuffer[idx + 3] = 255;
                 }
             }
         }
         
         outFrame.setData(colorBuffer);
         return outFrame;
+    }
+
+    void printStats(std::ostream& os = std::cout) const {
+        if (!root_) {
+            os << "[Octree Stats] Tree is null/empty." << std::endl;
+            return;
+        }
+
+        size_t totalNodes = 0;
+        size_t leafNodes = 0;
+        size_t actualPoints = 0;
+        size_t maxTreeDepth = 0;
+        size_t maxPointsInLeaf = 0;
+        size_t minPointsInLeaf = std::numeric_limits<size_t>::max();
+        
+        // Recursive lambda to gather stats
+        std::function<void(const OctreeNode*, size_t)> traverse = 
+            [&](const OctreeNode* node, size_t depth) {
+            if (!node) return;
+            
+            totalNodes++;
+            maxTreeDepth = std::max(maxTreeDepth, depth);
+
+            if (node->isLeaf) {
+                leafNodes++;
+                size_t pts = node->points.size();
+                actualPoints += pts;
+                maxPointsInLeaf = std::max(maxPointsInLeaf, pts);
+                minPointsInLeaf = std::min(minPointsInLeaf, pts);
+            } else {
+                for (const auto& child : node->children) {
+                    traverse(child.get(), depth + 1);
+                }
+            }
+        };
+
+        traverse(root_.get(), 0);
+
+        if (leafNodes == 0) minPointsInLeaf = 0;
+        double avgPointsPerLeaf = leafNodes > 0 ? (double)actualPoints / leafNodes : 0.0;
+        
+        // Approximate memory usage (overhead of nodes + data payload)
+        // OctreeNode: bounds(24) + vector(24) + children array(8*8=64) + center(12) + bool(1) + padding ~ 128 bytes
+        // NodeData: T + Vec3f(12) + bool(1) + bool(1) + float(4) + Vec3f(12) + padding ~ 32+sizeof(T)
+        // SharedPtr overhead: ~16 bytes
+        size_t nodeMem = totalNodes * sizeof(OctreeNode);
+        size_t dataMem = actualPoints * (sizeof(NodeData) + 16); 
+
+        os << "========================================\n";
+        os << "             OCTREE STATS               \n";
+        os << "========================================\n";
+        os << "Config:\n";
+        os << "  Max Depth Allowed : " << maxDepth << "\n";
+        os << "  Max Pts Per Node  : " << maxPointsPerNode << "\n";
+        os << "Structure:\n";
+        os << "  Total Nodes       : " << totalNodes << "\n";
+        os << "  Leaf Nodes        : " << leafNodes << "\n";
+        os << "  Non-Leaf Nodes    : " << (totalNodes - leafNodes) << "\n";
+        os << "  Tree Height       : " << maxTreeDepth << "\n";
+        os << "Data:\n";
+        os << "  Total Points      : " << size << " (Tracked) / " << actualPoints << " (Counted)\n";
+        os << "  Points/Leaf (Avg) : " << std::fixed << std::setprecision(2) << avgPointsPerLeaf << "\n";
+        os << "  Points/Leaf (Min) : " << minPointsInLeaf << "\n";
+        os << "  Points/Leaf (Max) : " << maxPointsInLeaf << "\n";
+        os << "Bounds:\n";
+        os << "  Min               : [" << root_->bounds.first.transpose() << "]\n";
+        os << "  Max               : [" << root_->bounds.second.transpose() << "]\n";
+        os << "Memory (Approx):\n";
+        os << "  Node Structure    : " << (nodeMem / 1024.0) << " KB\n";
+        os << "  Point Data        : " << (dataMem / 1024.0) << " KB\n";
+        os << "========================================\n" << std::defaultfloat;
     }
 
     bool empty() const { return size == 0; }
