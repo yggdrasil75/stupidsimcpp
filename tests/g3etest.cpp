@@ -39,7 +39,7 @@ struct spheredefaults {
     float reflection = 0.0f;
     float refraction = 0.0f;
     bool fillInside = true;
-    float voxelSize = 1.0f;
+    float voxelSize = 10.0f;
 };
 
 struct ceilingdefaults {
@@ -70,7 +70,7 @@ void createSphere(const defaults& config, const spheredefaults& sconfig, Octree<
     int maxY = std::min(config.gridSizecube, (int)(sconfig.centerY + sconfig.radius + 1));
     int minZ = std::max(0, (int)(sconfig.centerZ - sconfig.radius - 1));
     int maxZ = std::min(config.gridSizecube, (int)(sconfig.centerZ + sconfig.radius + 1));
-
+    
     float radSq = sconfig.radius * sconfig.radius;
     float innerRadSq = 0.0f;
     if (!sconfig.fillInside) {
