@@ -39,21 +39,19 @@ struct spheredefaults {
     float reflection = 0.0f;
     float refraction = 0.0f;
     bool fillInside = false;
-    float voxelSize = 1.5f;
+    float voxelSize = 0.1f;
     int numPoints = 15000;
 };
 
-struct ceilingdefaults {
-    float minX = 0.0f;
-    float maxX = 512.0f;
-    float minZ = 0.0f;
-    float maxZ = 512.0f;
-    float yLevel = 450.0f;  // Near the top
-    float spacing = 10.0f;  // Distance between light points
-    float color[3] = {1.0f, 1.0f, 1.0f};  // White light
-    float emittance = 5.0f;  // Brightness
-    float voxelSize = 2.0f;
-    bool enabled = false;
+struct stardefaults {
+    float x = 3000.0f;
+    float y = 0.0f; 
+    float z = 0.0f;
+    
+    float color[3] = {1.0f, 0.95f, 0.8f};
+    float emittance = 1000.0f;
+    float size = 1000.0f;
+    bool enabled = true;
 };
 
 std::mutex PreviewMutex;
@@ -63,91 +61,147 @@ bool updatePreview = false;
 bool previewRequested = false;
 using PointType = Eigen::Matrix<float, 3, 1>;
 
+// Render FPS tracking variables
+double renderFrameTime = 0.0;
+double avgRenderFrameTime = 0.0;
+double renderFPS = 0.0;
+const int FRAME_HISTORY_SIZE = 60;
+std::vector<double> renderFrameTimes;
+int frameHistoryIndex = 0;
+bool firstFrameMeasured = false;
+
 void createSphere(const defaults& config, const spheredefaults& sconfig, Octree<int>& grid) {
     if (!grid.empty()) grid.clear();
 
-    float phi = M_PI * (3.0f - std::sqrt(5.0f)); // Golden angle in radians
     Eigen::Vector3f colorVec(sconfig.color[0], sconfig.color[1], sconfig.color[2]);
+    Eigen::Vector3f center(sconfig.centerX, sconfig.centerY, sconfig.centerZ);
     
-    // We treat sconfig.voxelSize as an overlap multiplier.
-    // 1.0 gives mathematical coverage, >1.0 ensures overlap for solidity.
-    float overlapMultiplier = std::max(0.1f, sconfig.voxelSize);
-
-    float currentRadius = sconfig.radius;
+    float voxelSize = sconfig.voxelSize;
+    float radius = sconfig.radius;
     
-    // Loop for shells. If fillInside is false, this loop runs once.
-    // If true, it runs until radius is negligible.
-    while (currentRadius > 0.5f) {
-        // To maintain uniform visual density, the number of points on an inner shell
-        // should be proportional to surface area (radius^2).
-        float scaleFactor = currentRadius / sconfig.radius;
-        int currentN = std::max(4, (int)(sconfig.numPoints * scaleFactor * scaleFactor));
-        
-        // Calculate the point radius required to fully cover the surface area of the sphere.
-        // Surface Area = 4 * PI * R^2.
-        // Area per point = Surface Area / N.
-        // Approximate point radius r: PI * r^2 = Area per point.
-        // r = sqrt(4 * R^2 / N) = 2 * R / sqrt(N).
-        float calculatedSize = (2.0f * currentRadius) / std::sqrt((float)currentN);
-        
-        // Apply user-defined multiplier for extra solidity/overlap
-        float finalSize = calculatedSize * overlapMultiplier * overlapMultiplier;
-
-        for (int i = 0; i < currentN; ++i) {
-            // Fibonacci Sphere math
-            float y = 1.0f - (i / (float)(currentN - 1)) * 2.0f; // y goes from 1 to -1
-            float radiusAtY = std::sqrt(1.0f - y * y); // Radius at this height
-            float theta = phi * i; // Golden angle increment
-
-            float x = std::cos(theta) * radiusAtY;
-            float z = std::sin(theta) * radiusAtY;
-
-            PointType pos(
-                sconfig.centerX + x * currentRadius,
-                sconfig.centerY + y * currentRadius,
-                sconfig.centerZ + z * currentRadius
-            );
-
-            // Boundary check to prevent segfaults if radius pushes out of grid bounds
-            if (pos.x() >= 0 && pos.x() < config.gridSizecube &&
-                pos.y() >= 0 && pos.y() < config.gridSizecube &&
-                pos.z() >= 0 && pos.z() < config.gridSizecube) {
+    // Calculate how many voxels fit in the diameter
+    int voxelsPerDiameter = static_cast<int>(2.0f * radius / voxelSize);
+    if (voxelsPerDiameter < 1) voxelsPerDiameter = 1;
+    
+    // Create a 3D grid that covers the sphere's bounding box
+    for (int i = 0; i <= voxelsPerDiameter; i++) {
+        for (int j = 0; j <= voxelsPerDiameter; j++) {
+            for (int k = 0; k <= voxelsPerDiameter; k++) {
+                // Calculate position in the grid
+                float x = center.x() - radius + i * voxelSize;
+                float y = center.y() - radius + j * voxelSize;
+                float z = center.z() - radius + k * voxelSize;
                 
-                grid.set(1, pos, true, colorVec, finalSize, true, 1,
-                         sconfig.light, sconfig.emittance, sconfig.refraction, sconfig.reflection);
+                Eigen::Vector3f pos(x, y, z);
+                
+                // Calculate distance from center
+                float dist = (pos - center).norm();
+                
+                // For solid sphere: include all points within radius
+                if (dist <= radius + voxelSize * 0.5f) {
+                    // Optional: For better surface quality, adjust surface points
+                    if (dist > radius - voxelSize * 0.5f) {
+                        // This is a surface voxel, adjust to exactly on surface
+                        if (dist > 0.001f) {
+                            pos = center + (pos - center).normalized() * radius;
+                        }
+                    }
+                    
+                    if (pos.x() >= 0 && pos.x() < config.gridSizecube &&
+                        pos.y() >= 0 && pos.y() < config.gridSizecube &&
+                        pos.z() >= 0 && pos.z() < config.gridSizecube) {
+                        
+                        grid.set(1, pos, true, colorVec, voxelSize, true, 1,
+                                    sconfig.light, sconfig.emittance, sconfig.refraction, sconfig.reflection, Octree<int>::Shape::CUBE);
+                    }
+                }
             }
         }
-
-        if (!sconfig.fillInside) break;
-
-        // Decrease radius by a fraction of the point size to ensure shells overlap
-        currentRadius -= (finalSize * 0.75f);
+    }
+    
+    // If we want a truly solid sphere without gaps, we need a second pass
+    if (sconfig.fillInside) {
+        // Scan for potential gaps in the interior
+        int interiorSteps = static_cast<int>(radius / voxelSize);
+        float interiorStep = voxelSize * 0.5f; // Half-step for gap checking
+        
+        for (int i = 0; i <= interiorSteps * 2; i++) {
+            for (int j = 0; j <= interiorSteps * 2; j++) {
+                for (int k = 0; k <= interiorSteps * 2; k++) {
+                    Eigen::Vector3f pos(
+                        center.x() - radius + i * interiorStep,
+                        center.y() - radius + j * interiorStep,
+                        center.z() - radius + k * interiorStep
+                    );
+                    
+                    float dist = (pos - center).norm();
+                    
+                    // If deep inside the sphere
+                    if (dist < radius * 0.8f) {
+                        // Check if position is valid
+                        if (pos.x() >= 0 && pos.x() < config.gridSizecube &&
+                            pos.y() >= 0 && pos.y() < config.gridSizecube &&
+                            pos.z() >= 0 && pos.z() < config.gridSizecube) {
+                            
+                            // Try to add the point
+                            grid.set(1, pos, true, colorVec, voxelSize, true, 1,
+                                     sconfig.light, sconfig.emittance, sconfig.refraction, sconfig.reflection);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
-void addCeilingLight(const defaults& config, const ceilingdefaults& ceilingconf, Octree<int>& grid) {
-    if (!ceilingconf.enabled) return;
+void addStar(const defaults& config, const stardefaults& starconf, Octree<int>& grid) {
+    if (!starconf.enabled) return;
 
-    Eigen::Vector3f colorVec(ceilingconf.color[0], ceilingconf.color[1], ceilingconf.color[2]);
+    Eigen::Vector3f colorVec(starconf.color[0], starconf.color[1], starconf.color[2]);
+    PointType pos(starconf.x, starconf.y, starconf.z);
 
-    // Iterate over X and Z within bounds, stepping by 'spacing'
-    for (float x = ceilingconf.minX; x <= ceilingconf.maxX; x += ceilingconf.spacing) {
-        for (float z = ceilingconf.minZ; z <= ceilingconf.maxZ; z += ceilingconf.spacing) {
-            
-            PointType pos(x, ceilingconf.yLevel, z);
-
-            grid.set(2, pos, true, colorVec, ceilingconf.voxelSize, true, 2, true, ceilingconf.emittance, 0.0f, 0.0f);
-        }
-    }
-    grid.printStats();
+    grid.set(2, pos, true, colorVec, starconf.size, true, 2, true, starconf.emittance, 0.0f, 0.0f);
 }
 
 void livePreview(Octree<int>& grid, defaults& config, const Camera& cam) {
     std::lock_guard<std::mutex> lock(PreviewMutex);
     updatePreview = true;
-    frame currentPreviewFrame = grid.renderFrame(cam, config.outWidth, config.outHeight, frame::colormap::RGB, 4, 3, true);
     
-    glGenTextures(1, &textu);
+    // Measure render time
+    auto renderStart = std::chrono::high_resolution_clock::now();
+    
+    frame currentPreviewFrame = grid.renderFrame(cam, config.outWidth, config.outHeight, frame::colormap::RGB, 3, 1, true);
+    
+    auto renderEnd = std::chrono::high_resolution_clock::now();
+    renderFrameTime = std::chrono::duration<double>(renderEnd - renderStart).count();
+    
+    // Update FPS calculations
+    if (!firstFrameMeasured) {
+        renderFrameTimes.resize(FRAME_HISTORY_SIZE, renderFrameTime);
+        firstFrameMeasured = true;
+    }
+    
+    renderFrameTimes[frameHistoryIndex] = renderFrameTime;
+    frameHistoryIndex = (frameHistoryIndex + 1) % FRAME_HISTORY_SIZE;
+    
+    // Calculate average frame time and FPS
+    avgRenderFrameTime = 0.0;
+    int validFrames = 0;
+    for (int i = 0; i < FRAME_HISTORY_SIZE; i++) {
+        if (renderFrameTimes[i] > 0) {
+            avgRenderFrameTime += renderFrameTimes[i];
+            validFrames++;
+        }
+    }
+    if (validFrames > 0) {
+        avgRenderFrameTime /= validFrames;
+        renderFPS = 1.0 / avgRenderFrameTime;
+    }
+    
+    // Update texture
+    if (textu == 0) {
+        glGenTextures(1, &textu);
+    }
     glBindTexture(GL_TEXTURE_2D, textu);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -156,13 +210,13 @@ void livePreview(Octree<int>& grid, defaults& config, const Camera& cam) {
     glBindTexture(GL_TEXTURE_2D, textu);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, currentPreviewFrame.getWidth(), currentPreviewFrame.getHeight(), 
                  0, GL_RGB, GL_UNSIGNED_BYTE, currentPreviewFrame.getData().data());
-    //BMPWriter::saveBMP("output/frameoutput.bmp", currentPreviewFrame);
+    
     updatePreview = false;
     textureInitialized = true;
 }
 
 void resetView(Camera& cam, float gridSize) {
-    cam.origin = Vector3f(gridSize * 1.5f, gridSize * 1.5f, gridSize * 1.5f);
+    cam.origin = Vector3f(gridSize, gridSize, gridSize);
     Vector3f center(gridSize / 2.0f, gridSize / 2.0f, gridSize / 2.0f);
     cam.lookAt(center);
 }
@@ -242,7 +296,7 @@ int main() {
     float ghalf = config.gridSizecube / 2.f;
     
     spheredefaults sphereConf;
-    ceilingdefaults ceilingConf;
+    stardefaults starConf;
     
     sphereConf.centerX = ghalf;
     sphereConf.centerY = ghalf;
@@ -275,7 +329,16 @@ int main() {
     bool mouseCaptured = false;
     double lastMouseX = 0, lastMouseY = 0;
     float deltaTime = 0.016f;
-
+    
+    // Initialize render frame times vector
+    renderFrameTimes.resize(FRAME_HISTORY_SIZE, 0.0);
+    
+    if (grid.load("output/Treegrid.yggs")) {
+        gridInitialized = true;
+        grid.printStats();
+        resetView(cam, config.gridSizecube);
+    }
+    
     while (!glfwWindowShouldClose(window)) {
         double currentTime = glfwGetTime();
         static double lastFrameTime = currentTime;
@@ -374,13 +437,20 @@ int main() {
             ImGui::SliderFloat("Refraction", &sphereConf.refraction, 0.0f, 1.0f);
             ImGui::Checkbox("Fill Inside", &sphereConf.fillInside);
 
-            if (ImGui::CollapsingHeader("Ceiling Light Parameters", ImGuiTreeNodeFlags_DefaultOpen)) {
-                ImGui::Checkbox("Enable Ceiling Light", &ceilingConf.enabled);
-                ImGui::DragFloat("Height (Y)", &ceilingConf.yLevel, 1.0f, 0.0f, (float)config.gridSizecube);
-                ImGui::DragFloat("Spacing", &ceilingConf.spacing, 0.5f, 1.0f, 100.0f);
-                ImGui::DragFloat("Light Emittance", &ceilingConf.emittance, 0.1f, 0.0f, 100.0f);
-                ImGui::ColorEdit3("Light Color", ceilingConf.color);
-                ImGui::DragFloat("Light Voxel Size", &ceilingConf.voxelSize, 0.1f, 0.1f, 10.0f);
+            if (ImGui::CollapsingHeader("Star/Sun Parameters", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::Checkbox("Enable Star", &starConf.enabled);
+                
+                // Allow large range for position to place it "far away"
+                float starPos[3] = { starConf.x, starConf.y, starConf.z };
+                if (ImGui::DragFloat3("Position", starPos, 5.0f, -2000.0f, 2000.0f)) {
+                    starConf.x = starPos[0];
+                    starConf.y = starPos[1];
+                    starConf.z = starPos[2];
+                }
+
+                ImGui::DragFloat("Size (Radius)", &starConf.size, 1.0f, 1.0f, 500.0f);
+                ImGui::DragFloat("Brightness", &starConf.emittance, 1.0f, 0.0f, 1000.0f);
+                ImGui::ColorEdit3("Light Color", starConf.color);
             }
 
             ImGui::Separator();
@@ -388,7 +458,7 @@ int main() {
             if (ImGui::Button("Create Sphere & Render")) {
                 createSphere(config, sphereConf, grid);
                 grid.printStats();
-                addCeilingLight(config, ceilingConf, grid);
+                addStar(config, starConf, grid); 
                 gridInitialized = true;
                 
                 resetView(cam, config.gridSizecube);
@@ -403,6 +473,33 @@ int main() {
 
         {
             ImGui::Begin("Preview");
+            
+            // Display render FPS information
+            ImGui::Text("Render Performance:");
+            if (renderFPS > 0) {
+                // Color code based on FPS
+                ImVec4 fpsColor;
+                if (renderFPS >= 30.0) {
+                    fpsColor = ImVec4(0.0f, 1.0f, 0.0f, 1.0f); // Green for good FPS
+                } else if (renderFPS >= 15.0) {
+                    fpsColor = ImVec4(1.0f, 1.0f, 0.0f, 1.0f); // Yellow for okay FPS
+                } else {
+                    fpsColor = ImVec4(1.0f, 0.0f, 0.0f, 1.0f); // Red for poor FPS
+                }
+                
+                ImGui::TextColored(fpsColor, "FPS: %.1f", renderFPS);
+                ImGui::Text("Frame time: %.1f ms", avgRenderFrameTime * 1000.0);
+                
+                // Simple progress bar for frame time
+                ImGui::Text("%.1f/100 ms", avgRenderFrameTime * 1000.0);
+                
+                // Show latest frame time
+                ImGui::Text("Latest: %.1f ms", renderFrameTime * 1000.0);
+            } else {
+                ImGui::Text("No render data yet");
+            }
+            
+            ImGui::Separator();
             
             if (gridInitialized && textureInitialized) {
                 ImGui::Image((void*)(intptr_t)textu, ImVec2(config.outWidth, config.outHeight));
@@ -591,6 +688,8 @@ int main() {
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
+
+    grid.save("output/Treegrid.yggs");
     
     glfwDestroyWindow(window);
     if (textu != 0) {

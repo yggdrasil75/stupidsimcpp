@@ -27,6 +27,12 @@ class Octree {
 public:
     using PointType = Eigen::Matrix<float, Dim, 1>;
     using BoundingBox = std::pair<PointType, PointType>;
+    
+    enum class Shape {
+        SPHERE,
+        CUBE
+    };
+    
     struct NodeData {
         T data;
         PointType position;
@@ -39,15 +45,28 @@ public:
         float emittance;
         float refraction; 
         float reflection;
+        Shape shape;
 
         NodeData(const T& data, const PointType& pos, bool visible, Eigen::Vector3f color, float size = 0.01f,
-                 bool active = true, int objectId = -1, bool light = false, float emittance = 0.0f, float refraction = 0.0f, 
-                 float reflection = 0.0f) : data(data), position(pos), objectId(objectId), active(active), visible(visible), 
-                 color(color), size(size), light(light), emittance(emittance), refraction(refraction), 
-                 reflection(reflection) {}
+                 bool active = true, int objectId = -1, bool light = false, float emittance = 0.0f, 
+                 float refraction = 0.0f, float reflection = 0.0f, Shape shape = Shape::SPHERE) 
+                : data(data), position(pos), objectId(objectId), active(active), visible(visible), 
+                color(color), size(size), light(light), emittance(emittance), refraction(refraction), 
+                reflection(reflection), shape(shape) {}
         
         NodeData() : objectId(-1), active(false), visible(false), size(0.0f), light(false), 
-                     emittance(0.0f), refraction(0.0f), reflection(0.0f) {}
+                     emittance(0.0f), refraction(0.0f), reflection(0.0f), shape(Shape::SPHERE) {}
+        
+        // Helper method to get half-size for cube
+        PointType getHalfSize() const {
+            return PointType(size * 0.5f, size * 0.5f, size * 0.5f);
+        }
+        
+        // Helper method to get bounding box for cube
+        BoundingBox getCubeBounds() const {
+            PointType halfSize = getHalfSize();
+            return {position - halfSize, position + halfSize};
+        }
     };
 
     struct OctreeNode {
@@ -185,6 +204,7 @@ private:
                 writeVal(out, pt->emittance);
                 writeVal(out, pt->refraction);
                 writeVal(out, pt->reflection);
+                writeVal(out, static_cast<int>(pt->shape));
             }
         } else {
             // Write bitmask of active children
@@ -228,6 +248,9 @@ private:
                 readVal(in, pt->emittance);
                 readVal(in, pt->refraction);
                 readVal(in, pt->reflection);
+                int shapeInt;
+                readVal(in, shapeInt);
+                pt->shape = static_cast<Shape>(shapeInt);
                 node->points.push_back(pt);
             }
         } else {
@@ -315,6 +338,62 @@ private:
         return true;
     }
 
+    bool raySphereIntersect(const PointType& origin, const PointType& dir, const PointType& center,
+                           float radius, float& t) const {
+        PointType oc = origin - center;
+        float a = dir.dot(dir);
+        float b = 2.0f * oc.dot(dir);
+        float c = oc.dot(oc) - radius * radius;
+        float discriminant = b * b - 4 * a * c;
+        
+        if (discriminant < 0) return false;
+        
+        float sqrtDisc = sqrt(discriminant);
+        float t0 = (-b - sqrtDisc) / (2.0f * a);
+        float t1 = (-b + sqrtDisc) / (2.0f * a);
+        
+        t = t0;
+        if (t0 < 0.001f) {
+            t = t1;
+            if (t1 < 0.001f) return false;
+        }
+        return true;
+    }
+
+    // Ray-cube intersection
+    bool rayCubeIntersect(const PointType& origin, const PointType& dir, const NodeData* cube,
+                         float& t, PointType& normal, PointType& hitPoint) const {
+        // Use the cube's bounds for intersection
+        BoundingBox bounds = cube->getCubeBounds();
+        
+        float tMin, tMax;
+        if (!rayBoxIntersect(origin, dir, bounds, tMin, tMax)) {
+            return false;
+        }
+        
+        if (tMin < 0.001f) {
+            if (tMax < 0.001f) return false;
+            t = tMax;
+        } else {
+            t = tMin;
+        }
+        
+        hitPoint = origin + dir * t;
+        
+        const float epsilon = 0.0001f;
+        normal = PointType::Zero();
+        
+        for (int i = 0; i < Dim; ++i) {
+            if (std::abs(hitPoint[i] - bounds.first[i]) < epsilon) {
+                normal[i] = -1.0f;
+            } else if (std::abs(hitPoint[i] - bounds.second[i]) < epsilon) {
+                normal[i] = 1.0f;
+            }
+        }
+        
+        return true;
+    }
+
     float randomValueNormalDistribution(uint32_t& state) {
         std::mt19937 gen(state);
         state = gen();
@@ -340,6 +419,7 @@ private:
     float rgbToGrayscale(const Eigen::Vector3f& color) const {
         return 0.2126f * color[0] + 0.7152f * color[1] + 0.0722f * color[2];
     }
+
 public:
     Octree(const PointType& minBound, const PointType& maxBound, size_t maxPointsPerNode=16, size_t maxDepth = 16) :
         root_(std::make_unique<OctreeNode>(minBound, maxBound)), maxPointsPerNode(maxPointsPerNode),
@@ -348,9 +428,10 @@ public:
     Octree() : root_(nullptr), maxPointsPerNode(16), maxDepth(16), size(0) {}
 
     bool set(const T& data, const PointType& pos, bool visible, Eigen::Vector3f color, float size, bool active,
-             int objectId = -1, bool light = false, float emittance = 0.0f, float refraction = 0.0f, float reflection = 0.0f) {
+             int objectId = -1, bool light = false, float emittance = 0.0f, float refraction = 0.0f, 
+             float reflection = 0.0f, Shape shape = Shape::SPHERE) {
         auto pointData = std::make_shared<NodeData>(data, pos, visible, color, size, active, objectId,
-                                                    light, emittance, refraction, reflection);
+                                                    light, emittance, refraction, reflection, shape);
         if (insertRecursive(root_.get(), pointData, 0)) {
             this->size++;
             return true;
@@ -375,6 +456,7 @@ public:
         serializeNode(out, root_.get());
         
         out.close();
+        std::cout << "successfully saved grid to " << filename << std::endl;
         return true;
     }
 
@@ -401,6 +483,7 @@ public:
         deserializeNode(in, root_.get());
 
         in.close();
+        std::cout << "successfully loaded grid from " << filename << std::endl;
         return true;
     }
 
@@ -512,8 +595,8 @@ public:
 
     bool update(const PointType& oldPos, const PointType& newPos, const T& newData = T(), bool newVisible = true, 
                 Eigen::Vector3f newColor = Eigen::Vector3f(1.0f, 1.0f, 1.0f), float newSize = 0.01f, bool newActive = true,
-                int newObjectId = -2, bool newLight = false, float newEmittance = 0.0f, float newRefraction = 0.0f, float newReflection = 0.0f,
-                float tolerance = 0.0001f) {
+                int newObjectId = -2, bool newLight = false, float newEmittance = 0.0f, float newRefraction = 0.0f, 
+                float newReflection = 0.0f, Shape newShape = Shape::SPHERE, float tolerance = 0.0001f) {
     
         // Find the existing point
         auto pointData = find(oldPos, tolerance);
@@ -533,6 +616,7 @@ public:
             float emittanceCopy = pointData->emittance;
             float refractionCopy = pointData->refraction;
             float reflectionCopy = pointData->reflection;
+            Shape shapeCopy = pointData->shape;
             
             // Remove the old point
             if (!remove(oldPos, tolerance)) {
@@ -549,7 +633,8 @@ public:
                     newLight ? newLight : lightCopy,
                     newEmittance > 0 ? newEmittance : emittanceCopy,
                     newRefraction >= 0 ? newRefraction : refractionCopy,
-                    newReflection >= 0 ? newReflection : reflectionCopy);
+                    newReflection >= 0 ? newReflection : reflectionCopy,
+                    newShape);
         } else {
             // Just update properties in place
             pointData->data = newData;
@@ -563,6 +648,7 @@ public:
             pointData->emittance = newEmittance;
             pointData->refraction = newRefraction;
             pointData->reflection = newReflection;
+            pointData->shape = newShape;
             return true;
         }
     }
@@ -630,6 +716,14 @@ public:
         return true;
     }
 
+    bool setShape(const PointType& pos, Shape shape, float tolerance = 0.0001f) {
+        auto pointData = find(pos, tolerance);
+        if (!pointData) return false;
+        
+        pointData->shape = shape;
+        return true;
+    }
+
     std::vector<std::shared_ptr<NodeData>> voxelTraverse(const PointType& origin, const PointType& direction,
                                          float maxDist, bool stopAtFirstHit) const {
         std::vector<std::shared_ptr<NodeData>> hits;
@@ -643,14 +737,25 @@ public:
                 for (const auto& pointData : node->points) {
                     if (!pointData->active) continue;
                     
-                    PointType toPoint = pointData->position - origin;
-                    float projection = toPoint.dot(dir);
-                    if (projection >= 0 && projection <= maxDist) {
-                        PointType closestPoint = origin + dir * projection;
-                        float distSq = (pointData->position - closestPoint).squaredNorm();
-                        if (distSq < pointData->size * pointData->size) {
-                            hits.emplace_back(pointData);
-                            if (stopAtFirstHit) return;
+                    if (pointData->shape == Shape::SPHERE) {
+                        PointType center = pointData->position;
+                        float radius = pointData->size;
+                        float t;
+                        
+                        if (raySphereIntersect(origin, dir, center, radius, t)) {
+                            if (t >= 0 && t <= maxDist) {
+                                hits.emplace_back(pointData);
+                                if (stopAtFirstHit) return;
+                            }
+                        }
+                    } else {
+                        float t;
+                        PointType normal, hitPoint;
+                        if (rayCubeIntersect(origin, dir, pointData.get(), t, normal, hitPoint)) {
+                            if (t >= 0 && t <= maxDist) {
+                                hits.emplace_back(pointData);
+                                if (stopAtFirstHit) return;
+                            }
                         }
                     }
                 }
@@ -737,22 +842,35 @@ public:
 
             auto obj = hits[0];
             
-            PointType center = obj->position;
-            float radius = obj->size;
-            PointType L_vec = center - rayOrig;
-            float tca = L_vec.dot(rayDir);
-            float d2 = L_vec.dot(L_vec) - tca * tca;
-            float radius2 = radius * radius;
+            PointType hitPoint;
+            PointType normal;
+            float t = 0.0f;
+            
+            // Calculate intersection based on shape
+            if (obj->shape == Shape::SPHERE) {
+                // Sphere intersection
+                PointType center = obj->position;
+                float radius = obj->size;
+                PointType L_vec = center - rayOrig;
+                float tca = L_vec.dot(rayDir);
+                float d2 = L_vec.dot(L_vec) - tca * tca;
+                float radius2 = radius * radius;
 
-            float t = tca;
-            if (d2 <= radius2) {
-                float thc = std::sqrt(radius2 - d2);
-                t = tca - thc; 
-                if (t < 0.001f) t = tca + thc;
+                if (d2 <= radius2) {
+                    float thc = std::sqrt(radius2 - d2);
+                    t = tca - thc; 
+                    if (t < 0.001f) t = tca + thc;
+                }
+                
+                hitPoint = rayOrig + rayDir * t;
+                normal = (hitPoint - center).normalized();
+            } else {
+                // Cube intersection
+                PointType cubeNormal;
+                if (!rayCubeIntersect(rayOrig, rayDir, obj.get(), t, normal, hitPoint)) {
+                    return space;
+                }
             }
-
-            PointType hitPoint = rayOrig + rayDir * t;
-            PointType normal = (hitPoint - center).normalized();
 
             Eigen::Vector3f finalColor = space;
 
