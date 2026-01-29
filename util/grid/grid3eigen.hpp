@@ -45,7 +45,6 @@ public:
                  color(color), size(size), light(light), emittance(emittance), refraction(refraction), 
                  reflection(reflection) {}
         
-        // Default constructor for serialization
         NodeData() : active(false), visible(false), size(0.0f), light(false), 
                      emittance(0.0f), refraction(0.0f), reflection(0.0f) {}
     };
@@ -433,7 +432,6 @@ public:
         return true;
     }
 
-    // Load Octree from binary file
     bool load(const std::string& filename) {
         std::ifstream in(filename, std::ios::binary);
         if (!in) return false;
@@ -457,6 +455,222 @@ public:
         deserializeNode(in, root_.get());
 
         in.close();
+        return true;
+    }
+
+    std::shared_ptr<NodeData> find(const PointType& pos, float tolerance = 0.0001f) {
+        std::function<std::shared_ptr<NodeData>(OctreeNode*)> searchNode = [&](OctreeNode* node) -> std::shared_ptr<NodeData> {
+            if (!node->contains(pos)) return nullptr;
+            
+            if (node->isLeaf) {
+                for (const auto& pointData : node->points) {
+                    if (!pointData->active) continue;
+                    
+                    float distSq = (pointData->position - pos).squaredNorm();
+                    if (distSq <= tolerance * tolerance) {
+                        return pointData;
+                    }
+                }
+                return nullptr;
+            } else {
+                int octant = getOctant(pos, node->center);
+                if (node->children[octant]) {
+                    return searchNode(node->children[octant].get());
+                }
+            }
+            return nullptr;
+        };
+        
+        return searchNode(root_.get());
+    }
+
+    bool remove(const PointType& pos, float tolerance = 0.0001f) {
+        bool found = false;
+        std::function<bool(OctreeNode*)> removeNode = [&](OctreeNode* node) -> bool {
+            if (!node->contains(pos)) return false;
+            
+            if (node->isLeaf) {
+                auto it = std::remove_if(node->points.begin(), node->points.end(),
+                    [&](const std::shared_ptr<NodeData>& pointData) {
+                        if (!pointData->active) return false;
+                        
+                        float distSq = (pointData->position - pos).squaredNorm();
+                        if (distSq <= tolerance * tolerance) {
+                            found = true;
+                            return true;
+                        }
+                        return false;
+                    });
+                
+                if (found) {
+                    node->points.erase(it, node->points.end());
+                    size--;  // Decrement size counter
+                    return true;
+                }
+                return false;
+            } else {
+                int octant = getOctant(pos, node->center);
+                if (node->children[octant]) {
+                    return removeNode(node->children[octant].get());
+                }
+            }
+            return false;
+        };
+        
+        return removeNode(root_.get());
+    }
+
+    std::vector<std::shared_ptr<NodeData>> findInRadius(const PointType& center, float radius) {
+        std::vector<std::shared_ptr<NodeData>> results;
+        if (!root_) return results;
+        
+        float radiusSq = radius * radius;
+        
+        std::function<void(OctreeNode*)> searchNode = [&](OctreeNode* node) {
+            // Check if node's bounding box intersects with search sphere
+            PointType boxCenter = (node->bounds.first + node->bounds.second) * 0.5f;
+            PointType boxHalfSize = (node->bounds.second - node->bounds.first) * 0.5f;
+            
+            PointType closestPoint;
+            for (int i = 0; i < Dim; ++i) {
+                closestPoint[i] = std::max(node->bounds.first[i], 
+                                        std::min(center[i], node->bounds.second[i]));
+            }
+            
+            float distSq = (closestPoint - center).squaredNorm();
+            if (distSq > (radius + boxHalfSize.norm()) * (radius + boxHalfSize.norm())) {
+                return;  // No intersection
+            }
+            
+            if (node->isLeaf) {
+                for (const auto& pointData : node->points) {
+                    if (!pointData->active) continue;
+                    
+                    float pointDistSq = (pointData->position - center).squaredNorm();
+                    if (pointDistSq <= radiusSq) {
+                        results.emplace_back(pointData);
+                    }
+                }
+            } else {
+                for (const auto& child : node->children) {
+                    if (child) {
+                        searchNode(child.get());
+                    }
+                }
+            }
+        };
+        
+        searchNode(root_.get());
+        return results;
+    }
+
+    bool update(const PointType& oldPos, const PointType& newPos, const T& newData = T(), bool newVisible = true, 
+                Eigen::Vector3f newColor = Eigen::Vector3f(1.0f, 1.0f, 1.0f), float newSize = 0.01f, bool newActive = true,
+                bool newLight = false, float newEmittance = 0.0f, float newRefraction = 0.0f, float newReflection = 0.0f,
+                float tolerance = 0.0001f) {
+    
+        // Find the existing point
+        auto pointData = find(oldPos, tolerance);
+        if (!pointData) return false;
+        
+        // If position changed, we need to remove and reinsert
+        float moveDistSq = (newPos - oldPos).squaredNorm();
+        if (moveDistSq > tolerance * tolerance) {
+            // Save the data
+            T dataCopy = pointData->data;
+            bool activeCopy = pointData->active;
+            bool visibleCopy = pointData->visible;
+            Eigen::Vector3f colorCopy = pointData->color;
+            float sizeCopy = pointData->size;
+            bool lightCopy = pointData->light;
+            float emittanceCopy = pointData->emittance;
+            float refractionCopy = pointData->refraction;
+            float reflectionCopy = pointData->reflection;
+            
+            // Remove the old point
+            if (!remove(oldPos, tolerance)) {
+                return false;
+            }
+            
+            // Insert at new position with updated properties
+            return set(newData != T() ? newData : dataCopy, newPos, 
+                    newVisible ? newVisible : visibleCopy,
+                    newColor != Eigen::Vector3f(1.0f, 1.0f, 1.0f) ? newColor : colorCopy,
+                    newSize > 0 ? newSize : sizeCopy,
+                    newActive ? newActive : activeCopy,
+                    newLight ? newLight : lightCopy,
+                    newEmittance > 0 ? newEmittance : emittanceCopy,
+                    newRefraction >= 0 ? newRefraction : refractionCopy,
+                    newReflection >= 0 ? newReflection : reflectionCopy);
+        } else {
+            // Just update properties in place
+            pointData->data = newData;
+            pointData->position = newPos;  // Minor adjustment within tolerance
+            pointData->visible = newVisible;
+            pointData->color = newColor;
+            pointData->size = newSize;
+            pointData->active = newActive;
+            pointData->light = newLight;
+            pointData->emittance = newEmittance;
+            pointData->refraction = newRefraction;
+            pointData->reflection = newReflection;
+            return true;
+        }
+    }
+
+    bool updateData(const PointType& pos, const T& newData, float tolerance = 0.0001f) {
+        auto pointData = find(pos, tolerance);
+        if (!pointData) return false;
+        
+        pointData->data = newData;
+        return true;
+    }
+
+    bool setActive(const PointType& pos, bool active, float tolerance = 0.0001f) {
+        auto pointData = find(pos, tolerance);
+        if (!pointData) return false;
+        
+        pointData->active = active;
+        return true;
+    }
+
+    bool setVisible(const PointType& pos, bool visible, float tolerance = 0.0001f) {
+        auto pointData = find(pos, tolerance);
+        if (!pointData) return false;
+        
+        pointData->visible = visible;
+        return true;
+    }
+
+    bool setLight(const PointType& pos, bool light, float tolerance = 0.0001f) {
+        auto pointData = find(pos, tolerance);
+        if (!pointData) return false;
+        
+        pointData->light = light;
+        return true;
+    }
+
+    bool setColor(const PointType& pos, Eigen::Vector3f color, float tolerance = 0.0001f) {
+        auto pointData = find(pos, tolerance);
+        if (!pointData) return false;
+        
+        pointData->color = color;
+        return true;
+    }
+
+    bool setReflection(const PointType& pos, float reflection, float tolerance = 0.0001f) {
+        auto pointData = find(pos, tolerance);
+        if (!pointData) return false;
+        
+        pointData->reflection = reflection;
+        return true;
+    }
+
+    bool setEmittance(const PointType& pos, float emittance, float tolerance = 0.0001f) {
+        auto pointData = find(pos, tolerance);
+        if (!pointData) return false;
+        
+        pointData->emittance = emittance;
         return true;
     }
 
