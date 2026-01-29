@@ -102,6 +102,9 @@ private:
     size_t maxDepth;
     size_t size;
     size_t maxPointsPerNode;
+    
+    Eigen::Vector3f skylight_ = {0.1f, 0.1f, 0.1f};
+    Eigen::Vector3f backgroundColor_ = {0.53f, 0.81f, 0.92f};
 
     uint8_t getOctant(const PointType& point, const PointType& center) const {
         int octant = 0;
@@ -427,6 +430,22 @@ public:
     
     Octree() : root_(nullptr), maxPointsPerNode(16), maxDepth(16), size(0) {}
 
+    void setSkylight(const Eigen::Vector3f& skylight) { 
+        skylight_ = skylight; 
+    }
+    
+    Eigen::Vector3f getSkylight() const { 
+        return skylight_; 
+    }
+    
+    void setBackgroundColor(const Eigen::Vector3f& color) { 
+        backgroundColor_ = color; 
+    }
+
+    Eigen::Vector3f getBackgroundColor() const { 
+        return backgroundColor_; 
+    }
+
     bool set(const T& data, const PointType& pos, bool visible, Eigen::Vector3f color, float size, bool active,
              int objectId = -1, bool light = false, float emittance = 0.0f, float refraction = 0.0f, 
              float reflection = 0.0f, Shape shape = Shape::SPHERE) {
@@ -449,6 +468,10 @@ public:
         writeVal(out, maxDepth);
         writeVal(out, maxPointsPerNode);
         writeVal(out, size);
+        
+        // Save global settings
+        writeVec3(out, skylight_);
+        writeVec3(out, backgroundColor_);
         
         writeVec3(out, root_->bounds.first);
         writeVec3(out, root_->bounds.second);
@@ -474,6 +497,10 @@ public:
         readVal(in, maxDepth);
         readVal(in, maxPointsPerNode);
         readVal(in, size);
+        
+        // Load global settings
+        readVec3(in, skylight_);
+        readVec3(in, backgroundColor_);
 
         PointType minBound, maxBound;
         readVec3(in, minBound);
@@ -823,21 +850,18 @@ public:
         float tanHalfFov = tan(fovRad * 0.5f);
         float tanfovy = tanHalfFov;
         float tanfovx = tanHalfFov * aspect;
-        PointType space(0,0,0);
-        if (globalIllumination) space = {0.1f, 0.1f, 0.1f};
 
-        const Eigen::Vector3f defaultColor(0.01f, 0.01f, 0.01f); 
-        float rayLength = std::numeric_limits<float>::max();
         std::function<Eigen::Vector3f(const PointType&, const PointType&, int, uint32_t&)> traceRay = 
             [&](const PointType& rayOrig, const PointType& rayDir, int bounces, uint32_t& rngState) -> Eigen::Vector3f {
 
-            if (bounces > maxBounces) return space;
+            if (bounces > maxBounces) return globalIllumination ? skylight_ : Eigen::Vector3f::Zero();
 
-            auto hits = voxelTraverse(rayOrig, rayDir, rayLength, true);
-            if (hits.empty() && bounces == 0) {
-                return defaultColor; 
-            } else if (hits.empty()) {
-                return space;
+            auto hits = voxelTraverse(rayOrig, rayDir, std::numeric_limits<float>::max(), true);
+            if (hits.empty()) {
+                if (bounces == 0) {
+                    return backgroundColor_;
+                }
+                return globalIllumination ? skylight_ : Eigen::Vector3f::Zero();
             }
 
             auto obj = hits[0];
@@ -868,11 +892,11 @@ public:
                 // Cube intersection
                 PointType cubeNormal;
                 if (!rayCubeIntersect(rayOrig, rayDir, obj.get(), t, normal, hitPoint)) {
-                    return space;
+                    return globalIllumination ? skylight_ : Eigen::Vector3f::Zero();
                 }
             }
 
-            Eigen::Vector3f finalColor = space;
+            Eigen::Vector3f finalColor = globalIllumination ? skylight_ : Eigen::Vector3f::Zero();
 
             if (obj->light) {
                 return obj->color * obj->emittance;
@@ -941,6 +965,121 @@ public:
                 }
                 
                 Eigen::Vector3f color = accumulatedColor / static_cast<float>(samplesPerPixel);
+                
+                color = color.cwiseMax(0.0f).cwiseMin(1.0f);
+                
+                switch(colorformat) {
+                    case frame::colormap::B:
+                        colorBuffer[idx    ] = static_cast<uint8_t>(rgbToGrayscale(color) * 255.0f);
+                        break;
+                    case frame::colormap::RGB:
+                        colorBuffer[idx    ] = static_cast<uint8_t>(color[0] * 255.0f);
+                        colorBuffer[idx + 1] = static_cast<uint8_t>(color[1] * 255.0f);
+                        colorBuffer[idx + 2] = static_cast<uint8_t>(color[2] * 255.0f);
+                        break;
+                    case frame::colormap::BGR:
+                        colorBuffer[idx    ] = static_cast<uint8_t>(color[2] * 255.0f);
+                        colorBuffer[idx + 1] = static_cast<uint8_t>(color[1] * 255.0f);
+                        colorBuffer[idx + 2] = static_cast<uint8_t>(color[0] * 255.0f);
+                        break;
+                    case frame::colormap::RGBA:
+                        colorBuffer[idx    ] = static_cast<uint8_t>(color[0] * 255.0f);
+                        colorBuffer[idx + 1] = static_cast<uint8_t>(color[1] * 255.0f);
+                        colorBuffer[idx + 2] = static_cast<uint8_t>(color[2] * 255.0f);
+                        colorBuffer[idx + 3] = 255;
+                        break;
+                    case frame::colormap::BGRA:
+                        colorBuffer[idx    ] = static_cast<uint8_t>(color[2] * 255.0f);
+                        colorBuffer[idx + 1] = static_cast<uint8_t>(color[1] * 255.0f);
+                        colorBuffer[idx + 2] = static_cast<uint8_t>(color[0] * 255.0f);
+                        colorBuffer[idx + 3] = 255;
+                        break;
+                }
+            }
+        }
+        
+        outFrame.setData(colorBuffer);
+        return outFrame;
+    }
+
+    frame fastRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB) {
+        
+        PointType origin = cam.origin;
+        PointType dir = cam.direction.normalized();
+        PointType up = cam.up.normalized();
+        PointType right = cam.right();
+        
+        frame outFrame(width, height, colorformat);
+        std::vector<uint8_t> colorBuffer;
+        int channels;
+        if (colorformat == frame::colormap::B) {
+            channels = 1;
+        } else if (colorformat == frame::colormap::RGB || colorformat == frame::colormap::BGR) {
+            channels = 3;
+        } else { //BGRA and RGBA
+            channels = 4;
+        }
+        colorBuffer.resize(width * height * channels);
+
+        float aspect = static_cast<float>(width) / height;
+        float fovRad = cam.fovRad();
+        float tanHalfFov = tan(fovRad * 0.5f);
+        float tanfovy = tanHalfFov;
+        float tanfovx = tanHalfFov * aspect;
+        
+        #pragma omp parallel for schedule(dynamic) collapse(2)
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                int pidx = (y * width + x);
+                int idx = pidx * channels;
+
+                float px = (2.0f * (x + 0.5f) / width - 1.0f) * tanfovx;
+                float py = (1.0f - 2.0f * (y + 0.5f) / height) * tanfovy;
+                
+                PointType rayDir = dir + (right * px) + (up * py);
+                rayDir.normalize();
+
+                Eigen::Vector3f color = backgroundColor_; // Start with background color
+                
+                auto hits = voxelTraverse(origin, rayDir, std::numeric_limits<float>::max(), true);
+                if (!hits.empty()) {
+                    auto obj = hits[0];
+                    
+                    // Simple shading: use object color directly
+                    color = obj->color;
+                    
+                    // If it's a light, add emittance
+                    if (obj->light) {
+                        color = color * obj->emittance;
+                    }
+                    
+                    // Simple lighting based on ray direction (fake diffuse)
+                    PointType normal;
+                    if (obj->shape == Shape::SPHERE) {
+                        PointType center = obj->position;
+                        float radius = obj->size;
+                        PointType L_vec = center - origin;
+                        float tca = L_vec.dot(rayDir);
+                        float d2 = L_vec.dot(L_vec) - tca * tca;
+                        float radius2 = radius * radius;
+
+                        if (d2 <= radius2) {
+                            float thc = std::sqrt(radius2 - d2);
+                            float t = tca - thc; 
+                            if (t < 0.001f) t = tca + thc;
+                            
+                            PointType hitPoint = origin + rayDir * t;
+                            normal = (hitPoint - center).normalized();
+                        }
+                    } else {
+                        // For cubes, use a simple approximation
+                        normal = -rayDir; // Face the camera
+                    }
+                    
+                    // Simple directional lighting
+                    float lightDot = std::max(0.2f, normal.dot(-rayDir));
+                    color = color * lightDot;
+                }
                 
                 color = color.cwiseMax(0.0f).cwiseMin(1.0f);
                 

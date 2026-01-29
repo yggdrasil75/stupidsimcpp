@@ -39,7 +39,7 @@ struct spheredefaults {
     float reflection = 0.0f;
     float refraction = 0.0f;
     bool fillInside = false;
-    float voxelSize = 0.1f;
+    float voxelSize = 2.f;
     int numPoints = 15000;
 };
 
@@ -170,7 +170,7 @@ void livePreview(Octree<int>& grid, defaults& config, const Camera& cam) {
     // Measure render time
     auto renderStart = std::chrono::high_resolution_clock::now();
     
-    frame currentPreviewFrame = grid.renderFrame(cam, config.outWidth, config.outHeight, frame::colormap::RGB, 3, 1, true);
+    frame currentPreviewFrame = grid.fastRenderFrame(cam, config.outWidth, config.outHeight, frame::colormap::RGB);
     
     auto renderEnd = std::chrono::high_resolution_clock::now();
     renderFrameTime = std::chrono::duration<double>(renderEnd - renderStart).count();
