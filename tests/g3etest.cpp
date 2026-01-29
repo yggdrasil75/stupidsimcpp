@@ -53,7 +53,7 @@ struct ceilingdefaults {
     float color[3] = {1.0f, 1.0f, 1.0f};  // White light
     float emittance = 5.0f;  // Brightness
     float voxelSize = 2.0f;
-    bool enabled = true;
+    bool enabled = false;
 };
 
 std::mutex PreviewMutex;
@@ -113,7 +113,7 @@ void createSphere(const defaults& config, const spheredefaults& sconfig, Octree<
                 pos.y() >= 0 && pos.y() < config.gridSizecube &&
                 pos.z() >= 0 && pos.z() < config.gridSizecube) {
                 
-                grid.set(1, pos, true, colorVec, finalSize, true, 
+                grid.set(1, pos, true, colorVec, finalSize, true, 1,
                          sconfig.light, sconfig.emittance, sconfig.refraction, sconfig.reflection);
             }
         }
@@ -136,7 +136,7 @@ void addCeilingLight(const defaults& config, const ceilingdefaults& ceilingconf,
             
             PointType pos(x, ceilingconf.yLevel, z);
 
-            grid.set(2, pos, true, colorVec, ceilingconf.voxelSize, true, true, ceilingconf.emittance, 0.0f, 0.0f);
+            grid.set(2, pos, true, colorVec, ceilingconf.voxelSize, true, 2, true, ceilingconf.emittance, 0.0f, 0.0f);
         }
     }
     grid.printStats();

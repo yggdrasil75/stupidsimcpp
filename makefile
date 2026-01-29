@@ -7,13 +7,31 @@ STB_DIR := ./stb
 
 # Compiler and flags
 CXX := g++
-CXXFLAGS = -std=c++23 -O3 -march=native -I$(IMGUI_DIR) -I$(IMGUI_DIR)/backends -I$(STB_DIR)
-CXXFLAGS += `pkg-config --cflags glfw3`
-CFLAGS = $(CXXFLAGS)
+BASE_CXXFLAGS = -std=c++23 -O3 -I$(IMGUI_DIR) -I$(IMGUI_DIR)/backends -I$(STB_DIR)
+BASE_CXXFLAGS += `pkg-config --cflags glfw3`
+CFLAGS = $(BASE_CXXFLAGS)
 LDFLAGS := -L./imgui -limgui -lGL
 LINUX_GL_LIBS = -lGL -ltbb
 PKG_FLAGS := $(LINUX_GL_LIBS) `pkg-config --static --cflags --libs glfw3`
-CXXFLAGS += $(PKG_FLAGS)
+BASE_CXXFLAGS += $(PKG_FLAGS)
+
+# Test if AVX is supported (run once, store result)
+AVX_SUPPORTED := $(shell echo "int main(){}" | $(CXX) -mavx -x c++ -o /dev/null - 2>/dev/null && echo "yes" || echo "no")
+SSE2_SUPPORTED := $(shell echo "int main(){}" | $(CXX) -msse2 -x c++ -o /dev/null - 2>/dev/null && echo "yes" || echo "no")
+
+# Set SIMD flags based on detection
+ifeq ($(AVX_SUPPORTED),yes)
+    SIMD_CXXFLAGS = -mavx2 -mfma -DAVX
+    $(info Building with AVX support)
+else ifeq ($(SSE2_SUPPORTED),yes)
+    SIMD_CXXFLAGS = -msse2 -DSSE
+    $(info Building with SSE2 support (no AVX))
+else
+    SIMD_CXXFLAGS = -DNO_SIMD
+    $(warning No SIMD support detected, building scalar version)
+endif
+
+CXXFLAGS = $(BASE_CXXFLAGS) $(SIMD_CXXFLAGS)
 
 # Source files
 SRC := $(SRC_DIR)/g3etest.cpp
@@ -43,7 +61,7 @@ $(OBJ_DIR)/%.o: $(STB_DIR)/%.cpp
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 all: $(EXE)
-	@echo Build complete for $(ECHO_MESSAGE)
+	@echo "Build complete for $(UNAME_S)"
 
 $(EXE): $(OBJS)
 	$(CXX) -o $@ $^ $(CXXFLAGS) $(LIBS)
