@@ -524,7 +524,8 @@ public:
         return hits;
     }
     
-    frame renderFrame(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB, int samplesPerPixel = 2, int maxBounces = 4) {
+    frame renderFrame(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB, int samplesPerPixel = 2,
+                      int maxBounces = 4, bool globalIllumination = false) {
         PointType origin = cam.origin;
         PointType dir = cam.direction.normalized();
         PointType up = cam.up.normalized();
@@ -547,19 +548,21 @@ public:
         float tanHalfFov = tan(fovRad * 0.5f);
         float tanfovy = tanHalfFov;
         float tanfovx = tanHalfFov * aspect;
+        PointType space(0,0,0);
+        if (globalIllumination) space = {0.1,0.1,0.1};
 
         const Eigen::Vector3f defaultColor(0.01f, 0.01f, 0.01f); 
         float rayLength = std::numeric_limits<float>::max();
         std::function<Eigen::Vector3f(const PointType&, const PointType&, int, uint32_t&)> traceRay = 
             [&](const PointType& rayOrig, const PointType& rayDir, int bounces, uint32_t& rngState) -> Eigen::Vector3f {
 
-            if (bounces > maxBounces) return {0,0,0};
+            if (bounces > maxBounces) return space;
 
             auto hits = voxelTraverse(rayOrig, rayDir, rayLength, true);
             if (hits.empty() && bounces == 0) {
                 return defaultColor; 
             } else if (hits.empty()) {
-                return {0,0,0};
+                return space;
             }
 
             auto obj = hits[0];
@@ -581,7 +584,7 @@ public:
             PointType hitPoint = rayOrig + rayDir * t;
             PointType normal = (hitPoint - center).normalized();
 
-            Eigen::Vector3f finalColor = {0,0,0};
+            Eigen::Vector3f finalColor = space;
 
             if (obj->light) {
                 return obj->color * obj->emittance;

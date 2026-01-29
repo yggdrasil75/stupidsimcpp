@@ -145,7 +145,7 @@ void addCeilingLight(const defaults& config, const ceilingdefaults& ceilingconf,
 void livePreview(Octree<int>& grid, defaults& config, const Camera& cam) {
     std::lock_guard<std::mutex> lock(PreviewMutex);
     updatePreview = true;
-    frame currentPreviewFrame = grid.renderFrame(cam, config.outWidth, config.outHeight, frame::colormap::RGB, 4, 3);
+    frame currentPreviewFrame = grid.renderFrame(cam, config.outWidth, config.outHeight, frame::colormap::RGB, 4, 3, true);
     
     glGenTextures(1, &textu);
     glBindTexture(GL_TEXTURE_2D, textu);
