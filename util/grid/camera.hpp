@@ -15,6 +15,8 @@ struct Camera {
     float fov;
     float movementSpeed;
     float rotationSpeed;
+
+    Camera() : origin(Vector3f(0,0,0)), direction(Vector3f(0,0,0)), up(Vector3f(0,0,0)), fov(80), movementSpeed(10), rotationSpeed(10) {}
     
     Camera(const Vector3f& pos, const Vector3f& viewdir, const Vector3f& up, float fov = 80,
            float moveSpeed = 1.0f, float rotSpeed = 0.5f) 

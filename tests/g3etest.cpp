@@ -38,8 +38,9 @@ struct spheredefaults {
     float emittance = 0.0f;
     float reflection = 0.0f;
     float refraction = 0.0f;
-    bool fillInside = true;
-    float voxelSize = 10.0f;
+    bool fillInside = false;
+    float voxelSize = 1.5f;
+    int numPoints = 15000;
 };
 
 struct ceilingdefaults {
@@ -64,41 +65,63 @@ using PointType = Eigen::Matrix<float, 3, 1>;
 
 void createSphere(const defaults& config, const spheredefaults& sconfig, Octree<int>& grid) {
     if (!grid.empty()) grid.clear();
-    int minX = std::max(0, (int)(sconfig.centerX - sconfig.radius - 1));
-    int maxX = std::min(config.gridSizecube, (int)(sconfig.centerX + sconfig.radius + 1));
-    int minY = std::max(0, (int)(sconfig.centerY - sconfig.radius - 1));
-    int maxY = std::min(config.gridSizecube, (int)(sconfig.centerY + sconfig.radius + 1));
-    int minZ = std::max(0, (int)(sconfig.centerZ - sconfig.radius - 1));
-    int maxZ = std::min(config.gridSizecube, (int)(sconfig.centerZ + sconfig.radius + 1));
-    
-    float radSq = sconfig.radius * sconfig.radius;
-    float innerRadSq = 0.0f;
-    if (!sconfig.fillInside) {
-        float innerR = std::max(0.0f, sconfig.radius - 2.0f);
-        innerRadSq = innerR * innerR;
-    }
-    
+
+    float phi = M_PI * (3.0f - std::sqrt(5.0f)); // Golden angle in radians
     Eigen::Vector3f colorVec(sconfig.color[0], sconfig.color[1], sconfig.color[2]);
-    for (int x = minX; x < maxX; ++x) {
-        for (int y = minY; y < maxY; ++y) {
-            for (int z = minZ; z < maxZ; ++z) {
-                float dx = x - sconfig.centerX;
-                float dy = y - sconfig.centerY;
-                float dz = z - sconfig.centerZ;
-                float distSq = dx*dx + dy*dy + dz*dz;
+    
+    // We treat sconfig.voxelSize as an overlap multiplier.
+    // 1.0 gives mathematical coverage, >1.0 ensures overlap for solidity.
+    float overlapMultiplier = std::max(0.1f, sconfig.voxelSize);
 
-                bool solid = distSq <= radSq;
+    float currentRadius = sconfig.radius;
+    
+    // Loop for shells. If fillInside is false, this loop runs once.
+    // If true, it runs until radius is negligible.
+    while (currentRadius > 0.5f) {
+        // To maintain uniform visual density, the number of points on an inner shell
+        // should be proportional to surface area (radius^2).
+        float scaleFactor = currentRadius / sconfig.radius;
+        int currentN = std::max(4, (int)(sconfig.numPoints * scaleFactor * scaleFactor));
+        
+        // Calculate the point radius required to fully cover the surface area of the sphere.
+        // Surface Area = 4 * PI * R^2.
+        // Area per point = Surface Area / N.
+        // Approximate point radius r: PI * r^2 = Area per point.
+        // r = sqrt(4 * R^2 / N) = 2 * R / sqrt(N).
+        float calculatedSize = (2.0f * currentRadius) / std::sqrt((float)currentN);
+        
+        // Apply user-defined multiplier for extra solidity/overlap
+        float finalSize = calculatedSize * overlapMultiplier * overlapMultiplier;
+
+        for (int i = 0; i < currentN; ++i) {
+            // Fibonacci Sphere math
+            float y = 1.0f - (i / (float)(currentN - 1)) * 2.0f; // y goes from 1 to -1
+            float radiusAtY = std::sqrt(1.0f - y * y); // Radius at this height
+            float theta = phi * i; // Golden angle increment
+
+            float x = std::cos(theta) * radiusAtY;
+            float z = std::sin(theta) * radiusAtY;
+
+            PointType pos(
+                sconfig.centerX + x * currentRadius,
+                sconfig.centerY + y * currentRadius,
+                sconfig.centerZ + z * currentRadius
+            );
+
+            // Boundary check to prevent segfaults if radius pushes out of grid bounds
+            if (pos.x() >= 0 && pos.x() < config.gridSizecube &&
+                pos.y() >= 0 && pos.y() < config.gridSizecube &&
+                pos.z() >= 0 && pos.z() < config.gridSizecube) {
                 
-                if (solid) {
-                    if (!(sconfig.fillInside) && distSq < innerRadSq) {
-                        continue;
-                    }
-
-                    PointType pos((float)x, (float)y, (float)z);
-                    grid.set(1,pos, true, colorVec, sconfig.voxelSize, true, sconfig.light, sconfig.emittance, sconfig.refraction, sconfig.reflection);
-                }
+                grid.set(1, pos, true, colorVec, finalSize, true, 
+                         sconfig.light, sconfig.emittance, sconfig.refraction, sconfig.reflection);
             }
         }
+
+        if (!sconfig.fillInside) break;
+
+        // Decrease radius by a fraction of the point size to ensure shells overlap
+        currentRadius -= (finalSize * 0.75f);
     }
 }
 
@@ -122,7 +145,7 @@ void addCeilingLight(const defaults& config, const ceilingdefaults& ceilingconf,
 void livePreview(Octree<int>& grid, defaults& config, const Camera& cam) {
     std::lock_guard<std::mutex> lock(PreviewMutex);
     updatePreview = true;
-    frame currentPreviewFrame = grid.renderFrame(cam, config.outWidth, config.outHeight, frame::colormap::RGB);
+    frame currentPreviewFrame = grid.renderFrame(cam, config.outWidth, config.outHeight, frame::colormap::RGB, 4, 3);
     
     glGenTextures(1, &textu);
     glBindTexture(GL_TEXTURE_2D, textu);
@@ -217,9 +240,13 @@ int main() {
     Octree<int> grid(minBound, maxBound, 16, 16);
     bool gridInitialized = false;
     float ghalf = config.gridSizecube / 2.f;
-    Camera cam(PointType(ghalf, ghalf, ghalf), PointType(0,0,1), PointType(0,1,0), 80);
+    
     spheredefaults sphereConf;
     ceilingdefaults ceilingConf;
+    
+    sphereConf.centerX = ghalf;
+    sphereConf.centerY = ghalf;
+    sphereConf.centerZ = ghalf;
 
     bool autoRotate = false;
     bool autoRotateView = false;
@@ -241,6 +268,7 @@ int main() {
     float camvY = 0.f;
     float camvZ = 0.f;
     float camspeed = 50;
+    Camera cam(PointType(400, 400, 400), PointType(0,0,1), PointType(0,1,0), 80, camspeed);
 
     // Keyboard state tracking
     std::map<int, bool> keyStates;
@@ -253,6 +281,9 @@ int main() {
         static double lastFrameTime = currentTime;
         deltaTime = currentTime - lastFrameTime;
         lastFrameTime = currentTime;
+        
+        if (autoRotate) autoRotationTime += deltaTime;
+        if (autoRotateView) autoRotationAngle += deltaTime;
 
         glfwPollEvents();
         
@@ -315,7 +346,7 @@ int main() {
         {
             ImGui::Begin("Controls");
             
-            ImGui::Text("Sphere Parameters");
+            ImGui::Text("Planet");
             float pos[3] = { sphereConf.centerX, sphereConf.centerY, sphereConf.centerZ };
             if (ImGui::DragFloat3("Center (X,Y,Z)", pos, 1.0f, 0.0f, (float)config.gridSizecube)) {
                 sphereConf.centerX = pos[0];
@@ -324,8 +355,15 @@ int main() {
             }
             
             ImGui::DragFloat("Radius", &sphereConf.radius, 0.5f, 1.0f, 250.0f);
+            
+            // Replaced traditional voxel sizing with Point Count logic
+            ImGui::DragInt("Point Count", &sphereConf.numPoints, 100, 100, 200000);
+            ImGui::DragFloat("Density (Overlap)", &sphereConf.voxelSize, 0.05f, 0.1f, 5.0f);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Multiplies calculated point size. >1.0 ensures solid surface.");
+            }
+
             ImGui::ColorEdit3("Color", sphereConf.color);
-            ImGui::DragFloat("Voxel Size", &sphereConf.voxelSize, 0.1f, 0.1f, 5.0f);
             
             ImGui::Separator();
             ImGui::Checkbox("Is Light", &sphereConf.light);

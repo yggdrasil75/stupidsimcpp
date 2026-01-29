@@ -21,7 +21,6 @@
 #endif
 
 constexpr int Dim = 3;
-constexpr int maxBounces = 4;
 
 template<typename T>
 class Octree {
@@ -384,7 +383,13 @@ private:
         float x = randomValueNormalDistribution(state);
         float y = randomValueNormalDistribution(state);
         float z = randomValueNormalDistribution(state);
-        return PointType(x,y,z).normalized();
+        PointType randomDir(x, y, z);
+        randomDir.normalize();
+        
+        if (randomDir.dot(normal) < 0.0f) {
+            randomDir = -randomDir;
+        }
+        return randomDir;
     }
 
     float rgbToGrayscale(const Eigen::Vector3f& color) const {
@@ -413,7 +418,7 @@ public:
         std::ofstream out(filename, std::ios::binary);
         if (!out) return false;
 
-        uint32_t magic = 0x79676733; 
+        uint32_t magic = 0x79676733;
         writeVal(out, magic);
         writeVal(out, maxDepth);
         writeVal(out, maxPointsPerNode);
@@ -435,7 +440,7 @@ public:
 
         uint32_t magic;
         readVal(in, magic);
-        if (magic != 0x0C78E3) {
+        if (magic != 0x79676733) {
             std::cerr << "Invalid Octree file format" << std::endl;
             return false;
         }
@@ -466,6 +471,8 @@ public:
             if (!node || tMin > tMax) return;
             if (node->isLeaf) {
                 for (const auto& pointData : node->points) {
+                    if (!pointData->active) continue;
+                    
                     PointType toPoint = pointData->position - origin;
                     float projection = toPoint.dot(dir);
                     if (projection >= 0 && projection <= maxDist) {
@@ -517,7 +524,7 @@ public:
         return hits;
     }
     
-    frame renderFrame(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB) {
+    frame renderFrame(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB, int samplesPerPixel = 2, int maxBounces = 4) {
         PointType origin = cam.origin;
         PointType dir = cam.direction.normalized();
         PointType up = cam.up.normalized();
@@ -549,7 +556,7 @@ public:
             if (bounces > maxBounces) return {0,0,0};
 
             auto hits = voxelTraverse(rayOrig, rayDir, rayLength, true);
-            if (hits.empty() && bounces < 1) {
+            if (hits.empty() && bounces == 0) {
                 return defaultColor; 
             } else if (hits.empty()) {
                 return {0,0,0};
@@ -626,20 +633,25 @@ public:
         #pragma omp parallel for schedule(dynamic) collapse(2)
         for (int y = 0; y < height; ++y) {
             for (int x = 0; x < width; ++x) {
+                int pidx = (y * width + x);
+                uint32_t seed = pidx * 1973 + 9277;
+                int idx = pidx * channels;
+
                 float px = (2.0f * (x + 0.5f) / width - 1.0f) * tanfovx;
                 float py = (1.0f - 2.0f * (y + 0.5f) / height) * tanfovy;
                 
                 PointType rayDir = dir + (right * px) + (up * py);
                 rayDir.normalize();
+
+                Eigen::Vector3f accumulatedColor(0.0f, 0.0f, 0.0f);
                 
-                int pidx = (y * width + x);
-                uint32_t seed = pidx * 1973 + 9277;
-                int idx = pidx * channels;
+                for(int s = 0; s < samplesPerPixel; ++s) {
+                    accumulatedColor += traceRay(origin, rayDir, 0, seed);
+                }
                 
-                Eigen::Vector3f color = traceRay(origin, rayDir, 0, seed);
+                Eigen::Vector3f color = accumulatedColor / static_cast<float>(samplesPerPixel);
                 
                 color = color.cwiseMax(0.0f).cwiseMin(1.0f);
-                
                 
                 switch(colorformat) {
                     case frame::colormap::B:
@@ -667,7 +679,6 @@ public:
                         colorBuffer[idx + 2] = static_cast<uint8_t>(color[0] * 255.0f);
                         colorBuffer[idx + 3] = 255;
                         break;
-                    
                 }
             }
         }
