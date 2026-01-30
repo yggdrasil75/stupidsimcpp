@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <functional>
 #include <random>
+#include <limits>
 #include "../../eigen/Eigen/Core"
 #include "../timing_decorator.hpp"
 
@@ -173,6 +174,30 @@ private:
         return (permutation[(z + permutation[(y + permutation[x & 255]) & 255]) & 255] / 255.0f) * 2.0f - 1.0f;
     }
 
+    /// @brief Pseudo-random vector for Worley noise (2D)
+    Vector2f hashVector(const Vector2f& gridPoint) {
+        int x = (int)gridPoint.x() & 255;
+        int y = (int)gridPoint.y() & 255;
+        // Generate pseudo-random float [0,1] for x and y offsets
+        float hx = permutation[(x + permutation[y]) & 255] / 255.0f;
+        float hy = permutation[(y + permutation[(x + 1) & 255]) & 255] / 255.0f;
+        return Vector2f(hx, hy);
+    }
+
+    /// @brief Pseudo-random vector for Worley noise (3D)
+    Vector3f hashVector(const Vector3f& gridPoint) {
+        int x = (int)gridPoint.x() & 255;
+        int y = (int)gridPoint.y() & 255;
+        int z = (int)gridPoint.z() & 255;
+        
+        int h_xy = permutation[(x + permutation[y]) & 255];
+        float hx = permutation[(h_xy + z) & 255] / 255.0f;
+        float hy = permutation[(h_xy + permutation[(z + 1) & 255]) & 255] / 255.0f;
+        float hz = permutation[(permutation[(x+1)&255] + permutation[(y+1)&255] + z) & 255] / 255.0f;
+        
+        return Vector3f(hx, hy, hz);
+    }
+
 public:
     /// @brief Default constructor with random seed
     /// @note Uses random_device for seed; different runs produce different noise
@@ -192,7 +217,7 @@ public:
     /// @return Noise value in [-1,1] range
     /// @note Core 2D noise function; changes affect all 2D noise outputs
     float permute(const Vector2f& point) {
-        TIME_FUNCTION;
+        // TIME_FUNCTION;
         float x = point.x();
         float y = point.y();
         int X = (int)floor(x);
@@ -231,7 +256,7 @@ public:
     /// @param point 3D coordinate
     /// @return Noise value in [-1,1] range
     float permute(const Vector3f& point) {
-        TIME_FUNCTION;
+        // TIME_FUNCTION;
         float x = point.x();
         float y = point.y();
         float z = point.z();
@@ -373,7 +398,7 @@ public:
     /// @return Vector4f containing RGBA noise values
     /// @note Each channel uses different offset; changes affect color patterns
     Vector4f permuteColor(const Vector3f& point) {
-        TIME_FUNCTION;
+        // TIME_FUNCTION;
         float noiseR = permute(point);
         float noiseG = permute(Vector3f(point + Vector3f(100.0f, 100.0f, 100.0f)));
         float noiseB = permute(Vector3f(point + Vector3f(200.0f, 200.0f, 200.0f)));
@@ -547,6 +572,205 @@ public:
         }
         
         return value;
+    }
+
+    /// @brief Pure White Noise
+    /// @param point Input coordinate
+    /// @return Random value [-1, 1] based solely on integer coordinate hashing
+    float whiteNoise(const Vector2f& point) {
+        return hash((int)floor(point.x()), (int)floor(point.y()));
+    }
+
+    /// @brief Pure White Noise 3D
+    float whiteNoise(const Vector3f& point) {
+        return hash((int)floor(point.x()), (int)floor(point.y()), (int)floor(point.z()));
+    }
+
+    /// @brief Worley (Cellular) Noise 2D
+    /// @param point Input coordinate
+    /// @return Distance to the nearest feature point [0, 1+]
+    /// @note Used for stone, water caustics, biological cells
+    float worleyNoise(const Vector2f& point) {
+        Vector2f p = Vector2f(floor(point.x()), floor(point.y()));
+        Vector2f f = Vector2f(point.x() - p.x(), point.y() - p.y());
+
+        float minDist = 1.0f;
+
+        for (int y = -1; y <= 1; y++) {
+            for (int x = -1; x <= 1; x++) {
+                Vector2f neighbor(x, y);
+                // Get random point inside the neighbor cell
+                Vector2f pointInCell = hashVector(Vector2f(p + neighbor));
+                
+                // Vector from current pixel to that point
+                Vector2f diff = neighbor + pointInCell - f;
+                
+                float dist = diff.norm();
+                if (dist < minDist) minDist = dist;
+            }
+        }
+        return minDist; // Usually clamped or inverted for visuals
+    }
+
+    /// @brief Worley Noise 3D
+    /// @param point Input coordinate
+    /// @return Distance to nearest feature point
+    float worleyNoise(const Vector3f& point) {
+        Vector3f p = Vector3f(floor(point.x()), floor(point.y()), floor(point.z()));
+        Vector3f f = Vector3f(point.x() - p.x(), point.y() - p.y(), point.z() - p.z());
+
+        float minDist = 1.0f;
+
+        for (int z = -1; z <= 1; z++) {
+            for (int y = -1; y <= 1; y++) {
+                for (int x = -1; x <= 1; x++) {
+                    Vector3f neighbor(x, y, z);
+                    Vector3f pointInCell = hashVector(Vector3f(p + neighbor));
+                    Vector3f diff = neighbor + pointInCell - f;
+                    float dist = diff.norm();
+                    if (dist < minDist) minDist = dist;
+                }
+            }
+        }
+        return minDist;
+    }
+
+    /// @brief Voronoi Noise 2D (Cell ID)
+    /// @param point Input coordinate
+    /// @return Random hash value [-1, 1] unique to the closest cell
+    float voronoiNoise(const Vector2f& point) {
+        Vector2f p = Vector2f(floor(point.x()), floor(point.y()));
+        Vector2f f = Vector2f(point.x() - p.x(), point.y() - p.y());
+
+        float minDist = 100.0f;
+        Vector2f cellID = p;
+
+        for (int y = -1; y <= 1; y++) {
+            for (int x = -1; x <= 1; x++) {
+                Vector2f neighbor(x, y);
+                Vector2f pointInCell = hashVector(Vector2f(p + neighbor));
+                Vector2f diff = neighbor + pointInCell - f;
+                float dist = diff.squaredNorm(); // Faster than norm
+                if (dist < minDist) {
+                    minDist = dist;
+                    cellID = p + neighbor;
+                }
+            }
+        }
+        return hash((int)cellID.x(), (int)cellID.y());
+    }
+
+    /// @brief "Crystals" Noise (Variant of Worley)
+    /// @param point Input coordinate
+    /// @return F2 - F1 (Distance to 2nd closest - Distance to closest)
+    /// @note Creates cell-like borders, cracks, or crystal facets
+    float crystalNoise(const Vector2f& point) {
+        Vector2f p = Vector2f(floor(point.x()), floor(point.y()));
+        Vector2f f = Vector2f(point.x() - p.x(), point.y() - p.y());
+
+        float d1 = 10.0f; // Closest
+        float d2 = 10.0f; // 2nd Closest
+
+        for (int y = -1; y <= 1; y++) {
+            for (int x = -1; x <= 1; x++) {
+                Vector2f neighbor(x, y);
+                Vector2f pointInCell = hashVector(Vector2f(p + neighbor));
+                Vector2f diff = neighbor + pointInCell - f;
+                float dist = diff.norm();
+
+                if (dist < d1) {
+                    d2 = d1;
+                    d1 = dist;
+                } else if (dist < d2) {
+                    d2 = dist;
+                }
+            }
+        }
+        return d2 - d1;
+    }
+
+    /// @brief Domain Warping
+    /// @param point Input coordinate
+    /// @param strength Magnitude of the warp
+    /// @return Warped Perlin noise value
+    /// @note Calculates noise(p + noise(p)) for marble/fluid effects
+    float domainWarp(const Vector2f& point, float strength = 1.0f) {
+        Vector2f q(
+            permute(point),
+            permute(Vector2f(point + Vector2f(5.2f, 1.3f)))
+        );
+        return permute(Vector2f(point + q * strength));
+    }
+
+    /// @brief 3D Domain Warping
+    float domainWarp(const Vector3f& point, float strength = 1.0f) {
+        Vector3f q(
+            permute(point),
+            permute(Vector3f(point + Vector3f(5.2f, 1.3f, 2.8f))),
+            permute(Vector3f(point + Vector3f(1.1f, 8.4f, 5.5f)))
+        );
+        return permute(Vector3f(point + q * strength));
+    }
+
+    /// @brief Curl Noise 2D
+    /// @param point Input coordinate
+    /// @return Divergence-free vector field (useful for particle simulation)
+    /// @note Calculated via finite difference curl of a potential field
+    Vector2f curlNoise(const Vector2f& point) {
+        float e = 0.01f; // Epsilon
+        float n1 = permute(Vector2f(point + Vector2f(0, e)));
+        float n2 = permute(Vector2f(point + Vector2f(0, -e)));
+        float n3 = permute(Vector2f(point + Vector2f(e, 0)));
+        float n4 = permute(Vector2f(point + Vector2f(-e, 0)));
+
+        float dx = (n3 - n4) / (2.0f * e);
+        float dy = (n1 - n2) / (2.0f * e);
+
+        // Curl of scalar field in 2D is (d/dy, -d/dx)
+        return Vector2f(dy, -dx).normalized();
+    }
+
+    /// @brief Curl Noise 3D
+    /// @param point Input coordinate
+    /// @return Divergence-free vector field
+    /// @note Uses 3 offsets of Perlin noise as Vector Potential
+    Vector3f curlNoise(const Vector3f& point) {
+        float e = 0.01f;
+        
+        Vector3f dx(e, 0.0f, 0.0f);
+        Vector3f dy(0.0f, e, 0.0f);
+        Vector3f dz(0.0f, 0.0f, e);
+
+        // We need a vector potential (3 uncorrelated noise values)
+        // We reuse permuteColor's logic but keep it local to avoid overhead
+        auto potential = [&](const Vector3f& p) -> Vector3f {
+            return Vector3f(
+                permute(p),
+                permute(Vector3f(p + Vector3f(123.4f, 129.1f, 827.0f))), 
+                permute(Vector3f(p + Vector3f(492.5f, 991.2f, 351.4f))) 
+            );
+        };
+
+        Vector3f p_dx_p = potential(point + dx);
+        Vector3f p_dx_m = potential(point - dx);
+        Vector3f p_dy_p = potential(point + dy);
+        Vector3f p_dy_m = potential(point - dy);
+        Vector3f p_dz_p = potential(point + dz);
+        Vector3f p_dz_m = potential(point - dz);
+
+        // Finite difference
+        float dFz_dy = (p_dy_p.z() - p_dy_m.z()) / (2.0f * e);
+        float dFy_dz = (p_dz_p.y() - p_dz_m.y()) / (2.0f * e);
+        float dFx_dz = (p_dz_p.x() - p_dz_m.x()) / (2.0f * e);
+        float dFz_dx = (p_dx_p.z() - p_dx_m.z()) / (2.0f * e);
+        float dFy_dx = (p_dx_p.y() - p_dx_m.y()) / (2.0f * e);
+        float dFx_dy = (p_dy_p.x() - p_dy_m.x()) / (2.0f * e);
+
+        return Vector3f(
+            dFz_dy - dFy_dz,
+            dFx_dz - dFz_dx,
+            dFy_dx - dFx_dy
+        ).normalized();
     }
 };
 

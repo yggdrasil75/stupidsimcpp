@@ -7,6 +7,7 @@
 #include <mutex>
 #include <cmath>
 #include <random>
+#include <algorithm>
 
 #include "../util/grid/grid3eigen.hpp"
 #include "../util/output/bmpwriter.hpp"
@@ -54,6 +55,43 @@ struct stardefaults {
     bool enabled = true;
 };
 
+enum class NoiseType {
+    Perlin = 0,
+    Value = 1,
+    Fractal = 2,
+    Turbulence = 3,
+    Ridged = 4,
+    Billow = 5,
+    WhiteNoise = 6,
+    WorleyNoise = 7,
+    VoronoiNoise = 8,
+    CrystalNoise = 9,
+    DomainWarp = 10,
+    CurlNoise = 11
+};
+
+struct NoisePreviewState {
+    int width = 512;
+    int height = 512;
+    NoiseType currentType = NoiseType::Perlin;
+    NoiseType currentSubType = NoiseType::Perlin;
+    
+    int seed = 1337;
+    float scale = 0.02f;
+    int octaves = 4;
+    float persistence = 0.5f;
+    float lacunarity = 2.0f;
+    float ridgeOffset = 1.0f;
+    float strength = 2.0f;
+    float substrength = 2.0f;
+    
+    // Visualization
+    float offset[2] = {0.0f, 0.0f}; // Panning
+    GLuint textureId = 0;
+    std::vector<uint8_t> pixelBuffer;
+    bool needsUpdate = true;
+};
+
 std::mutex PreviewMutex;
 GLuint textu = 0;
 bool textureInitialized = false;
@@ -72,9 +110,134 @@ bool firstFrameMeasured = false;
 
 // Stats update timer
 std::chrono::steady_clock::time_point lastStatsUpdate;
-const std::chrono::seconds STATS_UPDATE_INTERVAL(60); // Update stats once per minute
+const std::chrono::seconds STATS_UPDATE_INTERVAL(60);
 std::string cachedStats;
 bool statsNeedUpdate = true;
+
+// Helper to generate the 2D noise texture
+void updateNoiseTexture(NoisePreviewState& state) {
+    glGenTextures(1, &state.textureId);
+    glBindTexture(GL_TEXTURE_2D, state.textureId);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+    state.pixelBuffer.resize(state.width * state.height * 3);
+    
+    // Create a local noise generator with current seed
+    PNoise2 generator(state.seed);
+    
+    #pragma omp parallel for
+    for (int y = 0; y < state.height; ++y) {
+        for (int x = 0; x < state.width; ++x) {
+            float nx = (x + state.offset[0]) * state.scale;
+            float ny = (y + state.offset[1]) * state.scale;
+            Eigen::Vector2f point(nx, ny);
+            
+            float val = 0.0f;
+            
+            // Call specific PNoise2 method
+            switch (state.currentType) {
+                case NoiseType::Perlin:
+                    val = generator.permute(point); // [-1, 1]
+                    break;
+                case NoiseType::Value:
+                    val = generator.valueNoise(point); // [-1, 1]
+                    break;
+                case NoiseType::Fractal:
+                    val = generator.fractalNoise(point, state.octaves, state.persistence, state.lacunarity);
+                    break;
+                case NoiseType::Turbulence:
+                    val = generator.turbulence(point, state.octaves); // [0, unbounded usually]
+                    val = (val * 2.0f) - 1.0f; 
+                    break;
+                case NoiseType::Ridged:
+                    val = generator.ridgedNoise(point, state.octaves, state.ridgeOffset);
+                    // Ridged output can be large, scale down slightly for preview
+                    val = (val * 0.5f) - 1.0f; 
+                    break;
+                case NoiseType::Billow:
+                    val = generator.billowNoise(point, state.octaves);
+                    val = (val * 2.0f) - 1.0f;
+                    break;
+                case NoiseType::WhiteNoise:
+                    val = generator.whiteNoise(point);
+                    break;
+                case NoiseType::WorleyNoise:
+                    val = generator.worleyNoise(point);
+                    break;
+                case NoiseType::VoronoiNoise:
+                    val = generator.voronoiNoise(point);
+                    break;
+                case NoiseType::CrystalNoise:
+                    val = generator.crystalNoise(point);
+                    break;
+                case NoiseType::DomainWarp:
+                    val = generator.domainWarp(point, state.strength);
+                    break;
+                case NoiseType::CurlNoise:
+                    Eigen::Vector2f flow = generator.curlNoise(point);
+                    flow = point + (flow * state.strength);
+                    switch (state.currentSubType) {
+                        case NoiseType::Perlin:
+                            val = generator.permute(flow); // [-1, 1]
+                            break;
+                        case NoiseType::Value:
+                            val = generator.valueNoise(flow); // [-1, 1]
+                            break;
+                        case NoiseType::Fractal:
+                            val = generator.fractalNoise(flow, state.octaves, state.persistence, state.lacunarity);
+                            break;
+                        case NoiseType::Turbulence:
+                            val = generator.turbulence(flow, state.octaves); // [0, unbounded usually]
+                            val = (val * 2.0f) - 1.0f; 
+                            break;
+                        case NoiseType::Ridged:
+                            val = generator.ridgedNoise(flow, state.octaves, state.ridgeOffset);
+                            // Ridged output can be large, scale down slightly for preview
+                            val = (val * 0.5f) - 1.0f; 
+                            break;
+                        case NoiseType::Billow:
+                            val = generator.billowNoise(flow, state.octaves);
+                            val = (val * 2.0f) - 1.0f;
+                            break;
+                        case NoiseType::WhiteNoise:
+                            val = generator.whiteNoise(flow);
+                            break;
+                        case NoiseType::WorleyNoise:
+                            val = generator.worleyNoise(flow);
+                            break;
+                        case NoiseType::VoronoiNoise:
+                            val = generator.voronoiNoise(flow);
+                            break;
+                        case NoiseType::CrystalNoise:
+                            val = generator.crystalNoise(flow);
+                            break;
+                        case NoiseType::DomainWarp:
+                            val = generator.domainWarp(flow, state.substrength);
+                            break;
+                    }
+                    break;
+            }
+
+            float norm = (val + 1.0f) * 0.5f;
+            norm = std::clamp(norm, 0.0f, 1.0f);
+            
+            uint8_t color = static_cast<uint8_t>(norm * 255);
+            
+            int idx = (y * state.width + x) * 3;
+            state.pixelBuffer[idx] = color;
+            state.pixelBuffer[idx+1] = color;
+            state.pixelBuffer[idx+2] = color;
+        }
+    }
+
+    glBindTexture(GL_TEXTURE_2D, state.textureId);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, state.width, state.height, 
+                 0, GL_RGB, GL_UNSIGNED_BYTE, state.pixelBuffer.data());
+    
+    state.needsUpdate = false;
+}
 
 void createSphere(const defaults& config, const spheredefaults& sconfig, Octree<int>& grid) {
     if (!grid.empty()) grid.clear();
@@ -181,15 +344,13 @@ void livePreview(Octree<int>& grid, defaults& config, const Camera& cam) {
     std::lock_guard<std::mutex> lock(PreviewMutex);
     updatePreview = true;
     
-    // Measure render time
     auto renderStart = std::chrono::high_resolution_clock::now();
-    
+
     frame currentPreviewFrame = grid.fastRenderFrame(cam, config.outWidth, config.outHeight, frame::colormap::RGB);
     
     auto renderEnd = std::chrono::high_resolution_clock::now();
     renderFrameTime = std::chrono::duration<double>(renderEnd - renderStart).count();
     
-    // Update FPS calculations
     if (!firstFrameMeasured) {
         renderFrameTimes.resize(FRAME_HISTORY_SIZE, renderFrameTime);
         firstFrameMeasured = true;
@@ -198,7 +359,6 @@ void livePreview(Octree<int>& grid, defaults& config, const Camera& cam) {
     renderFrameTimes[frameHistoryIndex] = renderFrameTime;
     frameHistoryIndex = (frameHistoryIndex + 1) % FRAME_HISTORY_SIZE;
     
-    // Calculate average frame time and FPS
     avgRenderFrameTime = 0.0;
     int validFrames = 0;
     for (int i = 0; i < FRAME_HISTORY_SIZE; i++) {
@@ -217,7 +377,6 @@ void livePreview(Octree<int>& grid, defaults& config, const Camera& cam) {
         updateStatsCache(grid);
     }
     
-    // Update texture
     if (textu == 0) {
         glGenTextures(1, &textu);
     }
@@ -303,8 +462,6 @@ int main() {
     #endif
     ImGui_ImplOpenGL3_Init(glsl_version);
 
-    bool show_demo_window = true;
-    bool show_another_window = false;
     ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
 
     defaults config;
@@ -317,6 +474,10 @@ int main() {
     spheredefaults sphereConf;
     stardefaults starConf;
     
+    // Initialize Noise Preview State
+    NoisePreviewState noiseState;
+    updateNoiseTexture(noiseState); // Initial generation
+
     sphereConf.centerX = ghalf;
     sphereConf.centerY = ghalf;
     sphereConf.centerZ = ghalf;
@@ -343,17 +504,15 @@ int main() {
     float camspeed = 50;
     Camera cam(PointType(400, 400, 400), PointType(0,0,1), PointType(0,1,0), 80, camspeed);
 
-    // Keyboard state tracking
     std::map<int, bool> keyStates;
     bool mouseCaptured = false;
     double lastMouseX = 0, lastMouseY = 0;
     float deltaTime = 0.016f;
-    
-    // Initialize render frame times vector
     renderFrameTimes.resize(FRAME_HISTORY_SIZE, 0.0);
     
     lastStatsUpdate = std::chrono::steady_clock::now();
     statsNeedUpdate = true;
+    bool worldPreview = false;
     
     if (grid.load("output/Treegrid.yggs")) {
         gridInitialized = true;
@@ -423,7 +582,6 @@ int main() {
         camvZ = cam.direction[2];
         camspeed = cam.movementSpeed;
         
-        // Start the Dear ImGui frame
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
@@ -438,16 +596,12 @@ int main() {
                 sphereConf.centerY = pos[1];
                 sphereConf.centerZ = pos[2];
             }
-            
             ImGui::DragFloat("Radius", &sphereConf.radius, 0.5f, 1.0f, 250.0f);
-            
-            // Replaced traditional voxel sizing with Point Count logic
             ImGui::DragInt("Point Count", &sphereConf.numPoints, 100, 100, 200000);
             ImGui::DragFloat("Density (Overlap)", &sphereConf.voxelSize, 0.05f, 0.1f, 5.0f);
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Multiplies calculated point size. >1.0 ensures solid surface.");
             }
-
             ImGui::ColorEdit3("Color", sphereConf.color);
             
             ImGui::Separator();
@@ -494,7 +648,9 @@ int main() {
         }
 
         {
-            ImGui::Begin("Preview");
+            ImGui::Begin("Planet Preview");
+            if (ImGui::Checkbox("update Preview", &worldPreview)) if (gridInitialized) livePreview(grid, config, cam);
+
             if (gridInitialized && textureInitialized) {
                 ImGui::Image((void*)(intptr_t)textu, ImVec2(config.outWidth, config.outHeight));
             } else if (gridInitialized) {
@@ -503,8 +659,6 @@ int main() {
                 ImGui::Text("No grid generated");
             }
             
-            ImGui::Separator();
-
             ImGui::Text("Render Performance:");
             if (renderFPS > 0) {
                 // Color code based on FPS
@@ -525,23 +679,16 @@ int main() {
                 
                 // Show latest frame time
                 ImGui::Text("Latest: %.1f ms", renderFrameTime * 1000.0);
-            } else {
-                ImGui::Text("No render data yet");
-            }
-
-            if (gridInitialized) {
-                // Show time since last update
-                auto now = std::chrono::steady_clock::now();
-                auto timeSinceUpdate = std::chrono::duration_cast<std::chrono::seconds>(now - lastStatsUpdate);
-                
-                if (!(timeSinceUpdate < STATS_UPDATE_INTERVAL)) {
-                    updateStatsCache(grid);
-                }
-                
-                // Display cached stats
-                ImGui::TextUnformatted(cachedStats.c_str());
             }
             
+            ImGui::Separator();
+            ImGui::Text("Performance: %.1f FPS (%.1f ms)", renderFPS, avgRenderFrameTime * 1000.0);
+
+            if (gridInitialized) {
+                auto now = std::chrono::steady_clock::now();
+                if ((now - lastStatsUpdate) > STATS_UPDATE_INTERVAL) updateStatsCache(grid);
+                ImGui::TextUnformatted(cachedStats.c_str());
+            }
             ImGui::End();
         }
 
@@ -702,8 +849,101 @@ int main() {
 
             ImGui::End();
         }
+        
+        {
+            ImGui::Begin("2D Noise Lab");
+            bool changed = false;
+            
+            const char* items[] = { "Perlin", "Value", "Fractal (Octave)", "Turbulence", "Ridged Multifractal", "Billow", "White", "Worley", "Voronoi", "Crystal", "Domain Warp", "Curl" };
+            int currentItem = static_cast<int>(noiseState.currentType);
+            if (ImGui::Combo("Method", &currentItem, items, IM_ARRAYSIZE(items))) {
+                noiseState.currentType = static_cast<NoiseType>(currentItem);
+                changed = true;
+            }
+            if (noiseState.currentType == NoiseType::CurlNoise) {
+                int currentsubitem = static_cast<int>(noiseState.currentSubType);
+                if (ImGui::Combo("Sub Method", &currentsubitem, items, IM_ARRAYSIZE(items))) {
+                    noiseState.currentSubType = static_cast<NoiseType>(currentsubitem);
+                    changed = true;
+                }
+            }
+            
+            changed |= ImGui::InputInt("Seed", &noiseState.seed);
+            if (ImGui::Button("Randomize Seed")) {
+                noiseState.seed = rand();
+                changed = true;
+            }
+            
+            ImGui::Separator();
+            ImGui::Text("Base Parameters");
+            changed |= ImGui::SliderFloat("Scale (Freq)", &noiseState.scale, 0.001f, 1.f, "%.4f");
+            changed |= ImGui::DragFloat2("Offset", noiseState.offset, 1.0f);
 
-        if (gridInitialized) livePreview(grid, config, cam);
+            // Conditional parameters based on noise type
+            bool usesOctaves = (noiseState.currentType == NoiseType::Fractal || 
+                                noiseState.currentType == NoiseType::Turbulence || 
+                                noiseState.currentType == NoiseType::Ridged || 
+                                noiseState.currentType == NoiseType::Billow);
+
+            if (usesOctaves) {
+                ImGui::Separator();
+                ImGui::Text("Fractal Parameters");
+                changed |= ImGui::SliderInt("Octaves", &noiseState.octaves, 1, 10);
+                
+                if (noiseState.currentType == NoiseType::Fractal) {
+                   changed |= ImGui::SliderFloat("Persistence", &noiseState.persistence, 0.0f, 1.0f);
+                   changed |= ImGui::SliderFloat("Lacunarity", &noiseState.lacunarity, 1.0f, 4.0f);
+                }
+            }
+            
+            if (noiseState.currentType == NoiseType::Ridged) {
+                ImGui::Separator();
+                changed |= ImGui::SliderFloat("Ridge Offset", &noiseState.ridgeOffset, 0.0f, 2.0f);
+            }
+            
+            if (noiseState.currentType == NoiseType::DomainWarp || noiseState.currentType == NoiseType::CurlNoise) {
+                ImGui::Separator();
+                changed |= ImGui::SliderFloat("Strength", &noiseState.strength, 0.1f, 4.0f);
+            }
+
+            if (noiseState.currentType == NoiseType::CurlNoise) {
+                ImGui::Separator();
+                ImGui::Text("Sub Parameters");
+                bool usesSubOctaves = (noiseState.currentSubType == NoiseType::Fractal || 
+                                    noiseState.currentSubType == NoiseType::Turbulence || 
+                                    noiseState.currentSubType == NoiseType::Ridged || 
+                                    noiseState.currentSubType == NoiseType::Billow);
+
+                if (usesSubOctaves) {
+                    ImGui::Separator();
+                    ImGui::Text("Fractal Parameters");
+                    changed |= ImGui::SliderInt("Octaves (sub)", &noiseState.octaves, 1, 10);
+                    
+                    if (noiseState.currentSubType == NoiseType::Fractal) {
+                    changed |= ImGui::SliderFloat("Persistence (sub)", &noiseState.persistence, 0.0f, 1.0f);
+                    changed |= ImGui::SliderFloat("Lacunarity (sub)", &noiseState.lacunarity, 1.0f, 4.0f);
+                    }
+                }
+                
+                if (noiseState.currentSubType == NoiseType::Ridged) {
+                    ImGui::Separator();
+                    changed |= ImGui::SliderFloat("Ridge Offset (sub)", &noiseState.ridgeOffset, 0.0f, 2.0f);
+                }
+                
+                if (noiseState.currentSubType == NoiseType::DomainWarp || noiseState.currentSubType == NoiseType::CurlNoise) {
+                    ImGui::Separator();
+                    changed |= ImGui::SliderFloat("Strength (sub)", &noiseState.substrength, 0.1f, 4.0f);
+                }
+            }
+            ImGui::Separator();
+            ImGui::Text("Preview (%dx%d)", noiseState.width, noiseState.height);
+            // Display the generated texture
+            
+            ImGui::Image((void*)(intptr_t)noiseState.textureId, ImVec2((float)noiseState.width, (float)noiseState.height));
+            updateNoiseTexture(noiseState);
+            
+            ImGui::End();
+        }
 
         ImGui::Render();
         int display_w, display_h;
@@ -728,6 +968,10 @@ int main() {
     if (textu != 0) {
         glDeleteTextures(1, &textu);
         textu = 0;
+    }
+    if (noiseState.textureId != 0) {
+        glDeleteTextures(1, &noiseState.textureId);
+        noiseState.textureId = 0;
     }
     glfwTerminate();
     
