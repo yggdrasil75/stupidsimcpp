@@ -70,23 +70,47 @@ enum class NoiseType {
     CurlNoise = 11
 };
 
-struct NoisePreviewState {
-    int width = 512;
-    int height = 512;
-    NoiseType currentType = NoiseType::Perlin;
-    NoiseType currentSubType = NoiseType::Perlin;
+enum class BlendMode {
+    Add = 0,
+    Subtract = 1,
+    Multiply = 2,
+    Min = 3,
+    Max = 4,
+    Replace = 5,
+    DomainWarp = 6 // Uses this layer's value to distort coordinates for NEXT layers
+};
+
+struct NoiseLayer {
+    bool enabled = true;
+    char name[32] = "Layer";
     
-    int seed = 1337;
+    NoiseType type = NoiseType::Perlin;
+    BlendMode blend = BlendMode::Add;
+    
+    // Params specific to this layer
+    int seedOffset = 0;
     float scale = 0.02f;
+    float strength = 1.0f; // blending weight or warp strength
+    
+    // Fractal specific
     int octaves = 4;
     float persistence = 0.5f;
     float lacunarity = 2.0f;
     float ridgeOffset = 1.0f;
-    float strength = 2.0f;
-    float substrength = 2.0f;
+};
+
+struct NoisePreviewState {
+    int width = 512;
+    int height = 512;
     
-    // Visualization
-    float offset[2] = {0.0f, 0.0f}; // Panning
+    // Global settings
+    int masterSeed = 1337;
+    float offset[2] = {0.0f, 0.0f}; 
+    
+    // The Stack
+    std::vector<NoiseLayer> layers;
+    
+    // Visuals
     GLuint textureId = 0;
     std::vector<uint8_t> pixelBuffer;
     bool needsUpdate = true;
@@ -114,116 +138,144 @@ const std::chrono::seconds STATS_UPDATE_INTERVAL(60);
 std::string cachedStats;
 bool statsNeedUpdate = true;
 
+float sampleNoiseLayer(PNoise2& gen, NoiseType type, Eigen::Vector2f point, const NoiseLayer& layer) {
+    float val = 0.0f;
+    
+    switch (type) {
+        case NoiseType::Perlin:
+            val = gen.permute(point); 
+            break;
+        case NoiseType::Value:
+            val = gen.valueNoise(point); 
+            break;
+        case NoiseType::Fractal:
+            val = gen.fractalNoise(point, layer.octaves, layer.persistence, layer.lacunarity);
+            break;
+        case NoiseType::Turbulence:
+            val = gen.turbulence(point, layer.octaves);
+            val = (val * 2.0f) - 1.0f; 
+            break;
+        case NoiseType::Ridged:
+            val = gen.ridgedNoise(point, layer.octaves, layer.ridgeOffset);
+            val = (val * 0.5f) - 1.0f; 
+            break;
+        case NoiseType::Billow:
+            val = gen.billowNoise(point, layer.octaves);
+            val = (val * 2.0f) - 1.0f;
+            break;
+        case NoiseType::WhiteNoise:
+            val = gen.whiteNoise(point);
+            break;
+        case NoiseType::WorleyNoise:
+            val = gen.worleyNoise(point);
+            break;
+        case NoiseType::VoronoiNoise:
+            val = gen.voronoiNoise(point);
+            break;
+        case NoiseType::CrystalNoise:
+            val = gen.crystalNoise(point);
+            break;
+        // Simplified: DomainWarp and Curl inside a layer act as standard noise 
+        // that we will use to manipulate coordinates manually in the loop
+        case NoiseType::DomainWarp:
+            val = gen.domainWarp(point, 1.0f); 
+            break;
+        case NoiseType::CurlNoise:
+            // For single channel return, we just take length or one component
+            // Ideally Curl returns a vector, but for this helper we return magnitude
+            // to allow it to be used as a heightmap factor if needed.
+            Eigen::Vector2f flow = gen.curlNoise(point);
+            val = flow.norm(); 
+            break;
+    }
+    return val;
+}
+
 // Helper to generate the 2D noise texture
 void updateNoiseTexture(NoisePreviewState& state) {
-    glGenTextures(1, &state.textureId);
-    glBindTexture(GL_TEXTURE_2D, state.textureId);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-
+    if (state.textureId == 0) glGenTextures(1, &state.textureId);
+    
     state.pixelBuffer.resize(state.width * state.height * 3);
     
-    // Create a local noise generator with current seed
-    PNoise2 generator(state.seed);
+    // Create one generator. We will re-seed it per layer or use offsets.
+    // PNoise2 is fast to init? If not, create one and change seed if supported, 
+    // or create a vector of generators. Assuming lightweight:
     
     #pragma omp parallel for
     for (int y = 0; y < state.height; ++y) {
+        // Optimization: Create generator on thread stack if PNoise2 is lightweight, 
+        // otherwise pass seed to methods if possible. 
+        // Assuming we construct one per thread or rely on internal state:
+        PNoise2 generator(state.masterSeed); 
+
         for (int x = 0; x < state.width; ++x) {
-            float nx = (x + state.offset[0]) * state.scale;
-            float ny = (y + state.offset[1]) * state.scale;
+            
+            // 1. Initial Coordinate
+            float nx = (x + state.offset[0]);
+            float ny = (y + state.offset[1]);
             Eigen::Vector2f point(nx, ny);
             
-            float val = 0.0f;
+            float finalValue = 0.0f;
             
-            // Call specific PNoise2 method
-            switch (state.currentType) {
-                case NoiseType::Perlin:
-                    val = generator.permute(point); // [-1, 1]
-                    break;
-                case NoiseType::Value:
-                    val = generator.valueNoise(point); // [-1, 1]
-                    break;
-                case NoiseType::Fractal:
-                    val = generator.fractalNoise(point, state.octaves, state.persistence, state.lacunarity);
-                    break;
-                case NoiseType::Turbulence:
-                    val = generator.turbulence(point, state.octaves); // [0, unbounded usually]
-                    val = (val * 2.0f) - 1.0f; 
-                    break;
-                case NoiseType::Ridged:
-                    val = generator.ridgedNoise(point, state.octaves, state.ridgeOffset);
-                    // Ridged output can be large, scale down slightly for preview
-                    val = (val * 0.5f) - 1.0f; 
-                    break;
-                case NoiseType::Billow:
-                    val = generator.billowNoise(point, state.octaves);
-                    val = (val * 2.0f) - 1.0f;
-                    break;
-                case NoiseType::WhiteNoise:
-                    val = generator.whiteNoise(point);
-                    break;
-                case NoiseType::WorleyNoise:
-                    val = generator.worleyNoise(point);
-                    break;
-                case NoiseType::VoronoiNoise:
-                    val = generator.voronoiNoise(point);
-                    break;
-                case NoiseType::CrystalNoise:
-                    val = generator.crystalNoise(point);
-                    break;
-                case NoiseType::DomainWarp:
-                    val = generator.domainWarp(point, state.strength);
-                    break;
-                case NoiseType::CurlNoise:
-                    Eigen::Vector2f flow = generator.curlNoise(point);
-                    flow = point + (flow * state.strength);
-                    switch (state.currentSubType) {
-                        case NoiseType::Perlin:
-                            val = generator.permute(flow); // [-1, 1]
-                            break;
-                        case NoiseType::Value:
-                            val = generator.valueNoise(flow); // [-1, 1]
-                            break;
-                        case NoiseType::Fractal:
-                            val = generator.fractalNoise(flow, state.octaves, state.persistence, state.lacunarity);
-                            break;
-                        case NoiseType::Turbulence:
-                            val = generator.turbulence(flow, state.octaves); // [0, unbounded usually]
-                            val = (val * 2.0f) - 1.0f; 
-                            break;
-                        case NoiseType::Ridged:
-                            val = generator.ridgedNoise(flow, state.octaves, state.ridgeOffset);
-                            // Ridged output can be large, scale down slightly for preview
-                            val = (val * 0.5f) - 1.0f; 
-                            break;
-                        case NoiseType::Billow:
-                            val = generator.billowNoise(flow, state.octaves);
-                            val = (val * 2.0f) - 1.0f;
-                            break;
-                        case NoiseType::WhiteNoise:
-                            val = generator.whiteNoise(flow);
-                            break;
-                        case NoiseType::WorleyNoise:
-                            val = generator.worleyNoise(flow);
-                            break;
-                        case NoiseType::VoronoiNoise:
-                            val = generator.voronoiNoise(flow);
-                            break;
-                        case NoiseType::CrystalNoise:
-                            val = generator.crystalNoise(flow);
-                            break;
-                        case NoiseType::DomainWarp:
-                            val = generator.domainWarp(flow, state.substrength);
-                            break;
-                    }
-                    break;
-            }
+            // 2. Process Layer Stack
+            for (const auto& layer : state.layers) {
+                if (!layer.enabled) continue;
 
-            float norm = (val + 1.0f) * 0.5f;
+                // Adjust coordinate frequency for this layer
+                Eigen::Vector2f samplePoint = point * layer.scale;
+                
+                // Re-seed logic (simulated by large coordinate offsets if re-seeding isn't exposed)
+                // Or if PNoise2 allows reseeding: generator.setSeed(state.masterSeed + layer.seedOffset);
+                // Here we cheat by offsetting coordinates based on seed to avoid constructor overhead in loop
+                samplePoint += Eigen::Vector2f((float)layer.seedOffset * 10.5f, (float)layer.seedOffset * -10.5f);
+
+                // Special Case: Coordinate Mutators (Domain Warp / Curl)
+                if (layer.blend == BlendMode::DomainWarp) {
+                    if (layer.type == NoiseType::CurlNoise) {
+                         Eigen::Vector2f flow = generator.curlNoise(samplePoint);
+                         point += flow * layer.strength * 100.0f; // Update the BASE point for future layers
+                    } else {
+                        // Standard Domain Warp using simple noise offsets
+                        float warpX = sampleNoiseLayer(generator, layer.type, samplePoint, layer);
+                        // Sample Y slightly offset to get different direction
+                        float warpY = sampleNoiseLayer(generator, layer.type, samplePoint + Eigen::Vector2f(5.2f, 1.3f), layer);
+                        point += Eigen::Vector2f(warpX, warpY) * layer.strength * 100.0f;
+                    }
+                    continue; // Don't add to finalValue, we just warped space
+                }
+
+                // Standard Arithmetic Layers
+                float nVal = sampleNoiseLayer(generator, layer.type, samplePoint, layer);
+                
+                switch (layer.blend) {
+                    case BlendMode::Replace:
+                        finalValue = nVal * layer.strength;
+                        break;
+                    case BlendMode::Add:
+                        finalValue += nVal * layer.strength;
+                        break;
+                    case BlendMode::Subtract:
+                        finalValue -= nVal * layer.strength;
+                        break;
+                    case BlendMode::Multiply:
+                        finalValue *= (nVal * layer.strength);
+                        break;
+                    case BlendMode::Max:
+                        finalValue = std::max(finalValue, nVal * layer.strength);
+                        break;
+                    case BlendMode::Min:
+                        finalValue = std::min(finalValue, nVal * layer.strength);
+                        break;
+                }
+            }
+            
+            // 3. Normalize for display (Map -1..1 to 0..1 usually, but stack can go higher)
+            // Tanh is good for soft clamping unbounded stacks
+            float norm = std::tanh(finalValue); 
+            norm = (norm + 1.0f) * 0.5f;
             norm = std::clamp(norm, 0.0f, 1.0f);
             
             uint8_t color = static_cast<uint8_t>(norm * 255);
-            
             int idx = (y * state.width + x) * 3;
             state.pixelBuffer[idx] = color;
             state.pixelBuffer[idx+1] = color;
@@ -235,8 +287,62 @@ void updateNoiseTexture(NoisePreviewState& state) {
     glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, state.width, state.height, 
                  0, GL_RGB, GL_UNSIGNED_BYTE, state.pixelBuffer.data());
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     
     state.needsUpdate = false;
+}
+
+float calculateNoiseValue(const NoisePreviewState& state, float x, float y) {
+    PNoise2 generator(state.masterSeed); 
+
+    // Initial Coordinate
+    float nx = (x + state.offset[0]);
+    float ny = (y + state.offset[1]);
+    Eigen::Vector2f point(nx, ny);
+    
+    float finalValue = 0.0f;
+    
+    // Process Layer Stack
+    for (const auto& layer : state.layers) {
+        if (!layer.enabled) continue;
+
+        // Adjust coordinate frequency for this layer
+        Eigen::Vector2f samplePoint = point * layer.scale;
+        
+        // Seed offset
+        samplePoint += Eigen::Vector2f((float)layer.seedOffset * 10.5f, (float)layer.seedOffset * -10.5f);
+
+        // Domain Warp / Curl
+        if (layer.blend == BlendMode::DomainWarp) {
+            if (layer.type == NoiseType::CurlNoise) {
+                    Eigen::Vector2f flow = generator.curlNoise(samplePoint);
+                    point += flow * layer.strength * 100.0f; 
+            } else {
+                float warpX = sampleNoiseLayer(generator, layer.type, samplePoint, layer);
+                float warpY = sampleNoiseLayer(generator, layer.type, samplePoint + Eigen::Vector2f(5.2f, 1.3f), layer);
+                point += Eigen::Vector2f(warpX, warpY) * layer.strength * 100.0f;
+            }
+            continue; 
+        }
+
+        // Standard Arithmetic Layers
+        float nVal = sampleNoiseLayer(generator, layer.type, samplePoint, layer);
+        
+        switch (layer.blend) {
+            case BlendMode::Replace: finalValue = nVal * layer.strength; break;
+            case BlendMode::Add:     finalValue += nVal * layer.strength; break;
+            case BlendMode::Subtract:finalValue -= nVal * layer.strength; break;
+            case BlendMode::Multiply:finalValue *= (nVal * layer.strength); break;
+            case BlendMode::Max:     finalValue = std::max(finalValue, nVal * layer.strength); break;
+            case BlendMode::Min:     finalValue = std::min(finalValue, nVal * layer.strength); break;
+        }
+    }
+    
+    // Normalize -1..1 (or unbounded) to 0..1
+    float norm = std::tanh(finalValue); 
+    norm = (norm + 1.0f) * 0.5f;
+    return std::clamp(norm, 0.0f, 1.0f);
 }
 
 void createSphere(const defaults& config, const spheredefaults& sconfig, Octree<int>& grid) {
@@ -476,7 +582,14 @@ int main() {
     
     // Initialize Noise Preview State
     NoisePreviewState noiseState;
-    updateNoiseTexture(noiseState); // Initial generation
+    NoiseLayer l1;
+    l1.type = NoiseType::Fractal;
+    l1.blend = BlendMode::Add; // Start with base
+    l1.scale = 0.005f;
+    strcpy(l1.name, "Continents");
+    noiseState.layers.push_back(l1);
+
+    updateNoiseTexture(noiseState);
 
     sphereConf.centerX = ghalf;
     sphereConf.centerY = ghalf;
@@ -852,95 +965,114 @@ int main() {
         
         {
             ImGui::Begin("2D Noise Lab");
+            
+            // Master Controls
             bool changed = false;
-            
-            const char* items[] = { "Perlin", "Value", "Fractal (Octave)", "Turbulence", "Ridged Multifractal", "Billow", "White", "Worley", "Voronoi", "Crystal", "Domain Warp", "Curl" };
-            int currentItem = static_cast<int>(noiseState.currentType);
-            if (ImGui::Combo("Method", &currentItem, items, IM_ARRAYSIZE(items))) {
-                noiseState.currentType = static_cast<NoiseType>(currentItem);
-                changed = true;
-            }
-            if (noiseState.currentType == NoiseType::CurlNoise) {
-                int currentsubitem = static_cast<int>(noiseState.currentSubType);
-                if (ImGui::Combo("Sub Method", &currentsubitem, items, IM_ARRAYSIZE(items))) {
-                    noiseState.currentSubType = static_cast<NoiseType>(currentsubitem);
-                    changed = true;
-                }
-            }
-            
-            changed |= ImGui::InputInt("Seed", &noiseState.seed);
-            if (ImGui::Button("Randomize Seed")) {
-                noiseState.seed = rand();
-                changed = true;
-            }
+            changed |= ImGui::InputInt("Master Seed", &noiseState.masterSeed);
+            changed |= ImGui::DragFloat2("Pan Offset", noiseState.offset, 1.0f);
             
             ImGui::Separator();
-            ImGui::Text("Base Parameters");
-            changed |= ImGui::SliderFloat("Scale (Freq)", &noiseState.scale, 0.001f, 1.f, "%.4f");
-            changed |= ImGui::DragFloat2("Offset", noiseState.offset, 1.0f);
-
-            // Conditional parameters based on noise type
-            bool usesOctaves = (noiseState.currentType == NoiseType::Fractal || 
-                                noiseState.currentType == NoiseType::Turbulence || 
-                                noiseState.currentType == NoiseType::Ridged || 
-                                noiseState.currentType == NoiseType::Billow);
-
-            if (usesOctaves) {
-                ImGui::Separator();
-                ImGui::Text("Fractal Parameters");
-                changed |= ImGui::SliderInt("Octaves", &noiseState.octaves, 1, 10);
+            
+            if (ImGui::Button("Add Layer")) {
+                NoiseLayer l;
+                sprintf(l.name, "Layer %zu", noiseState.layers.size());
+                noiseState.layers.push_back(l);
+                changed = true;
+            }
+            
+            ImGui::SameLine();
+            if (ImGui::Button("Clear All")) {
+                noiseState.layers.clear();
+                changed = true;
+            }
+            
+            ImGui::BeginChild("LayersScroll", ImVec2(0, 300), true);
+            
+            // Layer List
+            for (int i = 0; i < noiseState.layers.size(); ++i) {
+                NoiseLayer& layer = noiseState.layers[i];
                 
-                if (noiseState.currentType == NoiseType::Fractal) {
-                   changed |= ImGui::SliderFloat("Persistence", &noiseState.persistence, 0.0f, 1.0f);
-                   changed |= ImGui::SliderFloat("Lacunarity", &noiseState.lacunarity, 1.0f, 4.0f);
-                }
-            }
-            
-            if (noiseState.currentType == NoiseType::Ridged) {
-                ImGui::Separator();
-                changed |= ImGui::SliderFloat("Ridge Offset", &noiseState.ridgeOffset, 0.0f, 2.0f);
-            }
-            
-            if (noiseState.currentType == NoiseType::DomainWarp || noiseState.currentType == NoiseType::CurlNoise) {
-                ImGui::Separator();
-                changed |= ImGui::SliderFloat("Strength", &noiseState.strength, 0.1f, 4.0f);
-            }
-
-            if (noiseState.currentType == NoiseType::CurlNoise) {
-                ImGui::Separator();
-                ImGui::Text("Sub Parameters");
-                bool usesSubOctaves = (noiseState.currentSubType == NoiseType::Fractal || 
-                                    noiseState.currentSubType == NoiseType::Turbulence || 
-                                    noiseState.currentSubType == NoiseType::Ridged || 
-                                    noiseState.currentSubType == NoiseType::Billow);
-
-                if (usesSubOctaves) {
-                    ImGui::Separator();
-                    ImGui::Text("Fractal Parameters");
-                    changed |= ImGui::SliderInt("Octaves (sub)", &noiseState.octaves, 1, 10);
-                    
-                    if (noiseState.currentSubType == NoiseType::Fractal) {
-                    changed |= ImGui::SliderFloat("Persistence (sub)", &noiseState.persistence, 0.0f, 1.0f);
-                    changed |= ImGui::SliderFloat("Lacunarity (sub)", &noiseState.lacunarity, 1.0f, 4.0f);
+                ImGui::PushID(i); // Important for ImGui inside loops!
+                
+                // Header
+                bool open = ImGui::CollapsingHeader(layer.name, ImGuiTreeNodeFlags_DefaultOpen);
+                
+                // Context menu to move/delete
+                if (ImGui::BeginPopupContextItem()) {
+                    if (ImGui::MenuItem("Move Up", nullptr, false, i > 0)) {
+                        std::swap(noiseState.layers[i], noiseState.layers[i-1]);
+                        changed = true;
+                        ImGui::CloseCurrentPopup();
                     }
+                    if (ImGui::MenuItem("Move Down", nullptr, false, i < noiseState.layers.size()-1)) {
+                        std::swap(noiseState.layers[i], noiseState.layers[i+1]);
+                        changed = true;
+                        ImGui::CloseCurrentPopup();
+                    }
+                    if (ImGui::MenuItem("Duplicate")) {
+                        noiseState.layers.insert(noiseState.layers.begin() + i, layer);
+                        changed = true;
+                        ImGui::CloseCurrentPopup();
+                    }
+                    if (ImGui::MenuItem("Delete")) {
+                        noiseState.layers.erase(noiseState.layers.begin() + i);
+                        changed = true;
+                        ImGui::CloseCurrentPopup();
+                        ImGui::EndPopup();
+                        ImGui::PopID();
+                        continue; // Break loop safely
+                    }
+                    ImGui::EndPopup();
+                }
+
+                if (open) {
+                    ImGui::Checkbox("##enabled", &layer.enabled);
+                    ImGui::SameLine();
+                    ImGui::InputText("##name", layer.name, 32);
+
+                    // Type and Blend
+                    const char* types[] = { "Perlin", "Value", "Fractal", "Turbulence", "Ridged", "Billow", "White", "Worley", "Voronoi", "Crystal", "Domain Warp", "Curl" };
+                    const char* blends[] = { "Add", "Subtract", "Multiply", "Min", "Max", "Replace", "Domain Warp (Coord)" };
+                    
+                    if (ImGui::Combo("Type", (int*)&layer.type, types, IM_ARRAYSIZE(types))) changed = true;
+                    if (ImGui::Combo("Blend", (int*)&layer.blend, blends, IM_ARRAYSIZE(blends))) changed = true;
+
+                    // Common Params
+                    if (ImGui::SliderFloat("Scale", &layer.scale, 0.0001f, 0.2f, "%.5f")) changed = true;
+                    if (ImGui::SliderFloat("Strength/Weight", &layer.strength, 0.0f, 5.0f)) changed = true;
+                    if (ImGui::SliderInt("Seed Offset", &layer.seedOffset, 0, 100)) changed = true;
+
+                    // Conditional Params
+                    if (layer.type == NoiseType::Fractal || layer.type == NoiseType::Turbulence || 
+                        layer.type == NoiseType::Ridged || layer.type == NoiseType::Billow) {
+                        
+                        if (ImGui::SliderInt("Octaves", &layer.octaves, 1, 10)) changed = true;
+                        if (layer.type == NoiseType::Fractal) {
+                            if (ImGui::SliderFloat("Persistence", &layer.persistence, 0.0f, 1.0f)) changed = true;
+                            if (ImGui::SliderFloat("Lacunarity", &layer.lacunarity, 1.0f, 4.0f)) changed = true;
+                        }
+                        if (layer.type == NoiseType::Ridged) {
+                            if (ImGui::SliderFloat("Ridge Offset", &layer.ridgeOffset, 0.0f, 2.0f)) changed = true;
+                        }
+                    }
+                    
+                    ImGui::Separator();
                 }
                 
-                if (noiseState.currentSubType == NoiseType::Ridged) {
-                    ImGui::Separator();
-                    changed |= ImGui::SliderFloat("Ridge Offset (sub)", &noiseState.ridgeOffset, 0.0f, 2.0f);
-                }
-                
-                if (noiseState.currentSubType == NoiseType::DomainWarp || noiseState.currentSubType == NoiseType::CurlNoise) {
-                    ImGui::Separator();
-                    changed |= ImGui::SliderFloat("Strength (sub)", &noiseState.substrength, 0.1f, 4.0f);
-                }
+                ImGui::PopID();
             }
+            ImGui::EndChild();
+
             ImGui::Separator();
-            ImGui::Text("Preview (%dx%d)", noiseState.width, noiseState.height);
-            // Display the generated texture
             
+            // Preview
+            ImGui::Text("Preview Output");
             ImGui::Image((void*)(intptr_t)noiseState.textureId, ImVec2((float)noiseState.width, (float)noiseState.height));
-            updateNoiseTexture(noiseState);
+            
+            // Auto update logic
+            if (changed || noiseState.needsUpdate) {
+                updateNoiseTexture(noiseState);
+            }
             
             ImGui::End();
         }
