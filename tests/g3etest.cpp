@@ -293,58 +293,6 @@ void updateNoiseTexture(NoisePreviewState& state) {
     state.needsUpdate = false;
 }
 
-float calculateNoiseValue(const NoisePreviewState& state, float x, float y) {
-    PNoise2 generator(state.masterSeed); 
-
-    // Initial Coordinate
-    float nx = (x + state.offset[0]);
-    float ny = (y + state.offset[1]);
-    Eigen::Vector2f point(nx, ny);
-    
-    float finalValue = 0.0f;
-    
-    // Process Layer Stack
-    for (const auto& layer : state.layers) {
-        if (!layer.enabled) continue;
-
-        // Adjust coordinate frequency for this layer
-        Eigen::Vector2f samplePoint = point * layer.scale;
-        
-        // Seed offset
-        samplePoint += Eigen::Vector2f((float)layer.seedOffset * 10.5f, (float)layer.seedOffset * -10.5f);
-
-        // Domain Warp / Curl
-        if (layer.blend == BlendMode::DomainWarp) {
-            if (layer.type == NoiseType::CurlNoise) {
-                    Eigen::Vector2f flow = generator.curlNoise(samplePoint);
-                    point += flow * layer.strength * 100.0f; 
-            } else {
-                float warpX = sampleNoiseLayer(generator, layer.type, samplePoint, layer);
-                float warpY = sampleNoiseLayer(generator, layer.type, samplePoint + Eigen::Vector2f(5.2f, 1.3f), layer);
-                point += Eigen::Vector2f(warpX, warpY) * layer.strength * 100.0f;
-            }
-            continue; 
-        }
-
-        // Standard Arithmetic Layers
-        float nVal = sampleNoiseLayer(generator, layer.type, samplePoint, layer);
-        
-        switch (layer.blend) {
-            case BlendMode::Replace: finalValue = nVal * layer.strength; break;
-            case BlendMode::Add:     finalValue += nVal * layer.strength; break;
-            case BlendMode::Subtract:finalValue -= nVal * layer.strength; break;
-            case BlendMode::Multiply:finalValue *= (nVal * layer.strength); break;
-            case BlendMode::Max:     finalValue = std::max(finalValue, nVal * layer.strength); break;
-            case BlendMode::Min:     finalValue = std::min(finalValue, nVal * layer.strength); break;
-        }
-    }
-    
-    // Normalize -1..1 (or unbounded) to 0..1
-    float norm = std::tanh(finalValue); 
-    norm = (norm + 1.0f) * 0.5f;
-    return std::clamp(norm, 0.0f, 1.0f);
-}
-
 void createSphere(const defaults& config, const spheredefaults& sconfig, Octree<int>& grid) {
     if (!grid.empty()) grid.clear();
 
