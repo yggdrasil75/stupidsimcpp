@@ -70,6 +70,12 @@ std::vector<double> renderFrameTimes;
 int frameHistoryIndex = 0;
 bool firstFrameMeasured = false;
 
+// Stats update timer
+std::chrono::steady_clock::time_point lastStatsUpdate;
+const std::chrono::seconds STATS_UPDATE_INTERVAL(60); // Update stats once per minute
+std::string cachedStats;
+bool statsNeedUpdate = true;
+
 void createSphere(const defaults& config, const spheredefaults& sconfig, Octree<int>& grid) {
     if (!grid.empty()) grid.clear();
 
@@ -163,6 +169,14 @@ void addStar(const defaults& config, const stardefaults& starconf, Octree<int>& 
     grid.set(2, pos, true, colorVec, starconf.size, true, 2, true, starconf.emittance, 0.0f, 0.0f);
 }
 
+void updateStatsCache(Octree<int>& grid) {
+    std::stringstream gridstats;
+    grid.printStats(gridstats);
+    cachedStats = gridstats.str();
+    lastStatsUpdate = std::chrono::steady_clock::now();
+    statsNeedUpdate = false;
+}
+
 void livePreview(Octree<int>& grid, defaults& config, const Camera& cam) {
     std::lock_guard<std::mutex> lock(PreviewMutex);
     updatePreview = true;
@@ -196,6 +210,11 @@ void livePreview(Octree<int>& grid, defaults& config, const Camera& cam) {
     if (validFrames > 0) {
         avgRenderFrameTime /= validFrames;
         renderFPS = 1.0 / avgRenderFrameTime;
+    }
+    
+    auto now = std::chrono::steady_clock::now();
+    if (statsNeedUpdate || (now - lastStatsUpdate) > STATS_UPDATE_INTERVAL) {
+        updateStatsCache(grid);
     }
     
     // Update texture
@@ -333,9 +352,12 @@ int main() {
     // Initialize render frame times vector
     renderFrameTimes.resize(FRAME_HISTORY_SIZE, 0.0);
     
+    lastStatsUpdate = std::chrono::steady_clock::now();
+    statsNeedUpdate = true;
+    
     if (grid.load("output/Treegrid.yggs")) {
         gridInitialized = true;
-        grid.printStats();
+        updateStatsCache(grid);
         resetView(cam, config.gridSizecube);
     }
     
@@ -457,9 +479,9 @@ int main() {
             
             if (ImGui::Button("Create Sphere & Render")) {
                 createSphere(config, sphereConf, grid);
-                grid.printStats();
                 addStar(config, starConf, grid); 
                 gridInitialized = true;
+                statsNeedUpdate = true;
                 
                 resetView(cam, config.gridSizecube);
                 
@@ -473,8 +495,16 @@ int main() {
 
         {
             ImGui::Begin("Preview");
+            if (gridInitialized && textureInitialized) {
+                ImGui::Image((void*)(intptr_t)textu, ImVec2(config.outWidth, config.outHeight));
+            } else if (gridInitialized) {
+                ImGui::Text("Preview not generated yet");
+            } else {
+                ImGui::Text("No grid generated");
+            }
             
-            // Display render FPS information
+            ImGui::Separator();
+
             ImGui::Text("Render Performance:");
             if (renderFPS > 0) {
                 // Color code based on FPS
@@ -498,15 +528,18 @@ int main() {
             } else {
                 ImGui::Text("No render data yet");
             }
-            
-            ImGui::Separator();
-            
-            if (gridInitialized && textureInitialized) {
-                ImGui::Image((void*)(intptr_t)textu, ImVec2(config.outWidth, config.outHeight));
-            } else if (gridInitialized) {
-                ImGui::Text("Preview not generated yet");
-            } else {
-                ImGui::Text("No grid generated");
+
+            if (gridInitialized) {
+                // Show time since last update
+                auto now = std::chrono::steady_clock::now();
+                auto timeSinceUpdate = std::chrono::duration_cast<std::chrono::seconds>(now - lastStatsUpdate);
+                
+                if (!(timeSinceUpdate < STATS_UPDATE_INTERVAL)) {
+                    updateStatsCache(grid);
+                }
+                
+                // Display cached stats
+                ImGui::TextUnformatted(cachedStats.c_str());
             }
             
             ImGui::End();
