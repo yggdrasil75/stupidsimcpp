@@ -1,1103 +1,713 @@
 #ifndef GRID2_HPP
 #define GRID2_HPP
 
-#include <unordered_map>
-#include "../vectorlogic/vec2.hpp"
-#include "../vectorlogic/vec3.hpp"
-#include "../vectorlogic/vec4.hpp"
+#include "../../eigen/Eigen/Dense"
 #include "../timing_decorator.hpp"
 #include "../output/frame.hpp"
-#include "../noise/pnoise2.hpp"
-#include "../simblocks/water.hpp"
-#include "../simblocks/temp.hpp"
+#include "../noise/pnoise2.hpp" 
 #include <vector>
-#include <unordered_set>
-#include <execution>
+#include <array>
+#include <memory>
 #include <algorithm>
+#include <limits>
+#include <cmath>
+#include <functional>
+#include <iostream>
+#include <iomanip>
+#include <fstream>
+#include <unordered_map>
+#include <random>
 
-constexpr float EPSILON = 0.0000000000000000000000001;
+#ifdef SSE
+#include <immintrin.h>
+#endif
 
-/// @brief A bidirectional lookup helper to map internal IDs to 2D positions and vice-versa.
-/// @details Maintains two hashmaps to allow O(1) lookup in either direction.
-class reverselookupassistant {
-private:
-    std::unordered_map<size_t, Vec2> Positions;
-    /// "Positions" reversed - stores the reverse mapping from Vec2 to ID.
-    std::unordered_map<Vec2, size_t, Vec2::Hash> ƨnoiƚiƨoꟼ;
-    size_t next_id;
+constexpr int Dim2 = 2;
+
+template<typename T>
+class Grid2 {
 public:
-    /// @brief Get the Position associated with a specific ID.
-    /// @throws std::out_of_range if the ID does not exist.
-    Vec2 at(size_t id) const {
-        auto it = Positions.at(id);
-        return it;
-    }
-
-    /// @brief Get the ID associated with a specific Position.
-    /// @throws std::out_of_range if the Position does not exist.
-    size_t at(const Vec2& pos) const {
-        size_t id = ƨnoiƚiƨoꟼ.at(pos);
-        return id;
-    }
-
-    /// @brief Finds a position by ID (Wrapper for at).
-    Vec2 find(size_t id) {
-        return Positions.at(id);
-    }
-
-    /// @brief Registers a new position and assigns it a unique ID.
-    /// @return The newly generated ID.
-    size_t set(const Vec2& pos) {
-        size_t id = next_id++;
-        Positions[id] = pos;
-        ƨnoiƚiƨoꟼ[pos] = id;
-        return id;
-    }
-
-    /// @brief Removes an entry by ID.
-    size_t remove(size_t id) {
-        Vec2& pos = Positions[id];
-        Positions.erase(id);
-        ƨnoiƚiƨoꟼ.erase(pos);
-        return id;
-    }
-
-    /// @brief Removes an entry by Position.
-    size_t remove(const Vec2& pos) {
-        size_t id = ƨnoiƚiƨoꟼ[pos];
-        Positions.erase(id);
-        ƨnoiƚiƨoꟼ.erase(pos);
-        return id;
-    }
-
-    void reserve(size_t size) {
-        Positions.reserve(size);
-        ƨnoiƚiƨoꟼ.reserve(size);
-    }
-
-    size_t size() const {
-        return Positions.size();
-    }
-
-    size_t getNext_id() {
-        return next_id + 1;
-    }
+    using PointType = Eigen::Matrix<float, Dim2, 1>; // Eigen::Vector2f
+    using BoundingBox = std::pair<PointType, PointType>;
     
-    size_t bucket_count() {
-        return Positions.bucket_count();
-    }
+    // Shape for 2D is usually a Circle or a Square (AABB)
+    enum class Shape {
+        CIRCLE,
+        SQUARE
+    };
+    
+    struct NodeData {
+        T data;
+        PointType position;
+        int objectId;
+        bool active;
+        bool visible;
+        float size; // Radius or half-width
+        Eigen::Vector4f color; // RGBA
+        
+        // Physics properties
+        float temperature;
+        float conductivity;
+        float specific_heat;
+        float density;
+        float next_temperature; // For double-buffering simulation
 
-    bool empty() const {
-        return Positions.empty();
-    }
-    
-    void clear() {
-        Positions.clear();
-        Positions.rehash(0);
-        ƨnoiƚiƨoꟼ.clear();
-        ƨnoiƚiƨoꟼ.rehash(0);
-        next_id = 0;
-    }
-    
-    using iterator = typename std::unordered_map<size_t, Vec2>::iterator;
-    using const_iterator = typename std::unordered_map<size_t, Vec2>::const_iterator;
+        Shape shape;
 
-    iterator begin() { 
-        return Positions.begin(); 
-    }
-    iterator end() { 
-        return Positions.end(); 
-    }
-    const_iterator begin() const { 
-        return Positions.begin(); 
-    }
-    const_iterator end() const { 
-        return Positions.end(); 
-    }
-    const_iterator cbegin() const { 
-        return Positions.cbegin(); 
-    }
-    const_iterator cend() const { 
-        return Positions.cend(); 
-    }
+        NodeData(const T& data, const PointType& pos, bool visible, Eigen::Vector4f color, float size = 1.0f,
+                 bool active = true, int objectId = -1, Shape shape = Shape::SQUARE) 
+                : data(data), position(pos), objectId(objectId), active(active), visible(visible), 
+                color(color), size(size), shape(shape),
+                temperature(0.0f), conductivity(1.0f), specific_heat(1.0f), density(1.0f), next_temperature(0.0f) {}
+        
+        NodeData() : objectId(-1), active(false), visible(false), size(0.0f), 
+                     color(0,0,0,0), shape(Shape::SQUARE),
+                     temperature(0.0f), conductivity(1.0f), specific_heat(1.0f), density(1.0f), next_temperature(0.0f) {}
 
-    bool contains(size_t id) const {
-        return (Positions.find(id) != Positions.end());
-    }
+        // Helper for Square bounds
+        BoundingBox getSquareBounds() const {
+            PointType halfSize(size * 0.5f, size * 0.5f);
+            return {position - halfSize, position + halfSize};
+        }
+    };
 
-    bool contains(const Vec2& pos) const {
-        return (ƨnoiƚiƨoꟼ.find(pos) != ƨnoiƚiƨoꟼ.end());
-    }
-    
-};
+    struct QuadNode {
+        BoundingBox bounds;
+        std::vector<std::shared_ptr<NodeData>> points;
+        std::array<std::unique_ptr<QuadNode>, 4> children; // 4 quadrants
+        PointType center;
+        bool isLeaf;
 
-/// @brief Accelerates spatial queries by bucketizing positions into a grid.
-class SpatialGrid {
-private:
-    float cellSize;
-public:
-    std::unordered_map<Vec2, std::unordered_set<size_t>, Vec2::Hash> grid;
-    
-    /// @brief Initializes the spatial grid.
-    /// @param cellSize The dimension of the spatial buckets. Larger cells mean more items per bucket but fewer buckets.
-    SpatialGrid(float cellSize = 2.0f) : cellSize(cellSize) {}
-    
-    /// @brief Converts world coordinates to spatial grid coordinates.
-    Vec2 worldToGrid(const Vec2& worldPos) const {
-        return (worldPos / cellSize).floor();
-    }
-    
-    /// @brief Adds an object ID to the spatial index at the given position.
-    void insert(size_t id, const Vec2& pos) {
-        Vec2 gridPos = worldToGrid(pos);
-        grid[gridPos].insert(id);
-    }
-    
-    /// @brief Removes an object ID from the spatial index.
-    void remove(size_t id, const Vec2& pos) {
-        Vec2 gridPos = worldToGrid(pos);
-        auto cellIt = grid.find(gridPos);
-        if (cellIt != grid.end()) {
-            cellIt->second.erase(id);
-            if (cellIt->second.empty()) {
-                grid.erase(cellIt);
+        QuadNode(const PointType& min, const PointType& max) : bounds(min,max), isLeaf(true) {
+            for (auto& child : children) {
+                child = nullptr;
             }
+            center = (bounds.first + bounds.second) * 0.5f;
         }
-    }
-    
-    /// @brief Moves an object within the spatial index (removes from old cell, adds to new if changed).
-    void update(size_t id, const Vec2& oldPos, const Vec2& newPos) {
-        Vec2 oldGridPos = worldToGrid(oldPos);
-        Vec2 newGridPos = worldToGrid(newPos);
-        
-        if (oldGridPos != newGridPos) {
-            remove(id, oldPos);
-            insert(id, newPos);
-        }
-    }
-    
-    /// @brief Returns all IDs located in the specific grid cell containing 'center'.
-    std::unordered_set<size_t> find(const Vec2& center) const {
-        //Vec2 g2pos = worldToGrid(center);
-        auto cellIt = grid.find(worldToGrid(center));
-        if (cellIt != grid.end()) {
-            return cellIt->second;
-        }
-        return std::unordered_set<size_t>();
-    }
 
-    /// @brief Finds all object IDs within a square area around the center.
-    /// @param center The world position center.
-    /// @param radius The search radius (defines the bounds of grid cells to check).
-    /// @return A vector of candidate IDs (Note: this returns objects in valid grid cells, further distance checks may be required).
-    std::vector<size_t> queryRange(const Vec2& center, float radius) const {
-        std::vector<size_t> results;
-        float radiusSq = radius * radius;
-        
-        // Calculate grid bounds for the query
-        Vec2 minGrid = worldToGrid(center - Vec2(radius, radius));
-        Vec2 maxGrid = worldToGrid(center + Vec2(radius, radius));
-        
-        size_t estimatedSize = (maxGrid.x - minGrid.x + 1) * (maxGrid.y - minGrid.y + 1) * 10;
-        results.reserve(estimatedSize);
-
-        // Check all relevant grid cells
-        for (int x = minGrid.x; x <= maxGrid.x; ++x) {
-            for (int y = minGrid.y; y <= maxGrid.y; ++y) {
-                auto cellIt = grid.find(Vec2(x, y));
-                if (cellIt != grid.end()) {
-                    results.insert(results.end(), cellIt->second.begin(), cellIt->second.end());
-                }
-            }
+        bool contains(const PointType& point) const {
+            return (point.x() >= bounds.first.x() && point.x() <= bounds.second.x() &&
+                    point.y() >= bounds.first.y() && point.y() <= bounds.second.y());
         }
         
-        return results;
-    }
-    
-    void clear() {
-        grid.clear();
-        grid.rehash(0);
-    }
-};
+        // Check intersection with a query box
+        bool intersects(const BoundingBox& other) const {
+            return (bounds.first.x() <= other.second.x() && bounds.second.x() >= other.first.x() &&
+                    bounds.first.y() <= other.second.y() && bounds.second.y() >= other.first.y());
+        }
+    };
 
-/// @brief Represents a single point in the grid with an ID, color, and position.
-class GenericPixel {
-protected:
-    size_t id;
-    Vec4 color;
-    Vec2 pos;
-public:
-    //constructors
-    GenericPixel(size_t id, Vec4 color, Vec2 pos) : id(id), color(color), pos(pos) {};
-
-    //getters
-    Vec4 getColor() const {
-        return color;
-    }
-
-    //setters
-    void setColor(Vec4 newColor) {
-        color = newColor;
-    }
-
-    void move(Vec2 newPos) {
-        pos = newPos;
-    }
+private:
+    std::unique_ptr<QuadNode> root_;
+    size_t maxDepth;
+    size_t size;
+    size_t maxPointsPerNode;
     
-    void recolor(Vec4 newColor) {
-        color.recolor(newColor);
-    }
-    
-};
-
-/// @brief The main simulation grid class managing positions, visual data (pixels), and physical properties (temperature, noise).
-class Grid2 { 
-protected:
-    //all positions
-    reverselookupassistant Positions;
-    std::unordered_map<size_t, GenericPixel> Pixels;
-    
-    std::vector<size_t> unassignedIDs;
-    
-    float neighborRadius = 1.0f;
-    
-    //TODO: spatial map
-    SpatialGrid spatialGrid;
-    float spatialCellSize = neighborRadius * 1.5f;
-
-    // Default background color for empty spaces
-    Vec4 defaultBackgroundColor = Vec4(0.0f, 0.0f, 0.0f, 0.0f);
+    Eigen::Vector4f backgroundColor_ = {0.0f, 0.0f, 0.0f, 0.0f};
     PNoise2 noisegen;
 
-    //water
-    std::unordered_map<size_t, WaterParticle> water;
+    // Determine quadrant: 0:SW, 1:SE, 2:NW, 3:NE
+    uint8_t getQuadrant(const PointType& point, const PointType& center) const {
+        uint8_t quad = 0;
+        if (point.x() >= center.x()) quad |= 1; // Right
+        if (point.y() >= center.y()) quad |= 2; // Top
+        return quad;
+    }
 
-    std::unordered_map<size_t, Temp> tempMap;
-    bool regenpreventer = false;
-public:
-    /// @brief Populates the grid with Perlin noise-based pixels.
-    /// @param minx Start X index.
-    /// @param miny Start Y index.
-    /// @param maxx End X index.
-    /// @param maxy End Y index.
-    /// @param minChance Minimum noise threshold to spawn a pixel.
-    /// @param maxChance Maximum noise threshold to spawn a pixel.
-    /// @param color If true, generates RGB noise. If false, generates grayscale based on alpha.
-    /// @param noisemod Seed offset for the noise generator.
-    /// @return Reference to self for chaining.
-    Grid2 noiseGenGrid(size_t minx,size_t miny, size_t maxx, size_t maxy, float minChance = 0.1f
-                        , float maxChance = 1.0f, bool color = true, int noisemod = 42) {
-        TIME_FUNCTION;
-        noisegen = PNoise2(noisemod);
-        std::cout << "generating a noise grid with the following: (" << minx << ", " << miny 
-                << ") by (" << maxx << ", " << maxy << ") " << "chance: " << minChance 
-                << " max: " << maxChance << " gen colors: " << color << std::endl;
-        std::vector<Vec2> poses;
-        std::vector<Vec4> colors;
-        for (int x = minx; x < maxx; x++) {
-            for (int y = miny; y < maxy; y++) {
-                float nx = (x+noisemod)/(maxx+EPSILON)/0.1;
-                float ny = (y+noisemod)/(maxy+EPSILON)/0.1;
-                Vec2 pos = Vec2(nx,ny);
-                float alpha = noisegen.permute(pos);
-                if (alpha > minChance && alpha < maxChance) {
-                    if (color) {
-                        float red = noisegen.permute(Vec2(nx*0.3,ny*0.3));
-                        float green = noisegen.permute(Vec2(nx*0.6,ny*.06));
-                        float blue = noisegen.permute(Vec2(nx*0.9,ny*0.9));
-                        Vec4 newc = Vec4(red,green,blue,1.0);
-                        colors.push_back(newc);
-                        poses.push_back(Vec2(x,y));
-                    } else {
-                        Vec4 newc = Vec4(alpha,alpha,alpha,1.0);
-                        colors.push_back(newc);
-                        poses.push_back(Vec2(x,y));
-                    }
-                }
+    BoundingBox createChildBounds(const QuadNode* node, uint8_t quad) const {
+        PointType childMin, childMax;
+        PointType center = node->center;
+        
+        // X axis
+        if (quad & 1) { // Right
+            childMin.x() = center.x();
+            childMax.x() = node->bounds.second.x();
+        } else { // Left
+            childMin.x() = node->bounds.first.x();
+            childMax.x() = center.x();
+        }
+
+        // Y axis
+        if (quad & 2) { // Top
+            childMin.y() = center.y();
+            childMax.y() = node->bounds.second.y();
+        } else { // Bottom
+            childMin.y() = node->bounds.first.y();
+            childMax.y() = center.y();
+        }
+        
+        return {childMin, childMax};
+    }
+
+    void splitNode(QuadNode* node, int depth) {
+        if (depth >= maxDepth) return;
+        
+        for (int i = 0; i < 4; ++i) {
+            BoundingBox childBounds = createChildBounds(node, i);
+            node->children[i] = std::make_unique<QuadNode>(childBounds.first, childBounds.second);
+        }
+
+        for (const auto& pointData : node->points) {
+            int quad = getQuadrant(pointData->position, node->center);
+            node->children[quad]->points.emplace_back(pointData);
+        }
+
+        node->points.clear();
+        node->isLeaf = false;
+
+        for (int i = 0; i < 4; ++i) {
+            if (node->children[i]->points.size() > maxPointsPerNode) {
+                splitNode(node->children[i].get(), depth + 1);
             }
         }
-        std::cout << "noise generated" << std::endl;
-        bulkAddObjects(poses,colors);
-        return *this;
     }
 
-    /// @brief Generates a grayscale point at the given position based on noise.
-    size_t NoiseGenPointB(const Vec2& pos) {
-        float grayc = noisegen.permute(pos);
-        Vec4 newc = Vec4(grayc,grayc,grayc,grayc);
-        return addObject(pos,newc,1.0);
-    }
-    
-    /// @brief Generates an RGB point at the given position based on noise.
-    size_t NoiseGenPointRGB(const Vec2& pos) {
-        float red = noisegen.permute(pos);
-        float green = noisegen.permute(pos);
-        float blue = noisegen.permute(pos);
-        Vec4 newc = Vec4(red,green,blue,1);
-        return addObject(pos,newc,1.0);
-    }
+    bool insertRecursive(QuadNode* node, const std::shared_ptr<NodeData>& pointData, int depth) {
+        if (!node->contains(pointData->position)) return false;
 
-    /// @brief Generates an RGBA point at the given position based on noise.
-    size_t NoiseGenPointRGBA(const Vec2& pos) {
-        float red = noisegen.permute(pos);
-        float green = noisegen.permute(pos);
-        float blue = noisegen.permute(pos);
-        float alpha = noisegen.permute(pos);
-        Vec4 newc = Vec4(red,green,blue,alpha);
-        return addObject(pos,newc,1.0);
-    }
-
-    /// @brief Adds a new object to the grid.
-    /// @param pos The 2D world position.
-    /// @param color The color vector.
-    /// @param size The size (currently unused/informational).
-    /// @return The unique ID assigned to the new object.
-    size_t addObject(const Vec2& pos, const Vec4& color, float size = 1.0f) {
-        size_t id = Positions.set(pos);
-        Pixels.emplace(id, GenericPixel(id, color, pos));
-        spatialGrid.insert(id, pos);
-        return id;
-    }
-
-    /// @brief Sets the default background color.
-    void setDefault(const Vec4& color) {
-        defaultBackgroundColor = color;
-    }
-    
-    /// @brief Sets the default background color components.
-    void setDefault(float r, float g, float b, float a = 0.0f) {
-        defaultBackgroundColor = Vec4(r, g, b, a);
-    }
-    
-    /// @brief Configures thermal properties for a specific object ID.
-    void setMaterialProperties(size_t id, double conductivity, double specific_heat, double density = 1.0) {
-        auto it = tempMap.at(id);
-        it.conductivity = conductivity;
-        it.specific_heat = specific_heat;
-        it.diffusivity = conductivity / (density * specific_heat);
-    }
-    
-    /// @brief Moves an object to a new position and updates spatial indexing.
-    void setPosition(size_t id, const Vec2& newPosition) {
-        Vec2 oldPosition = Positions.at(id);
-        Pixels.at(id).move(newPosition);
-        spatialGrid.update(id, oldPosition, newPosition);
-        Positions.at(id).move(newPosition);
-    }
-        
-    //set color by id (by pos same as get color)
-    void setColor(size_t id, const Vec4 color) {
-        Pixels.at(id).recolor(color);
-    }
-    
-    /// @brief Sets the radius used for neighbor queries.
-    /// @details Triggers an optimization of the spatial grid cell size.
-    void setNeighborRadius(float radius) {
-        neighborRadius = radius;
-        // updateNeighborMap(); // Recompute all neighbors
-        optimizeSpatialGrid();
-    }
-    
-    /// @brief Sets the temperature at a specific position (creates point if missing).
-    void setTemp(const Vec2 pos, double temp) {
-        size_t id = getOrCreatePositionVec(pos, 0.0, true);
-        setTemp(id, temp);
-    }
-
-    /// @brief Sets the temperature for a specific object ID.
-    void setTemp(size_t id, double temp) {
-        Temp tval = Temp(temp);
-        tempMap.emplace(id, tval);
-    }
-    
-    // Get current default background color
-    Vec4 getDefaultBackgroundColor() const {
-        return defaultBackgroundColor;
-    }
-
-    //get position from id
-    Vec2 getPositionID(size_t id) const {
-        Vec2 it = Positions.at(id);
-        return it;
-    }
-
-    /// @brief Finds the ID of an object at a given position.
-    /// @param pos The position to query.
-    /// @param radius If 0.0, performs an exact match. If > 0.0, returns the first object found within the radius.
-    /// @return The ID of the found object.
-    /// @throws std::out_of_range If no object is found.
-    size_t getPositionVec(const Vec2& pos, float radius = 0.0f) const {
-        TIME_FUNCTION;
-        if (radius == 0.0f) {
-            // Exact match - use spatial grid to find the cell
-            Vec2 gridPos = spatialGrid.worldToGrid(pos);
-            auto cellIt = spatialGrid.grid.find(gridPos);
-            if (cellIt != spatialGrid.grid.end()) {
-                for (size_t id : cellIt->second) {
-                    if (Positions.at(id) == pos) {
-                        return id;
-                    }
-                }
+        if (node->isLeaf) {
+            node->points.emplace_back(pointData);
+            if (node->points.size() > maxPointsPerNode && depth < maxDepth) {
+                splitNode(node, depth);
             }
-            throw std::out_of_range("Position not found");
+            return true;
         } else {
-            auto results = getPositionVecRegion(pos, radius);
-            if (!results.empty()) {
-                return results[0]; // Return first found
+            int quad = getQuadrant(pointData->position, node->center);
+            if (node->children[quad]) {
+                return insertRecursive(node->children[quad].get(), pointData, depth + 1);
             }
-            throw std::out_of_range("No positions found in radius");
         }
+        return false;
     }
 
-    /// @brief Finds an object ID or creates a new one at the given position.
-    /// @param pos Target position.
-    /// @param radius Search radius for existing objects.
-    /// @param create If true, creates a new object if none is found.
-    /// @return The ID of the existing or newly created object.
-    size_t getOrCreatePositionVec(const Vec2& pos, float radius = 0.0f, bool create = true) {
-        //TIME_FUNCTION; //called too many times and average time is less than 0.0000001 so ignore it.
-        if (radius == 0.0f) {
-            Vec2 gridPos = spatialGrid.worldToGrid(pos);
-            auto cellIt = spatialGrid.grid.find(gridPos);
-            if (cellIt != spatialGrid.grid.end()) {
-                for (size_t id : cellIt->second) {
-                    if (Positions.at(id) == pos) {
-                        return id;
-                    }
-                }
-            }
-            if (create) {
+    // --- Serialization Helpers ---
+    template<typename V>
+    void writeVal(std::ofstream& out, const V& val) const {
+        out.write(reinterpret_cast<const char*>(&val), sizeof(V));
+    }
 
-                return addObject(pos, defaultBackgroundColor, 1.0f);
+    template<typename V>
+    void readVal(std::ifstream& in, V& val) {
+        in.read(reinterpret_cast<char*>(&val), sizeof(V));
+    }
+
+    void writeVec2(std::ofstream& out, const Eigen::Vector2f& vec) const {
+        writeVal(out, vec.x());
+        writeVal(out, vec.y());
+    }
+
+    void readVec2(std::ifstream& in, Eigen::Vector2f& vec) {
+        float x, y;
+        readVal(in, x); readVal(in, y);
+        vec = Eigen::Vector2f(x, y);
+    }
+    
+    void writeVec4(std::ofstream& out, const Eigen::Vector4f& vec) const {
+        writeVal(out, vec[0]); writeVal(out, vec[1]); writeVal(out, vec[2]); writeVal(out, vec[3]);
+    }
+
+    void readVec4(std::ifstream& in, Eigen::Vector4f& vec) {
+        float x, y, z, w;
+        readVal(in, x); readVal(in, y); readVal(in, z); readVal(in, w);
+        vec = Eigen::Vector4f(x, y, z, w);
+    }
+
+    void serializeNode(std::ofstream& out, const QuadNode* node) const {
+        writeVal(out, node->isLeaf);
+
+        if (node->isLeaf) {
+            size_t pointCount = node->points.size();
+            writeVal(out, pointCount);
+            for (const auto& pt : node->points) {
+                writeVal(out, pt->data);
+                writeVec2(out, pt->position);
+                writeVal(out, pt->objectId);
+                writeVal(out, pt->active);
+                writeVal(out, pt->visible);
+                writeVal(out, pt->size);
+                writeVec4(out, pt->color);
+                // Physics
+                writeVal(out, pt->temperature);
+                writeVal(out, pt->conductivity);
+                writeVal(out, pt->specific_heat);
+                writeVal(out, pt->density);
+                writeVal(out, static_cast<int>(pt->shape));
             }
-            throw std::out_of_range("Position not found");
         } else {
-            auto results = getPositionVecRegion(pos, radius);
-            if (!results.empty()) {
-                return results[0];
+            uint8_t childMask = 0;
+            for (int i = 0; i < 4; ++i) {
+                if (node->children[i] != nullptr) childMask |= (1 << i);
             }
-            if (create) {
-                return addObject(pos, defaultBackgroundColor, 1.0f);
-            }
-            throw std::out_of_range("No positions found in radius");
-        }
-    }
+            writeVal(out, childMask);
 
-    /// @brief Returns a list of all object IDs within a specified radius of a position.
-    std::vector<size_t> getPositionVecRegion(const Vec2& pos, float radius = 1.0f) const {
-        //TIME_FUNCTION;
-        float searchRadius = (radius == 0.0f) ? std::numeric_limits<float>::epsilon() : radius;
-        
-        // Get candidates from spatial grid
-        std::vector<size_t> candidates = spatialGrid.queryRange(pos, searchRadius);
-        
-        // Fine-filter by exact distance
-        std::vector<size_t> results;
-        float radiusSq = searchRadius * searchRadius;
-        
-        for (size_t id : candidates) {
-            if (Positions.at(id).distanceSquared(pos) <= radiusSq) {
-                results.push_back(id);
-            }
-        }
-        
-        return results;
-    }
-    
-    Vec4 getColor(size_t id) {
-        return Pixels.at(id).getColor();
-    }
-    
-    /// @brief Gets the temperature of a specific ID. Lazily initializes temperature if missing.
-    float getTemp(size_t id) {
-        if (tempMap.find(id) != tempMap.end()) {
-            Temp temp = Temp(getPositionID(id), getTemps());
-            tempMap.emplace(id, temp);
-        }
-        else {
-            std::cout << "found a temp: " << tempMap.at(id).temp << std::endl;
-        }
-        return tempMap.at(id).temp;
-    }
-    
-    /// @brief Gets the temperature at a position. Interpolates (IDW) if necessary.
-    double getTemp(const Vec2 pos) {
-        size_t id = getOrCreatePositionVec(pos, 0.01f, true);
-        if (tempMap.find(id) == tempMap.end()) {
-            //std::cout << "missing a temp at: " << pos << std::endl;
-            double dtemp = Temp::calTempIDW(pos, getTemps(id));
-            setTemp(id, dtemp);
-            return dtemp;
-        }
-        else return tempMap.at(id).temp;
-    }
-
-    /// @brief Retrieves all temperatures in the grid mapped by position.
-    std::unordered_map<Vec2, Temp> getTemps() const {
-        std::unordered_map<Vec2, Temp> out;
-        for (const auto& [id, temp] : tempMap) {
-            out.emplace(getPositionID(id), temp);
-        }
-        return out;
-    }
-
-    /// @brief Retrieves temperatures of neighbors around a specific ID.
-    std::unordered_map<Vec2, Temp> getTemps(size_t id) const {
-        std::unordered_map<Vec2, Temp> out;
-        std::vector<size_t> tval = spatialGrid.queryRange(Positions.at(id), 10);
-        for (size_t tempid : tval) {
-            Vec2 pos = Positions.at(tempid);
-            if (tempMap.find(id) != tempMap.end()) {
-                Temp temp = tempMap.at(tempid);
-                out.insert({pos, temp});
-            }
-        }
-        return out;
-    }
-
-    /// @brief Calculates the axis-aligned bounding box of all objects in the grid.
-    void getBoundingBox(Vec2& minCorner, Vec2& maxCorner) const {
-        TIME_FUNCTION;
-        if (Positions.empty()) {
-            minCorner = Vec2(0, 0);
-            maxCorner = Vec2(0, 0);
-            return;
-        }
-        
-        // Initialize with first position
-        auto it = Positions.begin();
-        minCorner = it->second;
-        maxCorner = it->second;
-        
-        // Find min and max coordinates
-        //#pragma omp parallel for
-        for (const auto& [id, pos] : Positions) {
-            minCorner.x = std::min(minCorner.x, pos.x);
-            minCorner.y = std::min(minCorner.y, pos.y);
-            maxCorner.x = std::max(maxCorner.x, pos.x);
-            maxCorner.y = std::max(maxCorner.y, pos.y);
-        }
-        
-    }
-
-    /// @brief Renders a specific region of the grid into a Frame object.
-    /// @param minCorner Top-left coordinate of the region.
-    /// @param maxCorner Bottom-right coordinate of the region.
-    /// @param res The output resolution (width, height) in pixels.
-    /// @param outChannels Color format (RGB, RGBA, BGR).
-    /// @return A Frame object containing the rendered image.
-    frame getGridRegionAsFrame(const Vec2& minCorner, const Vec2& maxCorner,
-                       Vec2& res, frame::colormap outChannels = frame::colormap::RGB)  {
-        TIME_FUNCTION;
-        size_t width = static_cast<int>(maxCorner.x - minCorner.x);
-        size_t height = static_cast<int>(maxCorner.y - minCorner.y);
-        size_t outputWidth = static_cast<int>(res.x);
-        size_t outputHeight = static_cast<int>(res.y);
-        float widthScale = outputWidth / width;
-        float heightScale = outputHeight / height;
-        
-        frame outframe = frame();
-        outframe.colorFormat = outChannels;
-
-        if (width <= 0 || height <= 0) {
-            width = height = 0;
-            return outframe;
-        }
-        if (regenpreventer) return outframe;
-        else regenpreventer = true;
-
-        std::cout << "Rendering region: " << minCorner << " to " << maxCorner 
-                << " at resolution: " << res << std::endl;
-        std::cout << "Scale factors: " << widthScale << " x " << heightScale << std::endl;
-        
-        std::unordered_map<Vec2,Vec4> colorBuffer;
-        colorBuffer.reserve(outputHeight*outputWidth);
-        std::unordered_map<Vec2,Vec4> colorTempBuffer;
-        colorTempBuffer.reserve(outputHeight * outputWidth);
-        std::unordered_map<Vec2,int> countBuffer;
-        countBuffer.reserve(outputHeight * outputWidth);
-        std::cout << "built buffers" << std::endl;
-
-        for (const auto& [id, pos] : Positions) {
-            if (pos.x >= minCorner.x && pos.x <= maxCorner.x && 
-                pos.y >= minCorner.y && pos.y <= maxCorner.y) {
-                float relx = pos.x - minCorner.x;
-                float rely = pos.y - minCorner.y;
-                int pixx = static_cast<int>(relx * widthScale);
-                int pixy = static_cast<int>(rely * heightScale);
-                Vec2 pix = Vec2(pixx,pixy);
-                
-                colorTempBuffer[pix] += Pixels.at(id).getColor();
-                countBuffer[pix]++;
-            }
-        }
-        std::cout << std::endl << "built initial buffer" << std::endl;
-
-        for (size_t y = 0; y < outputHeight; ++y) {
-            for (size_t x = 0; x < outputWidth; ++x) {
-                if (countBuffer[Vec2(x,y)] > 0) colorBuffer[Vec2(x,y)] = colorTempBuffer[Vec2(x,y)] / static_cast<float>(countBuffer[Vec2(x,y)]) * 255;
-                else colorBuffer[Vec2(x,y)] = defaultBackgroundColor;
-            }
-        }
-        std::cout << "blended second buffer" << std::endl;
-
-        switch (outChannels) {
-            case frame::colormap::RGBA: {
-                std::vector<uint8_t> colorBuffer2(outputWidth*outputHeight*4, 0);
-                std::cout << "outputting RGBA: " << std::endl;
-                for (const auto& [v2,getColor] : colorBuffer) {
-                    size_t index = (v2.y * outputWidth + v2.x) * 4;
-                    // std::cout << "index: " << index << std::endl;
-                    colorBuffer2[index+0] = getColor.r;
-                    colorBuffer2[index+1] = getColor.g;
-                    colorBuffer2[index+2] = getColor.b;
-                    colorBuffer2[index+3] = getColor.a;
-                }
-                frame result = frame(res.x,res.y, frame::colormap::RGBA);
-                result.setData(colorBuffer2);
-                std::cout << "returning result" << std::endl;
-                regenpreventer = false;
-                return result;
-                break;
-            }
-            case frame::colormap::BGR: {
-                std::vector<uint8_t> colorBuffer2(outputWidth*outputHeight*3, 0);
-                std::cout << "outputting BGR: " << std::endl;
-                for (const auto& [v2,getColor] : colorBuffer) {
-                    size_t index = (v2.y * outputWidth + v2.x) * 3;
-                    // std::cout << "index: " << index << std::endl;
-                    colorBuffer2[index+2] = getColor.r;
-                    colorBuffer2[index+1] = getColor.g;
-                    colorBuffer2[index+0] = getColor.b;
-                    //colorBuffer2[index+3] = getColor.a;
-                }
-                frame result = frame(res.x,res.y, frame::colormap::BGR);
-                result.setData(colorBuffer2);
-                std::cout << "returning result" << std::endl;
-                regenpreventer = false;
-                return result;
-                break;
-            }
-            case frame::colormap::RGB: 
-            default: {
-                std::vector<uint8_t> colorBuffer2(outputWidth*outputHeight*3, 0);
-                std::cout << "outputting RGB: " << std::endl;
-                for (const auto& [v2,getColor] : colorBuffer) {
-                    size_t index = (v2.y * outputWidth + v2.x) * 3;
-                    // std::cout << "index: " << index << std::endl;
-                    colorBuffer2[index+0] = getColor.r;
-                    colorBuffer2[index+1] = getColor.g;
-                    colorBuffer2[index+2] = getColor.b;
-                    //colorBuffer2[index+3] = getColor.a;
-                }
-                frame result = frame(res.x,res.y, frame::colormap::RGB);
-                result.setData(colorBuffer2);
-                std::cout << "returning result" << std::endl;
-                regenpreventer = false;
-                return result;
-                break;
+            for (int i = 0; i < 4; ++i) {
+                if (node->children[i]) serializeNode(out, node->children[i].get());
             }
         }
     }
 
-    /// @brief Renders the entire grid into a Frame. Auto-calculates bounds.
-    frame getGridAsFrame(frame::colormap outchannel = frame::colormap::RGB) {
-        Vec2 min;
-        Vec2 max;
-        getBoundingBox(min,max);
-        Vec2 res = (max + 1) - min;
-        std::cout << "getting grid as frame with the following: " << min << max << res << std::endl;
-        return getGridRegionAsFrame(min, max, res, outchannel);
-    }
+    void deserializeNode(std::ifstream& in, QuadNode* node) {
+        bool isLeaf;
+        readVal(in, isLeaf);
+        node->isLeaf = isLeaf;
 
-    /// @brief Generates a heatmap visualization of the grid temperatures.
-    frame getTempAsFrame(Vec2 minCorner, Vec2 maxCorner, Vec2 res, frame::colormap outcolor = frame::colormap::RGB)  {
-        TIME_FUNCTION;
-        if (regenpreventer) return frame();
-        else regenpreventer = true;
-        int pcount = 0;
-        size_t sheight = maxCorner.x - minCorner.x;
-        size_t swidth = maxCorner.y - minCorner.y;
-        
-        int width = static_cast<int>(res.x);
-        int height = static_cast<int>(res.y);
-        std::unordered_map<Vec2, double> tempBuffer;
-        tempBuffer.reserve(res.x * res.y);
-        double maxTemp = 0.0;
-        double minTemp = 0.0;
-        float xdiff = (maxCorner.x - minCorner.x);
-        float ydiff = (maxCorner.y - minCorner.y);
-        for (int x = 0; x < res.x; x++) {
-            for (int y = 0; y < res.y; y++) {
-                Vec2 cposout = Vec2(x,y);
-                Vec2 cposin = Vec2(minCorner.x + (x * xdiff / res.x),minCorner.y + (y * ydiff / res.y));
-                double ctemp = getTemp(cposin);
-                
-                tempBuffer[Vec2(x,y)] = ctemp;
-                if (ctemp > maxTemp) maxTemp = ctemp;
-                else if (ctemp < minTemp) minTemp = ctemp;
-            }
-        }
-        std::cout << "max temp: " << maxTemp << " min temp: " << minTemp << std::endl;
-        
-        switch (outcolor) {
-            case frame::colormap::RGBA: {
-                std::vector<uint8_t> rgbaBuffer(width*height*4, 0);
-                for (const auto& [v2, temp] : tempBuffer) {
-                    size_t index = (v2.y * width + v2.x) * 4;
-                    uint8_t atemp  = static_cast<unsigned char>((((temp-minTemp)) / (maxTemp-minTemp)) * 255);
-                    rgbaBuffer[index+0] = atemp;
-                    rgbaBuffer[index+1] = atemp;
-                    rgbaBuffer[index+2] = atemp;
-                    rgbaBuffer[index+3] = 255;
-                }
-                frame result = frame(res.x,res.y, frame::colormap::RGBA);
-                result.setData(rgbaBuffer);
-                regenpreventer = false;
-                return result;
-                break;
-            }
-            case frame::colormap::BGR: {
-                std::vector<uint8_t> rgbaBuffer(width*height*3, 0);
-                for (const auto& [v2, temp] : tempBuffer) {
-                    size_t index = (v2.y * width + v2.x) * 3;
-                    uint8_t atemp  = static_cast<unsigned char>((((temp-minTemp)) / (maxTemp-minTemp)) * 255);
-                    rgbaBuffer[index+2] = atemp;
-                    rgbaBuffer[index+1] = atemp;
-                    rgbaBuffer[index+0] = atemp;
-                }
-                frame result = frame(res.x,res.y, frame::colormap::BGR);
-                result.setData(rgbaBuffer);
-                regenpreventer = false;
-                return result;
-                break;
-            }
-            case frame::colormap::RGB: 
-            default: {
-                std::vector<uint8_t> rgbaBuffer(width*height*3, 0);
-                for (const auto& [v2, temp] : tempBuffer) {
-                    size_t index = (v2.y * width + v2.x) * 3;
-                    uint8_t atemp  = static_cast<unsigned char>((((temp-minTemp)) / (maxTemp-minTemp)) * 255);
-                    rgbaBuffer[index+0] = atemp;
-                    rgbaBuffer[index+1] = atemp;
-                    rgbaBuffer[index+2] = atemp;
-                }
-                frame result = frame(res.x,res.y, frame::colormap::RGB);
-                result.setData(rgbaBuffer);
-                regenpreventer = false;
-                return result;
-                break;
-            }
-        }
-    }
-
-    /// @brief Removes an object from the grid entirely.
-    size_t removeID(size_t id) {
-        Vec2 oldPosition = Positions.at(id);
-        Positions.remove(id);
-        Pixels.erase(id);
-        unassignedIDs.push_back(id);
-        spatialGrid.remove(id, oldPosition);
-        return id;
-    }
-    
-    /// @brief Updates multiple positions simultaneously.
-    void bulkUpdatePositions(const std::unordered_map<size_t, Vec2>& newPositions) {
-        TIME_FUNCTION;
-        for (const auto& [id, newPos] : newPositions) {
-            Vec2 oldPosition = Positions.at(id);
-            Positions.at(id).move(newPos);
-            Pixels.at(id).move(newPos);
-            spatialGrid.update(id, oldPosition, newPos);
-        }
-    }
-    
-    /// @brief Batch insertion of objects for efficiency.
-    std::vector<size_t> bulkAddObjects(const std::vector<Vec2> poses, std::vector<Vec4> colors) {
-        TIME_FUNCTION;
-        std::vector<size_t> ids;
-        ids.reserve(poses.size());
-        
-        // Reserve space in maps to avoid rehashing
-        if (Positions.bucket_count() < Positions.size() + poses.size()) {
-            Positions.reserve(Positions.size() + poses.size());
-            Pixels.reserve(Positions.size() + poses.size());
-        }
-        
-        // Batch insertion
-        std::vector<size_t> newids;
-        for (size_t i = 0; i < poses.size(); ++i) {
-            size_t id = Positions.set(poses[i]);
-            Pixels.emplace(id, GenericPixel(id, colors[i], poses[i]));
-            spatialGrid.insert(id,poses[i]);
-            newids.push_back(id);
-        }
-        
-        shrinkIfNeeded();
-        
-        return newids;
-    }
-
-    /// @brief Batch insertion of objects including temperature data.
-    std::vector<size_t> bulkAddObjects(const std::vector<Vec2> poses, std::vector<Vec4> colors, std::vector<float>& temps) {
-        TIME_FUNCTION;
-        std::vector<size_t> ids;
-        ids.reserve(poses.size());
-        
-        // Reserve space in maps to avoid rehashing
-        if (Positions.bucket_count() < Positions.size() + poses.size()) {
-            Positions.reserve(Positions.size() + poses.size());
-            Pixels.reserve(Positions.size() + poses.size());
-            tempMap.reserve(tempMap.size() + temps.size());
-        }
-        
-        // Batch insertion
-        std::vector<size_t> newids;
-        for (size_t i = 0; i < poses.size(); ++i) {
-            size_t id = Positions.set(poses[i]);
-            Pixels.emplace(id, GenericPixel(id, colors[i], poses[i]));
-            Temp temptemp = Temp(temps[i]);
-            tempMap.insert({id, temptemp});
-            spatialGrid.insert(id,poses[i]);
-            newids.push_back(id);
-        }
-        
-        shrinkIfNeeded();
-        
-        return newids;
-    }
-
-    void shrinkIfNeeded() {
-        //TODO: garbage collector
-    }
-    
-    //clear
-    void clear() {
-        Positions.clear();
-        Pixels.clear();
-        spatialGrid.clear();
-        Pixels.rehash(0);
-        defaultBackgroundColor = Vec4(0.0f, 0.0f, 0.0f, 0.0f);
-    }
-
-    /// @brief Rebuilds the spatial hashing grid based on the current neighbor radius.
-    void optimizeSpatialGrid() {
-        //std::cout << "optimizeSpatialGrid()" << std::endl;
-        spatialCellSize = neighborRadius * neighborRadius;
-        spatialGrid = SpatialGrid(spatialCellSize);
-        
-        // Rebuild spatial grid
-        spatialGrid.clear();
-        for (const auto& [id, pos] : Positions) {
-            spatialGrid.insert(id, pos);
-        }
-    }
-
-    /// @brief Gets IDs of objects within `neighborRadius` of the given ID.
-    std::vector<size_t> getNeighbors(size_t id) const {
-        Vec2 pos = Positions.at(id);
-        std::vector<size_t> candidates = spatialGrid.queryRange(pos, neighborRadius);
-        
-        std::vector<size_t> neighbors;
-        float radiusSq = neighborRadius * neighborRadius;
-        
-        for (size_t candidateId : candidates) {
-            if (candidateId != id && pos.distanceSquared(Positions.at(candidateId)) <= radiusSq) {
-                neighbors.push_back(candidateId);
-            }
-        }
-        
-        return neighbors;
-    }
-    
-    /// @brief Gets IDs of objects within a custom distance of the given ID.
-    std::vector<size_t> getNeighborsRange(size_t id, float dist) const {
-        Vec2 pos = Positions.at(id);
-        std::vector<size_t> candidates = spatialGrid.queryRange(pos, neighborRadius);
-        
-        std::vector<size_t> neighbors;
-        float radiusSq = dist * dist;
-        
-        for (size_t candidateId : candidates) {
-            if (candidateId != id && 
-                pos.distanceSquared(Positions.at(candidateId)) <= radiusSq) {
-                neighbors.push_back(candidateId);
-            }
-        }
-        
-        return neighbors;
-    }
-    
-    /// @brief Generates a noise grid that includes temperature data.
-    Grid2 noiseGenGridTemps(size_t minx,size_t miny, size_t maxx, size_t maxy, float minChance = 0.1f
-                        , float maxChance = 1.0f, bool color = true, int noisemod = 42) {
-        TIME_FUNCTION;
-        noisegen = PNoise2(noisemod);
-        std::cout << "generating a noise grid with the following: (" << minx << ", " << miny 
-                << ") by (" << maxx << ", " << maxy << ") " << "chance: " << minChance 
-                << " max: " << maxChance << " gen colors: " << color << std::endl;
-        std::vector<Vec2> poses;
-        std::vector<Vec4> colors;
-        std::vector<float> temps;
-        int callnumber = 0;
-        for (int x = minx; x < maxx; x++) {
-            for (int y = miny; y < maxy; y++) {
-                float nx = (x+noisemod)/(maxx+EPSILON)/0.1;
-                float ny = (y+noisemod)/(maxy+EPSILON)/0.1;
-                Vec2 pos = Vec2(nx,ny);
-                float temp = noisegen.permute(Vec2(nx*0.2+1,ny*0.1+2));
-                float alpha = noisegen.permute(pos);
-                if (alpha > minChance && alpha < maxChance) {
-                    if (color) {
-                        float red = noisegen.permute(Vec2(nx*0.3,ny*0.3));
-                        float green = noisegen.permute(Vec2(nx*0.6,ny*.06));
-                        float blue = noisegen.permute(Vec2(nx*0.9,ny*0.9));
-                        Vec4 newc = Vec4(red,green,blue,1.0);
-                        colors.push_back(newc);
-                        poses.push_back(Vec2(x,y));
-                        temps.push_back(temp * 100);
-                        //std::cout << "temp: " << temp << std::endl;
-                    } else {
-                        Vec4 newc = Vec4(alpha,alpha,alpha,1.0);
-                        colors.push_back(newc);
-                        poses.push_back(Vec2(x,y));
-                        temps.push_back(temp * 100);
-                    }
-                }
-            }
-        }
-        std::cout << "noise generated" << std::endl;
-        bulkAddObjects(poses, colors, temps);
-        return *this;
-    }
-
-    /// @brief Finds temperature objects within a region.
-    std::unordered_map<size_t, Temp*> findTempsInRegion(const Vec2& center, float radius) {
-        std::unordered_map<size_t, Temp*> results;
-        
-        // Get all IDs in the region
-        auto idsInRegion = spatialGrid.queryRange(center, radius);
-        results.reserve(idsInRegion.size());
-        
-        // Filter for ones that have temperature data
-        for (size_t id : idsInRegion) {
-            auto tempIt = tempMap.find(id);
-            if (tempIt != tempMap.end()) {
-                results.emplace(id, &tempIt->second);
-            }
-        }
-        
-        return results;
-    }
-
-    /// @brief Fills empty spots in the bounding box with default background pixels and gradients temps.
-    Grid2 backfillGrid() {
-        Vec2 Min;
-        Vec2 Max;
-        getBoundingBox(Min, Max);
-        std::vector<Vec2> newPos;
-        std::vector<Vec4> newColors;
-        for (size_t x = Min.x; x < Max.x; x++) {
-            for (size_t y = Min.y; y < Max.y; y++) {
-                Vec2 pos = Vec2(x,y);
-                if (Positions.contains(pos)) continue;
-                Vec4 color = defaultBackgroundColor;
-                float size = 0.1;
-                newPos.push_back(pos);
-                newColors.push_back(color);
-            }
-        }
-        bulkAddObjects(newPos, newColors);
-        gradTemps();
-        return *this;
-    }
-
-    /// @brief Smoothes temperatures across the grid using Inverse Distance Weighting from existing samples.
-    void gradTemps() {
-        //run this at the start. it generates temps for the grid from a sampling
-        std::vector<Vec2> toProcess;
-        
-        Vec2 Min, Max;
-        getBoundingBox(Min, Max);
-        
-        std::cout << "min: " << Min << std::endl;
-        std::cout << "max: " << Max << std::endl;
-        for (size_t x = Min.x; x < Max.x; x++) {
-            for (size_t y = Min.y; y < Max.y; y++) {
-                Vec2 pasdfjlkasdfasdfjlkasdfjlk = Vec2(x,y);
-                toProcess.emplace_back(pasdfjlkasdfasdfjlkasdfjlk);
-            }
-        }
-
-        while (toProcess.size() > 0) {
-            std::cout << "setting temp on " << toProcess.size() << " values" << std::endl;
-            for (size_t iter = 0; iter < toProcess.size(); iter++) {
-                Vec2 cpos = toProcess[iter];
-                size_t id = getPositionVec(cpos);
-                if (tempMap.find(id) != tempMap.end()) {
-                    toProcess.erase(toProcess.begin()+iter);
-                }
-            }
-            for (auto [id, temp] : tempMap) {
-                std::vector<size_t> neighbors = spatialGrid.queryRange(getPositionID(id), 35);
-                std::unordered_map<Vec2, Temp> neighbortemps;
-                for (size_t id : neighbors) {
-                    auto tempIt = tempMap.find(id);
-                    if (tempIt != tempMap.end()) {
-                        neighbortemps.insert({getPositionID(id), tempIt->second});
-                    }
-                }
-                Vec2 pos = getPositionID(id);
-
-                for (size_t neighbor : neighbors) {
-                    // if (tempMap.find(neighbor) != tempMap.end()) {
-                        Vec2 npos = getPositionID(neighbor);
-                        float newtemp = Temp::calTempIDW(npos, neighbortemps);
-                        Temp newTempT = Temp(newtemp);
-                        tempMap.insert({neighbor, newTempT});
-                    // }
-                }
-            }
-        }
-    }
-
-
-    /// @brief Simulates heat diffusion across the grid over a time step.
-    /// @param deltaTime Time elapsed (in milliseconds) since last update.
-    void diffuseTemps(float deltaTime) {
-        TIME_FUNCTION;
-        if (tempMap.empty() || deltaTime <= 0) return;
-        
-        std::vector<std::pair<size_t, Temp*>> tempEntries;
-        tempEntries.reserve(tempMap.size());
-        
-        for (auto& [id, tempObj] : tempMap) {
-            tempEntries.emplace_back(id, &tempObj);
-        }
-        
-        std::for_each(std::execution::par_unseq, tempEntries.begin(), tempEntries.end(),
-            [&](const std::pair<size_t, Temp*>& entry) {
-            size_t id = entry.first;
-            Temp* tempObj = entry.second;
-            Vec2 pos = Positions.at(id);
-            float oldtemp = tempObj->temp;
-                
-            auto nearbyIds = spatialGrid.queryRange(pos, neighborRadius * tempObj->conductivity);
+        if (isLeaf) {
+            size_t pointCount;
+            readVal(in, pointCount);
+            node->points.reserve(pointCount);
             
-            std::unordered_map<Vec2, Temp> neighborTemps;
-            for (size_t neighborId : nearbyIds) {
-                if (neighborId != id && tempMap.find(neighborId) != tempMap.end()) {
-                    neighborTemps.emplace(Positions.at(neighborId), tempMap.at(neighborId));
+            for (size_t i = 0; i < pointCount; ++i) {
+                auto pt = std::make_shared<NodeData>();
+                readVal(in, pt->data);
+                readVec2(in, pt->position);
+                readVal(in, pt->objectId);
+                readVal(in, pt->active);
+                readVal(in, pt->visible);
+                readVal(in, pt->size);
+                readVec4(in, pt->color);
+                readVal(in, pt->temperature);
+                readVal(in, pt->conductivity);
+                readVal(in, pt->specific_heat);
+                readVal(in, pt->density);
+                int shapeInt;
+                readVal(in, shapeInt);
+                pt->shape = static_cast<Shape>(shapeInt);
+                node->points.push_back(pt);
+            }
+        } else {
+            uint8_t childMask;
+            readVal(in, childMask);
+            PointType center = node->center;
+
+            for (int i = 0; i < 4; ++i) {
+                if ((childMask >> i) & 1) {
+                    PointType childMin, childMax;
+                    // Logic matches createChildBounds
+                    bool right = i & 1;
+                    bool top = i & 2;
+                    
+                    childMin.x() = right ? center.x() : node->bounds.first.x();
+                    childMax.x() = right ? node->bounds.second.x() : center.x();
+                    childMin.y() = top ? center.y() : node->bounds.first.y();
+                    childMax.y() = top ? node->bounds.second.y() : center.y();
+                    
+                    node->children[i] = std::make_unique<QuadNode>(childMin, childMax);
+                    deserializeNode(in, node->children[i].get());
+                } else {
+                    node->children[i] = nullptr;
                 }
             }
-                
-            tempObj->calLapl(pos, neighborTemps, deltaTime);
-            float newtemp = tempObj->temp;
-            //float tempdiff = (oldtemp - newtemp) * (deltaTime / 1000);
-            //tempObj->temp = oldtemp - tempdiff;
         }
-        );
     }
+
+public:
+    Grid2(const PointType& minBound, const PointType& maxBound, size_t maxPointsPerNode=16, size_t maxDepth = 16) :
+        root_(std::make_unique<QuadNode>(minBound, maxBound)), maxPointsPerNode(maxPointsPerNode),
+        maxDepth(maxDepth), size(0) {}
+    
+    Grid2() : root_(nullptr), maxPointsPerNode(16), maxDepth(16), size(0) {}
+
+    void setBackgroundColor(const Eigen::Vector4f& color) { 
+        backgroundColor_ = color; 
+    }
+
+    bool set(const T& data, const PointType& pos, bool visible, Eigen::Vector4f color, float size = 1.0f,
+             bool active = true, int objectId = -1, Shape shape = Shape::SQUARE) {
+        auto pointData = std::make_shared<NodeData>(data, pos, visible, color, size, active, objectId, shape);
+        if (insertRecursive(root_.get(), pointData, 0)) {
+            this->size++;
+            return true;
+        }
+        return false;
+    }
+
+    // --- Standard Grid Operations ---
+
+    bool save(const std::string& filename) const {
+        if (!root_) return false;
+        std::ofstream out(filename, std::ios::binary);
+        if (!out) return false;
+
+        uint32_t magic = 0x47524944; // GRID
+        writeVal(out, magic);
+        writeVal(out, maxDepth);
+        writeVal(out, maxPointsPerNode);
+        writeVal(out, size);
+        writeVec4(out, backgroundColor_);
+        writeVec2(out, root_->bounds.first);
+        writeVec2(out, root_->bounds.second);
+
+        serializeNode(out, root_.get());
+        out.close();
+        std::cout << "Successfully saved Grid2 to " << filename << std::endl;
+        return true;
+    }
+
+    bool load(const std::string& filename) {
+        std::ifstream in(filename, std::ios::binary);
+        if (!in) return false;
+
+        uint32_t magic;
+        readVal(in, magic);
+        if (magic != 0x47524944) {
+            std::cerr << "Invalid Grid2 file format" << std::endl;
+            return false;
+        }
+
+        readVal(in, maxDepth);
+        readVal(in, maxPointsPerNode);
+        readVal(in, size);
+        readVec4(in, backgroundColor_);
+        
+        PointType minBound, maxBound;
+        readVec2(in, minBound);
+        readVec2(in, maxBound);
+
+        root_ = std::make_unique<QuadNode>(minBound, maxBound);
+        deserializeNode(in, root_.get());
+        in.close();
+        return true;
+    }
+
+    std::shared_ptr<NodeData> find(const PointType& pos, float tolerance = 0.0001f) {
+        std::function<std::shared_ptr<NodeData>(QuadNode*)> searchNode = [&](QuadNode* node) -> std::shared_ptr<NodeData> {
+            if (!node->contains(pos)) return nullptr;
+            
+            if (node->isLeaf) {
+                for (const auto& pointData : node->points) {
+                    if (!pointData->active) continue;
+                    float distSq = (pointData->position - pos).squaredNorm();
+                    if (distSq <= tolerance * tolerance) return pointData;
+                }
+                return nullptr;
+            } else {
+                int quad = getQuadrant(pos, node->center);
+                if (node->children[quad]) return searchNode(node->children[quad].get());
+            }
+            return nullptr;
+        };
+        return searchNode(root_.get());
+    }
+
+    std::vector<std::shared_ptr<NodeData>> findInRadius(const PointType& center, float radius) const {
+        std::vector<std::shared_ptr<NodeData>> results;
+        if (!root_) return results;
+        float radiusSq = radius * radius;
+        BoundingBox queryBox(center - PointType(radius, radius), center + PointType(radius, radius));
+
+        std::function<void(QuadNode*)> searchNode = [&](QuadNode* node) {
+            if (!node->intersects(queryBox)) return;
+
+            if (node->isLeaf) {
+                for (const auto& pointData : node->points) {
+                    if (!pointData->active) continue;
+                    if ((pointData->position - center).squaredNorm() <= radiusSq) {
+                        results.emplace_back(pointData);
+                    }
+                }
+            } else {
+                for (const auto& child : node->children) {
+                    if (child) searchNode(child.get());
+                }
+            }
+        };
+        searchNode(root_.get());
+        return results;
+    }
+
+    // --- Noise Generation Features ---
+
+    Grid2& noiseGenGrid(float minX, float minY, float maxX, float maxY, float minChance = 0.1f, 
+                        float maxChance = 1.0f, bool color = true, int noiseSeed = 42, float densityScale = 1.0f) {
+        TIME_FUNCTION;
+        noisegen = PNoise2(noiseSeed);
+        std::cout << "Generating noise grid (" << minX << "," << minY << ") to (" << maxX << "," << maxY << ")" << std::endl;
+
+        // Iterate through integer coordinates (or stepped float coords based on density)
+        // Adjust step size based on grid density scaling
+        float step = 1.0f / densityScale;
+
+        for (float x = minX; x < maxX; x += step) {
+            for (float y = minY; y < maxY; y += step) {
+                // Normalize for noise input
+                float nx = (x + noiseSeed) / (maxX + 0.00001f) * 10.0f;
+                float ny = (y + noiseSeed) / (maxY + 0.00001f) * 10.0f;
+                
+                // PNoise2 usually takes a struct or Vec2. We'll reconstruct one here 
+                // or assume PNoise2 has been updated to take floats or Eigen.
+                // Assuming PNoise2::permute takes Vec2(x,y) where Vec2 is from legacy or adapter.
+                // Here we pass a legacy-compatible Vec2 just in case, or floats if adapter exists.
+                // For this implementation, we assume we can pass floats to a helper or construct a temporary.
+                float alpha = noisegen.permute(Vec2(nx, ny)); // Using external Vec2 for compatibility with PNoise2 header
+                
+                if (alpha > minChance && alpha < maxChance) {
+                    PointType pos(x, y);
+                    Eigen::Vector4f col;
+                    float temp = 0.0f;
+
+                    if (color) {
+                        float r = noisegen.permute(Vec2(nx * 0.3f, ny * 0.3f));
+                        float g = noisegen.permute(Vec2(nx * 0.6f, ny * 0.06f));
+                        float b = noisegen.permute(Vec2(nx * 0.9f, ny * 0.9f));
+                        col = Eigen::Vector4f(r, g, b, 1.0f);
+                        temp = noisegen.permute(Vec2(nx * 0.2f + 1, ny * 0.1f + 2));
+                    } else {
+                        col = Eigen::Vector4f(alpha, alpha, alpha, 1.0f);
+                        temp = alpha;
+                    }
+
+                    // Create node
+                    auto pointData = std::make_shared<NodeData>(T(), pos, true, col, step, true, -1, Shape::SQUARE);
+                    pointData->temperature = temp * 100.0f; // Scale temp
+                    insertRecursive(root_.get(), pointData, 0);
+                    this->size++;
+                }
+            }
+        }
+        return *this;
+    }
+
+    // --- Thermal Simulation ---
+
+    void setMaterialProperties(const PointType& pos, float cond, float sh, float dens) {
+        auto node = find(pos);
+        if (node) {
+            node->conductivity = cond;
+            node->specific_heat = sh;
+            node->density = dens;
+        }
+    }
+
+    void setTemp(const PointType& pos, float temp) {
+        auto node = find(pos);
+        if (node) {
+            node->temperature = temp;
+        } else {
+            // Create invisible thermal point if it doesn't exist?
+            // For now, only set if exists to match sparse grid logic
+        }
+    }
+
+    // Standard Heat Diffusion (Explicit Euler)
+    void diffuseTemps(float deltaTime, float neighborRadius = 1.5f) {
+        TIME_FUNCTION;
+        if (!root_) return;
+
+        // 1. Collect all active nodes (could optimize by threading traversing)
+        std::vector<NodeData*> activeNodes;
+        std::function<void(QuadNode*)> collect = [&](QuadNode* node) {
+            if (node->isLeaf) {
+                for (auto& pt : node->points) {
+                    if (pt->active) activeNodes.push_back(pt.get());
+                }
+            } else {
+                for (auto& child : node->children) {
+                    if (child) collect(child.get());
+                }
+            }
+        };
+        collect(root_.get());
+
+        // 2. Calculate Laplacian / Heat flow
+        #pragma omp parallel for schedule(dynamic)
+        for (size_t i = 0; i < activeNodes.size(); ++i) {
+            NodeData* curr = activeNodes[i];
+            
+            // Find neighbors
+            auto neighbors = findInRadius(curr->position, neighborRadius);
+            
+            float laplacian = 0.0f;
+            float totalWeight = 0.0f;
+            
+            for (const auto& nb : neighbors) {
+                if (nb.get() == curr) continue;
+                
+                float distSq = (nb->position - curr->position).squaredNorm();
+                float dist = std::sqrt(distSq);
+                
+                // Simple weight based on distance (1/r)
+                if (dist > 0.0001f) {
+                    float weight = 1.0f / dist;
+                    // Heat transfer: k * (T_neighbor - T_current)
+                    laplacian += weight * (nb->temperature - curr->temperature);
+                    totalWeight += weight;
+                }
+            }
+
+            // Normalizing factor (simplified physics model for grid)
+            // Diffusivity alpha = k / (rho * cp)
+            float alpha = curr->conductivity / (curr->density * curr->specific_heat);
+            
+            // dT/dt = alpha * Laplacian
+            // Scaling Laplacian by arbitrary grid constant or 1/area approx
+            float change = 0.0f;
+            if (totalWeight > 0) {
+                 change = alpha * laplacian * deltaTime;
+            }
+            
+            curr->next_temperature = curr->temperature + change;
+        }
+
+        // 3. Apply updates
+        #pragma omp parallel for
+        for (size_t i = 0; i < activeNodes.size(); ++i) {
+            activeNodes[i]->temperature = activeNodes[i]->next_temperature;
+        }
+    }
+
+    // --- Rendering ---
+    
+    // Rasterize the quadtree onto a 2D frame buffer
+    frame renderFrame(const PointType& minView, const PointType& maxView, 
+                      int width, int height, 
+                      frame::colormap colorformat = frame::colormap::RGBA) {
+        TIME_FUNCTION;
+        
+        frame outFrame(width, height, colorformat);
+        std::vector<uint8_t> buffer;
+        int channels = (colorformat == frame::colormap::RGBA || colorformat == frame::colormap::BGRA) ? 4 : 3;
+        if (colorformat == frame::colormap::B) channels = 1;
+
+        buffer.resize(width * height * channels, 0);
+        
+        // Fill background
+        // Optimizing background fill requires iterating pixels, doing it implicitly during traversal is harder for gaps.
+        // So we fill first.
+        #pragma omp parallel for
+        for (int i = 0; i < width * height; ++i) {
+            int idx = i * channels;
+            if (channels == 4) {
+                buffer[idx] = static_cast<uint8_t>(backgroundColor_[0] * 255);
+                buffer[idx+1] = static_cast<uint8_t>(backgroundColor_[1] * 255);
+                buffer[idx+2] = static_cast<uint8_t>(backgroundColor_[2] * 255);
+                buffer[idx+3] = static_cast<uint8_t>(backgroundColor_[3] * 255);
+            } else if (channels == 3) {
+                buffer[idx] = static_cast<uint8_t>(backgroundColor_[0] * 255);
+                buffer[idx+1] = static_cast<uint8_t>(backgroundColor_[1] * 255);
+                buffer[idx+2] = static_cast<uint8_t>(backgroundColor_[2] * 255);
+            }
+        }
+
+        Eigen::Vector2f viewSize = maxView - minView;
+        Eigen::Vector2f scale(width / viewSize.x(), height / viewSize.y());
+
+        // Recursive render function
+        // We traverse nodes that overlap the view. If leaf, we project points to pixels.
+        // Painter's algorithm isn't strictly necessary for 2D unless overlapping, 
+        // but sorting isn't implemented here. 
+        std::function<void(QuadNode*)> renderNode = [&](QuadNode* node) {
+            // Cull if node is outside view
+            if (node->bounds.second.x() < minView.x() || node->bounds.first.x() > maxView.x() ||
+                node->bounds.second.y() < minView.y() || node->bounds.first.y() > maxView.y()) {
+                return;
+            }
+
+            if (node->isLeaf) {
+                for (const auto& pt : node->points) {
+                    if (!pt->visible) continue;
+
+                    // Project world to screen
+                    float sx = (pt->position.x() - minView.x()) * scale.x();
+                    float sy = (height - 1) - (pt->position.y() - minView.y()) * scale.y(); // Flip Y for image coords
+
+                    int px = static_cast<int>(sx);
+                    int py = static_cast<int>(sy);
+                    
+                    // Size in pixels
+                    int pSize = static_cast<int>(pt->size * scale.x());
+                    if (pSize < 1) pSize = 1;
+
+                    // Simple Splatting
+                    for (int dy = -pSize/2; dy <= pSize/2; ++dy) {
+                        for (int dx = -pSize/2; dx <= pSize/2; ++dx) {
+                            int nx = px + dx;
+                            int ny = py + dy;
+
+                            if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                                int idx = (ny * width + nx) * channels;
+                                
+                                // Blend logic (Alpha Blending)
+                                float alpha = pt->color[3];
+                                float invAlpha = 1.0f - alpha;
+
+                                if (colorformat == frame::colormap::RGBA) {
+                                    buffer[idx]   = static_cast<uint8_t>(pt->color[0] * 255 * alpha + buffer[idx] * invAlpha);
+                                    buffer[idx+1] = static_cast<uint8_t>(pt->color[1] * 255 * alpha + buffer[idx+1] * invAlpha);
+                                    buffer[idx+2] = static_cast<uint8_t>(pt->color[2] * 255 * alpha + buffer[idx+2] * invAlpha);
+                                    buffer[idx+3] = 255;
+                                } else if (colorformat == frame::colormap::RGB) {
+                                    buffer[idx]   = static_cast<uint8_t>(pt->color[0] * 255 * alpha + buffer[idx] * invAlpha);
+                                    buffer[idx+1] = static_cast<uint8_t>(pt->color[1] * 255 * alpha + buffer[idx+1] * invAlpha);
+                                    buffer[idx+2] = static_cast<uint8_t>(pt->color[2] * 255 * alpha + buffer[idx+2] * invAlpha);
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                for (auto& child : node->children) {
+                    if (child) renderNode(child.get());
+                }
+            }
+        };
+
+        renderNode(root_.get());
+
+        outFrame.setData(buffer);
+        return outFrame;
+    }
+
+    // Heatmap rendering
+    frame renderTempFrame(const PointType& minView, const PointType& maxView, 
+                          int width, int height, 
+                          float minTemp = 0.0f, float maxTemp = 100.0f) {
+        // Reuse render logic but override color with heatmap gradient
+        // Simplification: We iterate active nodes, map temp to color, then call similar render logic
+        // For brevity, a dedicated loop over active points:
+        
+        frame outFrame(width, height, frame::colormap::RGB);
+        std::vector<uint8_t> buffer(width * height * 3, 0); // Black background
+        
+        Eigen::Vector2f scale(width / (maxView.x() - minView.x()), height / (maxView.y() - minView.y()));
+
+        auto activePts = findInRadius((minView + maxView) * 0.5f, (maxView - minView).norm()); // Broad phase
+
+        for(const auto& pt : activePts) {
+            float sx = (pt->position.x() - minView.x()) * scale.x();
+            float sy = (height - 1) - (pt->position.y() - minView.y()) * scale.y();
+            
+            int px = static_cast<int>(sx);
+            int py = static_cast<int>(sy);
+            
+            if (px >= 0 && px < width && py >= 0 && py < height) {
+                float tNorm = (pt->temperature - minTemp) / (maxTemp - minTemp);
+                tNorm = std::clamp(tNorm, 0.0f, 1.0f);
+                
+                // Simple Blue -> Red heatmap
+                uint8_t r = static_cast<uint8_t>(tNorm * 255);
+                uint8_t b = static_cast<uint8_t>((1.0f - tNorm) * 255);
+                uint8_t g = 0; 
+
+                int idx = (py * width + px) * 3;
+                buffer[idx] = r;
+                buffer[idx+1] = g;
+                buffer[idx+2] = b;
+            }
+        }
+        
+        outFrame.setData(buffer);
+        return outFrame;
+    }
+
+    void clear() {
+        if (!root_) return;
+        PointType min = root_->bounds.first;
+        PointType max = root_->bounds.second;
+        root_ = std::make_unique<QuadNode>(min, max);
+        size = 0;
+    }
+
+    size_t getSize() const { return size; }
 };
 
 #endif
