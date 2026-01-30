@@ -1002,6 +1002,68 @@ public:
         return outFrame;
     }
 
+    std::shared_ptr<NodeData> fastVoxelTraverse(const PointType& origin, const PointType& direction,
+                                         float maxDist) const {
+        std::shared_ptr<NodeData> hit;
+        
+        if (empty()) return hit;
+
+        std::function<void(OctreeNode*, const PointType&, const PointType&, float, float)> traverseNode = 
+                        [&](OctreeNode* node, const PointType& origin, const PointType& dir, float tMin, float tMax) {
+            if (!node || tMin > tMax) return;
+            if (node->isLeaf) {
+                for (const auto& pointData : node->points) {
+                    if (!pointData->active) continue;
+                    
+                    PointType toPoint = pointData->position - origin;
+                    float projection = toPoint.dot(dir);
+                    if (projection >= 0 && projection <= maxDist) {
+                        PointType closestPoint = origin + dir * projection;
+                        float distSq = (pointData->position - closestPoint).squaredNorm();
+                        if (distSq < pointData->size * pointData->size) {
+                            hit = pointData;
+                            return;
+                        }
+                    }
+                }
+            } else {
+                std::array<std::pair<int, float>, 8> childOrder;
+                PointType center = node->center;
+                for (int i = 0; i < 8; ++i) {
+                    if (node->children[i]) {
+                        PointType childCenter = node->children[i]->center;
+                        float dist = (childCenter - origin).dot(dir);
+                        childOrder[i] = {i, dist};
+                    } else {
+                        childOrder[i] = {i, std::numeric_limits<float>::lowest()};
+                    }
+                }
+
+                bitonic_sort_8(childOrder);
+
+                for (int i = 0; i < 8; ++i) {
+                    int childIdx = childOrder[i].first;
+                    if (node->children[childIdx]) {
+                        const auto& childBounds = node->children[childIdx]->bounds;
+                        
+                        float childtMin = tMin;
+                        float childtMax = tMax;
+                        if (rayBoxIntersect(origin, dir, childBounds, childtMin, childtMax)) {
+                            traverseNode(node->children[childIdx].get(), origin, dir, childtMin, childtMax);
+                            if (hit != nullptr) return;
+                        }
+                    }
+                }
+            }
+        };
+        float tMin, tMax;
+        if (rayBoxIntersect(origin, direction, root_->bounds, tMin, tMax)) {
+            tMax = std::min(tMax, maxDist);
+            traverseNode(root_.get(), origin, direction, tMin, tMax);
+        }
+        return hit;
+    }
+
     frame fastRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB) {
         
         PointType origin = cam.origin;
@@ -1041,48 +1103,23 @@ public:
 
                 Eigen::Vector3f color = backgroundColor_; // Start with background color
                 
-                auto hits = voxelTraverse(origin, rayDir, std::numeric_limits<float>::max(), true);
-                if (!hits.empty()) {
-                    auto obj = hits[0];
+                auto hit = fastVoxelTraverse(origin, rayDir, std::numeric_limits<float>::max());
+                if (hit != nullptr) {
+                    auto obj = hit;
                     
-                    // Simple shading: use object color directly
                     color = obj->color;
                     
-                    // If it's a light, add emittance
                     if (obj->light) {
                         color = color * obj->emittance;
                     }
                     
-                    // Simple lighting based on ray direction (fake diffuse)
-                    PointType normal;
-                    if (obj->shape == Shape::SPHERE) {
-                        PointType center = obj->position;
-                        float radius = obj->size;
-                        PointType L_vec = center - origin;
-                        float tca = L_vec.dot(rayDir);
-                        float d2 = L_vec.dot(L_vec) - tca * tca;
-                        float radius2 = radius * radius;
-
-                        if (d2 <= radius2) {
-                            float thc = std::sqrt(radius2 - d2);
-                            float t = tca - thc; 
-                            if (t < 0.001f) t = tca + thc;
-                            
-                            PointType hitPoint = origin + rayDir * t;
-                            normal = (hitPoint - center).normalized();
-                        }
-                    } else {
-                        // For cubes, use a simple approximation
-                        normal = -rayDir; // Face the camera
-                    }
+                    PointType normal = -rayDir;
                     
                     // Simple directional lighting
                     float lightDot = std::max(0.2f, normal.dot(-rayDir));
                     color = color * lightDot;
                 }
-                
-                color = color.cwiseMax(0.0f).cwiseMin(1.0f);
-                
+
                 switch(colorformat) {
                     case frame::colormap::B:
                         colorBuffer[idx    ] = static_cast<uint8_t>(rgbToGrayscale(color) * 255.0f);
