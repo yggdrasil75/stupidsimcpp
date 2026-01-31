@@ -15,6 +15,7 @@
 #include <iostream>
 #include <iomanip>
 #include <fstream>
+#include <mutex>
 
 #ifdef SSE
 #include <immintrin.h>
@@ -75,8 +76,11 @@ public:
         std::array<std::unique_ptr<OctreeNode>, 8> children;
         PointType center;
         bool isLeaf;
+        
+        mutable std::shared_ptr<NodeData> lodData;
+        mutable std::mutex lodMutex; 
 
-        OctreeNode(const PointType& min, const PointType& max) : bounds(min,max), isLeaf(true) {
+        OctreeNode(const PointType& min, const PointType& max) : bounds(min,max), isLeaf(true), lodData(nullptr) {
             for (std::unique_ptr<OctreeNode>& child : children) {
                 child = nullptr;
             }
@@ -105,6 +109,9 @@ private:
     
     Eigen::Vector3f skylight_ = {0.1f, 0.1f, 0.1f};
     Eigen::Vector3f backgroundColor_ = {0.53f, 0.81f, 0.92f};
+
+    float lodFalloffRate_ = 0.1f; // Lower = better, higher = worse. 0-1
+    float lodMinDistance_ = 100.0f;
 
     uint8_t getOctant(const PointType& point, const PointType& center) const {
         int octant = 0;
@@ -148,6 +155,11 @@ private:
     }
 
     bool insertRecursive(OctreeNode* node, const std::shared_ptr<NodeData>& pointData, int depth) {
+        {
+            std::lock_guard<std::mutex> lock(node->lodMutex);
+            node->lodData = nullptr;
+        }
+
         if (!node->contains(pointData->position)) return false;
 
         if (node->isLeaf) {
@@ -163,6 +175,74 @@ private:
             }
         }
         return false;
+    }
+    
+    void ensureLOD(const OctreeNode* node) const {
+        std::lock_guard<std::mutex> lock(node->lodMutex);
+        if (node->lodData != nullptr) return;
+
+        PointType avgPos = PointType::Zero();
+        Eigen::Vector3f avgColor = Eigen::Vector3f::Zero();
+        float avgEmittance = 0.0f;
+        float avgRefl = 0.0f;
+        float avgRefr = 0.0f;
+        bool anyLight = false;
+        int count = 0;
+        
+        if (node->isLeaf) {
+            if (node->points.size() == 1) {
+                node->lodData = node->points[0];
+                return;
+            } else if (node->points.size() == 0) {
+                return;
+            }
+        }
+        
+
+        auto accumulate = [&](const std::shared_ptr<NodeData>& item) {
+            if (!item || !item->active || !item->visible) return;
+            avgPos += item->position;
+            avgColor += item->color;
+            avgEmittance += item->emittance;
+            avgRefl += item->reflection;
+            avgRefr += item->refraction;
+            if (item->light) anyLight = true;
+            count++;
+        };
+
+        for (const auto& child : node->children) {
+            if (child) {
+                ensureLOD(child.get());
+                if (child->lodData) {
+                    accumulate(child->lodData);
+                } else if (child->isLeaf && !child->points.empty()) {
+                    for(const auto& pt : child->points) accumulate(pt);
+                }
+            }
+        }
+
+        if (count > 0) {
+            float invCount = 1.0f / count;
+            
+            auto lod = std::make_shared<NodeData>();
+            
+            lod->position = avgPos * invCount;
+            lod->color = avgColor * invCount;
+            
+            PointType nodeDims = node->bounds.second - node->bounds.first;
+            lod->size = nodeDims.maxCoeff();
+
+            lod->emittance = avgEmittance * invCount;
+            lod->reflection = avgRefl * invCount;
+            lod->refraction = avgRefr * invCount;
+            lod->light = anyLight;
+            lod->active = true;
+            lod->visible = true;
+            lod->shape = Shape::CUBE;
+            lod->objectId = -1; 
+
+            node->lodData = lod;
+        }
     }
 
     template<typename V>
@@ -232,6 +312,7 @@ private:
         bool isLeaf;
         readVal(in, isLeaf);
         node->isLeaf = isLeaf;
+        node->lodData = nullptr;
 
         if (isLeaf) {
             size_t pointCount;
@@ -446,6 +527,14 @@ public:
         return backgroundColor_; 
     }
 
+    void setLODFalloff(float rate) { lodFalloffRate_ = rate; }
+    void setLODMinDistance(float dist) { lodMinDistance_ = dist; }
+
+    void generateLODs() {
+        if (!root_) return;
+        ensureLOD(root_.get());
+    }
+
     bool set(const T& data, const PointType& pos, bool visible, Eigen::Vector3f color, float size, bool active,
              int objectId = -1, bool light = false, float emittance = 0.0f, float refraction = 0.0f, 
              float reflection = 0.0f, Shape shape = Shape::SPHERE) {
@@ -543,6 +632,11 @@ public:
     bool remove(const PointType& pos, float tolerance = 0.0001f) {
         bool found = false;
         std::function<bool(OctreeNode*)> removeNode = [&](OctreeNode* node) -> bool {
+            {
+                std::lock_guard<std::mutex> lock(node->lodMutex);
+                node->lodData = nullptr; 
+            }
+
             if (!node->contains(pos)) return false;
             
             if (node->isLeaf) {
@@ -584,9 +678,6 @@ public:
         
         std::function<void(OctreeNode*)> searchNode = [&](OctreeNode* node) {
             // Check if node's bounding box intersects with search sphere
-            PointType boxCenter = (node->bounds.first + node->bounds.second) * 0.5f;
-            PointType boxHalfSize = (node->bounds.second - node->bounds.first) * 0.5f;
-            
             PointType closestPoint;
             for (int i = 0; i < Dim; ++i) {
                 closestPoint[i] = std::max(node->bounds.first[i], 
@@ -752,7 +843,7 @@ public:
     }
 
     std::vector<std::shared_ptr<NodeData>> voxelTraverse(const PointType& origin, const PointType& direction,
-                                         float maxDist, bool stopAtFirstHit) const {
+                                         float maxDist, bool stopAtFirstHit, bool enableLOD = false) const {
         std::vector<std::shared_ptr<NodeData>> hits;
         
         if (empty()) return hits;
@@ -760,6 +851,34 @@ public:
         std::function<void(OctreeNode*, const PointType&, const PointType&, float, float)> traverseNode = 
                         [&](OctreeNode* node, const PointType& origin, const PointType& dir, float tMin, float tMax) {
             if (!node || tMin > tMax) return;
+
+            if (enableLOD && !node->isLeaf) {
+                float dist = (node->center - origin).norm();
+                float nodeSize = (node->bounds.second - node->bounds.first).norm();
+                
+                if (dist > lodMinDistance_) {
+                    float ratio = dist / (nodeSize + 0.0001f);
+                    
+                    if (ratio > (1.0f / lodFalloffRate_)) {
+                        ensureLOD(node);
+                        if (node->lodData) {
+                            if (node->lodData->shape == Shape::SPHERE) {
+                                float t;
+                                if (raySphereIntersect(origin, dir, node->lodData->position, node->lodData->size, t)) {
+                                    if (t >= 0 && t <= maxDist) hits.emplace_back(node->lodData);
+                                }
+                            } else {
+                                float t; PointType n, h;
+                                if (rayCubeIntersect(origin, dir, node->lodData.get(), t, n, h)) {
+                                    if (t >= 0 && t <= maxDist) hits.emplace_back(node->lodData);
+                                }
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
+
             if (node->isLeaf) {
                 for (const auto& pointData : node->points) {
                     if (!pointData->active) continue;
@@ -856,7 +975,7 @@ public:
 
             if (bounces > maxBounces) return globalIllumination ? skylight_ : Eigen::Vector3f::Zero();
 
-            auto hits = voxelTraverse(rayOrig, rayDir, std::numeric_limits<float>::max(), true);
+            auto hits = voxelTraverse(rayOrig, rayDir, std::numeric_limits<float>::max(), true, true);
             if (hits.empty()) {
                 if (bounces == 0) {
                     return backgroundColor_;
@@ -1003,7 +1122,7 @@ public:
     }
 
     std::shared_ptr<NodeData> fastVoxelTraverse(const PointType& origin, const PointType& direction,
-                                         float maxDist) const {
+                                         float maxDist, bool enableLOD = false) const {
         std::shared_ptr<NodeData> hit;
         
         if (empty()) return hit;
@@ -1011,6 +1130,32 @@ public:
         std::function<void(OctreeNode*, const PointType&, const PointType&, float, float)> traverseNode = 
                         [&](OctreeNode* node, const PointType& origin, const PointType& dir, float tMin, float tMax) {
             if (!node || tMin > tMax) return;
+
+            // LOD Check for fast traverse
+            if (enableLOD && !node->isLeaf) {
+                float dist = (node->center - origin).norm();
+                float nodeSize = (node->bounds.second - node->bounds.first).norm();
+                if (dist > lodMinDistance_) {
+                    float ratio = dist / (nodeSize + 0.0001f);
+                    if (ratio > (1.0f / lodFalloffRate_)) {
+                        ensureLOD(node);
+                        if (node->lodData) {
+                             // Project LOD
+                            PointType toPoint = node->lodData->position - origin;
+                            float projection = toPoint.dot(dir);
+                            if (projection >= 0 && projection <= maxDist) {
+                                PointType closestPoint = origin + dir * projection;
+                                float distSq = (node->lodData->position - closestPoint).squaredNorm();
+                                if (distSq < node->lodData->size * node->lodData->size) {
+                                    hit = node->lodData;
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             if (node->isLeaf) {
                 for (const auto& pointData : node->points) {
                     if (!pointData->active) continue;
@@ -1103,7 +1248,7 @@ public:
 
                 Eigen::Vector3f color = backgroundColor_; // Start with background color
                 
-                auto hit = fastVoxelTraverse(origin, rayDir, std::numeric_limits<float>::max());
+                auto hit = fastVoxelTraverse(origin, rayDir, std::numeric_limits<float>::max(), true);
                 if (hit != nullptr) {
                     auto obj = hit;
                     
@@ -1166,13 +1311,16 @@ public:
         size_t maxTreeDepth = 0;
         size_t maxPointsInLeaf = 0;
         size_t minPointsInLeaf = std::numeric_limits<size_t>::max();
-        
+        size_t lodGeneratedNodes = 0;
+
         std::function<void(const OctreeNode*, size_t)> traverse = 
             [&](const OctreeNode* node, size_t depth) {
             if (!node) return;
             
             totalNodes++;
             maxTreeDepth = std::max(maxTreeDepth, depth);
+
+            if (node->lodData) lodGeneratedNodes++;
 
             if (node->isLeaf) {
                 leafNodes++;
@@ -1201,10 +1349,13 @@ public:
         os << "Config:\n";
         os << "  Max Depth Allowed : " << maxDepth << "\n";
         os << "  Max Pts Per Node  : " << maxPointsPerNode << "\n";
+        os << "  LOD Falloff Rate  : " << lodFalloffRate_ << "\n";
+        os << "  LOD Min Distance  : " << lodMinDistance_ << "\n";
         os << "Structure:\n";
         os << "  Total Nodes       : " << totalNodes << "\n";
         os << "  Leaf Nodes        : " << leafNodes << "\n";
         os << "  Non-Leaf Nodes    : " << (totalNodes - leafNodes) << "\n";
+        os << "  LODs Generated    : " << lodGeneratedNodes << "\n";
         os << "  Tree Height       : " << maxTreeDepth << "\n";
         os << "Data:\n";
         os << "  Total Points      : " << size << " (Tracked) / " << actualPoints << " (Counted)\n";
@@ -1230,6 +1381,7 @@ public:
             
             node->points.clear();
             node->points.shrink_to_fit();
+            node->lodData = nullptr;
             
             for (int i = 0; i < 8; ++i) {
                 if (node->children[i]) {

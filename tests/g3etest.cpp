@@ -25,7 +25,7 @@
 struct defaults {
     int outWidth = 512;
     int outHeight = 512;
-    int gridSizecube = 512;
+    int gridSizecube = 10000;
     PNoise2 noise = PNoise2(42);
 };
 
@@ -401,6 +401,7 @@ void livePreview(Octree<int>& grid, defaults& config, const Camera& cam) {
     auto renderStart = std::chrono::high_resolution_clock::now();
 
     frame currentPreviewFrame = grid.fastRenderFrame(cam, config.outWidth, config.outHeight, frame::colormap::RGB);
+    //frame currentPreviewFrame = grid.renderFrame(cam, config.outWidth, config.outHeight, frame::colormap::RGB, 3, 2, true);
     
     auto renderEnd = std::chrono::high_resolution_clock::now();
     renderFrameTime = std::chrono::duration<double>(renderEnd - renderStart).count();
@@ -699,7 +700,7 @@ int main() {
                 statsNeedUpdate = true;
                 
                 resetView(cam, config.gridSizecube);
-                
+                grid.generateLODs();
                 livePreview(grid, config, cam);
                 ImGui::Image((void*)(intptr_t)textu, ImVec2(config.outWidth, config.outHeight));
                 
@@ -710,7 +711,12 @@ int main() {
 
         {
             ImGui::Begin("Planet Preview");
-            if (ImGui::Checkbox("update Preview", &worldPreview)) if (gridInitialized) livePreview(grid, config, cam);
+            ImGui::Checkbox("update Preview", &worldPreview);
+            if (worldPreview) {
+                if (gridInitialized) {
+                    livePreview(grid, config, cam);
+                }
+            }
 
             if (gridInitialized && textureInitialized) {
                 ImGui::Image((void*)(intptr_t)textu, ImVec2(config.outWidth, config.outHeight));
@@ -743,7 +749,6 @@ int main() {
             }
             
             ImGui::Separator();
-            ImGui::Text("Performance: %.1f FPS (%.1f ms)", renderFPS, avgRenderFrameTime * 1000.0);
 
             if (gridInitialized) {
                 auto now = std::chrono::steady_clock::now();
