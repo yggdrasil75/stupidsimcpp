@@ -75,6 +75,7 @@ public:
         std::vector<std::shared_ptr<NodeData>> points;
         std::array<std::unique_ptr<OctreeNode>, 8> children;
         PointType center;
+        float nodeSize;
         bool isLeaf;
         
         mutable std::shared_ptr<NodeData> lodData;
@@ -85,6 +86,7 @@ public:
                 child = nullptr;
             }
             center = (bounds.first + bounds.second) * 0.5;
+            nodeSize = (bounds.second - bounds.first).norm();
         }
 
         bool contains(const PointType& point) const {
@@ -504,6 +506,24 @@ private:
         return 0.2126f * color[0] + 0.7152f * color[1] + 0.0722f * color[2];
     }
 
+    void collectNodesByObjectId(OctreeNode* node, int id, std::vector<std::shared_ptr<NodeData>>& results) const {
+        if (!node) return;
+        
+        if (node->isLeaf) {
+            for (const auto& pt : node->points) {
+                if (pt->active && (id == -1 || pt->objectId == id)) {
+                    results.push_back(pt);
+                }
+            }
+        } else {
+            for (const auto& child : node->children) {
+                if (child) {
+                    collectNodesByObjectId(child.get(), id, results);
+                }
+            }
+        }
+    }
+
 public:
     Octree(const PointType& minBound, const PointType& maxBound, size_t maxPointsPerNode=16, size_t maxDepth = 16) :
         root_(std::make_unique<OctreeNode>(minBound, maxBound)), maxPointsPerNode(maxPointsPerNode),
@@ -847,55 +867,47 @@ public:
         std::vector<std::shared_ptr<NodeData>> hits;
         
         if (empty()) return hits;
+        float invLodf = 1.0f / lodFalloffRate_;
+        uint8_t raySignMask = (direction.x() < 0 ? 1 : 0) | (direction.y() < 0 ? 2 : 0) | (direction.z() < 0 ? 4 : 0);
 
         std::function<void(OctreeNode*, const PointType&, const PointType&, float, float)> traverseNode = 
                         [&](OctreeNode* node, const PointType& origin, const PointType& dir, float tMin, float tMax) {
-            if (!node || tMin > tMax) return;
+            if (!node) return;
 
-            if (enableLOD && !node->isLeaf) {
-                float dist = (node->center - origin).norm();
-                float nodeSize = (node->bounds.second - node->bounds.first).norm();
+            // if (enableLOD && !node->isLeaf) {
+            //     float dist = (node->center - origin).norm();
                 
-                if (dist > lodMinDistance_) {
-                    float ratio = dist / (nodeSize + 0.0001f);
+            //     if (dist > lodMinDistance_) {
+            //         float ratio = dist / (node->nodeSize + 0.0001f);
                     
-                    if (ratio > (1.0f / lodFalloffRate_)) {
-                        ensureLOD(node);
-                        if (node->lodData) {
-                            if (node->lodData->shape == Shape::SPHERE) {
-                                float t;
-                                if (raySphereIntersect(origin, dir, node->lodData->position, node->lodData->size, t)) {
-                                    if (t >= 0 && t <= maxDist) hits.emplace_back(node->lodData);
-                                }
-                            } else {
-                                float t; PointType n, h;
-                                if (rayCubeIntersect(origin, dir, node->lodData.get(), t, n, h)) {
-                                    if (t >= 0 && t <= maxDist) hits.emplace_back(node->lodData);
-                                }
-                            }
-                            return;
-                        }
-                    }
-                }
-            }
+            //         if (ratio > (invLodf)) {
+            //             ensureLOD(node);
+            //             if (node->lodData) {
+            //                 float t;
+            //                 PointType n;
+            //                 PointType h;
+            //                 if (rayCubeIntersect(origin, dir, node->lodData.get(), t, n, h)) {
+            //                     if (t >= 0 && t <= maxDist) hits.emplace_back(node->lodData);
+            //                 }
+            //                 return;
+            //             }
+            //         }
+            //     }
+            // }
 
             if (node->isLeaf) {
                 for (const auto& pointData : node->points) {
                     if (!pointData->active) continue;
                     
-                    if (pointData->shape == Shape::SPHERE) {
-                        PointType center = pointData->position;
-                        float radius = pointData->size;
-                        float t;
-                        
-                        if (raySphereIntersect(origin, dir, center, radius, t)) {
-                            if (t >= 0 && t <= maxDist) {
-                                hits.emplace_back(pointData);
-                                if (stopAtFirstHit) return;
-                            }
-                        }
-                    } else {
-                        float t;
+                    float t;
+                    // if (pointData->shape == Shape::SPHERE) {
+                    //     if (raySphereIntersect(origin, dir, pointData->position, pointData->size, t)) {
+                    //         if (t >= 0 && t <= maxDist) {
+                    //             hits.emplace_back(pointData);
+                    //             if (stopAtFirstHit) return;
+                    //         }
+                    //     }
+                    // } else {
                         PointType normal, hitPoint;
                         if (rayCubeIntersect(origin, dir, pointData.get(), t, normal, hitPoint)) {
                             if (t >= 0 && t <= maxDist) {
@@ -903,25 +915,12 @@ public:
                                 if (stopAtFirstHit) return;
                             }
                         }
-                    }
+                    // }
                 }
             } else {
-                std::array<std::pair<int, float>, 8> childOrder;
-                PointType center = node->center;
                 for (int i = 0; i < 8; ++i) {
-                    if (node->children[i]) {
-                        PointType childCenter = node->children[i]->center;
-                        float dist = (childCenter - origin).dot(dir);
-                        childOrder[i] = {i, dist};
-                    } else {
-                        childOrder[i] = {i, std::numeric_limits<float>::lowest()};
-                    }
-                }
-
-                bitonic_sort_8(childOrder);
-
-                for (int i = 0; i < 8; ++i) {
-                    int childIdx = childOrder[i].first;
+                    int childIdx = i ^ raySignMask; 
+                    
                     if (node->children[childIdx]) {
                         const auto& childBounds = node->children[childIdx]->bounds;
                         
@@ -938,9 +937,7 @@ public:
         float tMin, tMax;
         if (rayBoxIntersect(origin, direction, root_->bounds, tMin, tMax)) {
             tMax = std::min(tMax, maxDist);
-            if (tMin <= tMax) {
-                traverseNode(root_.get(), origin, direction, tMin, tMax);
-            }
+            traverseNode(root_.get(), origin, direction, tMin, tMax);
         }
         return hits;
     }
@@ -1297,6 +1294,44 @@ public:
         
         outFrame.setData(colorBuffer);
         return outFrame;
+    }
+
+    std::vector<std::shared_ptr<NodeData>> getExternalNodes(int targetObjectId) {
+        std::vector<std::shared_ptr<NodeData>> candidates;
+        std::vector<std::shared_ptr<NodeData>> surfaceNodes;
+        
+        collectNodesByObjectId(root_.get(), targetObjectId, candidates);
+
+        if (candidates.empty()) return surfaceNodes;
+
+        surfaceNodes.reserve(candidates.size());
+
+        const std::array<PointType, 6> directions = {
+            PointType(1, 0, 0), PointType(-1, 0, 0), PointType(0, 1, 0), 
+            PointType(0, -1, 0), PointType(0, 0, 1), PointType(0, 0, -1)
+        };
+
+        for (const auto& node : candidates) {
+            bool isExposed = false;
+            float step = node->size; 
+            for (const auto& dir : directions) {
+                PointType probePos = node->position + (dir * step);
+                auto neighbor = find(probePos, step * 0.25f);
+
+                if (neighbor == nullptr || !neighbor->active || neighbor->objectId != node->objectId) {
+                    isExposed = true;
+                }
+
+                if (isExposed) break;
+            }
+
+            if (isExposed) {
+                surfaceNodes.push_back(node);
+            }
+        }
+        surfaceNodes.shrink_to_fit();
+
+        return surfaceNodes;
     }
 
     void printStats(std::ostream& os = std::cout) const {

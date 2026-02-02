@@ -26,6 +26,12 @@ struct defaults {
     int outWidth = 512;
     int outHeight = 512;
     int gridSizecube = 10000;
+    bool slowRender = false;
+    bool globalIllumination = true;
+    int rayCount = 3;
+    int reflectCount = 3;
+    int lodDist;
+    float lodDropoff;
     PNoise2 noise = PNoise2(42);
 };
 
@@ -399,9 +405,15 @@ void livePreview(Octree<int>& grid, defaults& config, const Camera& cam) {
     updatePreview = true;
     
     auto renderStart = std::chrono::high_resolution_clock::now();
-
-    frame currentPreviewFrame = grid.fastRenderFrame(cam, config.outWidth, config.outHeight, frame::colormap::RGB);
-    //frame currentPreviewFrame = grid.renderFrame(cam, config.outWidth, config.outHeight, frame::colormap::RGB, 3, 2, true);
+    frame currentPreviewFrame;
+    grid.setLODMinDistance(config.lodDist);
+    grid.setLODFalloff(config.lodDropoff);
+    if (config.slowRender) {
+        currentPreviewFrame = grid.renderFrame(cam, config.outWidth, config.outHeight, frame::colormap::RGB, config.rayCount, config.reflectCount, config.globalIllumination);
+    } else {
+        currentPreviewFrame = grid.fastRenderFrame(cam, config.outWidth, config.outHeight, frame::colormap::RGB);
+    }
+    
     
     auto renderEnd = std::chrono::high_resolution_clock::now();
     renderFrameTime = std::chrono::duration<double>(renderEnd - renderStart).count();
@@ -649,7 +661,7 @@ int main() {
         ImGui::NewFrame();
         
         {
-            ImGui::Begin("Controls");
+            ImGui::Begin("Sim Controls");
             
             ImGui::Text("Planet");
             float pos[3] = { sphereConf.centerX, sphereConf.centerY, sphereConf.centerZ };
@@ -711,7 +723,6 @@ int main() {
 
         {
             ImGui::Begin("Planet Preview");
-            ImGui::Checkbox("update Preview", &worldPreview);
             if (worldPreview) {
                 if (gridInitialized) {
                     livePreview(grid, config, cam);
@@ -912,6 +923,18 @@ int main() {
                 ImGui::SliderFloat("Yaw Speed", &yawSpeed, 0.1f, 5.0f, "%.2f deg/sec");
                 ImGui::SliderFloat("Pitch Speed", &pitchSpeed, 0.0f, 2.0f, "%.2f deg/sec");
             }
+
+            ImGui::Separator();
+
+            ImGui::Checkbox("update Preview", &worldPreview);
+            ImGui::Checkbox("Use Slower renderer", &config.slowRender);
+            if (config.slowRender) {
+                ImGui::InputInt("Rays per pixel", &config.rayCount);
+                ImGui::InputInt("Max reflections", &config.reflectCount);
+            }
+            ImGui::InputFloat("Lod dropoff", &config.lodDropoff);
+            ImGui::InputInt("lod minimum Distance", &config.lodDist);
+            ImGui::Checkbox("use Global illumination", &config.globalIllumination);
 
             ImGui::End();
         }
