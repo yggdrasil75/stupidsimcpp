@@ -874,26 +874,26 @@ public:
                         [&](OctreeNode* node, const PointType& origin, const PointType& dir, float tMin, float tMax) {
             if (!node) return;
 
-            // if (enableLOD && !node->isLeaf) {
-            //     float dist = (node->center - origin).norm();
+            if (enableLOD && !node->isLeaf) {
+                float dist = (node->center - origin).norm();
                 
-            //     if (dist > lodMinDistance_) {
-            //         float ratio = dist / (node->nodeSize + 0.0001f);
+                if (dist > lodMinDistance_) {
+                    float ratio = dist / (node->nodeSize + 0.0001f);
                     
-            //         if (ratio > (invLodf)) {
-            //             ensureLOD(node);
-            //             if (node->lodData) {
-            //                 float t;
-            //                 PointType n;
-            //                 PointType h;
-            //                 if (rayCubeIntersect(origin, dir, node->lodData.get(), t, n, h)) {
-            //                     if (t >= 0 && t <= maxDist) hits.emplace_back(node->lodData);
-            //                 }
-            //                 return;
-            //             }
-            //         }
-            //     }
-            // }
+                    if (ratio > (invLodf)) {
+                        ensureLOD(node);
+                        if (node->lodData) {
+                            float t;
+                            PointType n;
+                            PointType h;
+                            if (rayCubeIntersect(origin, dir, node->lodData.get(), t, n, h)) {
+                                if (t >= 0 && t <= maxDist) hits.emplace_back(node->lodData);
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
 
             if (node->isLeaf) {
                 for (const auto& pointData : node->points) {

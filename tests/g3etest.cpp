@@ -30,8 +30,8 @@ struct defaults {
     bool globalIllumination = true;
     int rayCount = 3;
     int reflectCount = 3;
-    int lodDist;
-    float lodDropoff;
+    int lodDist = 500;
+    float lodDropoff = 0.1;
     PNoise2 noise = PNoise2(42);
 };
 
@@ -39,15 +39,14 @@ struct spheredefaults {
     float centerX = 0.0f;
     float centerY = 0.0f;
     float centerZ = 0.0f;
-    float radius = 128.0f;
+    float radius = 1024.0f;
     float color[3] = {0.0f, 1.0f, 0.0f};
     bool light = false;
     float emittance = 0.0f;
     float reflection = 0.0f;
     float refraction = 0.0f;
     bool fillInside = false;
-    float voxelSize = 2.f;
-    int numPoints = 15000;
+    float voxelSize = 10.f;
 };
 
 struct stardefaults {
@@ -558,6 +557,9 @@ int main() {
 
     bool autoRotate = false;
     bool autoRotateView = false;
+    bool orbitEquator = false;
+    bool orbitPoles = false;
+    
     float rotationSpeedX = 0.1f;
     float rotationSpeedY = 0.07f;
     float rotationSpeedZ = 0.05f;
@@ -600,7 +602,7 @@ int main() {
         deltaTime = currentTime - lastFrameTime;
         lastFrameTime = currentTime;
         
-        if (autoRotate) autoRotationTime += deltaTime;
+        if (orbitEquator || orbitPoles || autoRotate) autoRotationTime += deltaTime;
         if (autoRotateView) autoRotationAngle += deltaTime;
 
         glfwPollEvents();
@@ -646,6 +648,29 @@ int main() {
             previewRequested = true;
         }
         
+        float cx = sphereConf.centerX;
+        float cy = sphereConf.centerY;
+        float cz = sphereConf.centerZ;
+
+        if (orbitEquator || orbitPoles) {
+            float speed = 0.5f;
+            float angle = autoRotationTime * speed;
+            
+            if (orbitEquator) {
+                cam.origin[0] = cx + rotationRadius * cosf(angle);
+                cam.origin[1] = cy;
+                cam.origin[2] = cz + rotationRadius * sinf(angle);
+            } else {
+                cam.origin[0] = cx;
+                cam.origin[1] = cy + rotationRadius * cosf(angle);
+                cam.origin[2] = cz + rotationRadius * sinf(angle);
+            }
+            
+            PointType target(cx, cy, cz);
+            cam.direction = (target - cam.origin).normalized();
+            previewRequested = true;
+        }
+
         // Update camera position and view direction variables for UI
         camX = cam.origin[0];
         camY = cam.origin[1];
@@ -671,7 +696,6 @@ int main() {
                 sphereConf.centerZ = pos[2];
             }
             ImGui::DragFloat("Radius", &sphereConf.radius, 0.5f, 1.0f, 250.0f);
-            ImGui::DragInt("Point Count", &sphereConf.numPoints, 100, 100, 200000);
             ImGui::DragFloat("Density (Overlap)", &sphereConf.voxelSize, 0.05f, 0.1f, 5.0f);
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Multiplies calculated point size. >1.0 ensures solid surface.");
@@ -808,6 +832,43 @@ int main() {
             }
             
             ImGui::Separator();
+            
+            // Focus Button
+            if (ImGui::Button("Focus on Planet")) {
+                PointType target(sphereConf.centerX, sphereConf.centerY, sphereConf.centerZ);
+                PointType newDir = (target - cam.origin).normalized();
+                cam.direction = newDir;
+                camvX = newDir[0];
+                camvY = newDir[1];
+                camvZ = newDir[2];
+                previewRequested = true;
+            }
+            
+            ImGui::SameLine();
+            
+            // Equator Orbit
+            if (ImGui::Button(orbitEquator ? "Stop Equator" : "Orbit Equator")) {
+                orbitEquator = !orbitEquator;
+                if (orbitEquator) {
+                    orbitPoles = false;
+                    autoRotate = false;
+                    autoRotationTime = 0.0f;
+                }
+            }
+
+            ImGui::SameLine();
+            
+            // Polar Orbit
+            if (ImGui::Button(orbitPoles ? "Stop Poles" : "Orbit Poles")) {
+                orbitPoles = !orbitPoles;
+                if (orbitPoles) {
+                    orbitEquator = false;
+                    autoRotate = false;
+                    autoRotationTime = 0.0f;
+                }
+            }
+
+            ImGui::Separator();
             ImGui::Text("Current Camera Position:");
             ImGui::Text("X: %.2f, Y: %.2f, Z: %.2f", 
                         cam.origin[0], 
@@ -817,9 +878,11 @@ int main() {
             ImGui::Text("Auto-Rotation:");
             
             // Toggle button for auto-rotation
-            if (ImGui::Button(autoRotate ? "Stop Auto-Rotation" : "Start Auto-Rotation")) {
+            if (ImGui::Button(autoRotate ? "Stop random Rotate" : "Start random Rotate")) {
                 autoRotate = !autoRotate;
                 if (autoRotate) {
+                    orbitEquator = false;
+                    orbitPoles = false;
                     autoRotationTime = 0.0f;
                     initialViewDir = PointType(camvX, camvY, camvZ);
                 }
@@ -867,10 +930,10 @@ int main() {
                 ImGui::SliderFloat("X Speed", &rotationSpeedX, 0.01f, 1.0f);
                 ImGui::SliderFloat("Y Speed", &rotationSpeedY, 0.01f, 1.0f);
                 ImGui::SliderFloat("Z Speed", &rotationSpeedZ, 0.01f, 1.0f);
-                
-                // Slider for orbit radius
-                ImGui::SliderFloat("Orbit Radius", &rotationRadius, 10.0f, 200.0f);
             }
+            
+            // Slider for orbit radius
+            ImGui::SliderFloat("Orbit Radius", &rotationRadius, 10.0f, 2000.0f);
 
             if (autoRotateView) {
                 ImGui::SameLine();
