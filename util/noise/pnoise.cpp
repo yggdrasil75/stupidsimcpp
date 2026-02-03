@@ -1,4 +1,5 @@
-#pragma once
+#ifndef PNOISE_CPP
+#define PNOISE_CPP
 
 #include <vector>
 #include <cmath>
@@ -7,6 +8,7 @@
 #include <iostream>
 
 #include "./pnoise2.hpp"
+#include "../timing_decorator.hpp"
 #include "../../imgui/imgui.h"
 #include <GLFW/glfw3.h>
 
@@ -110,6 +112,7 @@ inline float sampleNoiseLayer(PNoise2& gen, NoiseType type, Eigen::Vector2f poin
 }
 
 inline void updateNoiseTexture(NoisePreviewState& state) {
+    TIME_FUNCTION;
     if (state.textureId == 0) glGenTextures(1, &state.textureId);
     
     state.pixelBuffer.resize(state.width * state.height * 3);
@@ -120,24 +123,19 @@ inline void updateNoiseTexture(NoisePreviewState& state) {
 
         for (int x = 0; x < state.width; ++x) {
             
-            // 1. Initial Coordinate
             float nx = (x + state.offset[0]);
             float ny = (y + state.offset[1]);
             Eigen::Vector2f point(nx, ny);
             
             float finalValue = 0.0f;
             
-            // 2. Process Layer Stack
             for (const auto& layer : state.layers) {
                 if (!layer.enabled) continue;
 
-                // Adjust coordinate frequency for this layer
                 Eigen::Vector2f samplePoint = point * layer.scale;
                 
-                // Cheat seed offset
                 samplePoint += Eigen::Vector2f((float)layer.seedOffset * 10.5f, (float)layer.seedOffset * -10.5f);
 
-                // Special Case: Coordinate Mutators
                 if (layer.blend == BlendMode::DomainWarp) {
                     if (layer.type == NoiseType::CurlNoise) {
                          Eigen::Vector2f flow = generator.curlNoise(samplePoint);
@@ -150,7 +148,6 @@ inline void updateNoiseTexture(NoisePreviewState& state) {
                     continue; 
                 }
 
-                // Standard Arithmetic Layers
                 float nVal = sampleNoiseLayer(generator, layer.type, samplePoint, layer);
                 
                 switch (layer.blend) {
@@ -175,7 +172,6 @@ inline void updateNoiseTexture(NoisePreviewState& state) {
                 }
             }
             
-            // 3. Normalize for display
             float norm = std::tanh(finalValue); 
             norm = (norm + 1.0f) * 0.5f;
             norm = std::clamp(norm, 0.0f, 1.0f);
@@ -223,16 +219,13 @@ inline void drawNoiseLab(NoisePreviewState& noiseState) {
     
     ImGui::BeginChild("LayersScroll", ImVec2(0, 300), true);
     
-    // Layer List
     for (int i = 0; i < noiseState.layers.size(); ++i) {
         NoiseLayer& layer = noiseState.layers[i];
         
         ImGui::PushID(i);
         
-        // Header
         bool open = ImGui::CollapsingHeader(layer.name, ImGuiTreeNodeFlags_DefaultOpen);
         
-        // Context menu to move/delete
         if (ImGui::BeginPopupContextItem()) {
             if (ImGui::MenuItem("Move Up", nullptr, false, i > 0)) {
                 std::swap(noiseState.layers[i], noiseState.layers[i-1]);
@@ -265,19 +258,16 @@ inline void drawNoiseLab(NoisePreviewState& noiseState) {
             ImGui::SameLine();
             ImGui::InputText("##name", layer.name, 32);
 
-            // Type and Blend
             const char* types[] = { "Perlin", "Value", "Fractal", "Turbulence", "Ridged", "Billow", "White", "Worley", "Voronoi", "Crystal", "Domain Warp", "Curl" };
             const char* blends[] = { "Add", "Subtract", "Multiply", "Min", "Max", "Replace", "Domain Warp (Coord)" };
             
             if (ImGui::Combo("Type", (int*)&layer.type, types, IM_ARRAYSIZE(types))) changed = true;
             if (ImGui::Combo("Blend", (int*)&layer.blend, blends, IM_ARRAYSIZE(blends))) changed = true;
 
-            // Common Params
             if (ImGui::SliderFloat("Scale", &layer.scale, 0.0001f, 0.2f, "%.5f")) changed = true;
             if (ImGui::SliderFloat("Strength/Weight", &layer.strength, 0.0f, 5.0f)) changed = true;
             if (ImGui::SliderInt("Seed Offset", &layer.seedOffset, 0, 100)) changed = true;
 
-            // Conditional Params
             if (layer.type == NoiseType::Fractal || layer.type == NoiseType::Turbulence || 
                 layer.type == NoiseType::Ridged || layer.type == NoiseType::Billow) {
                 
@@ -300,14 +290,14 @@ inline void drawNoiseLab(NoisePreviewState& noiseState) {
 
     ImGui::Separator();
     
-    // Preview
     ImGui::Text("Preview Output");
     ImGui::Image((void*)(intptr_t)noiseState.textureId, ImVec2((float)noiseState.width, (float)noiseState.height));
     
-    // Auto update logic
     if (changed || noiseState.needsUpdate) {
         updateNoiseTexture(noiseState);
     }
     
     ImGui::End();
 }
+
+#endif

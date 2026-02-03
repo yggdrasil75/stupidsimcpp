@@ -86,6 +86,19 @@ private:
         return ((h & 1) == 0 ? u : -u) + ((h & 2) == 0 ? v : -v);
     }
 
+    /// @brief Gradient function for 2D only Perlin noise
+    /// @param hash Hash value for gradient selection
+    /// @param x X coordinate
+    /// @param y Y coordinate
+    /// @return Dot product of gradient vector and distance vector
+    /// @note Core of Perlin noise; changes affect basic noise character
+    inline static float grad2(int hash, float x, float y) {
+        int h = hash & 15;
+        float u = h < 8 ? x : y;
+        float v = h < 4 ? y : ((h == 12 || h == 14) ? x : 0.0f);
+        return ((h & 1) == 0 ? u : -u) + ((h & 2) == 0 ? v : -v);
+    }
+
     /// @brief Initialize permutation table with shuffled values
     /// @note Called on construction; changing seed or shuffle affects all noise patterns
     void initializePermutation() {
@@ -236,11 +249,6 @@ public:
         int vBR = permutation[permutation[xmod+1]+ymod+0];
         int vTL = permutation[permutation[xmod+0]+ymod+1];
         int vTR = permutation[permutation[xmod+1]+ymod+1];
-
-        // float dBL = BL.dot(GetConstantVector(vBL));
-        // float dBR = BR.dot(GetConstantVector(vBR));
-        // float dTL = TL.dot(GetConstantVector(vTL));
-        // float dTR = TR.dot(GetConstantVector(vTR));
         
         float u = fade(xf);
         float v = fade(yf);
@@ -288,16 +296,6 @@ public:
         int vRBR = permutation[permutation[permutation[Z+1]+X+1]+Y+0];
         int vRTL = permutation[permutation[permutation[Z+1]+X+0]+Y+1];
         int vRTR = permutation[permutation[permutation[Z+1]+X+1]+Y+1];
-
-        // float dFBL = FBL.dot(GetConstantVector3(vFBL));
-        // float dFBR = FBR.dot(GetConstantVector3(vFBR));
-        // float dFTL = FTL.dot(GetConstantVector3(vFTL));
-        // float dFTR = FTR.dot(GetConstantVector3(vFTR));
-
-        // float dRBL = RBL.dot(GetConstantVector3(vRBL));
-        // float dRBR = RBR.dot(GetConstantVector3(vRBR));
-        // float dRTL = RTL.dot(GetConstantVector3(vRTL));
-        // float dRTR = RTR.dot(GetConstantVector3(vRTR));
         
         float u = fade(xf);
         float v = fade(yf);
@@ -342,8 +340,8 @@ public:
         float sx = fade(tx);
         float sy = fade(ty);
         
-        float nx0 = lerp(c00, c10, sx);
-        float nx1 = lerp(c01, c11, sx);
+        float nx0 = lerp(sy, c00, c10);
+        float nx1 = lerp(sx, c01, c11);
         
         return lerp(nx0, nx1, sy);
     }
@@ -382,15 +380,15 @@ public:
         float sy = fade(ty);
         float sz = fade(tz);
         
-        float nx00 = lerp(c000, c100, sx);
-        float nx10 = lerp(c010, c110, sx);
-        float nx01 = lerp(c001, c101, sx);
-        float nx11 = lerp(c011, c111, sx);
+        float nx00 = lerp(sx, c000, c100);
+        float nx10 = lerp(sx, c010, c110);
+        float nx01 = lerp(sx, c001, c101);
+        float nx11 = lerp(sx, c011, c111);
         
-        float ny0 = lerp(nx00, nx10, sy);
-        float ny1 = lerp(nx01, nx11, sy);
+        float ny0 = lerp(sy, nx00, nx10);
+        float ny1 = lerp(sy, nx01, nx11);
         
-        return lerp(ny0, ny1, sz);
+        return lerp(sz, ny0, ny1);
     }
 
     /// @brief Generate RGBA color from 3D noise with offset channels
@@ -424,20 +422,18 @@ public:
     /// @param lacunarity Frequency multiplier per octave
     /// @return Combined noise value
     /// @note Parameters control noise character: octaves=detail, persistence=roughness, lacunarity=frequency change
-    float fractalNoise(const Vector2f& point, int octaves, float persistence, float lacunarity) {
-        float total = 0.0f;
+    float fractalNoise(const Vector2f& point, int octaves, float persistence = 0.5, float lacunarity = 2.0) {
         float frequency = 1.f;
         float amplitude = 1.f;
         float maxV = 0.f;
-        Vector2f scaledPoint = point * frequency;
         for (int i = 0; i < octaves; i++) {
-            total += permute(scaledPoint) * amplitude;
-            maxV += amplitude;
+            Vector2f scaledPoint = point * frequency;
+            maxV += permute(scaledPoint) * amplitude;
             amplitude *= persistence;
             frequency *= lacunarity;
         }
 
-        return total / maxV;
+        return maxV;
     }
 
     /// @brief Generate 3D fractal (octave) noise
@@ -446,20 +442,18 @@ public:
     /// @param persistence Amplitude multiplier per octave
     /// @param lacunarity Frequency multiplier per octave
     /// @return Combined noise value
-    float fractalNoise(const Vector3f& point, int octaves, float persistence, float lacunarity) {
-        float total = 0.0f;
+    float fractalNoise(const Vector3f& point, int octaves, float persistence = 0.5, float lacunarity = 2.0) {
         float frequency = 1.f;
         float amplitude = 1.f;
         float maxV = 0.f;
-        Vector3f scaledPoint = point * frequency;
         for (int i = 0; i < octaves; i++) {
-            total += permute(scaledPoint) * amplitude;
-            maxV += amplitude;
+            Vector3f scaledPoint = point * frequency;
+            maxV += permute(scaledPoint) * amplitude;
             amplitude *= persistence;
             frequency *= lacunarity;
         }
 
-        return total / maxV;
+        return maxV;
     }
 
     /// @brief Generate turbulence noise (absolute value of octaves)
@@ -599,17 +593,14 @@ public:
         for (int y = -1; y <= 1; y++) {
             for (int x = -1; x <= 1; x++) {
                 Vector2f neighbor(x, y);
-                // Get random point inside the neighbor cell
                 Vector2f pointInCell = hashVector(Vector2f(p + neighbor));
-                
-                // Vector from current pixel to that point
                 Vector2f diff = neighbor + pointInCell - f;
                 
                 float dist = diff.norm();
                 if (dist < minDist) minDist = dist;
             }
         }
-        return minDist; // Usually clamped or inverted for visuals
+        return minDist;
     }
 
     /// @brief Worley Noise 3D
@@ -650,7 +641,7 @@ public:
                 Vector2f neighbor(x, y);
                 Vector2f pointInCell = hashVector(Vector2f(p + neighbor));
                 Vector2f diff = neighbor + pointInCell - f;
-                float dist = diff.squaredNorm(); // Faster than norm
+                float dist = diff.squaredNorm();
                 if (dist < minDist) {
                     minDist = dist;
                     cellID = p + neighbor;
@@ -668,8 +659,8 @@ public:
         Vector2f p = Vector2f(floor(point.x()), floor(point.y()));
         Vector2f f = Vector2f(point.x() - p.x(), point.y() - p.y());
 
-        float d1 = 10.0f; // Closest
-        float d2 = 10.0f; // 2nd Closest
+        float d1 = 10.0f;
+        float d2 = 10.0f;
 
         for (int y = -1; y <= 1; y++) {
             for (int x = -1; x <= 1; x++) {
@@ -717,16 +708,13 @@ public:
     /// @return Divergence-free vector field (useful for particle simulation)
     /// @note Calculated via finite difference curl of a potential field
     Vector2f curlNoise(const Vector2f& point) {
-        float e = 0.01f; // Epsilon
-        float n1 = permute(Vector2f(point + Vector2f(0, e)));
-        float n2 = permute(Vector2f(point + Vector2f(0, -e)));
-        float n3 = permute(Vector2f(point + Vector2f(e, 0)));
-        float n4 = permute(Vector2f(point + Vector2f(-e, 0)));
+        float n1 = permute(Vector2f(point + Vector2f(0, EPSILON)));
+        float n2 = permute(Vector2f(point + Vector2f(0, -EPSILON)));
+        float n3 = permute(Vector2f(point + Vector2f(EPSILON, 0)));
+        float n4 = permute(Vector2f(point + Vector2f(-EPSILON, 0)));
 
-        float dx = (n3 - n4) / (2.0f * e);
-        float dy = (n1 - n2) / (2.0f * e);
-
-        // Curl of scalar field in 2D is (d/dy, -d/dx)
+        float dx = (n3 - n4) / (2.0f * EPSILON);
+        float dy = (n1 - n2) / (2.0f * EPSILON);
         return Vector2f(dy, -dx).normalized();
     }
 
@@ -735,14 +723,10 @@ public:
     /// @return Divergence-free vector field
     /// @note Uses 3 offsets of Perlin noise as Vector Potential
     Vector3f curlNoise(const Vector3f& point) {
-        float e = 0.01f;
-        
-        Vector3f dx(e, 0.0f, 0.0f);
-        Vector3f dy(0.0f, e, 0.0f);
-        Vector3f dz(0.0f, 0.0f, e);
+        Vector3f dx(EPSILON, 0.0f, 0.0f);
+        Vector3f dy(0.0f, EPSILON, 0.0f);
+        Vector3f dz(0.0f, 0.0f, EPSILON);
 
-        // We need a vector potential (3 uncorrelated noise values)
-        // We reuse permuteColor's logic but keep it local to avoid overhead
         auto potential = [&](const Vector3f& p) -> Vector3f {
             return Vector3f(
                 permute(p),
@@ -759,12 +743,12 @@ public:
         Vector3f p_dz_m = potential(point - dz);
 
         // Finite difference
-        float dFz_dy = (p_dy_p.z() - p_dy_m.z()) / (2.0f * e);
-        float dFy_dz = (p_dz_p.y() - p_dz_m.y()) / (2.0f * e);
-        float dFx_dz = (p_dz_p.x() - p_dz_m.x()) / (2.0f * e);
-        float dFz_dx = (p_dx_p.z() - p_dx_m.z()) / (2.0f * e);
-        float dFy_dx = (p_dx_p.y() - p_dx_m.y()) / (2.0f * e);
-        float dFx_dy = (p_dy_p.x() - p_dy_m.x()) / (2.0f * e);
+        float dFz_dy = (p_dy_p.z() - p_dy_m.z()) / (2.0f * EPSILON);
+        float dFy_dz = (p_dz_p.y() - p_dz_m.y()) / (2.0f * EPSILON);
+        float dFx_dz = (p_dz_p.x() - p_dz_m.x()) / (2.0f * EPSILON);
+        float dFz_dx = (p_dx_p.z() - p_dx_m.z()) / (2.0f * EPSILON);
+        float dFy_dx = (p_dx_p.y() - p_dx_m.y()) / (2.0f * EPSILON);
+        float dFx_dy = (p_dy_p.x() - p_dy_m.x()) / (2.0f * EPSILON);
 
         return Vector3f(
             dFz_dy - dFy_dz,
