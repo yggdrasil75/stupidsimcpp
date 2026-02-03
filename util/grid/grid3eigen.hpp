@@ -690,7 +690,7 @@ public:
         return removeNode(root_.get());
     }
 
-    std::vector<std::shared_ptr<NodeData>> findInRadius(const PointType& center, float radius) const {
+    std::vector<std::shared_ptr<NodeData>> findInRadius(const PointType& center, float radius, int objectid = -1) const {
         std::vector<std::shared_ptr<NodeData>> results;
         if (!root_) return results;
         
@@ -714,7 +714,7 @@ public:
                     if (!pointData->active) continue;
                     
                     float pointDistSq = (pointData->position - center).squaredNorm();
-                    if (pointDistSq <= radiusSq) {
+                    if (pointDistSq <= radiusSq && (pointData->objectId == objectid || objectid == -1)) {
                         results.emplace_back(pointData);
                     }
                 }
