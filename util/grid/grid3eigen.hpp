@@ -731,7 +731,7 @@ public:
         return results;
     }
 
-    bool update(const PointType& oldPos, const PointType& newPos, const T& newData = T(), bool newVisible = true, 
+    bool update(const PointType& oldPos, const PointType& newPos, const T& newData, bool newVisible = true, 
                 Eigen::Vector3f newColor = Eigen::Vector3f(1.0f, 1.0f, 1.0f), float newSize = 0.01f, bool newActive = true,
                 int newObjectId = -2, bool newLight = false, float newEmittance = 0.0f, float newRefraction = 0.0f, 
                 float newReflection = 0.0f, Shape newShape = Shape::SPHERE, float tolerance = 0.0001f) {
@@ -762,7 +762,7 @@ public:
             }
             
             // Insert at new position with updated properties
-            return set(newData != T() ? newData : dataCopy, newPos, 
+            return set(newData, newPos, 
                     newVisible ? newVisible : visibleCopy,
                     newColor != Eigen::Vector3f(1.0f, 1.0f, 1.0f) ? newColor : colorCopy,
                     newSize > 0 ? newSize : sizeCopy,
@@ -943,7 +943,7 @@ public:
     }
     
     frame renderFrame(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB, int samplesPerPixel = 2,
-                      int maxBounces = 4, bool globalIllumination = false) {
+                      int maxBounces = 4, bool globalIllumination = false, bool useLod = true) {
         PointType origin = cam.origin;
         PointType dir = cam.direction.normalized();
         PointType up = cam.up.normalized();
@@ -972,7 +972,7 @@ public:
 
             if (bounces > maxBounces) return globalIllumination ? skylight_ : Eigen::Vector3f::Zero();
 
-            auto hits = voxelTraverse(rayOrig, rayDir, std::numeric_limits<float>::max(), true, true);
+            auto hits = voxelTraverse(rayOrig, rayDir, std::numeric_limits<float>::max(), true, useLod);
             if (hits.empty()) {
                 if (bounces == 0) {
                     return backgroundColor_;
