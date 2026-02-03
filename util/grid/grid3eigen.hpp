@@ -502,9 +502,6 @@ private:
         return randomDir;
     }
 
-    float rgbToGrayscale(const Eigen::Vector3f& color) const {
-        return 0.2126f * color[0] + 0.7152f * color[1] + 0.0722f * color[2];
-    }
 
     void collectNodesByObjectId(OctreeNode* node, int id, std::vector<std::shared_ptr<NodeData>>& results) const {
         if (!node) return;
@@ -900,14 +897,14 @@ public:
                     if (!pointData->active) continue;
                     
                     float t;
-                    // if (pointData->shape == Shape::SPHERE) {
-                    //     if (raySphereIntersect(origin, dir, pointData->position, pointData->size, t)) {
-                    //         if (t >= 0 && t <= maxDist) {
-                    //             hits.emplace_back(pointData);
-                    //             if (stopAtFirstHit) return;
-                    //         }
-                    //     }
-                    // } else {
+                    if (pointData->shape == Shape::SPHERE) {
+                        if (raySphereIntersect(origin, dir, pointData->position, pointData->size, t)) {
+                            if (t >= 0 && t <= maxDist) {
+                                hits.emplace_back(pointData);
+                                if (stopAtFirstHit) return;
+                            }
+                        }
+                    } else {
                         PointType normal, hitPoint;
                         if (rayCubeIntersect(origin, dir, pointData.get(), t, normal, hitPoint)) {
                             if (t >= 0 && t <= maxDist) {
@@ -915,7 +912,7 @@ public:
                                 if (stopAtFirstHit) return;
                             }
                         }
-                    // }
+                    }
                 }
             } else {
                 for (int i = 0; i < 8; ++i) {
@@ -950,15 +947,8 @@ public:
         PointType right = cam.right();
         
         frame outFrame(width, height, colorformat);
-        std::vector<uint8_t> colorBuffer;
-        int channels;
-        if (colorformat == frame::colormap::B) {
-            channels = 1;
-        } else if (colorformat == frame::colormap::RGB || colorformat == frame::colormap::BGR) {
-            channels = 3;
-        } else { //BGRA and RGBA
-            channels = 4;
-        }
+        std::vector<float> colorBuffer;
+        int channels = 3;
         colorBuffer.resize(width * height * channels);
 
         float aspect = static_cast<float>(width) / height;
@@ -1005,7 +995,6 @@ public:
                 hitPoint = rayOrig + rayDir * t;
                 normal = (hitPoint - center).normalized();
             } else {
-                // Cube intersection
                 PointType cubeNormal;
                 if (!rayCubeIntersect(rayOrig, rayDir, obj.get(), t, normal, hitPoint)) {
                     return globalIllumination ? skylight_ : Eigen::Vector3f::Zero();
@@ -1028,11 +1017,6 @@ public:
                 Eigen::Vector3f incomingLight = traceRay(hitPoint + normal * 0.002f, scatterDir, bounces + 1, rngState);
                 
                 finalColor += obj->color.cwiseProduct(incomingLight) * diffuseProb;
-            }
-
-            if (refl > 0.001f) {
-                PointType rDir = (rayDir - 2.0f * rayDir.dot(normal) * normal).normalized();
-                finalColor += traceRay(hitPoint + normal * 0.002f, rDir, bounces + 1, rngState) * refl;
             }
 
             if (refr > 0.001f) {
@@ -1083,38 +1067,14 @@ public:
                 Eigen::Vector3f color = accumulatedColor / static_cast<float>(samplesPerPixel);
                 
                 color = color.cwiseMax(0.0f).cwiseMin(1.0f);
-                
-                switch(colorformat) {
-                    case frame::colormap::B:
-                        colorBuffer[idx    ] = static_cast<uint8_t>(rgbToGrayscale(color) * 255.0f);
-                        break;
-                    case frame::colormap::RGB:
-                        colorBuffer[idx    ] = static_cast<uint8_t>(color[0] * 255.0f);
-                        colorBuffer[idx + 1] = static_cast<uint8_t>(color[1] * 255.0f);
-                        colorBuffer[idx + 2] = static_cast<uint8_t>(color[2] * 255.0f);
-                        break;
-                    case frame::colormap::BGR:
-                        colorBuffer[idx    ] = static_cast<uint8_t>(color[2] * 255.0f);
-                        colorBuffer[idx + 1] = static_cast<uint8_t>(color[1] * 255.0f);
-                        colorBuffer[idx + 2] = static_cast<uint8_t>(color[0] * 255.0f);
-                        break;
-                    case frame::colormap::RGBA:
-                        colorBuffer[idx    ] = static_cast<uint8_t>(color[0] * 255.0f);
-                        colorBuffer[idx + 1] = static_cast<uint8_t>(color[1] * 255.0f);
-                        colorBuffer[idx + 2] = static_cast<uint8_t>(color[2] * 255.0f);
-                        colorBuffer[idx + 3] = 255;
-                        break;
-                    case frame::colormap::BGRA:
-                        colorBuffer[idx    ] = static_cast<uint8_t>(color[2] * 255.0f);
-                        colorBuffer[idx + 1] = static_cast<uint8_t>(color[1] * 255.0f);
-                        colorBuffer[idx + 2] = static_cast<uint8_t>(color[0] * 255.0f);
-                        colorBuffer[idx + 3] = 255;
-                        break;
-                }
+
+                colorBuffer[idx    ] = color[0];
+                colorBuffer[idx + 1] = color[1];
+                colorBuffer[idx + 2] = color[2];
             }
         }
         
-        outFrame.setData(colorBuffer);
+        outFrame.setData(colorBuffer, frame::colormap::RGB);
         return outFrame;
     }
 
@@ -1214,15 +1174,9 @@ public:
         PointType right = cam.right();
         
         frame outFrame(width, height, colorformat);
-        std::vector<uint8_t> colorBuffer;
+        std::vector<float> colorBuffer;
         int channels;
-        if (colorformat == frame::colormap::B) {
-            channels = 1;
-        } else if (colorformat == frame::colormap::RGB || colorformat == frame::colormap::BGR) {
-            channels = 3;
-        } else { //BGRA and RGBA
-            channels = 4;
-        }
+        channels = 3;
         colorBuffer.resize(width * height * channels);
 
         float aspect = static_cast<float>(width) / height;
@@ -1262,37 +1216,13 @@ public:
                     color = color * lightDot;
                 }
 
-                switch(colorformat) {
-                    case frame::colormap::B:
-                        colorBuffer[idx    ] = static_cast<uint8_t>(rgbToGrayscale(color) * 255.0f);
-                        break;
-                    case frame::colormap::RGB:
-                        colorBuffer[idx    ] = static_cast<uint8_t>(color[0] * 255.0f);
-                        colorBuffer[idx + 1] = static_cast<uint8_t>(color[1] * 255.0f);
-                        colorBuffer[idx + 2] = static_cast<uint8_t>(color[2] * 255.0f);
-                        break;
-                    case frame::colormap::BGR:
-                        colorBuffer[idx    ] = static_cast<uint8_t>(color[2] * 255.0f);
-                        colorBuffer[idx + 1] = static_cast<uint8_t>(color[1] * 255.0f);
-                        colorBuffer[idx + 2] = static_cast<uint8_t>(color[0] * 255.0f);
-                        break;
-                    case frame::colormap::RGBA:
-                        colorBuffer[idx    ] = static_cast<uint8_t>(color[0] * 255.0f);
-                        colorBuffer[idx + 1] = static_cast<uint8_t>(color[1] * 255.0f);
-                        colorBuffer[idx + 2] = static_cast<uint8_t>(color[2] * 255.0f);
-                        colorBuffer[idx + 3] = 255;
-                        break;
-                    case frame::colormap::BGRA:
-                        colorBuffer[idx    ] = static_cast<uint8_t>(color[2] * 255.0f);
-                        colorBuffer[idx + 1] = static_cast<uint8_t>(color[1] * 255.0f);
-                        colorBuffer[idx + 2] = static_cast<uint8_t>(color[0] * 255.0f);
-                        colorBuffer[idx + 3] = 255;
-                        break;
-                }
+                colorBuffer[idx    ] = color[0];
+                colorBuffer[idx + 1] = color[1];
+                colorBuffer[idx + 2] = color[2];
             }
         }
         
-        outFrame.setData(colorBuffer);
+        outFrame.setData(colorBuffer, frame::colormap::RGB);
         return outFrame;
     }
 

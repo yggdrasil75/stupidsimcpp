@@ -15,6 +15,8 @@
 #include <future>
 #include <mutex>
 #include <atomic>
+#include <cmath>
+#include <iomanip>
 #include "../timing_decorator.hpp"
 
 class frame {
@@ -26,7 +28,6 @@ private:
     size_t sourceSize = 0;
     size_t width = 0;
     size_t height = 0;
-    
 public:
     enum class colormap {
         RGB,
@@ -44,7 +45,29 @@ public:
         HUFFMAN,
         RAW
     };
+private:
+    size_t getChannels(colormap fmt) const {
+        switch (fmt) {
+            case colormap::RGBA: return 4;
+            case colormap::BGR: return 3;
+            case colormap::BGRA: return 4;
+            case colormap::B: return 1;
+            case colormap::RGB: default: return 3;
+        }
+    }
 
+    void resetState(size_t newSize) {
+        cformat = compresstype::RAW;
+        _compressedData.clear();
+        _compressedData.shrink_to_fit();
+        overheadmap.clear();
+        sourceSize = newSize;
+    }
+    
+    float rgbToGrayscale(float r, float g, float b) const {
+        return 0.2126f * r + 0.7152f * g + 0.0722f * b;
+    }
+public:
     colormap colorFormat = colormap::RGB;
     compresstype cformat = compresstype::RAW;
 
@@ -58,28 +81,243 @@ public:
     frame() {};
     frame(size_t w, size_t h, colormap format = colormap::RGB) 
         : width(w), height(h), colorFormat(format), cformat(compresstype::RAW) {
-        size_t channels = 3;
-        switch (format) {
-            case colormap::RGBA: channels = 4; break;
-            case colormap::BGR: channels = 3; break;
-            case colormap::BGRA: channels = 4; break;
-            case colormap::B: channels = 1; break;
-            default: channels = 3; break;
-        }
-        _data.resize(width * height * channels);
+        _data.resize(width * height * getChannels(format));
     }
 
     void setData(const std::vector<uint8_t>& data) {
         _data = data;
-        cformat = compresstype::RAW;
-        _compressedData.clear();
-        _compressedData.shrink_to_fit();
-        overheadmap.clear();
-        sourceSize = data.size();
+        resetState(data.size());
+    }
+
+    void setData(const std::vector<uint8_t>& inputData, colormap inputFormat) {
+        if (inputFormat == colorFormat) {
+            setData(inputData);
+            return;
+        }
+
+        size_t srcChannels = getChannels(inputFormat);
+        size_t dstChannels = getChannels(colorFormat);
+        size_t numPixels = width * height;
+
+        if (inputData.size() != numPixels * srcChannels) {
+            throw std::runtime_error("Input data size does not match frame dimensions for the specified format.");
+        }
+
+        std::vector<uint8_t> newData;
+        newData.reserve(numPixels * dstChannels);
+
+        for (size_t i = 0; i < numPixels; ++i) {
+            size_t px = i * srcChannels;
+            uint8_t r = 0, g = 0, b = 0, a = 255;
+
+            switch (inputFormat) {
+                case colormap::RGB: {
+                    r = inputData[px];
+                    g = inputData[px+1];
+                    b = inputData[px+2];
+                    break;
+                }  
+                case colormap::RGBA:
+                    r = inputData[px];
+                    g = inputData[px+1];
+                    b = inputData[px+2];
+                    a = inputData[px+3];
+                    break;
+                case colormap::BGR:
+                    b = inputData[px];
+                    g = inputData[px+1];
+                    r = inputData[px+2];
+                    break;
+                case colormap::BGRA:
+                    b = inputData[px];
+                    g = inputData[px+1];
+                    r = inputData[px+2];
+                    a = inputData[px+3];
+                    break;
+                case colormap::B:
+                    r = g = b = inputData[px];
+                    break;
+            }
+
+            switch (colorFormat) {
+                case colormap::RGB:
+                    newData.push_back(r);
+                    newData.push_back(g);
+                    newData.push_back(b);
+                    break;
+                case colormap::RGBA:
+                    newData.push_back(r);
+                    newData.push_back(g);
+                    newData.push_back(b);
+                    newData.push_back(a);
+                    break;
+                case colormap::BGR:
+                    newData.push_back(b);
+                    newData.push_back(g);
+                    newData.push_back(r);
+                    break;
+                case colormap::BGRA:
+                    newData.push_back(b);
+                    newData.push_back(g);
+                    newData.push_back(r);
+                    newData.push_back(a);
+                    break;
+                case colormap::B:    
+                    newData.push_back(rgbToGrayscale(r, g, b));
+                    break;
+            }
+        }
+
+        _data = std::move(newData);
+        resetState(_data.size());
+    }
+
+    void setData(const std::vector<float>& inputData) {
+        size_t channels = getChannels(colorFormat);
+        
+        if (inputData.size() != width * height * channels) {
+            throw std::runtime_error("Input float data size does not match frame dimensions.");
+        }
+
+        std::vector<uint8_t> newData;
+        newData.reserve(inputData.size());
+
+        for (float val : inputData) {
+            // Clamp between 0.0 and 1.0, scale to 255
+            float v = std::max(0.0f, std::min(1.0f, val));
+            newData.push_back(static_cast<uint8_t>(v * 255.0f));
+        }
+
+        _data = std::move(newData);
+        resetState(_data.size());
+    }
+
+    void setData(const std::vector<float>& inputData, colormap inputFormat) {
+        size_t srcChannels = getChannels(inputFormat);
+        size_t dstChannels = getChannels(colorFormat);
+        size_t numPixels = width * height;
+
+        if (inputData.size() != numPixels * srcChannels) {
+            throw std::runtime_error("Input float data size does not match frame dimensions.");
+        }
+
+        std::vector<uint8_t> newData;
+        newData.reserve(numPixels * dstChannels);
+
+        auto floatToByte = [](float f) -> uint8_t {
+            return static_cast<uint8_t>(std::max(0.0f, std::min(1.0f, f)) * 255.0f);
+        };
+
+        for (size_t i = 0; i < numPixels; ++i) {
+            size_t px = i * srcChannels;
+            uint8_t r = 0, g = 0, b = 0, a = 255;
+
+            // Extract and convert floats to bytes
+            switch (inputFormat) {
+                case colormap::RGB:  
+                    r = floatToByte(inputData[px]);
+                    g = floatToByte(inputData[px+1]);
+                    b = floatToByte(inputData[px+2]);
+                    break;
+                case colormap::RGBA: 
+                    r = floatToByte(inputData[px]);
+                    g = floatToByte(inputData[px+1]);
+                    b = floatToByte(inputData[px+2]);
+                    a = floatToByte(inputData[px+3]);
+                    break;
+                case colormap::BGR:  
+                    b = floatToByte(inputData[px]);
+                    g = floatToByte(inputData[px+1]);
+                    r = floatToByte(inputData[px+2]);
+                    break;
+                case colormap::BGRA: 
+                    b = floatToByte(inputData[px]);
+                    g = floatToByte(inputData[px+1]);
+                    r = floatToByte(inputData[px+2]);
+                    a = floatToByte(inputData[px+3]);
+                    break;
+                case colormap::B:    
+                    r = g = b = floatToByte(inputData[px]);
+                    break;
+            }
+
+            switch (colorFormat) {
+                case colormap::RGB:
+                    newData.push_back(r);
+                    newData.push_back(g);
+                    newData.push_back(b);
+                    break;
+                case colormap::RGBA:
+                    newData.push_back(r);
+                    newData.push_back(g);
+                    newData.push_back(b);
+                    newData.push_back(a);
+                    break;
+                case colormap::BGR:
+                    newData.push_back(b);
+                    newData.push_back(g);
+                    newData.push_back(r);
+                    break;
+                case colormap::BGRA:
+                    newData.push_back(b);
+                    newData.push_back(g);
+                    newData.push_back(r);
+                    newData.push_back(a);
+                    break;
+                case colormap::B:    
+                    newData.push_back(rgbToGrayscale(r, g, b));
+                    break;
+            }
+        }
+
+        _data = std::move(newData);
+        resetState(_data.size());
     }
 
     const std::vector<uint8_t>& getData() const {
         return _data;
+    }
+    
+    std::vector<uint8_t> getPixel(size_t x, size_t y) const {
+        if (cformat != compresstype::RAW) {
+            throw std::runtime_error("Cannot get pixel data from a compressed frame. Decompress first.");
+        }
+        if (x >= width || y >= height) {
+            throw std::out_of_range("Pixel coordinates out of bounds.");
+        }
+
+        size_t channels = getChannels(colorFormat);
+        size_t index = (y * width + x) * channels;
+        
+        std::vector<uint8_t> pixel;
+        pixel.reserve(channels);
+
+        for (size_t i = 0; i < channels; ++i) {
+            pixel.push_back(_data[index + i]);
+        }
+        return pixel;
+    }
+
+    void setPixel(size_t x, size_t y, const std::vector<uint8_t>& values) {
+        if (cformat != compresstype::RAW) {
+            throw std::runtime_error("Cannot set pixel data on a compressed frame. Decompress first.");
+        }
+        if (x >= width || y >= height) {
+            throw std::out_of_range("Pixel coordinates out of bounds.");
+        }
+
+        size_t channels = getChannels(colorFormat);
+        if (values.size() != channels) {
+            throw std::invalid_argument("Input value count does not match frame channel count.");
+        }
+
+        size_t index = (y * width + x) * channels;
+        for (size_t i = 0; i < channels; ++i) {
+            _data[index + i] = values[i];
+        }
+        
+        // Since data changed, previous compression stats are invalid
+        resetState(_data.size());
     }
 
     // Run-Length Encoding (RLE) compression
@@ -243,13 +481,27 @@ public:
     void printCompressionInfo() const {
         std::cout << "Compression Type: ";
         switch (cformat) {
-            case compresstype::RLE: std::cout << "RLE"; break;
-            case compresstype::DIFF: std::cout << "DIFF"; break;
-            case compresstype::DIFFRLE: std::cout << "DIFF + RLE"; break;
-            case compresstype::LZ78: std::cout << "LZ78 (kinda)"; break;
-            case compresstype::HUFFMAN: std::cout << "HUFFMAN"; break;
-            case compresstype::RAW: std::cout << "RAW (uncompressed)"; break;
-            default: std::cout << "UNKNOWN"; break;
+            case compresstype::RLE: 
+                std::cout << "RLE";
+                break;
+            case compresstype::DIFF:
+                std::cout << "DIFF";
+                break;
+            case compresstype::DIFFRLE:
+                std::cout << "DIFF + RLE";
+                break;
+            case compresstype::LZ78:
+                std::cout << "LZ78 (kinda)";
+                break;
+            case compresstype::HUFFMAN:
+                std::cout << "HUFFMAN";
+                break;
+            case compresstype::RAW:
+                std::cout << "RAW (uncompressed)";
+                break;
+            default:
+                std::cout << "UNKNOWN";
+                break;
         }
         std::cout << std::endl;
         
@@ -503,19 +755,30 @@ private:
 
 };
 
-
-std::ostream& operator<<(std::ostream& os, frame& f) {
+inline std::ostream& operator<<(std::ostream& os, frame& f) {
     os << "Frame[" << f.getWidth() << "x" << f.getHeight() << "] ";
     
     // Color format
     os << "Format: ";
     switch (f.colorFormat) {
-        case frame::colormap::RGB: os << "RGB"; break;
-        case frame::colormap::RGBA: os << "RGBA"; break;
-        case frame::colormap::BGR: os << "BGR"; break;
-        case frame::colormap::BGRA: os << "BGRA"; break;
-        case frame::colormap::B: os << "Grayscale"; break;
-        default: os << "Unknown"; break;
+        case frame::colormap::RGB:
+            os << "RGB";
+            break;
+        case frame::colormap::RGBA:
+            os << "RGBA";
+            break;
+        case frame::colormap::BGR:
+            os << "BGR";
+            break;
+        case frame::colormap::BGRA:
+            os << "BGRA";
+            break;
+        case frame::colormap::B: 
+            os << "Grayscale";
+            break;
+        default:
+            os << "Unknown";
+            break;
     }
     
     // Compression info

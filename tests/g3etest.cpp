@@ -28,6 +28,7 @@ struct defaults {
     int gridSizecube = 10000;
     bool slowRender = false;
     bool globalIllumination = true;
+    bool useLod = true;
     int rayCount = 3;
     int reflectCount = 3;
     int lodDist = 500;
@@ -408,7 +409,7 @@ void livePreview(Octree<int>& grid, defaults& config, const Camera& cam) {
     grid.setLODMinDistance(config.lodDist);
     grid.setLODFalloff(config.lodDropoff);
     if (config.slowRender) {
-        currentPreviewFrame = grid.renderFrame(cam, config.outWidth, config.outHeight, frame::colormap::RGB, config.rayCount, config.reflectCount, config.globalIllumination);
+        currentPreviewFrame = grid.renderFrame(cam, config.outWidth, config.outHeight, frame::colormap::RGB, config.rayCount, config.reflectCount, config.globalIllumination, config.useLod);
     } else {
         currentPreviewFrame = grid.fastRenderFrame(cam, config.outWidth, config.outHeight, frame::colormap::RGB);
     }
@@ -998,6 +999,7 @@ int main() {
             ImGui::InputFloat("Lod dropoff", &config.lodDropoff);
             ImGui::InputInt("lod minimum Distance", &config.lodDist);
             ImGui::Checkbox("use Global illumination", &config.globalIllumination);
+            ImGui::Checkbox("use Lod", &config.useLod);
 
             ImGui::End();
         }
