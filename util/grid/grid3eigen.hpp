@@ -646,6 +646,10 @@ public:
         return searchNode(root_.get());
     }
 
+    bool inGrid(PointType pos) {
+        return root_.contains(pos);
+    }
+
     bool remove(const PointType& pos, float tolerance = 0.0001f) {
         bool found = false;
         std::function<bool(OctreeNode*)> removeNode = [&](OctreeNode* node) -> bool {
