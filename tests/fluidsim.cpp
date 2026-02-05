@@ -11,8 +11,8 @@ int main() {
 
     // Setup Camera
     Camera cam;
-    cam.origin = Eigen::Vector3f(0.0f, 400.0f, -1800.0f); // Back and slightly up
-    cam.direction = (Eigen::Vector3f(0.0f, 0.0f, 0.0f) - cam.origin).normalized(); // Look at center
+    cam.origin = Eigen::Vector3f(0.0f, 1000.0f, -1800.0f);
+    cam.direction = (Eigen::Vector3f(0.0f, 0.0f, 0.0f) - cam.origin).normalized();
     cam.up = Eigen::Vector3f(0.0f, 1.0f, 0.0f);
     cam.fov = 60.0f;
 
@@ -31,8 +31,8 @@ int main() {
         
         if (frameIdx % 10 == 0) {
             if (frameIdx < (TOTAL_FRAMES * 0.1f)) {
-                float t = static_cast<float>(frameIdx) / (TOTAL_FRAMES * 0.9f);
-                int spawnCount = 2 + static_cast<int>(t * 4); 
+                //float t = static_cast<float>(frameIdx) / (TOTAL_FRAMES * 0.9f);
+                int spawnCount = 2; // + static_cast<int>(t * 4); 
                 sim.spawnParticles(baseParticle, spawnCount);
             }
         }
@@ -42,7 +42,7 @@ int main() {
         if (frameIdx % 50 == 0) {
             std::cout << "Rendering Frame " << frameIdx << " / " << TOTAL_FRAMES << std::endl;
             
-            frame renderedFrame = sim.grid.renderFrame(cam, HEIGHT, WIDTH, frame::colormap::RGB, 5, 4, true, false);
+            frame renderedFrame = sim.grid.renderFrame(cam, HEIGHT, WIDTH, frame::colormap::RGB, 4, 4, true, false);
             
             std::stringstream ss;
             ss << "output/frame_" << std::setw(4) << std::setfill('0') << frameIdx << ".bmp";
