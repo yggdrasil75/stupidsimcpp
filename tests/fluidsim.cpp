@@ -5,13 +5,13 @@ int main() {
     fluidSim sim;
     
     // Simulation settings
-    const int TOTAL_FRAMES = 100000;
+    const int TOTAL_FRAMES = 100;
     const int WIDTH = 800;
     const int HEIGHT = 600;
 
     // Setup Camera
     Camera cam;
-    cam.origin = Eigen::Vector3f(0.0f, 1000.0f, -1800.0f);
+    cam.origin = Eigen::Vector3f(0.0f, 4000.0f, -5800.0f);
     cam.direction = (Eigen::Vector3f(0.0f, 0.0f, 0.0f) - cam.origin).normalized();
     cam.up = Eigen::Vector3f(0.0f, 1.0f, 0.0f);
     cam.fov = 60.0f;
@@ -29,7 +29,7 @@ int main() {
 
     for (int frameIdx = 0; frameIdx < TOTAL_FRAMES; ++frameIdx) {
         
-        if (frameIdx % 10 == 0) {
+        if (frameIdx % 1 == 0) {
             if (frameIdx < (TOTAL_FRAMES * 0.1f)) {
                 //float t = static_cast<float>(frameIdx) / (TOTAL_FRAMES * 0.9f);
                 int spawnCount = 2; // + static_cast<int>(t * 4); 

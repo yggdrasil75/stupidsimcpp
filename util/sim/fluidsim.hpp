@@ -28,14 +28,16 @@ struct fluidParticle {
     Eigen::Matrix<float, 3, 1> forceAccumulator;
     float density = 0.0f;
     float pressure = 0.0f;
+    Eigen::Matrix<float, 3, 1> pressureForce;
     float viscosity = 25.0f;
+    Eigen::Matrix<float, 3, 1> viscosityForce;
     float restitution = 500.0f;
     float mass;
 };
 
 struct gridConfig {
-    float gridSizeCube = 1024;
-    const float SMOOTHING_RADIUS = 320.0f;
+    float gridSizeCube = 4096;
+    const float SMOOTHING_RADIUS = 1024.0f;
     const float REST_DENSITY = 0.5f;
     const float TIMESTEP = 0.016f;
     const float G_ATTRACTION = 50.0f;
@@ -49,21 +51,91 @@ Eigen::Matrix<float, 3, 1> posGen() {
     return Eigen::Matrix<float, 3, 1>(dist(gen),dist(gen),dist(gen));
 }
 
-// Math Helpers for SPH Kernels
-float poly6Kernel(float r, float h) {
-    if (r < 0 || r > h) return 0.0f;
-    float h2 = h * h;
-    float r2 = r * r;
-    float diff = h2 - r2;
-    float coef = 315.0f / (64.0f * M_PI * pow(h, 9));
-    return coef * diff * diff * diff;
+float W_poly6(Eigen::Vector3f rv, float h) {
+    float r = rv.squaredNorm();
+    
+    if (r > h || r < 0) return 0;
+    float factor = 315 / (64 * M_PI * pow(h, 9));
+    float m = pow(h*h-r, 3);
+    return factor * m;
 }
 
-Eigen::Vector3f spikyGradientKernel(Eigen::Vector3f r_vec, float r, float h) {
-    if (r <= 0 || r > h) return Eigen::Vector3f::Zero();
+Eigen::Vector3f gradW_poly6(Eigen::Vector3f rv, float h) {
+    float r = rv.squaredNorm();
+    float h2 = h * h;
+
+    if (r > h2 || r < 0) {
+        return Eigen::Vector3f::Zero();
+    }
+
+    float m = -6 * pow(h*h-r, 2);
+    float factor = -945.0f / (32.0f * M_PI * std::pow(h, 9));
+
+    return factor * m * rv;
+}
+
+float lapW_poly6(Eigen::Vector3f rv, float h) {
+    float r = rv.squaredNorm();
+    float h2 = h * h;
+
+    if (r > h || r < 0) return 0;
+
+    float m = h2 - r;
+    float term2 = 3.0f * h2 - 7.0f * r;
+    float factor = -945.0f / (32.0f * M_PI * std::pow(h, 9));
+
+    return factor * m * term2;
+}
+
+float W_spiky(Eigen::Vector3f rv, float h) {
+    float r = rv.norm();
+    if (r > h || r < 0) return 0;
+
+    float coeff = pow(r-h, 3);
+    float factor = 15 / (M_PI * pow(h, 6));
+
+    return factor * coeff;
+}
+
+Eigen::Vector3f gradW_spiky(Eigen::Vector3f rv, float h) {
+    float r = rv.norm();
+
+    if (r > h || r < 0) {
+        return Eigen::Vector3f::Zero();
+    }
+
     float diff = h - r;
-    float coef = -45.0f / (M_PI * pow(h, 6));
-    return r_vec.normalized() * coef * diff * diff;
+    float coeff = -45.0f / (M_PI * std::pow(h, 6));
+    
+    Eigen::Vector3f direction = rv / r;
+
+    return coeff * std::pow(diff, 2) * direction;
+}
+
+float W_visc(Eigen::Vector3f rv, float h) {
+    float r = rv.norm();
+
+    if (r > h || r < 0) return 0;
+
+    float r2 = r * r;
+    float r3 = r2 * r;
+    float h3 = h * h * h;
+    
+    float coeff = 15.0f / (2.0f * M_PI * h3);
+    float term = (-0.5f * r3 / h3) + (r2 / (h * h)) + (h / (2.0f * r)) - 1.0f;
+
+    return coeff * term;
+}
+
+float lapW_visc(Eigen::Vector3f rv, float h) {
+    float r = rv.norm();
+
+    if (r > h || r < 0) return 0;
+
+    float diff = h - r;
+    float coeff = 45.0f / (M_PI * std::pow(h, 6));
+
+    return coeff * diff;
 }
 
 Eigen::Vector3f buildGradient(float value, const std::map<float, Eigen::Vector3f>& gradientKeys) {
@@ -96,6 +168,7 @@ private:
     gridConfig config;
     int nextObjectId = 0;
     std::map<float, Eigen::Vector3f> gradientmap;
+    float closeThresh = 0.01f * config.SMOOTHING_RADIUS;
 public:
     Octree<fluidParticle> grid;
 
@@ -111,7 +184,6 @@ public:
         toSpawn.mass = newMass;
         float size = toSpawn.mass / 10;
         Eigen::Vector3f color = buildGradient(toSpawn.mass / 1000, gradientmap);
-        std::cout << "spawning " << count << " particles with a mass of " << toSpawn.mass << " and a size of " << size << std::endl;
         for (int i = 0; i < count; i++) {
             Eigen::Matrix<float, 3, 1> pos = posGen();
             int id = nextObjectId++;
@@ -124,55 +196,90 @@ public:
         }
     }
 
-    void applyPressureDensity() {
-        #pragma omp parallel for
+    float sphKernel(Eigen::Vector3f rv) {
+        float r = rv.norm();
+        if (r < closeThresh) return W_spiky(rv, config.SMOOTHING_RADIUS);
+        else return W_poly6(rv,config.SMOOTHING_RADIUS);
+    }
+
+    void computeDensities() {
+        for (auto& point : idposMap) {
+            float densSum = 0;
+            auto node = grid.find(point.second);
+            if (!node) continue;
+            std::vector<std::shared_ptr<Octree<fluidParticle>::NodeData>> neighbors = grid.findInRadius(point.second, config.SMOOTHING_RADIUS);
+            for (auto& neighbor : neighbors) {
+                Eigen::Vector3f rv = node->position - neighbor->position;
+                float w = sphKernel(rv);
+                densSum += neighbor->data.mass * w;
+            }
+            node->data.density = densSum;
+        }
+    }
+
+    void applyPressure() {
+        for (auto& point : idposMap) {
+            auto node = grid.find(point.second);
+            if (!node) {
+                continue;
+            }
+            // std::cout << "nd: " << node->data.density;
+            // std::cout << "nr: " << node->data.restitution;
+            // std::cout << "crd: " << config.REST_DENSITY;
+            node->data.pressure = node->data.restitution * (node->data.density - config.REST_DENSITY);
+            std::cout << std::endl;
+        }
+
+        for (auto& point : idposMap) {
+            auto node = grid.find(point.second);
+            if (!node) {
+                continue;
+            }
+            Eigen::Vector3f pressureForce = Eigen::Vector3f::Zero();
+
+            std::vector<std::shared_ptr<Octree<fluidParticle>::NodeData>> neighbors = grid.findInRadius(point.second, config.SMOOTHING_RADIUS);
+            for (auto& neighbor : neighbors) {
+                if (node == neighbor) continue;
+                Eigen::Vector3f rv = node->position - neighbor->position;
+                Eigen::Vector3f gradW = gradW_spiky(rv, config.SMOOTHING_RADIUS);
+                // std::cout << "np: " << node->data.pressure;
+                // std::cout << "np2: " << neighbor->data.pressure;
+                // std::cout << "nd: " << neighbor->data.density;
+                float scalarP = (node->data.pressure + neighbor->data.pressure) / (2.0f * neighbor->data.density);
+
+                pressureForce -= neighbor->data.mass * scalarP * gradW;
+            }
+            node->data.pressureForce = pressureForce;
+            // std::cout << "pressure: " << pressureForce.norm();
+        }
+    }
+
+    void applyViscosity() {
         for (auto& point : idposMap) {
             auto node = grid.find(point.second);
             if (!node) continue;
+            Eigen::Vector3f viscosityForce = Eigen::Vector3f::Zero();
             
             std::vector<std::shared_ptr<Octree<fluidParticle>::NodeData>> neighbors = grid.findInRadius(point.second, config.SMOOTHING_RADIUS);
-            
-            float density = 0.0f;
-            for (const auto& neighbor : neighbors) {
-                if (node == neighbor) continue;
-                float dist = (point.second - neighbor->position).norm();
-                density += neighbor->data.mass * poly6Kernel(dist, config.SMOOTHING_RADIUS);
+            for (auto& neighbor : neighbors) {
+                Eigen::Vector3f rv = node->position - neighbor->position;
+                Eigen::Vector3f velDiff = neighbor->data.velocity - node->data.velocity;
+                float lapW = lapW_visc(rv, config.SMOOTHING_RADIUS);
+                viscosityForce += node->data.viscosity * neighbor->data.mass * (velDiff / neighbor->data.density) * lapW;
             }
-            node->data.density = std::max(density, EPSILON);
-            float pressure = node->data.restitution * (density - config.REST_DENSITY);
-            node->data.pressure = std::max(pressure, 0.0f);
+            node->data.viscosityForce = viscosityForce;
+            // std::cout << "viscosity: " << viscosityForce;
         }
+
     }
     
     void applyForce() {
-        #pragma omp parallel for
         for (auto& point : idposMap) {
             auto node = grid.find(point.second);
             if (!node) continue;
-            Eigen::Vector3f totalForce = -point.second.normalized() * 10.0f * node->data.mass;
-            std::vector<std::shared_ptr<Octree<fluidParticle>::NodeData>> neighbors = grid.findInRadius(point.second, config.SMOOTHING_RADIUS);
-
-            for (const auto& neighbor : neighbors) {
-                if (node == neighbor) continue;
-                Eigen::Vector3f diff = point.second - neighbor->position;
-                float dist = diff.norm();
-                if (dist < EPSILON) continue;
-                float densj = neighbor->data.density;
-                if (densj < EPSILON) densj = EPSILON;
-
-                Eigen::Vector3f pressureForceVec = -neighbor->data.mass * ((node->data.pressure + neighbor->data.pressure) / (2.0f * densj)) * spikyGradientKernel(diff, dist, config.SMOOTHING_RADIUS);
-                totalForce += pressureForceVec;
-                
-                Eigen::Vector3f velDiff = neighbor->data.velocity - node->data.velocity;
-                float viscositCoef = node->data.viscosity * neighbor->data.mass * (1.0f / densj) * poly6Kernel(dist, config.SMOOTHING_RADIUS);
-                totalForce += velDiff * viscositCoef;
-
-                float clampDist = std::max(dist, 5.0f);
-                Eigen::Vector3f dirToNeighbor = (neighbor->position - node->position).normalized();
-                float attract = (config.G_ATTRACTION * node->data.mass * neighbor->data.mass) / (clampDist * clampDist);
-                totalForce += dirToNeighbor * attract;
-            }
-            node->data.forceAccumulator = totalForce;
+            Eigen::Vector3f internalForces = node->data.pressureForce + node->data.viscosityForce;
+            Eigen::Vector3f acceleration = (internalForces / node->data.mass);
+            node->data.forceAccumulator = acceleration * config.TIMESTEP;
         }
     }
 
@@ -193,22 +300,25 @@ public:
             fluidParticle newParticles;
             spawnParticles(newParticles, idsToRemove.size(), false);
         }
-        std::cout << "replacing " << idsToRemove.size() << "particles" << std::endl;
     }
 
     void applyPhysics() {
         TIME_FUNCTION;
-        applyPressureDensity();
+        computeDensities();
+        applyPressure();
+        applyViscosity();
         applyForce();
 
         for (auto& point : idposMap) {
             auto node = grid.find(point.second);
             if (!node) continue;
-            Eigen::Matrix<float, 3, 1> acceleration = node->data.forceAccumulator / node->data.mass;
-            node->data.velocity += acceleration * config.TIMESTEP;
-            Eigen::Matrix<float, 3, 1> newPos = point.second + (node->data.velocity * config.TIMESTEP);
+            Eigen::Matrix<float, 3, 1> acceleration = node->data.forceAccumulator;
+            //std::cout << acceleration;
+            node->data.velocity += acceleration;
+            Eigen::Matrix<float, 3, 1> newPos = point.second + (node->data.velocity);
             idposMap[point.first] = newPos;
-            grid.move(point.second, newPos);
+            std::cout << "moving " << (newPos - node->position).norm() << std::endl;
+            grid.move(node->position, newPos);
         }
         replaceLost();
     }
