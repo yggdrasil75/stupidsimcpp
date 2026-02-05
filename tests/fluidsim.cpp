@@ -29,42 +29,27 @@ int main() {
 
     for (int frameIdx = 0; frameIdx < TOTAL_FRAMES; ++frameIdx) {
         
-        // --- Spawning Logic ---
-        // Spawn throughout the simulation (e.g., until 90% completion)
         if (frameIdx % 10 == 0) {
-            if (frameIdx < (TOTAL_FRAMES * 0.9f)) {
+            if (frameIdx < (TOTAL_FRAMES * 0.1f)) {
                 float t = static_cast<float>(frameIdx) / (TOTAL_FRAMES * 0.9f);
-                
-                // Linear interpolation for Mass: Heavy (10.0) -> Light (0.5)
-                float currentMass = (1.0f - t) * 10.0f + t * 0.5f;
-                
-                // Linear interpolation for Size: Large (12.0) -> Small (2.0)
-                float currentSize = (1.0f - t) * 12.0f + t * 2.0f;
-
-                // Number of particles to spawn this frame (can increase as they get smaller)
                 int spawnCount = 2 + static_cast<int>(t * 4); 
-
-                sim.spawnParticles(baseParticle, spawnCount, currentSize, currentMass);
+                sim.spawnParticles(baseParticle, spawnCount);
             }
         }
 
-        // --- Physics Step ---
         sim.applyPhysics();
 
-        // --- Render & Save ---
         if (frameIdx % 50 == 0) {
             std::cout << "Rendering Frame " << frameIdx << " / " << TOTAL_FRAMES << std::endl;
             
-            // Generate LODs for faster/better rendering
-            sim.grid.generateLODs();
-
-            // Render frame
-            frame renderedFrame = sim.grid.renderFrame(cam, HEIGHT, WIDTH, frame::colormap::RGB, 4, 4, true, false);
+            frame renderedFrame = sim.grid.renderFrame(cam, HEIGHT, WIDTH, frame::colormap::RGB, 5, 4, true, false);
             
-            // Save to BMP
             std::stringstream ss;
             ss << "output/frame_" << std::setw(4) << std::setfill('0') << frameIdx << ".bmp";
             BMPWriter::saveBMP(ss.str(), renderedFrame);
+            
+        }
+        if (frameIdx % 100 == 0) {
             sim.grid.printStats();
         }
     }

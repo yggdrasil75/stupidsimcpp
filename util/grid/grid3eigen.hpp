@@ -647,7 +647,7 @@ public:
     }
 
     bool inGrid(PointType pos) {
-        return root_.contains(pos);
+        return root_->contains(pos);
     }
 
     bool remove(const PointType& pos, float tolerance = 0.0001f) {
@@ -790,6 +790,15 @@ public:
             pointData->shape = newShape;
             return true;
         }
+    }
+
+    bool move(const PointType& pos, const PointType& newPos) {
+        auto pointData = find(pos);
+        if (!pointData) return false;
+        if (!remove(pos)) return false;
+        return set(pointData->data, pointData->position, pointData->visible, pointData->color, pointData->size, 
+                   pointData->active, pointData->objectId, pointData->light, pointData->emittance, 
+                   pointData->refraction, pointData->reflection, pointData->shape);
     }
 
     bool setObjectId(const PointType& pos, int objectId, float tolerance = 0.0001f) {

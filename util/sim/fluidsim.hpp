@@ -23,14 +23,13 @@
 #include "../stb/stb_image.h"
 
 struct fluidParticle {
-    Eigen::Matrix<float, 3, 1> pos;
     Eigen::Matrix<float, 3, 1> velocity;
     Eigen::Matrix<float, 3, 1> acceleration;
     Eigen::Matrix<float, 3, 1> forceAccumulator;
-    float density;
-    float pressure;
-    float viscosity;
-    float restitution;
+    float density = 0.0f;
+    float pressure = 0.0f;
+    float viscosity = 25.0f;
+    float restitution = 500.0f;
     float mass;
 };
 
@@ -108,17 +107,21 @@ public:
 
     }
 
-    void spawnParticles(fluidParticle toSpawn, int count) {
+    void spawnParticles(fluidParticle toSpawn, int count, bool resize = true) {
         TIME_FUNCTION;
+        float size = toSpawn.mass / 10;
+        Eigen::Vector3f color = buildGradient(toSpawn.mass / 1000, gradientmap);
+        std::cout << "spawning " << count << " particles with a mass of " << toSpawn.mass << " and a size of " << size << std::endl;
         for (int i = 0; i < count; i++) {
             Eigen::Matrix<float, 3, 1> pos = posGen();
             int id = nextObjectId++;
             
-            Eigen::Vector3f color = buildGradient(toSpawn.mass / 1000, gradientmap);
-            grid.set(toSpawn, pos, true, color, 1, true, id, false);
+            grid.set(toSpawn, pos, true, color, size, true, id, (toSpawn.mass > 100) : true ? false, 1);
             idposMap[id] = pos;
         }
-        newMass -= newMass / 10;
+        if (resize){
+            newMass -= newMass * .01;
+        }
     }
 
     void applyPressureDensity() {
@@ -172,27 +175,39 @@ public:
     }
 
     void replaceLost() {
-        int toReplace = 0;
-        #pragma omp parallel for
+        std::vector<size_t> idsToRemove;
         for (auto& point : idposMap) { 
             if (!grid.inGrid(point.second)) {
-                grid.remove(point.second);
-                toReplace++;
+                idsToRemove.push_back(point.first);
             }
         }
-        fluidParticle newParticles;
-        newParticles.mass = newMass;
-        spawnParticles(newParticles, toReplace);
+
+        for (size_t id : idsToRemove) {
+            grid.remove(idposMap[id]);
+            idposMap.erase(id);
+        }
+
+        if (!idsToRemove.empty()) {
+            fluidParticle newParticles;
+            newParticles.mass = newMass;
+            spawnParticles(newParticles, idsToRemove.size(), false);
+        }
     }
 
     void applyPhysics() {
         TIME_FUNCTION;
-            ///TODO: 
-            // apply velocity to have particle move
-            // use mass of neighboring particles to change direction towards them
-            // ressure pushes particles away if they are too close
-            // resitution controls how much pressure builds up based on how close particles are
-            // have to find a way to have a clump use their combined mass instead of individual mass.
-            //if a particle leaves the grid, destroy it and spawn a new one
+        applyPressureDensity();
+        applyForce();
+
+        for (auto& point : idposMap) {
+            auto node = grid.find(point.second);
+            if (!node) continue;
+            Eigen::Matrix<float, 3, 1> acceleration = node->data.forceAccumulator / node->data.mass;
+            node->data.velocity += acceleration * config.TIMESTEP;
+            Eigen::Matrix<float, 3, 1> newPos = point.second + (node->data.velocity * config.TIMESTEP);
+            idposMap[point.first] = newPos;
+            grid.move(point.second, newPos);
+        }
+        replaceLost();
     }
 };
