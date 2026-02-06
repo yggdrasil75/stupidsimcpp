@@ -45,6 +45,13 @@ public:
         HUFFMAN,
         RAW
     };
+
+    enum class interpolation {
+        NEAREST,
+        BILINEAR,
+        AREA,
+        LANCZOS4
+    };
 private:
     size_t getChannels(colormap fmt) const {
         switch (fmt) {
@@ -562,6 +569,35 @@ public:
         _data.shrink_to_fit();
     }
 
+    void resize(size_t newWidth, size_t newHeight, interpolation method = interpolation::NEAREST) {
+        TIME_FUNCTION;
+        if (cformat != compresstype::RAW) {
+            throw std::runtime_error("Cannot resize a compressed frame. Decompress first.");
+        }
+        if (newWidth == 0 || newHeight == 0) {
+            throw std::invalid_argument("Target dimensions must be non-zero.");
+        }
+        if (width == newWidth && height == newHeight) {
+            return;
+        }
+
+        size_t channels = getChannels(colorFormat);
+        std::vector<uint8_t> newData;
+        newData.resize(newWidth * newHeight * channels);
+
+        if (method == interpolation::NEAREST) {
+            resizeNearest(newData, newWidth, newHeight, channels);
+        } else if (method == interpolation::BILINEAR) {
+            resizeBilinear(newData, newWidth, newHeight, channels);
+        }
+
+        _data = std::move(newData);
+        width = newWidth;
+        height = newHeight;
+        
+        resetState(_data.size());
+    }
+
 private:
     std::vector<std::vector<uint8_t>> sortvecs(std::vector<std::vector<uint8_t>> source) {
         std::sort(source.begin(), source.end(), [](const std::vector<uint8_t> & a, const std::vector<uint8_t> & b) {return a.size() > b.size();});
@@ -753,6 +789,72 @@ private:
         throw std::logic_error("Function not yet implemented");
     }
 
+    void resizeNearest(std::vector<uint8_t>& dst, size_t newW, size_t newH, size_t channels) {
+        const double x_ratio = (double)width / newW;
+        const double y_ratio = (double)height / newH;
+
+        #pragma omp parallel for
+        for (size_t y = 0; y < newH; ++y) {
+            size_t srcY = static_cast<size_t>(std::floor(y * y_ratio));
+            if (srcY >= height) srcY = height - 1;
+            
+            size_t destOffsetBase = y * newW * channels;
+            size_t srcRowOffset = srcY * width * channels;
+
+            for (size_t x = 0; x < newW; ++x) {
+                size_t srcX = static_cast<size_t>(std::floor(x * x_ratio));
+                if (srcX >= width) srcX = width - 1;
+
+                size_t srcIndex = srcRowOffset + (srcX * channels);
+                size_t destIndex = destOffsetBase + (x * channels);
+
+                for (size_t c = 0; c < channels; ++c) {
+                    dst[destIndex + c] = _data[srcIndex + c];
+                }
+            }
+        }
+    }
+
+    void resizeBilinear(std::vector<uint8_t>& dst, size_t newW, size_t newH, size_t channels) {
+        const float x_ratio = (width > 1) ? static_cast<float>(width - 1) / (newW - 1) : 0;
+        const float y_ratio = (height > 1) ? static_cast<float>(height - 1) / (newH - 1) : 0;
+
+        for (size_t y = 0; y < newH; ++y) {
+            float srcY_f = y * y_ratio;
+            size_t y_l = static_cast<size_t>(srcY_f);
+            size_t y_h = (y_l + 1 < height) ? y_l + 1 : y_l;
+            float y_weight = srcY_f - y_l;
+            float y_inv = 1.0f - y_weight;
+
+            size_t destOffsetBase = y * newW * channels;
+
+            for (size_t x = 0; x < newW; ++x) {
+                float srcX_f = x * x_ratio;
+                size_t x_l = static_cast<size_t>(srcX_f);
+                size_t x_h = (x_l + 1 < width) ? x_l + 1 : x_l;
+                float x_weight = srcX_f - x_l;
+                float x_inv = 1.0f - x_weight;
+
+                size_t idx_TL = (y_l * width + x_l) * channels;
+                size_t idx_TR = (y_l * width + x_h) * channels;
+                size_t idx_BL = (y_h * width + x_l) * channels;
+                size_t idx_BR = (y_h * width + x_h) * channels;
+                size_t destIndex = destOffsetBase + (x * channels);
+
+                for (size_t c = 0; c < channels; ++c) {
+                    float val_TL = _data[idx_TL + c];
+                    float val_TR = _data[idx_TR + c];
+                    float val_BL = _data[idx_BL + c];
+                    float val_BR = _data[idx_BR + c];
+
+                    float top = val_TL * x_inv + val_TR * x_weight;
+                    float bottom = val_BL * x_inv + val_BR * x_weight;
+                    float result = top * y_inv + bottom * y_weight;
+                    dst[destIndex + c] = static_cast<uint8_t>(result);
+                }
+            }
+        }
+    }
 };
 
 inline std::ostream& operator<<(std::ostream& os, frame& f) {

@@ -36,7 +36,7 @@ struct fluidParticle {
 };
 
 struct gridConfig {
-    float gridSizeCube = 4096;
+    float gridSizeCube = 8192;
     const float SMOOTHING_RADIUS = 1024.0f;
     const float REST_DENSITY = 0.00005f;
     const float TIMESTEP = 0.016f;
@@ -190,13 +190,13 @@ public:
     void spawnParticles(fluidParticle toSpawn, int count, bool resize = true) {
         TIME_FUNCTION;
         toSpawn.mass = newMass;
-        float size = toSpawn.mass / 10;
+        //float size = toSpawn.mass / 10;
         Eigen::Vector3f color = buildGradient(toSpawn.mass / 1000, gradientmap);
         for (int i = 0; i < count; i++) {
             Eigen::Matrix<float, 3, 1> pos = posGen();
             int id = nextObjectId++;
             
-            grid.set(toSpawn, pos, true, color, size, true, id, (toSpawn.mass > 100) ? true : false, 1);
+            grid.set(toSpawn, pos, true, color, 10, true, id, (toSpawn.mass > 100) ? true : false, 1);
             idposMap.emplace(id, pos);
         }
         if (resize){
@@ -226,27 +226,18 @@ public:
     }
 
     void applyPressure() {
-        // std::cout << "points to consider: " << idposMap.size();
         size_t pointcounter = 0;
         for (auto& point : idposMap) {
-            // std::cout << " point: " << pointcounter++;
             auto node = grid.find(point.second);
             if (!node) {
-                // std::cout << " point is missing" << std::endl;
                 continue;
             }
-            // std::cout << " nd: " << node->data.density;
-            // std::cout << " nr: " << node->data.restitution;
-            // std::cout << " crd: " << config.REST_DENSITY;
             node->data.pressure = node->data.restitution * (node->data.density - config.REST_DENSITY);
-            // std::cout << std::endl << std::endl;
         }
 
         for (auto& point : idposMap) {
-            // std::cout << " point: " << pointcounter++;
             auto node = grid.find(point.second);
             if (!node) {
-                // std::cout << " point is missing" << std::endl;
                 continue;
             }
             Eigen::Vector3f pressureForce = Eigen::Vector3f::Zero();
@@ -256,15 +247,11 @@ public:
                 if (node == neighbor) continue;
                 Eigen::Vector3f rv = node->position - neighbor->position;
                 Eigen::Vector3f gradW = gradW_spiky(rv, config.SMOOTHING_RADIUS);
-                // std::cout << " np: " << node->data.pressure;
-                // std::cout << " np2: " << neighbor->data.pressure;
-                // std::cout << " nd: " << neighbor->data.density;
                 float scalarP = (node->data.pressure + neighbor->data.pressure) / (2.0f * neighbor->data.density);
 
                 pressureForce -= neighbor->data.mass * scalarP * gradW;
             }
             node->data.pressureForce = pressureForce;
-            // std::cout << " pressure: " << pressureForce.norm() << std::endl;
         }
     }
 
@@ -280,28 +267,19 @@ public:
                 Eigen::Vector3f rv = node->position - neighbor->position;
                 Eigen::Vector3f velDiff = neighbor->data.velocity - node->data.velocity;
                 float lapW = lapW_visc(rv, config.SMOOTHING_RADIUS);
-                // std::cout << "nv: " << node->data.viscosity;
-                // std::cout << "nm: " << neighbor->data.mass;
-                // std::cout << "veldiff: " << velDiff.norm();
-                // std::cout << "nd: " << neighbor->data.density;
-                // std::cout << "lapl: " << lapW;
                 viscosityForce += node->data.viscosity * neighbor->data.mass * (velDiff / neighbor->data.density) * lapW;
             }
             node->data.viscosityForce = viscosityForce;
-            // std::cout << "viscosity: " << viscosityForce.norm() << std::endl;
         }
     }
     
     Eigen::Vector3f applyMutualGravity(std::shared_ptr<Octree<fluidParticle>::NodeData>& node) {
         Eigen::Vector3f gravityForce = Eigen::Vector3f::Zero();
         std::vector<std::shared_ptr<Octree<fluidParticle>::NodeData>> neighbors = grid.findInRadius(node->position, config.SMOOTHING_RADIUS);
-        
         for (auto& neighbor : neighbors) {
             if (node == neighbor) continue;
-
             Eigen::Vector3f dir = neighbor->position - node->position;
             float dist = dir.norm();
-            
             if (dist > EPSILON) {
                 dir.normalize();
                 float forceMag = (config.G_ATTRACTION * node->data.mass * neighbor->data.mass) / (dist * dist);
@@ -309,6 +287,21 @@ public:
             }
         }
         return gravityForce;
+    }
+    
+    Eigen::Vector3f applyCenterGravity(std::shared_ptr<Octree<fluidParticle>::NodeData>& node) {
+        Eigen::Vector3f center = Eigen::Vector3f::Zero();
+        Eigen::Vector3f direction = center - node->position;
+        float distSq = direction.squaredNorm();
+        float dist = std::sqrt(distSq);
+        if (dist < 50.0f) {
+            dist = 50.0f;
+            distSq = 2500.0f; 
+        }
+        direction /= dist;
+        float centerMass = 5000.0f; 
+        float forceMag = (config.G_ATTRACTION * node->data.mass * centerMass) / distSq;
+        return direction * forceMag;
     }
 
     void applyForce() {
@@ -318,16 +311,17 @@ public:
             Eigen::Vector3f internalForces = node->data.pressureForce + node->data.viscosityForce;
             Eigen::Vector3f acceleration = (internalForces / node->data.mass);
             Eigen::Vector3f gravity = applyMutualGravity(node);
-            // std::cout << "gravity: " << gravity.norm();
+            gravity += applyCenterGravity(node);
             node->data.forceAccumulator = (acceleration + gravity) / node->data.mass;
-            // node->data.forceAccumulator = node->data.pressureForce + node->data.viscosityForce;
         }
     }
 
     void replaceLost() {
         std::vector<size_t> idsToRemove;
         for (auto& point : idposMap) { 
-            if (!grid.inGrid(point.second)) {
+            if (config.gridSizeCube / 2 > point.second[0] > config.gridSizeCube / 2 || 
+                config.gridSizeCube / 2 > point.second[1] > config.gridSizeCube / 2 ||
+                config.gridSizeCube / 2 > point.second[2] > config.gridSizeCube / 2) {
                 idsToRemove.push_back(point.first);
             }
         }
@@ -354,24 +348,14 @@ public:
             auto node = grid.find(point.second);
             if (!node) continue;
             Eigen::Matrix<float, 3, 1> acceleration = node->data.forceAccumulator;
-            //std::cout << acceleration;
             node->data.velocity += acceleration * config.TIMESTEP;
             Eigen::Matrix<float, 3, 1> newPos = point.second + (node->data.velocity);
             Eigen::Vector3f oldPos = point.second;
-            // std::cout << "moving " << (newPos - node->position).norm();
-            // grid.update(oldPos, newPos, node->data, node->visible, node->color, node->size, 
-            //        node->active, node->objectId, node->light, node->emittance, 
-            //        node->refraction, node->reflection, node->shape);
             if (grid.move(oldPos, newPos)) {
                 auto newpoint = grid.find(newPos);
-                if (!newpoint) std::cout << "failed to move" << std::endl;
-                // auto oldpoint = grid.find(oldPos);
-                // if (!oldpoint) std::cout << "still at old position" << std::endl;
                 idposMap[point.first] = newPos;
-                // std::cout << "moved" << std::endl;
-            } // else std::cout << "failed to move" << std::endl;
+            }
         }
-        // std::cout << std::endl;
         replaceLost();
     }
 };

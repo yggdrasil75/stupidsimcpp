@@ -6,8 +6,8 @@ int main() {
     
     // Simulation settings
     const int TOTAL_FRAMES = 10000;
-    const int WIDTH = 800;
-    const int HEIGHT = 600;
+    const int WIDTH = 1024;
+    const int HEIGHT = 1024;
 
     // Setup Camera
     Camera cam;
@@ -26,8 +26,10 @@ int main() {
     baseParticle.restitution = 200.0f;
 
     std::cout << "Starting Fluid Simulation..." << std::endl;
+    sim.grid.setLODFalloff(0.001);
+    sim.grid.setLODMinDistance(4096);
 
-    for (int frameIdx = 0; frameIdx < TOTAL_FRAMES; ++frameIdx) {
+    for (int frameIdx = 0; frameIdx < TOTAL_FRAMES; frameIdx++) {
         
         if (frameIdx < (TOTAL_FRAMES * 0.1f)) {
             if (frameIdx % 1 == 0) {
@@ -39,40 +41,44 @@ int main() {
 
         sim.applyPhysics();
 
-        if (frameIdx % 1 == 0) {
-            std::cout << "Rendering ultrafast Frame " << frameIdx << " / " << TOTAL_FRAMES << std::endl;
+        if (frameIdx % 100 == 0) {
+            std::cout << "Rendering Frame " << frameIdx << " / " << TOTAL_FRAMES << std::endl;
             
-            frame renderedFrame = sim.grid.fastRenderFrame(cam, HEIGHT, WIDTH, frame::colormap::RGB);
+            frame renderedFrame = sim.grid.renderFrame(cam, HEIGHT, WIDTH, frame::colormap::RGB, 4, 5, true, false);
             
             std::stringstream ss;
-            ss << "output/ufframe_" << std::setw(4) << std::setfill('0') << frameIdx << ".bmp";
+            ss << "output/frame_" << std::setw(4) << std::setfill('0') << frameIdx << ".bmp";
             BMPWriter::saveBMP(ss.str(), renderedFrame);
-            
-        }
-        if (frameIdx % 10 == 0) {
+        } else if (frameIdx % 25 == 0) {
             std::cout << "Rendering quick Frame " << frameIdx << " / " << TOTAL_FRAMES << std::endl;
             
             frame renderedFrame = sim.grid.renderFrame(cam, HEIGHT, WIDTH, frame::colormap::RGB, 1, 1, true, false);
             
             std::stringstream ss;
-            ss << "output/qframe_" << std::setw(4) << std::setfill('0') << frameIdx << ".bmp";
+            ss << "output/frame_" << std::setw(4) << std::setfill('0') << frameIdx << ".bmp";
             BMPWriter::saveBMP(ss.str(), renderedFrame);
+        } else if (frameIdx % 5 == 0) {
+            std::cout << "Rendering ultrafast Frame " << frameIdx << " / " << TOTAL_FRAMES << std::endl;
             
-        }
-        if (frameIdx % 50 == 0) {
-            std::cout << "Rendering Frame " << frameIdx << " / " << TOTAL_FRAMES << std::endl;
-            
-            frame renderedFrame = sim.grid.renderFrame(cam, HEIGHT, WIDTH, frame::colormap::RGB, 4, 4, true, false);
+            frame renderedFrame = sim.grid.fastRenderFrame(cam, HEIGHT / 2, WIDTH / 2, frame::colormap::RGB);
+            renderedFrame.resize(HEIGHT, WIDTH, frame::interpolation::NEAREST);
             
             std::stringstream ss;
             ss << "output/frame_" << std::setw(4) << std::setfill('0') << frameIdx << ".bmp";
             BMPWriter::saveBMP(ss.str(), renderedFrame);
-            
         }
+        
         if (frameIdx % 500 == 0) {
             sim.grid.printStats();
         }
     }
+
+    sim.grid.printStats();
+    frame renderedFrame = sim.grid.renderFrame(cam, HEIGHT, WIDTH, frame::colormap::RGB, 5, 7, true, false);
+    
+    std::stringstream ss;
+    ss << "output/frame_" << std::setw(4) << std::setfill('0') << TOTAL_FRAMES << ".bmp";
+    BMPWriter::saveBMP(ss.str(), renderedFrame);
 
     std::cout << "Simulation Complete." << std::endl;
     FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
