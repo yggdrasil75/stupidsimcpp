@@ -29,16 +29,16 @@ struct fluidParticle {
     float density = 0.0f;
     float pressure = 0.0f;
     Eigen::Matrix<float, 3, 1> pressureForce;
-    float viscosity = 25.0f;
+    float viscosity = 0.5f;
     Eigen::Matrix<float, 3, 1> viscosityForce;
-    float restitution = 500.0f;
+    float restitution = 5.0f;
     float mass;
 };
 
 struct gridConfig {
     float gridSizeCube = 4096;
     const float SMOOTHING_RADIUS = 1024.0f;
-    const float REST_DENSITY = 0.5f;
+    const float REST_DENSITY = 0.00005f;
     const float TIMESTEP = 0.016f;
     const float G_ATTRACTION = 50.0f;
 };
@@ -47,6 +47,14 @@ Eigen::Matrix<float, 3, 1> posGen() {
     static std::random_device rd;
     static std::mt19937 gen(rd());
     static std::normal_distribution<float> dist(0.0f, 1024.0f);
+    
+    return Eigen::Matrix<float, 3, 1>(dist(gen),dist(gen),dist(gen));
+}
+
+Eigen::Matrix<float, 3, 1> velGen() {
+    static std::random_device rd;
+    static std::mt19937 gen(rd());
+    static std::normal_distribution<float> dist(0.0f, 1.0f);
     
     return Eigen::Matrix<float, 3, 1>(dist(gen),dist(gen),dist(gen));
 }
@@ -189,17 +197,17 @@ public:
             int id = nextObjectId++;
             
             grid.set(toSpawn, pos, true, color, size, true, id, (toSpawn.mass > 100) ? true : false, 1);
-            idposMap[id] = pos;
+            idposMap.emplace(id, pos);
         }
         if (resize){
-            newMass *= 0.99f;
+            newMass *= 0.999f;
         }
     }
 
     float sphKernel(Eigen::Vector3f rv) {
         float r = rv.norm();
-        if (r < closeThresh) return W_spiky(rv, config.SMOOTHING_RADIUS);
-        else return W_poly6(rv,config.SMOOTHING_RADIUS);
+        if (r < closeThresh) return W_spiky(rv, config.G_ATTRACTION);
+        else return W_poly6(rv,config.G_ATTRACTION);
     }
 
     void computeDensities() {
@@ -218,21 +226,27 @@ public:
     }
 
     void applyPressure() {
+        // std::cout << "points to consider: " << idposMap.size();
+        size_t pointcounter = 0;
         for (auto& point : idposMap) {
+            // std::cout << " point: " << pointcounter++;
             auto node = grid.find(point.second);
             if (!node) {
+                // std::cout << " point is missing" << std::endl;
                 continue;
             }
-            // std::cout << "nd: " << node->data.density;
-            // std::cout << "nr: " << node->data.restitution;
-            // std::cout << "crd: " << config.REST_DENSITY;
+            // std::cout << " nd: " << node->data.density;
+            // std::cout << " nr: " << node->data.restitution;
+            // std::cout << " crd: " << config.REST_DENSITY;
             node->data.pressure = node->data.restitution * (node->data.density - config.REST_DENSITY);
-            std::cout << std::endl;
+            // std::cout << std::endl << std::endl;
         }
 
         for (auto& point : idposMap) {
+            // std::cout << " point: " << pointcounter++;
             auto node = grid.find(point.second);
             if (!node) {
+                // std::cout << " point is missing" << std::endl;
                 continue;
             }
             Eigen::Vector3f pressureForce = Eigen::Vector3f::Zero();
@@ -242,15 +256,15 @@ public:
                 if (node == neighbor) continue;
                 Eigen::Vector3f rv = node->position - neighbor->position;
                 Eigen::Vector3f gradW = gradW_spiky(rv, config.SMOOTHING_RADIUS);
-                // std::cout << "np: " << node->data.pressure;
-                // std::cout << "np2: " << neighbor->data.pressure;
-                // std::cout << "nd: " << neighbor->data.density;
+                // std::cout << " np: " << node->data.pressure;
+                // std::cout << " np2: " << neighbor->data.pressure;
+                // std::cout << " nd: " << neighbor->data.density;
                 float scalarP = (node->data.pressure + neighbor->data.pressure) / (2.0f * neighbor->data.density);
 
                 pressureForce -= neighbor->data.mass * scalarP * gradW;
             }
             node->data.pressureForce = pressureForce;
-            // std::cout << "pressure: " << pressureForce.norm();
+            // std::cout << " pressure: " << pressureForce.norm() << std::endl;
         }
     }
 
@@ -259,27 +273,54 @@ public:
             auto node = grid.find(point.second);
             if (!node) continue;
             Eigen::Vector3f viscosityForce = Eigen::Vector3f::Zero();
+            if (node->data.velocity == Eigen::Vector3f::Zero()) node->data.velocity = velGen();
             
             std::vector<std::shared_ptr<Octree<fluidParticle>::NodeData>> neighbors = grid.findInRadius(point.second, config.SMOOTHING_RADIUS);
             for (auto& neighbor : neighbors) {
                 Eigen::Vector3f rv = node->position - neighbor->position;
                 Eigen::Vector3f velDiff = neighbor->data.velocity - node->data.velocity;
                 float lapW = lapW_visc(rv, config.SMOOTHING_RADIUS);
+                // std::cout << "nv: " << node->data.viscosity;
+                // std::cout << "nm: " << neighbor->data.mass;
+                // std::cout << "veldiff: " << velDiff.norm();
+                // std::cout << "nd: " << neighbor->data.density;
+                // std::cout << "lapl: " << lapW;
                 viscosityForce += node->data.viscosity * neighbor->data.mass * (velDiff / neighbor->data.density) * lapW;
             }
             node->data.viscosityForce = viscosityForce;
-            // std::cout << "viscosity: " << viscosityForce;
+            // std::cout << "viscosity: " << viscosityForce.norm() << std::endl;
         }
-
     }
     
+    Eigen::Vector3f applyMutualGravity(std::shared_ptr<Octree<fluidParticle>::NodeData>& node) {
+        Eigen::Vector3f gravityForce = Eigen::Vector3f::Zero();
+        std::vector<std::shared_ptr<Octree<fluidParticle>::NodeData>> neighbors = grid.findInRadius(node->position, config.SMOOTHING_RADIUS);
+        
+        for (auto& neighbor : neighbors) {
+            if (node == neighbor) continue;
+
+            Eigen::Vector3f dir = neighbor->position - node->position;
+            float dist = dir.norm();
+            
+            if (dist > EPSILON) {
+                dir.normalize();
+                float forceMag = (config.G_ATTRACTION * node->data.mass * neighbor->data.mass) / (dist * dist);
+                gravityForce += dir * forceMag;
+            }
+        }
+        return gravityForce;
+    }
+
     void applyForce() {
         for (auto& point : idposMap) {
             auto node = grid.find(point.second);
             if (!node) continue;
             Eigen::Vector3f internalForces = node->data.pressureForce + node->data.viscosityForce;
             Eigen::Vector3f acceleration = (internalForces / node->data.mass);
-            node->data.forceAccumulator = acceleration * config.TIMESTEP;
+            Eigen::Vector3f gravity = applyMutualGravity(node);
+            // std::cout << "gravity: " << gravity.norm();
+            node->data.forceAccumulator = (acceleration + gravity) / node->data.mass;
+            // node->data.forceAccumulator = node->data.pressureForce + node->data.viscosityForce;
         }
     }
 
@@ -314,12 +355,23 @@ public:
             if (!node) continue;
             Eigen::Matrix<float, 3, 1> acceleration = node->data.forceAccumulator;
             //std::cout << acceleration;
-            node->data.velocity += acceleration;
+            node->data.velocity += acceleration * config.TIMESTEP;
             Eigen::Matrix<float, 3, 1> newPos = point.second + (node->data.velocity);
-            idposMap[point.first] = newPos;
-            std::cout << "moving " << (newPos - node->position).norm() << std::endl;
-            grid.move(node->position, newPos);
+            Eigen::Vector3f oldPos = point.second;
+            // std::cout << "moving " << (newPos - node->position).norm();
+            // grid.update(oldPos, newPos, node->data, node->visible, node->color, node->size, 
+            //        node->active, node->objectId, node->light, node->emittance, 
+            //        node->refraction, node->reflection, node->shape);
+            if (grid.move(oldPos, newPos)) {
+                auto newpoint = grid.find(newPos);
+                if (!newpoint) std::cout << "failed to move" << std::endl;
+                // auto oldpoint = grid.find(oldPos);
+                // if (!oldpoint) std::cout << "still at old position" << std::endl;
+                idposMap[point.first] = newPos;
+                // std::cout << "moved" << std::endl;
+            } // else std::cout << "failed to move" << std::endl;
         }
+        // std::cout << std::endl;
         replaceLost();
     }
 };

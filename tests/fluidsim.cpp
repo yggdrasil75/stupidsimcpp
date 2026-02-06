@@ -5,7 +5,7 @@ int main() {
     fluidSim sim;
     
     // Simulation settings
-    const int TOTAL_FRAMES = 100;
+    const int TOTAL_FRAMES = 10000;
     const int WIDTH = 800;
     const int HEIGHT = 600;
 
@@ -29,8 +29,8 @@ int main() {
 
     for (int frameIdx = 0; frameIdx < TOTAL_FRAMES; ++frameIdx) {
         
-        if (frameIdx % 1 == 0) {
-            if (frameIdx < (TOTAL_FRAMES * 0.1f)) {
+        if (frameIdx < (TOTAL_FRAMES * 0.1f)) {
+            if (frameIdx % 1 == 0) {
                 //float t = static_cast<float>(frameIdx) / (TOTAL_FRAMES * 0.9f);
                 int spawnCount = 2; // + static_cast<int>(t * 4); 
                 sim.spawnParticles(baseParticle, spawnCount);
@@ -39,6 +39,26 @@ int main() {
 
         sim.applyPhysics();
 
+        if (frameIdx % 1 == 0) {
+            std::cout << "Rendering ultrafast Frame " << frameIdx << " / " << TOTAL_FRAMES << std::endl;
+            
+            frame renderedFrame = sim.grid.fastRenderFrame(cam, HEIGHT, WIDTH, frame::colormap::RGB);
+            
+            std::stringstream ss;
+            ss << "output/ufframe_" << std::setw(4) << std::setfill('0') << frameIdx << ".bmp";
+            BMPWriter::saveBMP(ss.str(), renderedFrame);
+            
+        }
+        if (frameIdx % 10 == 0) {
+            std::cout << "Rendering quick Frame " << frameIdx << " / " << TOTAL_FRAMES << std::endl;
+            
+            frame renderedFrame = sim.grid.renderFrame(cam, HEIGHT, WIDTH, frame::colormap::RGB, 1, 1, true, false);
+            
+            std::stringstream ss;
+            ss << "output/qframe_" << std::setw(4) << std::setfill('0') << frameIdx << ".bmp";
+            BMPWriter::saveBMP(ss.str(), renderedFrame);
+            
+        }
         if (frameIdx % 50 == 0) {
             std::cout << "Rendering Frame " << frameIdx << " / " << TOTAL_FRAMES << std::endl;
             
@@ -49,7 +69,7 @@ int main() {
             BMPWriter::saveBMP(ss.str(), renderedFrame);
             
         }
-        if (frameIdx % 100 == 0) {
+        if (frameIdx % 500 == 0) {
             sim.grid.printStats();
         }
     }

@@ -795,10 +795,14 @@ public:
     bool move(const PointType& pos, const PointType& newPos) {
         auto pointData = find(pos);
         if (!pointData) return false;
-        if (!remove(pos)) return false;
-        return set(pointData->data, pointData->position, pointData->visible, pointData->color, pointData->size, 
+        bool success = set(pointData->data, newPos, pointData->visible, pointData->color, pointData->size, 
                    pointData->active, pointData->objectId, pointData->light, pointData->emittance, 
                    pointData->refraction, pointData->reflection, pointData->shape);
+        if (success) {
+            remove(pos);
+            return true;
+        }
+        return false;
     }
 
     bool setObjectId(const PointType& pos, int objectId, float tolerance = 0.0001f) {
