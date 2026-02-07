@@ -1,3 +1,6 @@
+#ifndef FLUIDSIM_HPP
+#define FLUIDSIM_HPP
+
 #include <map>
 #include <iostream>
 #include <vector>
@@ -10,17 +13,7 @@
 #include <algorithm>
 
 #include "../util/grid/grid3eigen.hpp"
-#include "../util/output/bmpwriter.hpp"
 #include "../util/output/frame.hpp"
-#include "../util/noise/pnoise2.hpp"
-#include "../util/noise/pnoise.cpp"
-#include "../util/output/aviwriter.hpp"
-
-#include "../imgui/imgui.h"
-#include "../imgui/backends/imgui_impl_glfw.h"
-#include "../imgui/backends/imgui_impl_opengl3.h"
-#include <GLFW/glfw3.h>
-#include "../stb/stb_image.h"
 
 struct fluidParticle {
     Eigen::Matrix<float, 3, 1> velocity;
@@ -173,11 +166,11 @@ class fluidSim {
 private:
     std::unordered_map<size_t, Eigen::Matrix<float, 3, 1>> idposMap;
     float newMass = 1000;
-    gridConfig config;
     int nextObjectId = 0;
     std::map<float, Eigen::Vector3f> gradientmap;
-    float closeThresh = 0.01f * config.SMOOTHING_RADIUS;
 public:
+    gridConfig config;
+    float closeThresh = 0.01f * config.SMOOTHING_RADIUS;
     Octree<fluidParticle> grid;
 
     fluidSim() : grid({-config.gridSizeCube, -config.gridSizeCube, -config.gridSizeCube}, {config.gridSizeCube, config.gridSizeCube, config.gridSizeCube}) {
@@ -359,3 +352,6 @@ public:
         replaceLost();
     }
 };
+
+
+#endif

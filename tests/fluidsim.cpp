@@ -1,5 +1,17 @@
+#ifndef FLUIDSIM_CPP
+#define FLUIDSIM_CPP
+
 #include "../util/sim/fluidsim.hpp"
 #include "../util/timing_decorator.cpp"
+#include "../util/output/bmpwriter.hpp"
+#include "../util/output/aviwriter.hpp"
+
+#include "../imgui/imgui.h"
+#include "../imgui/backends/imgui_impl_glfw.h"
+#include "../imgui/backends/imgui_impl_opengl3.h"
+#include <GLFW/glfw3.h>
+#include "../stb/stb_image.h"
+
 
 int main() {
     fluidSim sim;
@@ -84,3 +96,5 @@ int main() {
     FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
     return 0;
 }
+
+#endif
