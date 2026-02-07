@@ -16,6 +16,7 @@
 #include "../util/noise/pnoise2.hpp"
 #include "../util/noise/pnoise.cpp"
 #include "../util/output/aviwriter.hpp"
+#include "fluidsim.cpp"
 
 #include "../imgui/imgui.h"
 #include "../imgui/backends/imgui_impl_glfw.h"
@@ -337,6 +338,9 @@ int main() {
 
     updateNoiseTexture(noiseState);
 
+    FluidSimUI fluidUI;
+    bool showFluidSim = false;
+
     sphereConf.centerX = ghalf;
     sphereConf.centerY = ghalf;
     sphereConf.centerZ = ghalf;
@@ -387,6 +391,10 @@ int main() {
         static double lastFrameTime = currentTime;
         deltaTime = currentTime - lastFrameTime;
         lastFrameTime = currentTime;
+
+        if (showFluidSim) {
+            fluidUI.update();
+        }
         
         if (orbitEquator || orbitPoles || autoRotate) autoRotationTime += deltaTime;
         if (autoRotateView) autoRotationAngle += deltaTime;
@@ -527,8 +535,16 @@ int main() {
                 ImGui::Image((void*)(intptr_t)textu, ImVec2(config.outWidth, config.outHeight));
                 
             }
+
+            ImGui::Separator();
+            ImGui::Text("Modules");
+            ImGui::Checkbox("Fluid Simulation", &showFluidSim);
             
             ImGui::End();
+        }
+
+        if (showFluidSim) {
+            fluidUI.renderUI();
         }
 
         {

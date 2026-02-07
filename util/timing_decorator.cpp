@@ -1,3 +1,6 @@
+#ifndef TIMING_CPP
+#define TIMING_CPP
+
 #include "timing_decorator.hpp"
 #include <cmath>
 
@@ -113,3 +116,5 @@ void FunctionTimer::printStats(Mode mode) {
 void FunctionTimer::clearStats() {
     stats_.clear();
 }
+
+#endif

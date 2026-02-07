@@ -11,6 +11,7 @@
 #include <cmath>
 #include <random>
 #include <algorithm>
+#include <unordered_map>
 
 #include "../util/grid/grid3eigen.hpp"
 #include "../util/output/frame.hpp"
@@ -30,10 +31,10 @@ struct fluidParticle {
 
 struct gridConfig {
     float gridSizeCube = 8192;
-    const float SMOOTHING_RADIUS = 1024.0f;
-    const float REST_DENSITY = 0.00005f;
-    const float TIMESTEP = 0.016f;
-    const float G_ATTRACTION = 50.0f;
+    float SMOOTHING_RADIUS = 1024.0f;
+    float REST_DENSITY = 0.00005f;
+    float TIMESTEP = 0.016f;
+    float G_ATTRACTION = 50.0f;
 };
 
 Eigen::Matrix<float, 3, 1> posGen() {
@@ -170,20 +171,27 @@ private:
     std::map<float, Eigen::Vector3f> gradientmap;
 public:
     gridConfig config;
-    float closeThresh = 0.01f * config.SMOOTHING_RADIUS;
+    float closeThresh;
     Octree<fluidParticle> grid;
 
     fluidSim() : grid({-config.gridSizeCube, -config.gridSizeCube, -config.gridSizeCube}, {config.gridSizeCube, config.gridSizeCube, config.gridSizeCube}) {
+        closeThresh = 0.01f * config.SMOOTHING_RADIUS;
         grid.setBackgroundColor({0.1f, 0.1f, 0.2f});
         gradientmap.emplace(0.0, Eigen::Vector3f(1, 0, 0));
         gradientmap.emplace(0.5, Eigen::Vector3f(0, 1, 0));
         gradientmap.emplace(1.0, Eigen::Vector3f(0, 0, 1));
     }
 
+    void reset() {
+        grid.clear();
+        idposMap.clear();
+        nextObjectId = 0;
+        newMass = 1000;
+    }
+
     void spawnParticles(fluidParticle toSpawn, int count, bool resize = true) {
         TIME_FUNCTION;
         toSpawn.mass = newMass;
-        //float size = toSpawn.mass / 10;
         Eigen::Vector3f color = buildGradient(toSpawn.mass / 1000, gradientmap);
         for (int i = 0; i < count; i++) {
             Eigen::Matrix<float, 3, 1> pos = posGen();
@@ -219,7 +227,6 @@ public:
     }
 
     void applyPressure() {
-        size_t pointcounter = 0;
         for (auto& point : idposMap) {
             auto node = grid.find(point.second);
             if (!node) {
@@ -311,10 +318,11 @@ public:
 
     void replaceLost() {
         std::vector<size_t> idsToRemove;
+        int gridHalfSize = config.gridSizeCube / 2;
         for (auto& point : idposMap) { 
-            if (config.gridSizeCube / 2 > point.second[0] > config.gridSizeCube / 2 || 
-                config.gridSizeCube / 2 > point.second[1] > config.gridSizeCube / 2 ||
-                config.gridSizeCube / 2 > point.second[2] > config.gridSizeCube / 2) {
+            if (std::abs(point.second[0]) > gridHalfSize || 
+                std::abs(point.second[1]) > gridHalfSize ||
+                std::abs(point.second[2]) > gridHalfSize) {
                 idsToRemove.push_back(point.first);
             }
         }
@@ -331,7 +339,6 @@ public:
     }
 
     void applyPhysics() {
-        TIME_FUNCTION;
         computeDensities();
         applyPressure();
         applyViscosity();
@@ -345,13 +352,13 @@ public:
             Eigen::Matrix<float, 3, 1> newPos = point.second + (node->data.velocity);
             Eigen::Vector3f oldPos = point.second;
             if (grid.move(oldPos, newPos)) {
-                auto newpoint = grid.find(newPos);
                 idposMap[point.first] = newPos;
             }
         }
         replaceLost();
     }
+    
+    size_t getParticleCount() const { return idposMap.size(); }
 };
-
 
 #endif

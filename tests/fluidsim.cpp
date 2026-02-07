@@ -13,88 +13,158 @@
 #include "../stb/stb_image.h"
 
 
-int main() {
+struct fluidSimPreviewConfig {
+    float lodDist = 4096.0f;
+    float lodDropoff = 0.001f;
+    bool slowRender = false;
+    int outWidth = 1024;
+    int outHeight = 1024;
+    int rayCount = 1;
+    int reflectCount = 1;
+    bool globalIllumination = false;
+    bool useLod = true;
+};
+
+class FluidSimUI {
+private:
     fluidSim sim;
-    
-    // Simulation settings
-    const int TOTAL_FRAMES = 10000;
-    const int WIDTH = 1024;
-    const int HEIGHT = 1024;
-
-    // Setup Camera
-    Camera cam;
-    cam.origin = Eigen::Vector3f(0.0f, 4000.0f, -5800.0f);
-    cam.direction = (Eigen::Vector3f(0.0f, 0.0f, 0.0f) - cam.origin).normalized();
-    cam.up = Eigen::Vector3f(0.0f, 1.0f, 0.0f);
-    cam.fov = 60.0f;
-
-    // Base particle template
     fluidParticle baseParticle;
-    baseParticle.velocity = Eigen::Vector3f::Zero();
-    baseParticle.acceleration = Eigen::Vector3f::Zero();
-    baseParticle.forceAccumulator = Eigen::Vector3f::Zero();
-    baseParticle.pressure = 0.0f;
-    baseParticle.viscosity = 8.0f;
-    baseParticle.restitution = 200.0f;
+    fluidSimPreviewConfig viewConfig;
+    Camera cam;
+    
+    // UI State
+    bool isRunning = false;
+    int particlesToSpawnPerFrame = 2;
+    int totalParticleCap = 5000;
+    
+    // Texture Management
+    GLuint textu = 0;
+    std::mutex PreviewMutex;
+    bool updatePreview = false;
+    bool textureInitialized = false;
+    frame currentPreviewFrame;
 
-    std::cout << "Starting Fluid Simulation..." << std::endl;
-    sim.grid.setLODFalloff(0.001);
-    sim.grid.setLODMinDistance(4096);
+public:
+    FluidSimUI() {
+        cam.origin = Eigen::Vector3f(0.0f, 4000.0f, -5800.0f);
+        cam.direction = (Eigen::Vector3f(0.0f, 0.0f, 0.0f) - cam.origin).normalized();
+        cam.up = Eigen::Vector3f(0.0f, 1.0f, 0.0f);
+        cam.fov = 60.0f;
 
-    for (int frameIdx = 0; frameIdx < TOTAL_FRAMES; frameIdx++) {
+        baseParticle.velocity = Eigen::Vector3f::Zero();
+        baseParticle.acceleration = Eigen::Vector3f::Zero();
+        baseParticle.forceAccumulator = Eigen::Vector3f::Zero();
+        baseParticle.pressure = 0.0f;
+        baseParticle.viscosity = 8.0f;
+        baseParticle.restitution = 200.0f;
         
-        if (frameIdx < (TOTAL_FRAMES * 0.1f)) {
-            if (frameIdx % 1 == 0) {
-                //float t = static_cast<float>(frameIdx) / (TOTAL_FRAMES * 0.9f);
-                int spawnCount = 2; // + static_cast<int>(t * 4); 
-                sim.spawnParticles(baseParticle, spawnCount);
-            }
-        }
+        sim.grid.setLODFalloff(viewConfig.lodDropoff);
+        sim.grid.setLODMinDistance(viewConfig.lodDist);
+    }
 
-        sim.applyPhysics();
-
-        if (frameIdx % 100 == 0) {
-            std::cout << "Rendering Frame " << frameIdx << " / " << TOTAL_FRAMES << std::endl;
-            
-            frame renderedFrame = sim.grid.renderFrame(cam, HEIGHT, WIDTH, frame::colormap::RGB, 4, 5, true, false);
-            
-            std::stringstream ss;
-            ss << "output/frame_" << std::setw(4) << std::setfill('0') << frameIdx << ".bmp";
-            BMPWriter::saveBMP(ss.str(), renderedFrame);
-        } else if (frameIdx % 25 == 0) {
-            std::cout << "Rendering quick Frame " << frameIdx << " / " << TOTAL_FRAMES << std::endl;
-            
-            frame renderedFrame = sim.grid.renderFrame(cam, HEIGHT, WIDTH, frame::colormap::RGB, 1, 1, true, false);
-            
-            std::stringstream ss;
-            ss << "output/frame_" << std::setw(4) << std::setfill('0') << frameIdx << ".bmp";
-            BMPWriter::saveBMP(ss.str(), renderedFrame);
-        } else if (frameIdx % 5 == 0) {
-            std::cout << "Rendering ultrafast Frame " << frameIdx << " / " << TOTAL_FRAMES << std::endl;
-            
-            frame renderedFrame = sim.grid.fastRenderFrame(cam, HEIGHT / 2, WIDTH / 2, frame::colormap::RGB);
-            renderedFrame.resize(HEIGHT, WIDTH, frame::interpolation::NEAREST);
-            
-            std::stringstream ss;
-            ss << "output/frame_" << std::setw(4) << std::setfill('0') << frameIdx << ".bmp";
-            BMPWriter::saveBMP(ss.str(), renderedFrame);
-        }
-        
-        if (frameIdx % 500 == 0) {
-            sim.grid.printStats();
+    ~FluidSimUI() {
+        if (textu != 0) {
+            glDeleteTextures(1, &textu);
         }
     }
 
-    sim.grid.printStats();
-    frame renderedFrame = sim.grid.renderFrame(cam, HEIGHT, WIDTH, frame::colormap::RGB, 5, 7, true, false);
-    
-    std::stringstream ss;
-    ss << "output/frame_" << std::setw(4) << std::setfill('0') << TOTAL_FRAMES << ".bmp";
-    BMPWriter::saveBMP(ss.str(), renderedFrame);
+    void update() {
+        if (isRunning) {
+            if (sim.getParticleCount() < (size_t)totalParticleCap) {
+                 sim.spawnParticles(baseParticle, particlesToSpawnPerFrame);
+            }
+            sim.applyPhysics();
+        }
+    }
 
-    std::cout << "Simulation Complete." << std::endl;
-    FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
-    return 0;
-}
+    void renderUI() {
+        ImGui::Begin("Fluid Simulation Control");
+
+        if (ImGui::Button(isRunning ? "Pause" : "Start")) {
+            isRunning = !isRunning;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Step")) {
+            sim.applyPhysics();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Reset")) {
+            std::lock_guard<std::mutex> lock(PreviewMutex);
+            sim.reset();
+        }
+
+        ImGui::Separator();
+        ImGui::Text("Particle Management");
+        ImGui::DragInt("Spawn Rate (per frame)", &particlesToSpawnPerFrame, 1, 0, 100);
+        ImGui::DragInt("Max Particles", &totalParticleCap, 10, 0, 50000);
+        ImGui::Text("Current Particles: %zu", sim.getParticleCount());
+
+        if (ImGui::CollapsingHeader("Physics Parameters")) {
+            ImGui::DragFloat("Smoothing Radius", &sim.config.SMOOTHING_RADIUS, 1.0f, 100.0f, 5000.0f);
+            ImGui::DragFloat("Rest Density", &sim.config.REST_DENSITY, 0.00001f, 0.0f, 0.01f, "%.6f");
+            ImGui::DragFloat("Timestep", &sim.config.TIMESTEP, 0.001f, 0.001f, 0.1f);
+            ImGui::DragFloat("Gravity (Attraction)", &sim.config.G_ATTRACTION, 0.1f, 0.0f, 500.0f);
+            
+            ImGui::Text("Base Particle Properties");
+            ImGui::DragFloat("Viscosity", &baseParticle.viscosity, 0.1f, 0.0f, 50.0f);
+            ImGui::DragFloat("Restitution", &baseParticle.restitution, 1.0f, 0.0f, 1000.0f);
+        }
+
+        if (ImGui::CollapsingHeader("View Settings")) {
+            ImGui::DragFloat("Camera FOV", &cam.fov, 1.0f, 10.0f, 170.0f);
+            
+            float camPos[3] = {cam.origin.x(), cam.origin.y(), cam.origin.z()};
+            if(ImGui::DragFloat3("Camera Pos", camPos, 10.0f)) {
+                cam.origin = Eigen::Vector3f(camPos[0], camPos[1], camPos[2]);
+                cam.direction = (Eigen::Vector3f(0.0f, 0.0f, 0.0f) - cam.origin).normalized();
+            }
+
+            ImGui::Checkbox("High Quality Render", &viewConfig.slowRender);
+            if (viewConfig.slowRender) {
+                ImGui::DragInt("Ray Count", &viewConfig.rayCount, 1, 1, 16);
+                ImGui::Checkbox("Global Illumination", &viewConfig.globalIllumination);
+            }
+        }
+
+        updatePreviewTexture();
+        
+        if (textureInitialized) {
+            float aspect = (float)currentPreviewFrame.getWidth() / (float)currentPreviewFrame.getHeight();
+            float availWidth = ImGui::GetContentRegionAvail().x;
+            ImGui::Image((void*)(intptr_t)textu, ImVec2(availWidth, availWidth / aspect));
+        }
+
+        ImGui::End();
+    }
+
+private:
+    void updatePreviewTexture() {
+        std::lock_guard<std::mutex> lock(PreviewMutex);
+        updatePreview = true;
+        
+        sim.grid.setLODMinDistance(viewConfig.lodDist);
+        sim.grid.setLODFalloff(viewConfig.lodDropoff);
+        
+        if (viewConfig.slowRender) {
+            currentPreviewFrame = sim.grid.renderFrame(cam, viewConfig.outWidth, viewConfig.outHeight, frame::colormap::RGB, viewConfig.rayCount, viewConfig.reflectCount, viewConfig.globalIllumination, viewConfig.useLod);
+        } else {
+            currentPreviewFrame = sim.grid.fastRenderFrame(cam, viewConfig.outWidth, viewConfig.outHeight, frame::colormap::RGB);
+        }
+        
+        if (textu == 0) {
+            glGenTextures(1, &textu);
+        }
+        glBindTexture(GL_TEXTURE_2D, textu);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, currentPreviewFrame.getWidth(), currentPreviewFrame.getHeight(), 
+                     0, GL_RGB, GL_UNSIGNED_BYTE, currentPreviewFrame.getData().data());
+        
+        updatePreview = false;
+        textureInitialized = true;
+    }
+};
 
 #endif
