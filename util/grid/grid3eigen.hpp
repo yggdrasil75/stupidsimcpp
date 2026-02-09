@@ -90,12 +90,9 @@ public:
         }
 
         bool contains(const PointType& point) const {
-            for (int i = 0; i < Dim; ++i) {
-                if (point[i] < bounds.first[i] || point[i] > bounds.second[i]) {
-                    return false;
-                }
-            }
-            return true;
+            return (point[0] >= bounds.first[0] && point[0] <= bounds.second[0] &&
+                    point[1] >= bounds.first[1] && point[1] <= bounds.second[1] &&
+                    point[2] >= bounds.first[2] && point[2] <= bounds.second[2]);
         }
 
         bool isEmpty() const {
@@ -114,23 +111,41 @@ private:
 
     float lodFalloffRate_ = 0.1f; // Lower = better, higher = worse. 0-1
     float lodMinDistance_ = 100.0f;
+    
+    struct Ray {
+        PointType origin;
+        PointType dir;
+        PointType invDir;
+        uint8_t sign[3];
+        Ray(const PointType& orig, const PointType& dir) : origin(orig), dir(dir) {
+            invDir = dir.cwiseInverse();
+            sign[0] = (invDir[0] < 0);
+            sign[1] = (invDir[1] < 0);
+            sign[2] = (invDir[2] < 0);
+        }
+    };
 
     uint8_t getOctant(const PointType& point, const PointType& center) const {
-        int octant = 0;
-        for (int i = 0; i < Dim; ++i) {
-            if (point[i] >= center[i]) octant |= (1 << i);
-        }
+        uint8_t octant = 0;
+        if (point[0] >= center[0]) octant |= 1;
+        if (point[1] >= center[1]) octant |= 2;
+        if (point[2] >= center[2]) octant |= 4;
         return octant;
     }
 
     BoundingBox createChildBounds(const OctreeNode* node, uint8_t octant) const {
         PointType childMin, childMax;
-        PointType center = node->center;
-        for (int i = 0; i < Dim; ++i) {
-            bool high = (octant >> i) & 1;
-            childMin[i] = high ? center[i] : node->bounds.first[i];
-            childMax[i] = high ? node->bounds.second[i] : center[i];
-        }
+        const PointType& center = node->center;
+        
+        childMin[0] = (octant & 1) ? center[0] : node->bounds.first[0];
+        childMax[0] = (octant & 1) ? node->bounds.second[0] : center[0];
+        
+        childMin[1] = (octant & 2) ? center[1] : node->bounds.first[1];
+        childMax[1] = (octant & 2) ? node->bounds.second[1] : center[1];
+        
+        childMin[2] = (octant & 4) ? center[2] : node->bounds.first[2];
+        childMax[2] = (octant & 4) ? node->bounds.second[2] : center[2];
+
         return {childMin, childMax};
     }
 
@@ -402,18 +417,16 @@ private:
         arr[4] = a4; arr[5] = a5; arr[6] = a6; arr[7] = a7;
     }
 
-    bool rayBoxIntersect(const PointType& origin, const PointType& dir, const BoundingBox& box,
-                            float& tMin, float& tMax) const {
+    bool rayBoxIntersect(const Ray& ray, const BoundingBox& box, float& tMin, float& tMax) const {
         tMin = 0.0f;
         tMax = std::numeric_limits<float>::max();
 
         for (int i = 0; i < Dim; ++i) {
-            if (std::abs(dir[i]) < std::numeric_limits<float>::epsilon()) {
-                if (origin[i] < box.first[i] || origin[i] > box.second[i]) return false;
+            if (std::abs(ray.dir[i]) < std::numeric_limits<float>::epsilon()) {
+                if (ray.origin[i] < box.first[i] || ray.origin[i] > box.second[i]) return false;
             } else {
-                float invD = 1.f / dir[i];
-                float t1 = (box.first[i] - origin[i]) * invD;
-                float t2 = (box.second[i] - origin[i]) * invD;
+                float t1 = (box.first[i] - ray.origin[i]) * ray.invDir[i];
+                float t2 = (box.second[i] - ray.origin[i]) * ray.invDir[i];
                 
                 if (t1 > t2) std::swap(t1, t2);
                 tMin = std::max(tMin, t1);
@@ -424,12 +437,11 @@ private:
         return true;
     }
 
-    bool raySphereIntersect(const PointType& origin, const PointType& dir, const PointType& center,
-                           float radius, float& t) const {
-        PointType oc = origin - center;
-        float a = dir.dot(dir);
-        float b = 2.0f * oc.dot(dir);
-        float c = oc.dot(oc) - radius * radius;
+    bool raySphereIntersect(const Ray& ray, const PointType& center, float radiusSq, float& t) const {
+        PointType oc = ray.origin - center;
+        float a = ray.dir.dot(ray.dir);
+        float b = 2.0f * oc.dot(ray.dir);
+        float c = oc.dot(oc) - radiusSq;
         float discriminant = b * b - 4 * a * c;
         
         if (discriminant < 0) return false;
@@ -439,40 +451,38 @@ private:
         float t1 = (-b + sqrtDisc) / (2.0f * a);
         
         t = t0;
-        if (t0 < 0.001f) {
+        if (t0 < EPSILON) {
             t = t1;
-            if (t1 < 0.001f) return false;
+            if (t1 < EPSILON) return false;
         }
         return true;
+
     }
 
-    // Ray-cube intersection
-    bool rayCubeIntersect(const PointType& origin, const PointType& dir, const NodeData* cube,
+    bool rayCubeIntersect(const Ray& ray, const NodeData* cube,
                          float& t, PointType& normal, PointType& hitPoint) const {
-        // Use the cube's bounds for intersection
         BoundingBox bounds = cube->getCubeBounds();
         
         float tMin, tMax;
-        if (!rayBoxIntersect(origin, dir, bounds, tMin, tMax)) {
+        if (!rayBoxIntersect(ray, bounds, tMin, tMax)) {
             return false;
         }
         
-        if (tMin < 0.001f) {
-            if (tMax < 0.001f) return false;
+        if (tMin < EPSILON) {
+            if (tMax < EPSILON) return false;
             t = tMax;
         } else {
             t = tMin;
         }
         
-        hitPoint = origin + dir * t;
+        hitPoint = ray.origin + ray.dir * t;
         
-        const float epsilon = 0.0001f;
         normal = PointType::Zero();
         
         for (int i = 0; i < Dim; ++i) {
-            if (std::abs(hitPoint[i] - bounds.first[i]) < epsilon) {
+            if (std::abs(hitPoint[i] - bounds.first[i]) < EPSILON) {
                 normal[i] = -1.0f;
-            } else if (std::abs(hitPoint[i] - bounds.second[i]) < epsilon) {
+            } else if (std::abs(hitPoint[i] - bounds.second[i]) < EPSILON) {
                 normal[i] = 1.0f;
             }
         }
@@ -497,11 +507,10 @@ private:
         randomDir.normalize();
         
         if (randomDir.dot(normal) < 0.0f) {
-            randomDir = -randomDir;
+            return -randomDir;
         }
         return randomDir;
     }
-
 
     void collectNodesByObjectId(OctreeNode* node, int id, std::vector<std::shared_ptr<NodeData>>& results) const {
         if (!node) return;
@@ -620,7 +629,7 @@ public:
         return true;
     }
 
-    std::shared_ptr<NodeData> find(const PointType& pos, float tolerance = 0.0001f) {
+    std::shared_ptr<NodeData> find(const PointType& pos, float tolerance = EPSILON) {
         std::function<std::shared_ptr<NodeData>(OctreeNode*)> searchNode = [&](OctreeNode* node) -> std::shared_ptr<NodeData> {
             if (!node->contains(pos)) return nullptr;
             
@@ -650,7 +659,7 @@ public:
         return root_->contains(pos);
     }
 
-    bool remove(const PointType& pos, float tolerance = 0.0001f) {
+    bool remove(const PointType& pos, float tolerance = EPSILON) {
         bool found = false;
         std::function<bool(OctreeNode*)> removeNode = [&](OctreeNode* node) -> bool {
             {
@@ -735,7 +744,7 @@ public:
     bool update(const PointType& oldPos, const PointType& newPos, const T& newData, bool newVisible = true, 
                 Eigen::Vector3f newColor = Eigen::Vector3f(1.0f, 1.0f, 1.0f), float newSize = 0.01f, bool newActive = true,
                 int newObjectId = -2, bool newLight = false, float newEmittance = 0.0f, float newRefraction = 0.0f, 
-                float newReflection = 0.0f, Shape newShape = Shape::SPHERE, float tolerance = 0.0001f) {
+                float newReflection = 0.0f, Shape newShape = Shape::SPHERE, float tolerance = EPSILON) {
     
         // Find the existing point
         auto pointData = find(oldPos, tolerance);
@@ -805,14 +814,14 @@ public:
         return false;
     }
 
-    bool setObjectId(const PointType& pos, int objectId, float tolerance = 0.0001f) {
+    bool setObjectId(const PointType& pos, int objectId, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
         pointData->objectId = objectId;
         return true;
     }
 
-    bool updateData(const PointType& pos, const T& newData, float tolerance = 0.0001f) {
+    bool updateData(const PointType& pos, const T& newData, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
         
@@ -820,7 +829,7 @@ public:
         return true;
     }
 
-    bool setActive(const PointType& pos, bool active, float tolerance = 0.0001f) {
+    bool setActive(const PointType& pos, bool active, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
         
@@ -828,7 +837,7 @@ public:
         return true;
     }
 
-    bool setVisible(const PointType& pos, bool visible, float tolerance = 0.0001f) {
+    bool setVisible(const PointType& pos, bool visible, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
         
@@ -836,7 +845,7 @@ public:
         return true;
     }
 
-    bool setLight(const PointType& pos, bool light, float tolerance = 0.0001f) {
+    bool setLight(const PointType& pos, bool light, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
         
@@ -844,7 +853,7 @@ public:
         return true;
     }
 
-    bool setColor(const PointType& pos, Eigen::Vector3f color, float tolerance = 0.0001f) {
+    bool setColor(const PointType& pos, Eigen::Vector3f color, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
         
@@ -852,7 +861,7 @@ public:
         return true;
     }
 
-    bool setReflection(const PointType& pos, float reflection, float tolerance = 0.0001f) {
+    bool setReflection(const PointType& pos, float reflection, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
         
@@ -860,7 +869,7 @@ public:
         return true;
     }
 
-    bool setEmittance(const PointType& pos, float emittance, float tolerance = 0.0001f) {
+    bool setEmittance(const PointType& pos, float emittance, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
         
@@ -868,7 +877,7 @@ public:
         return true;
     }
 
-    bool setShape(const PointType& pos, Shape shape, float tolerance = 0.0001f) {
+    bool setShape(const PointType& pos, Shape shape, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
         
@@ -883,16 +892,17 @@ public:
         if (empty()) return hits;
         float invLodf = 1.0f / lodFalloffRate_;
         uint8_t raySignMask = (direction.x() < 0 ? 1 : 0) | (direction.y() < 0 ? 2 : 0) | (direction.z() < 0 ? 4 : 0);
-
+        Ray oray(origin, direction);
         std::function<void(OctreeNode*, const PointType&, const PointType&, float, float)> traverseNode = 
                         [&](OctreeNode* node, const PointType& origin, const PointType& dir, float tMin, float tMax) {
             if (!node) return;
+            Ray ray(origin, dir);
 
             if (enableLOD && !node->isLeaf) {
                 float dist = (node->center - origin).norm();
                 
                 if (dist > lodMinDistance_) {
-                    float ratio = dist / (node->nodeSize + 0.0001f);
+                    float ratio = dist / (node->nodeSize + EPSILON);
                     
                     if (ratio > (invLodf)) {
                         ensureLOD(node);
@@ -900,7 +910,7 @@ public:
                             float t;
                             PointType n;
                             PointType h;
-                            if (rayCubeIntersect(origin, dir, node->lodData.get(), t, n, h)) {
+                            if (rayCubeIntersect(ray, node->lodData.get(), t, n, h)) {
                                 if (t >= 0 && t <= maxDist) hits.emplace_back(node->lodData);
                             }
                             return;
@@ -915,7 +925,7 @@ public:
                     
                     float t;
                     if (pointData->shape == Shape::SPHERE) {
-                        if (raySphereIntersect(origin, dir, pointData->position, pointData->size, t)) {
+                        if (raySphereIntersect(ray, pointData->position, pointData->size * pointData->size, t)) {
                             if (t >= 0 && t <= maxDist) {
                                 hits.emplace_back(pointData);
                                 if (stopAtFirstHit) return;
@@ -923,7 +933,7 @@ public:
                         }
                     } else {
                         PointType normal, hitPoint;
-                        if (rayCubeIntersect(origin, dir, pointData.get(), t, normal, hitPoint)) {
+                        if (rayCubeIntersect(ray, pointData.get(), t, normal, hitPoint)) {
                             if (t >= 0 && t <= maxDist) {
                                 hits.emplace_back(pointData);
                                 if (stopAtFirstHit) return;
@@ -940,7 +950,7 @@ public:
                         
                         float childtMin = tMin;
                         float childtMax = tMax;
-                        if (rayBoxIntersect(origin, dir, childBounds, childtMin, childtMax)) {
+                        if (rayBoxIntersect(ray, childBounds, childtMin, childtMax)) {
                             traverseNode(node->children[childIdx].get(), origin, dir, childtMin, childtMax);
                             if (stopAtFirstHit && !hits.empty()) return;
                         }
@@ -949,7 +959,7 @@ public:
             }
         };
         float tMin, tMax;
-        if (rayBoxIntersect(origin, direction, root_->bounds, tMin, tMax)) {
+        if (rayBoxIntersect(oray, root_->bounds, tMin, tMax)) {
             tMax = std::min(tMax, maxDist);
             traverseNode(root_.get(), origin, direction, tMin, tMax);
         }
@@ -976,7 +986,7 @@ public:
 
         std::function<Eigen::Vector3f(const PointType&, const PointType&, int, uint32_t&)> traceRay = 
             [&](const PointType& rayOrig, const PointType& rayDir, int bounces, uint32_t& rngState) -> Eigen::Vector3f {
-
+            Ray ray(rayOrig, rayDir);
             if (bounces > maxBounces) return globalIllumination ? skylight_ : Eigen::Vector3f::Zero();
 
             auto hits = voxelTraverse(rayOrig, rayDir, std::numeric_limits<float>::max(), true, useLod);
@@ -1013,7 +1023,7 @@ public:
                 normal = (hitPoint - center).normalized();
             } else {
                 PointType cubeNormal;
-                if (!rayCubeIntersect(rayOrig, rayDir, obj.get(), t, normal, hitPoint)) {
+                if (!rayCubeIntersect(ray, obj.get(), t, normal, hitPoint)) {
                     return globalIllumination ? skylight_ : Eigen::Vector3f::Zero();
                 }
             }
@@ -1098,19 +1108,20 @@ public:
     std::shared_ptr<NodeData> fastVoxelTraverse(const PointType& origin, const PointType& direction,
                                          float maxDist, bool enableLOD = false) const {
         std::shared_ptr<NodeData> hit;
-        
+        Ray oray(origin, direction);
         if (empty()) return hit;
 
         std::function<void(OctreeNode*, const PointType&, const PointType&, float, float)> traverseNode = 
                         [&](OctreeNode* node, const PointType& origin, const PointType& dir, float tMin, float tMax) {
             if (!node || tMin > tMax) return;
+            Ray ray(origin, dir);
 
             // LOD Check for fast traverse
             if (enableLOD && !node->isLeaf) {
                 float dist = (node->center - origin).norm();
                 float nodeSize = (node->bounds.second - node->bounds.first).norm();
                 if (dist > lodMinDistance_) {
-                    float ratio = dist / (nodeSize + 0.0001f);
+                    float ratio = dist / (nodeSize + EPSILON);
                     if (ratio > (1.0f / lodFalloffRate_)) {
                         ensureLOD(node);
                         if (node->lodData) {
@@ -1167,7 +1178,7 @@ public:
                         
                         float childtMin = tMin;
                         float childtMax = tMax;
-                        if (rayBoxIntersect(origin, dir, childBounds, childtMin, childtMax)) {
+                        if (rayBoxIntersect(ray, childBounds, childtMin, childtMax)) {
                             traverseNode(node->children[childIdx].get(), origin, dir, childtMin, childtMax);
                             if (hit != nullptr) return;
                         }
@@ -1176,7 +1187,7 @@ public:
             }
         };
         float tMin, tMax;
-        if (rayBoxIntersect(origin, direction, root_->bounds, tMin, tMax)) {
+        if (rayBoxIntersect(oray, root_->bounds, tMin, tMax)) {
             tMax = std::min(tMax, maxDist);
             traverseNode(root_.get(), origin, direction, tMin, tMax);
         }
@@ -1184,7 +1195,6 @@ public:
     }
 
     frame fastRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB) {
-        
         PointType origin = cam.origin;
         PointType dir = cam.direction.normalized();
         PointType up = cam.up.normalized();
@@ -1352,31 +1362,29 @@ public:
         os << "  Point Data        : " << (dataMem / 1024.0) << " KB\n";
         os << "========================================\n" << std::defaultfloat;
     }
-
     bool empty() const { return size == 0; }
 
     void clear() {
-        if (!root_) return;
-        
-        std::function<void(OctreeNode*)> clearNode = [&](OctreeNode* node) {
-            if (!node) return;
-            
-            node->points.clear();
-            node->points.shrink_to_fit();
-            node->lodData = nullptr;
-            
-            for (int i = 0; i < 8; ++i) {
-                if (node->children[i]) {
-                    clearNode(node->children[i].get());
-                    node->children[i].reset(nullptr);
+        if (root_) {   
+            std::function<void(OctreeNode*)> clearNode = [&](OctreeNode* node) {
+                if (!node) return;
+                
+                node->points.clear();
+                node->points.shrink_to_fit();
+                node->lodData = nullptr;
+                
+                for (int i = 0; i < 8; ++i) {
+                    if (node->children[i]) {
+                        clearNode(node->children[i].get());
+                        node->children[i].reset(nullptr);
+                    }
                 }
-            }
+                
+                node->isLeaf = true;
+            };
             
-            node->isLeaf = true;
-        };
-        
-        clearNode(root_.get());
-        
+            clearNode(root_.get());
+        }
         PointType minBound = root_->bounds.first;
         PointType maxBound = root_->bounds.second;
         root_ = std::make_unique<OctreeNode>(minBound, maxBound);
