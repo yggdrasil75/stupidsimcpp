@@ -418,37 +418,38 @@ private:
     }
 
     bool rayBoxIntersect(const Ray& ray, const BoundingBox& box, float& tMin, float& tMax) const {
-        tMin = 0.0f;
-        tMax = std::numeric_limits<float>::max();
+        float tx1 = (box.first[0] - ray.origin[0]) * ray.invDir[0];
+        float tx2 = (box.second[0] - ray.origin[0]) * ray.invDir[0];
 
-        for (int i = 0; i < Dim; ++i) {
-            if (std::abs(ray.dir[i]) < std::numeric_limits<float>::epsilon()) {
-                if (ray.origin[i] < box.first[i] || ray.origin[i] > box.second[i]) return false;
-            } else {
-                float t1 = (box.first[i] - ray.origin[i]) * ray.invDir[i];
-                float t2 = (box.second[i] - ray.origin[i]) * ray.invDir[i];
-                
-                if (t1 > t2) std::swap(t1, t2);
-                tMin = std::max(tMin, t1);
-                tMax = std::min(tMax, t2);
-                if (tMin > tMax) return false;
-            }
-        }
-        return true;
+        tMin = std::min(tx1, tx2);
+        tMax = std::max(tx1, tx2);
+
+        float ty1 = (box.first[1] - ray.origin[1]) * ray.invDir[1];
+        float ty2 = (box.second[1] - ray.origin[1]) * ray.invDir[1];
+
+        tMin = std::max(tMin, std::min(ty1, ty2));
+        tMax = std::min(tMax, std::max(ty1, ty2));
+
+        float tz1 = (box.first[2] - ray.origin[2]) * ray.invDir[2];
+        float tz2 = (box.second[2] - ray.origin[2]) * ray.invDir[2];
+
+        tMin = std::max(tMin, std::min(tz1, tz2));
+        tMax = std::min(tMax, std::max(tz1, tz2));
+
+        return tMax >= std::max(0.0f, tMin);
     }
 
     bool raySphereIntersect(const Ray& ray, const PointType& center, float radiusSq, float& t) const {
         PointType oc = ray.origin - center;
-        float a = ray.dir.dot(ray.dir);
         float b = 2.0f * oc.dot(ray.dir);
         float c = oc.dot(oc) - radiusSq;
-        float discriminant = b * b - 4 * a * c;
+        float discriminant = b * b - 4 * c;
         
         if (discriminant < 0) return false;
         
         float sqrtDisc = sqrt(discriminant);
-        float t0 = (-b - sqrtDisc) / (2.0f * a);
-        float t1 = (-b + sqrtDisc) / (2.0f * a);
+        float t0 = (-b - sqrtDisc) * 0.5f;
+        float t1 = (-b + sqrtDisc) * 0.5f;
         
         t = t0;
         if (t0 < EPSILON) {
@@ -456,7 +457,6 @@ private:
             if (t1 < EPSILON) return false;
         }
         return true;
-
     }
 
     bool rayCubeIntersect(const Ray& ray, const NodeData* cube,
@@ -478,14 +478,14 @@ private:
         hitPoint = ray.origin + ray.dir * t;
         
         normal = PointType::Zero();
+        const float bias = 1.0001f;
         
-        for (int i = 0; i < Dim; ++i) {
-            if (std::abs(hitPoint[i] - bounds.first[i]) < EPSILON) {
-                normal[i] = -1.0f;
-            } else if (std::abs(hitPoint[i] - bounds.second[i]) < EPSILON) {
-                normal[i] = 1.0f;
-            }
-        }
+        if (std::abs(hitPoint[0] - bounds.first[0]) < EPSILON * bias) normal[0] = -1.0f;
+        else if (std::abs(hitPoint[0] - bounds.second[0]) < EPSILON * bias) normal[0] = 1.0f;
+        if (std::abs(hitPoint[1] - bounds.first[1]) < EPSILON * bias) normal[1] = -1.0f;
+        else if (std::abs(hitPoint[1] - bounds.second[1]) < EPSILON * bias) normal[1] = 1.0f;
+        if (std::abs(hitPoint[2] - bounds.first[2]) < EPSILON * bias) normal[2] = -1.0f;
+        else if (std::abs(hitPoint[2] - bounds.second[2]) < EPSILON * bias) normal[2] = 1.0f;
         
         return true;
     }
