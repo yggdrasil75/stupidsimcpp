@@ -176,7 +176,7 @@ public:
 
     fluidSim() : grid({-config.gridSizeCube, -config.gridSizeCube, -config.gridSizeCube}, {config.gridSizeCube, config.gridSizeCube, config.gridSizeCube}) {
         closeThresh = 0.01f * config.SMOOTHING_RADIUS;
-        grid.setBackgroundColor({0.1f, 0.1f, 0.2f});
+        //grid.setBackgroundColor({0.1f, 0.1f, 0.2f});
         gradientmap.emplace(0.0, Eigen::Vector3f(1, 0, 0));
         gradientmap.emplace(0.5, Eigen::Vector3f(0, 1, 0));
         gradientmap.emplace(1.0, Eigen::Vector3f(0, 0, 1));
