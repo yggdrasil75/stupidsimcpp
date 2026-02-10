@@ -29,11 +29,6 @@ public:
     using PointType = Eigen::Matrix<float, Dim, 1>;
     using BoundingBox = std::pair<PointType, PointType>;
     
-    enum class Shape {
-        SPHERE,
-        CUBE
-    };
-    
     struct NodeData {
         T data;
         PointType position;
@@ -46,17 +41,16 @@ public:
         float emittance;
         float refraction; 
         float reflection;
-        Shape shape;
 
         NodeData(const T& data, const PointType& pos, bool visible, Eigen::Vector3f color, float size = 0.01f,
                  bool active = true, int objectId = -1, bool light = false, float emittance = 0.0f, 
-                 float refraction = 0.0f, float reflection = 0.0f, Shape shape = Shape::SPHERE) 
+                 float refraction = 0.0f, float reflection = 0.0f) 
                 : data(data), position(pos), objectId(objectId), active(active), visible(visible), 
                 color(color), size(size), light(light), emittance(emittance), refraction(refraction), 
-                reflection(reflection), shape(shape) {}
+                reflection(reflection) {}
         
         NodeData() : objectId(-1), active(false), visible(false), size(0.0f), light(false), 
-                     emittance(0.0f), refraction(0.0f), reflection(0.0f), shape(Shape::SPHERE) {}
+                     emittance(0.0f), refraction(0.0f), reflection(0.0f) {}
         
         // Helper method to get half-size for cube
         PointType getHalfSize() const {
@@ -214,7 +208,6 @@ private:
                 return;
             }
         }
-        
 
         auto accumulate = [&](const std::shared_ptr<NodeData>& item) {
             if (!item || !item->active || !item->visible) return;
@@ -255,7 +248,6 @@ private:
             lod->light = anyLight;
             lod->active = true;
             lod->visible = true;
-            lod->shape = Shape::CUBE;
             lod->objectId = -1; 
 
             node->lodData = lod;
@@ -304,7 +296,6 @@ private:
                 writeVal(out, pt->emittance);
                 writeVal(out, pt->refraction);
                 writeVal(out, pt->reflection);
-                writeVal(out, static_cast<int>(pt->shape));
             }
         } else {
             // Write bitmask of active children
@@ -351,7 +342,6 @@ private:
                 readVal(in, pt->reflection);
                 int shapeInt;
                 readVal(in, shapeInt);
-                pt->shape = static_cast<Shape>(shapeInt);
                 node->points.push_back(pt);
             }
         } else {
@@ -437,26 +427,6 @@ private:
         tMax = std::min(tMax, std::max(tz1, tz2));
 
         return tMax >= std::max(0.0f, tMin);
-    }
-
-    bool raySphereIntersect(const Ray& ray, const PointType& center, float radiusSq, float& t) const {
-        PointType oc = ray.origin - center;
-        float b = 2.0f * oc.dot(ray.dir);
-        float c = oc.dot(oc) - radiusSq;
-        float discriminant = b * b - 4 * c;
-        
-        if (discriminant < 0) return false;
-        
-        float sqrtDisc = sqrt(discriminant);
-        float t0 = (-b - sqrtDisc) * 0.5f;
-        float t1 = (-b + sqrtDisc) * 0.5f;
-        
-        t = t0;
-        if (t0 < EPSILON) {
-            t = t1;
-            if (t1 < EPSILON) return false;
-        }
-        return true;
     }
 
     bool rayCubeIntersect(const Ray& ray, const NodeData* cube,
@@ -563,9 +533,9 @@ public:
 
     bool set(const T& data, const PointType& pos, bool visible, Eigen::Vector3f color, float size, bool active,
              int objectId = -1, bool light = false, float emittance = 0.0f, float refraction = 0.0f, 
-             float reflection = 0.0f, Shape shape = Shape::SPHERE) {
+             float reflection = 0.0f) {
         auto pointData = std::make_shared<NodeData>(data, pos, visible, color, size, active, objectId,
-                                                    light, emittance, refraction, reflection, shape);
+                                                    light, emittance, refraction, reflection);
         if (insertRecursive(root_.get(), pointData, 0)) {
             this->size++;
             return true;
@@ -744,61 +714,38 @@ public:
     bool update(const PointType& oldPos, const PointType& newPos, const T& newData, bool newVisible = true, 
                 Eigen::Vector3f newColor = Eigen::Vector3f(1.0f, 1.0f, 1.0f), float newSize = 0.01f, bool newActive = true,
                 int newObjectId = -2, bool newLight = false, float newEmittance = 0.0f, float newRefraction = 0.0f, 
-                float newReflection = 0.0f, Shape newShape = Shape::SPHERE, float tolerance = EPSILON) {
+                float newReflection = 0.0f, float tolerance = EPSILON) {
     
-        // Find the existing point
         auto pointData = find(oldPos, tolerance);
         if (!pointData) return false;
         
-        // If position changed, we need to remove and reinsert
-        float moveDistSq = (newPos - oldPos).squaredNorm();
-        if (moveDistSq > tolerance * tolerance) {
-            // Save the data
-            T dataCopy = pointData->data;
-            bool activeCopy = pointData->active;
-            bool visibleCopy = pointData->visible;
-            Eigen::Vector3f colorCopy = pointData->color;
-            float sizeCopy = pointData->size;
-            int objectIdCopy = pointData->objectId;
-            bool lightCopy = pointData->light;
-            float emittanceCopy = pointData->emittance;
-            float refractionCopy = pointData->refraction;
-            float reflectionCopy = pointData->reflection;
-            Shape shapeCopy = pointData->shape;
-            
-            // Remove the old point
-            if (!remove(oldPos, tolerance)) {
-                return false;
-            }
-            
-            // Insert at new position with updated properties
-            return set(newData, newPos, 
-                    newVisible ? newVisible : visibleCopy,
-                    newColor != Eigen::Vector3f(1.0f, 1.0f, 1.0f) ? newColor : colorCopy,
-                    newSize > 0 ? newSize : sizeCopy,
-                    newActive ? newActive : activeCopy,
-                    newObjectId != -2 ? newObjectId : objectIdCopy,
-                    newLight ? newLight : lightCopy,
-                    newEmittance > 0 ? newEmittance : emittanceCopy,
-                    newRefraction >= 0 ? newRefraction : refractionCopy,
-                    newReflection >= 0 ? newReflection : reflectionCopy,
-                    newShape);
-        } else {
-            // Just update properties in place
-            pointData->data = newData;
-            pointData->position = newPos;  // Minor adjustment within tolerance
-            pointData->visible = newVisible;
-            pointData->color = newColor;
-            pointData->size = newSize;
-            if (newObjectId != -2) pointData->objectId = newObjectId;
-            pointData->active = newActive;
-            pointData->light = newLight;
-            pointData->emittance = newEmittance;
-            pointData->refraction = newRefraction;
-            pointData->reflection = newReflection;
-            pointData->shape = newShape;
-            return true;
+        T dataCopy = pointData->data;
+        bool activeCopy = pointData->active;
+        bool visibleCopy = pointData->visible;
+        Eigen::Vector3f colorCopy = pointData->color;
+        float sizeCopy = pointData->size;
+        int objectIdCopy = pointData->objectId;
+        bool lightCopy = pointData->light;
+        float emittanceCopy = pointData->emittance;
+        float refractionCopy = pointData->refraction;
+        float reflectionCopy = pointData->reflection;
+        
+        // Remove the old point
+        if (!remove(oldPos, tolerance)) {
+            return false;
         }
+        
+        // Insert at new position with updated properties
+        return set(newData, newPos, 
+                newVisible ? newVisible : visibleCopy,
+                newColor != Eigen::Vector3f(1.0f, 1.0f, 1.0f) ? newColor : colorCopy,
+                newSize > 0 ? newSize : sizeCopy,
+                newActive ? newActive : activeCopy,
+                newObjectId != -2 ? newObjectId : objectIdCopy,
+                newLight ? newLight : lightCopy,
+                newEmittance > 0 ? newEmittance : emittanceCopy,
+                newRefraction >= 0 ? newRefraction : refractionCopy,
+                newReflection >= 0 ? newReflection : reflectionCopy);
     }
 
     bool move(const PointType& pos, const PointType& newPos) {
@@ -806,7 +753,7 @@ public:
         if (!pointData) return false;
         bool success = set(pointData->data, newPos, pointData->visible, pointData->color, pointData->size, 
                    pointData->active, pointData->objectId, pointData->light, pointData->emittance, 
-                   pointData->refraction, pointData->reflection, pointData->shape);
+                   pointData->refraction, pointData->reflection);
         if (success) {
             remove(pos);
             return true;
@@ -877,14 +824,6 @@ public:
         return true;
     }
 
-    bool setShape(const PointType& pos, Shape shape, float tolerance = EPSILON) {
-        auto pointData = find(pos, tolerance);
-        if (!pointData) return false;
-        
-        pointData->shape = shape;
-        return true;
-    }
-
     std::vector<std::shared_ptr<NodeData>> voxelTraverse(const PointType& origin, const PointType& direction,
                                          float maxDist, bool stopAtFirstHit, bool enableLOD = false) const {
         std::vector<std::shared_ptr<NodeData>> hits;
@@ -924,20 +863,11 @@ public:
                     if (!pointData->active) continue;
                     
                     float t;
-                    if (pointData->shape == Shape::SPHERE) {
-                        if (raySphereIntersect(ray, pointData->position, pointData->size * pointData->size, t)) {
-                            if (t >= 0 && t <= maxDist) {
-                                hits.emplace_back(pointData);
-                                if (stopAtFirstHit) return;
-                            }
-                        }
-                    } else {
-                        PointType normal, hitPoint;
-                        if (rayCubeIntersect(ray, pointData.get(), t, normal, hitPoint)) {
-                            if (t >= 0 && t <= maxDist) {
-                                hits.emplace_back(pointData);
-                                if (stopAtFirstHit) return;
-                            }
+                    PointType normal, hitPoint;
+                    if (rayCubeIntersect(ray, pointData.get(), t, normal, hitPoint)) {
+                        if (t >= 0 && t <= maxDist) {
+                            hits.emplace_back(pointData);
+                            if (stopAtFirstHit) return;
                         }
                     }
                 }
@@ -1003,29 +933,10 @@ public:
             PointType normal;
             float t = 0.0f;
             
-            // Calculate intersection based on shape
-            if (obj->shape == Shape::SPHERE) {
-                // Sphere intersection
-                PointType center = obj->position;
-                float radius = obj->size;
-                PointType L_vec = center - rayOrig;
-                float tca = L_vec.dot(rayDir);
-                float d2 = L_vec.dot(L_vec) - tca * tca;
-                float radius2 = radius * radius;
-
-                if (d2 <= radius2) {
-                    float thc = std::sqrt(radius2 - d2);
-                    t = tca - thc; 
-                    if (t < 0.001f) t = tca + thc;
-                }
-                
-                hitPoint = rayOrig + rayDir * t;
-                normal = (hitPoint - center).normalized();
-            } else {
-                PointType cubeNormal;
-                if (!rayCubeIntersect(ray, obj.get(), t, normal, hitPoint)) {
-                    return globalIllumination ? skylight_ : Eigen::Vector3f::Zero();
-                }
+            // Calculate intersection
+            PointType cubeNormal;
+            if (!rayCubeIntersect(ray, obj.get(), t, normal, hitPoint)) {
+                return globalIllumination ? skylight_ : Eigen::Vector3f::Zero();
             }
 
             Eigen::Vector3f finalColor = globalIllumination ? skylight_ : Eigen::Vector3f::Zero();
@@ -1224,7 +1135,7 @@ public:
                 PointType rayDir = dir + (right * px) + (up * py);
                 rayDir.normalize();
 
-                Eigen::Vector3f color = backgroundColor_; // Start with background color
+                Eigen::Vector3f color = backgroundColor_;
                 
                 auto hit = fastVoxelTraverse(origin, rayDir, std::numeric_limits<float>::max(), true);
                 if (hit != nullptr) {

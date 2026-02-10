@@ -127,7 +127,7 @@ void createSphere(const defaults& config, const spheredefaults& sconfig, Octree<
                         pos.z() >= 0 && pos.z() < config.gridSizecube) {
                         
                         grid.set(1, pos, true, colorVec, voxelSize, true, 1,
-                                    sconfig.light, sconfig.emittance, sconfig.refraction, sconfig.reflection, Octree<int>::Shape::CUBE);
+                                    sconfig.light, sconfig.emittance, sconfig.refraction, sconfig.reflection);
                     }
                 }
             }

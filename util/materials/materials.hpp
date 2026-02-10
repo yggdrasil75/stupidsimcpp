@@ -1,6 +1,7 @@
 #ifndef G3_MATERIALS_HPP
 #define G3_MATERIALS_HPP
 
+#include "../../eigen/Eigen/Dense"
 #include "colors.hpp"
 
 struct Material {
@@ -15,6 +16,7 @@ struct Material {
     float density;
     float speedOfSound;
     float audioAbsorption;
+    Eigen::Vector3f rgb; //for the fast version.
 
     // Constructor with sensible defaults
     Material(float ior = 1.5f, float dispersion = 0.0f, float chromaticity = 550.0f, 
@@ -39,7 +41,9 @@ struct Material {
         
         float bandwidth = 10.0f + (1.0f - saturation) * 290.0f;
 
-        return Material(ior, 0.02f, wavelength, bandwidth, transmission, roughness, emittance, 2.0f, 3000.0f, 0.1f, isLight);
+        Material outerial(ior, 0.02f, wavelength, bandwidth, transmission, roughness, emittance, 2.0f, 3000.0f, 0.1f, isLight);
+        outerial.rgb = Eigen::Vector3f(r, g, b);
+        return outerial;
     }
 };
 
