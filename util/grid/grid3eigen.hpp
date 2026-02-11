@@ -340,8 +340,6 @@ private:
                 readVal(in, pt->emittance);
                 readVal(in, pt->refraction);
                 readVal(in, pt->reflection);
-                int shapeInt;
-                readVal(in, shapeInt);
                 node->points.push_back(pt);
             }
         } else {
