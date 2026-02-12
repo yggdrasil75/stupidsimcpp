@@ -10,6 +10,7 @@
 #include <algorithm>
 
 #include "../util/grid/grid3eigen.hpp"
+#include "../util/grid/gridmesh.hpp"
 #include "../util/output/bmpwriter.hpp"
 #include "../util/output/frame.hpp"
 #include "../util/timing_decorator.cpp"
@@ -36,6 +37,9 @@ struct defaults {
     int lodDist = 500;
     float lodDropoff = 0.1;
     PNoise2 noise = PNoise2(42);
+    
+    float meshResolution = 0.5f;
+    float meshIsoLevel = 0.4f;
 };
 
 struct spheredefaults {
@@ -84,6 +88,9 @@ std::chrono::steady_clock::time_point lastStatsUpdate;
 const std::chrono::seconds STATS_UPDATE_INTERVAL(60);
 std::string cachedStats;
 bool statsNeedUpdate = true;
+
+CachedGridMesh<int> planetMesh(1); 
+bool meshNeedsUpdate = false;
 
 void createSphere(const defaults& config, const spheredefaults& sconfig, Octree<int>& grid) {
     if (!grid.empty()) grid.clear();
@@ -167,6 +174,8 @@ void createSphere(const defaults& config, const spheredefaults& sconfig, Octree<
             }
         }
     }
+    std::cout << "voxel grid ready" << std::endl;
+    meshNeedsUpdate = true;
 }
 
 void addStar(const defaults& config, const stardefaults& starconf, Octree<int>& grid) {
@@ -176,6 +185,8 @@ void addStar(const defaults& config, const stardefaults& starconf, Octree<int>& 
     PointType pos(starconf.x, starconf.y, starconf.z);
 
     grid.set(2, pos, true, colorVec, starconf.size, true, 2, true, starconf.emittance, 0.0f, 0.0f);
+    
+    meshNeedsUpdate = true;
 }
 
 void updateStatsCache(Octree<int>& grid) {
@@ -190,16 +201,26 @@ void livePreview(Octree<int>& grid, defaults& config, const Camera& cam) {
     std::lock_guard<std::mutex> lock(PreviewMutex);
     updatePreview = true;
     
+    if (meshNeedsUpdate) {
+        planetMesh.setResolution(config.meshResolution);
+        planetMesh.setIsoLevel(config.meshIsoLevel);
+        planetMesh.update(grid);
+        meshNeedsUpdate = false;
+        statsNeedUpdate = true;
+    }
+
     auto renderStart = std::chrono::high_resolution_clock::now();
     frame currentPreviewFrame;
-    grid.setLODMinDistance(config.lodDist);
-    grid.setLODFalloff(config.lodDropoff);
-    if (config.slowRender) {
-        currentPreviewFrame = grid.renderFrame(cam, config.outWidth, config.outHeight, frame::colormap::RGB, config.rayCount, config.reflectCount, config.globalIllumination, config.useLod);
-    } else {
-        currentPreviewFrame = grid.fastRenderFrame(cam, config.outWidth, config.outHeight, frame::colormap::RGB);
-    }
+
+    currentPreviewFrame = planetMesh.render(cam, config.outWidth, config.outHeight, 0.1f, 10000.0f, frame::colormap::RGB);
     
+    // grid.setLODMinDistance(config.lodDist);
+    // grid.setLODFalloff(config.lodDropoff);
+    // if (config.slowRender) {
+    //     currentPreviewFrame = grid.renderFrame(cam, config.outWidth, config.outHeight, frame::colormap::RGB, config.rayCount, config.reflectCount, config.globalIllumination, config.useLod);
+    // } else {
+    //     currentPreviewFrame = grid.fastRenderFrame(cam, config.outWidth, config.outHeight, frame::colormap::RGB);
+    // }
     
     auto renderEnd = std::chrono::high_resolution_clock::now();
     renderFrameTime = std::chrono::duration<double>(renderEnd - renderStart).count();
@@ -294,7 +315,7 @@ int main() {
     #endif
 
     bool application_not_closed = true;
-    GLFWwindow* window = glfwCreateWindow((int)(1280), (int)(800), "voxelgrid live renderer", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow((int)(1280), (int)(800), "StupidSim", nullptr, nullptr);
     if (window == nullptr) {
         glfwTerminate();
         return 1;
@@ -355,7 +376,7 @@ int main() {
     float rotationSpeedZ = 0.05f;
     float autoRotationTime = 0.0f;
     PointType initialViewDir(0, 0, 1);
-    float rotationRadius = 255.0f;
+    float rotationRadius = 2000.0f;
     float yawSpeed = 0.5f;
     float pitchSpeed = 0.3f;
     float rollSpeed = 0.2f;
@@ -384,6 +405,7 @@ int main() {
         gridInitialized = true;
         updateStatsCache(grid);
         resetView(cam, config.gridSizecube);
+        meshNeedsUpdate = true;
     }
     
     while (!glfwWindowShouldClose(window)) {
@@ -490,20 +512,29 @@ int main() {
                 sphereConf.centerZ = pos[2];
             }
             ImGui::DragFloat("Radius", &sphereConf.radius, 0.5f, 1.0f, 250.0f);
-            ImGui::DragFloat("Density (Overlap)", &sphereConf.voxelSize, 0.05f, 0.1f, 5.0f);
+            ImGui::DragFloat("Density (Overlap)", &sphereConf.voxelSize, 0.1f, 1.0f, 100.0f);
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Multiplies calculated point size. >1.0 ensures solid surface.");
             }
             ImGui::ColorEdit3("Color", sphereConf.color);
             
             ImGui::Separator();
-            ImGui::Checkbox("Is Light", &sphereConf.light);
-            if(sphereConf.light) {
-                ImGui::DragFloat("Emittance", &sphereConf.emittance, 0.1f, 0.0f, 100.0f);
+            ImGui::Text("Marching Cubes Config");
+            if (ImGui::SliderFloat("Mesh Resolution", &config.meshResolution, 0.1f, 2.0f)) {
+                meshNeedsUpdate = true;
             }
-            ImGui::SliderFloat("Reflection", &sphereConf.reflection, 0.0f, 1.0f);
-            ImGui::SliderFloat("Refraction", &sphereConf.refraction, 0.0f, 1.0f);
-            ImGui::Checkbox("Fill Inside", &sphereConf.fillInside);
+            if (ImGui::SliderFloat("Iso Level", &config.meshIsoLevel, 0.01f, 1.0f)) {
+                meshNeedsUpdate = true;
+            }
+
+            ImGui::Separator();
+            ImGui::Checkbox("Is Light", &sphereConf.light);
+            // if(sphereConf.light) {
+            //     ImGui::DragFloat("Emittance", &sphereConf.emittance, 0.1f, 0.0f, 100.0f);
+            // }
+            // ImGui::SliderFloat("Reflection", &sphereConf.reflection, 0.0f, 1.0f);
+            // ImGui::SliderFloat("Refraction", &sphereConf.refraction, 0.0f, 1.0f);
+            // ImGui::Checkbox("Fill Inside", &sphereConf.fillInside);
 
             if (ImGui::CollapsingHeader("Star/Sun Parameters", ImGuiTreeNodeFlags_DefaultOpen)) {
                 ImGui::Checkbox("Enable Star", &starConf.enabled);
@@ -516,7 +547,7 @@ int main() {
                     starConf.z = starPos[2];
                 }
 
-                ImGui::DragFloat("Size (Radius)", &starConf.size, 1.0f, 1.0f, 500.0f);
+                ImGui::DragFloat("Size (Radius)", &starConf.size, 1.0f, 1.0f, 1000.0f);
                 ImGui::DragFloat("Brightness", &starConf.emittance, 1.0f, 0.0f, 1000.0f);
                 ImGui::ColorEdit3("Light Color", starConf.color);
             }
@@ -604,16 +635,15 @@ int main() {
             float maxSliderValueX = config.gridSizecube;
             float maxSliderValueY = config.gridSizecube;
             float maxSliderValueZ = config.gridSizecube;
-            float maxSliderValueRotation = 360.0f;
             
-            ImGui::Text("Position (0 to grid size²):");
-            if (ImGui::SliderFloat("Camera X", &camX, 0.0f, maxSliderValueX)) {
+            ImGui::Text("Position (0 to grid size):");
+            if (ImGui::SliderFloat("Camera X", &camX, -maxSliderValueX, maxSliderValueX)) {
                 cam.origin[0] = camX;
             }
-            if (ImGui::SliderFloat("Camera Y", &camY, 0.0f, maxSliderValueY)) {
+            if (ImGui::SliderFloat("Camera Y", &camY, -maxSliderValueY, maxSliderValueY)) {
                 cam.origin[1] = camY;
             }
-            if (ImGui::SliderFloat("Camera Z", &camZ, 0.0f, maxSliderValueZ)) {
+            if (ImGui::SliderFloat("Camera Z", &camZ, -maxSliderValueZ, maxSliderValueZ)) {
                 cam.origin[2] = camZ;
             }
             
@@ -629,13 +659,12 @@ int main() {
                 cam.direction[2] = camvZ;
             }
 
-            if (ImGui::SliderFloat("Camera Speed", &camspeed, 1, 100)) {
+            if (ImGui::SliderFloat("Camera Speed", &camspeed, 1, 500)) {
                 cam.movementSpeed = camspeed;
             }
             
             ImGui::Separator();
             
-            // Focus Button
             if (ImGui::Button("Focus on Planet")) {
                 PointType target(sphereConf.centerX, sphereConf.centerY, sphereConf.centerZ);
                 PointType newDir = (target - cam.origin).normalized();
@@ -672,10 +701,7 @@ int main() {
 
             ImGui::Separator();
             ImGui::Text("Current Camera Position:");
-            ImGui::Text("X: %.2f, Y: %.2f, Z: %.2f", 
-                        cam.origin[0], 
-                        cam.origin[1], 
-                        cam.origin[2]);
+            ImGui::Text("X: %.2f, Y: %.2f, Z: %.2f", cam.origin[0], cam.origin[1], cam.origin[2]);
 
             ImGui::Text("Auto-Rotation:");
             
@@ -727,7 +753,8 @@ int main() {
                 // Update camera
                 cam.origin = PointType(camX, camY, camZ);
                 cam.direction = PointType(camvX, camvY, camvZ);
-                
+                cam.lookAt(PointType(sphereConf.centerX, sphereConf.centerY, sphereConf.centerZ));
+
                 // Sliders to control rotation speeds
                 ImGui::SliderFloat("X Speed", &rotationSpeedX, 0.01f, 1.0f);
                 ImGui::SliderFloat("Y Speed", &rotationSpeedY, 0.01f, 1.0f);
@@ -735,7 +762,7 @@ int main() {
             }
             
             // Slider for orbit radius
-            ImGui::SliderFloat("Orbit Radius", &rotationRadius, 10.0f, 2000.0f);
+            ImGui::SliderFloat("Orbit Radius", &rotationRadius, 10.0f, 5000.0f);
 
             if (autoRotateView) {
                 ImGui::SameLine();
@@ -791,16 +818,19 @@ int main() {
 
             ImGui::Separator();
 
-            ImGui::Checkbox("update Preview", &worldPreview);
-            ImGui::Checkbox("Use Slower renderer", &config.slowRender);
-            if (config.slowRender) {
-                ImGui::InputInt("Rays per pixel", &config.rayCount);
-                ImGui::InputInt("Max reflections", &config.reflectCount);
-            }
-            ImGui::InputFloat("Lod dropoff", &config.lodDropoff);
-            ImGui::InputInt("lod minimum Distance", &config.lodDist);
-            ImGui::Checkbox("use Global illumination", &config.globalIllumination);
-            ImGui::Checkbox("use Lod", &config.useLod);
+            ImGui::Checkbox("Continuous Preview", &worldPreview);
+
+            // Removed Raytracing specific controls (Global Illum, LOD) as they don't apply to raster mesh
+            // ImGui::Checkbox("update Preview", &worldPreview);
+            // ImGui::Checkbox("Use Slower renderer", &config.slowRender);
+            // if (config.slowRender) {
+            //     ImGui::InputInt("Rays per pixel", &config.rayCount);
+            //     ImGui::InputInt("Max reflections", &config.reflectCount);
+            // }
+            // ImGui::InputFloat("Lod dropoff", &config.lodDropoff);
+            // ImGui::InputInt("lod minimum Distance", &config.lodDist);
+            // ImGui::Checkbox("use Global illumination", &config.globalIllumination);
+            // ImGui::Checkbox("use Lod", &config.useLod);
 
             ImGui::End();
         }

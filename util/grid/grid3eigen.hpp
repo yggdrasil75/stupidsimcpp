@@ -211,7 +211,6 @@ private:
 
         auto accumulate = [&](const std::shared_ptr<NodeData>& item) {
             if (!item || !item->active || !item->visible) return;
-            avgPos += item->position;
             avgColor += item->color;
             avgEmittance += item->emittance;
             avgRefl += item->reflection;
@@ -236,7 +235,7 @@ private:
             
             auto lod = std::make_shared<NodeData>();
             
-            lod->position = avgPos * invCount;
+            lod->position = node->center;
             lod->color = avgColor * invCount;
             
             PointType nodeDims = node->bounds.second - node->bounds.first;
@@ -825,8 +824,6 @@ public:
     std::vector<std::shared_ptr<NodeData>> voxelTraverse(const PointType& origin, const PointType& direction,
                                          float maxDist, bool stopAtFirstHit, bool enableLOD = false) const {
         std::vector<std::shared_ptr<NodeData>> hits;
-        
-        if (empty()) return hits;
         float invLodf = 1.0f / lodFalloffRate_;
         uint8_t raySignMask = (direction.x() < 0 ? 1 : 0) | (direction.y() < 0 ? 2 : 0) | (direction.z() < 0 ? 4 : 0);
         Ray oray(origin, direction);
@@ -1014,30 +1011,27 @@ public:
         return outFrame;
     }
 
-    std::shared_ptr<NodeData> fastVoxelTraverse(const PointType& origin, const PointType& direction,
-                                         float maxDist, bool enableLOD = false) const {
+    std::shared_ptr<NodeData> fastVoxelTraverse(const Ray& ray, float maxDist, bool enableLOD = false) const {
         std::shared_ptr<NodeData> hit;
-        Ray oray(origin, direction);
         if (empty()) return hit;
+        float lodRatio = 1.0f / lodFalloffRate_;
 
         std::function<void(OctreeNode*, const PointType&, const PointType&, float, float)> traverseNode = 
                         [&](OctreeNode* node, const PointType& origin, const PointType& dir, float tMin, float tMax) {
             if (!node || tMin > tMax) return;
-            Ray ray(origin, dir);
 
             // LOD Check for fast traverse
             if (enableLOD && !node->isLeaf) {
                 float dist = (node->center - origin).norm();
                 float nodeSize = (node->bounds.second - node->bounds.first).norm();
-                if (dist > lodMinDistance_) {
+                if (dist > lodMinDistance_ && dist <= maxDist) {
                     float ratio = dist / (nodeSize + EPSILON);
-                    if (ratio > (1.0f / lodFalloffRate_)) {
+                    if (ratio > lodRatio) {
                         ensureLOD(node);
                         if (node->lodData) {
-                             // Project LOD
                             PointType toPoint = node->lodData->position - origin;
                             float projection = toPoint.dot(dir);
-                            if (projection >= 0 && projection <= maxDist) {
+                            if (projection >= 0) {
                                 PointType closestPoint = origin + dir * projection;
                                 float distSq = (node->lodData->position - closestPoint).squaredNorm();
                                 if (distSq < node->lodData->size * node->lodData->size) {
@@ -1096,9 +1090,9 @@ public:
             }
         };
         float tMin, tMax;
-        if (rayBoxIntersect(oray, root_->bounds, tMin, tMax)) {
+        if (rayBoxIntersect(ray, root_->bounds, tMin, tMax)) {
             tMax = std::min(tMax, maxDist);
-            traverseNode(root_.get(), origin, direction, tMin, tMax);
+            traverseNode(root_.get(), ray.origin, ray.dir, tMin, tMax);
         }
         return hit;
     }
@@ -1134,8 +1128,8 @@ public:
                 rayDir.normalize();
 
                 Eigen::Vector3f color = backgroundColor_;
-                
-                auto hit = fastVoxelTraverse(origin, rayDir, std::numeric_limits<float>::max(), true);
+                Ray ray(origin, rayDir);
+                auto hit = fastVoxelTraverse(ray, std::numeric_limits<float>::max(), true);
                 if (hit != nullptr) {
                     auto obj = hit;
                     
