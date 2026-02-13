@@ -10,7 +10,6 @@
 #include <algorithm>
 
 #include "../util/grid/grid3eigen.hpp"
-#include "../util/grid/gridmesh.hpp"
 #include "../util/output/bmpwriter.hpp"
 #include "../util/output/frame.hpp"
 #include "../util/timing_decorator.cpp"
@@ -38,7 +37,7 @@ struct defaults {
     float lodDropoff = 0.1;
     PNoise2 noise = PNoise2(42);
     
-    float meshResolution = 0.5f;
+    int meshResolution = 32;
     float meshIsoLevel = 0.4f;
 };
 
@@ -89,7 +88,7 @@ const std::chrono::seconds STATS_UPDATE_INTERVAL(60);
 std::string cachedStats;
 bool statsNeedUpdate = true;
 
-CachedGridMesh<int> planetMesh(1); 
+Scene scene;
 bool meshNeedsUpdate = false;
 
 void createSphere(const defaults& config, const spheredefaults& sconfig, Octree<int>& grid) {
@@ -200,11 +199,19 @@ void updateStatsCache(Octree<int>& grid) {
 void livePreview(Octree<int>& grid, defaults& config, const Camera& cam) {
     std::lock_guard<std::mutex> lock(PreviewMutex);
     updatePreview = true;
+
     
     if (meshNeedsUpdate) {
-        planetMesh.setResolution(config.meshResolution);
-        planetMesh.setIsoLevel(config.meshIsoLevel);
-        planetMesh.update(grid);
+        scene.clear();
+        std::shared_ptr<Mesh> planetMesh = grid.generateMesh(1, config.meshIsoLevel, config.meshResolution);
+        std::shared_ptr<Mesh> starMesh = grid.generateMesh(2, config.meshIsoLevel, config.meshResolution);
+
+        scene.addMesh(planetMesh);
+        scene.addMesh(starMesh);
+        
+        // planetMesh.setResolution(config.meshResolution);
+        // planetMesh.setIsoLevel(config.meshIsoLevel);
+        // planetMesh.update(grid);
         meshNeedsUpdate = false;
         statsNeedUpdate = true;
     }
@@ -212,7 +219,7 @@ void livePreview(Octree<int>& grid, defaults& config, const Camera& cam) {
     auto renderStart = std::chrono::high_resolution_clock::now();
     frame currentPreviewFrame;
 
-    currentPreviewFrame = planetMesh.render(cam, config.outWidth, config.outHeight, 0.1f, 10000.0f, frame::colormap::RGB);
+    currentPreviewFrame = scene.render(cam, config.outWidth, config.outHeight, 0.1f, 10000.0f, frame::colormap::RGB);
     
     // grid.setLODMinDistance(config.lodDist);
     // grid.setLODFalloff(config.lodDropoff);
@@ -520,7 +527,7 @@ int main() {
             
             ImGui::Separator();
             ImGui::Text("Marching Cubes Config");
-            if (ImGui::SliderFloat("Mesh Resolution", &config.meshResolution, 0.1f, 2.0f)) {
+            if (ImGui::SliderInt("Mesh Resolution", &config.meshResolution, 16, 128)) {
                 meshNeedsUpdate = true;
             }
             if (ImGui::SliderFloat("Iso Level", &config.meshIsoLevel, 0.01f, 1.0f)) {

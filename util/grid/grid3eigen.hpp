@@ -5,6 +5,7 @@
 #include "../timing_decorator.hpp"
 #include "../output/frame.hpp"
 #include "camera.hpp"
+#include "mesh.hpp"
 #include <vector>
 #include <array>
 #include <memory>
@@ -16,6 +17,7 @@
 #include <iomanip>
 #include <fstream>
 #include <mutex>
+#include <map>
 
 #ifdef SSE
 #include <immintrin.h>
@@ -495,6 +497,144 @@ private:
                 }
             }
         }
+    }
+
+    struct GridCell {
+        std::array<PointType, 8> p;
+        std::array<float, 8> val;
+        std::array<PointType, 8> color;
+    };
+
+    struct Vector3fCompare {
+        bool operator()(const Eigen::Vector3f& a, const Eigen::Vector3f& b) const {
+            return std::tie(a.x(), a.y(), a.z()) < std::tie(b.x(), b.y(), b.z());
+        }
+    };
+
+    std::pair<PointType, PointType> vertexInterpolate(float isolevel, const PointType& p1, const PointType& p2, float val1, float val2, const PointType& c1, const PointType& c2) {
+        if (std::abs(isolevel - val1) < 1e-5) return {p1, c1};
+        if (std::abs(isolevel - val2) < 1e-5) return {p2, c2};
+        if (std::abs(val1 - val2) < 1e-5) return {p1, c1};
+        float mu = (isolevel - val1) / (val2 - val1);
+        PointType pos = p1 + mu * (p2 - p1);
+        PointType color = c1 + mu * (c2 - c1);
+        return {pos, color};
+    }
+    
+    void polygonise(GridCell& grid, float isolevel, std::vector<PointType>& vertices, std::vector<Eigen::Vector3f>& colors, std::vector<Eigen::Vector3i>& triangles) {
+        int cubeindex = 0;
+        if (grid.val[0] < isolevel) cubeindex |= 1;
+        if (grid.val[1] < isolevel) cubeindex |= 2;
+        if (grid.val[2] < isolevel) cubeindex |= 4;
+        if (grid.val[3] < isolevel) cubeindex |= 8;
+        if (grid.val[4] < isolevel) cubeindex |= 16;
+        if (grid.val[5] < isolevel) cubeindex |= 32;
+        if (grid.val[6] < isolevel) cubeindex |= 64;
+        if (grid.val[7] < isolevel) cubeindex |= 128;
+
+        if (edgeTable[cubeindex] == 0) return;
+
+        std::array<PointType, 12> vertlist_pos;
+        std::array<PointType, 12> vertlist_color;
+
+        auto interpolate = [&](int edge_idx, int p_idx1, int p_idx2) {
+            auto [pos, col] = vertexInterpolate(isolevel, grid.p[p_idx1], grid.p[p_idx2], grid.val[p_idx1], grid.val[p_idx2], grid.color[p_idx1], grid.color[p_idx2]);
+            vertlist_pos[edge_idx] = pos;
+            vertlist_color[edge_idx] = col;
+        };
+
+        if (edgeTable[cubeindex] & 1)    interpolate(0, 0, 1);
+        if (edgeTable[cubeindex] & 2)    interpolate(1, 1, 2);
+        if (edgeTable[cubeindex] & 4)    interpolate(2, 2, 3);
+        if (edgeTable[cubeindex] & 8)    interpolate(3, 3, 0);
+        if (edgeTable[cubeindex] & 16)   interpolate(4, 4, 5);
+        if (edgeTable[cubeindex] & 32)   interpolate(5, 5, 6);
+        if (edgeTable[cubeindex] & 64)   interpolate(6, 6, 7);
+        if (edgeTable[cubeindex] & 128)  interpolate(7, 7, 4);
+        if (edgeTable[cubeindex] & 256)  interpolate(8, 0, 4);
+        if (edgeTable[cubeindex] & 512)  interpolate(9, 1, 5);
+        if (edgeTable[cubeindex] & 1024) interpolate(10, 2, 6);
+        if (edgeTable[cubeindex] & 2048) interpolate(11, 3, 7);
+
+        int currentVertCount = vertices.size();
+        
+        for (int i = 0; triTable[cubeindex][i] != -1; i += 3) {
+            Eigen::Vector3i tri;
+            for(int j=0; j<3; ++j) {
+                int table_idx = triTable[cubeindex][i+j];
+                tri[j] = currentVertCount + j; 
+                vertices.push_back(vertlist_pos[table_idx]);
+                colors.push_back(vertlist_color[table_idx]);
+            }
+            triangles.push_back(tri);
+            currentVertCount += 3;
+        }
+    }
+
+    std::pair<float, PointType> getScalarFieldValue(const PointType& pos, int objectId, float radius) {
+        auto neighbors = findInRadius(pos, radius, objectId);
+        float density = 0.0f;
+        PointType accumulatedColor = PointType::Zero();
+        float totalWeight = 0.0f;
+
+        if (neighbors.empty()) {
+            return {0.0f, {0.0f, 0.0f, 0.0f}};
+        }
+
+        for (auto& neighbor : neighbors) {
+            float distSq = (neighbor->position - pos).squaredNorm();
+            float rSq = radius * radius;
+            if (distSq < rSq) {
+                float x = distSq / rSq;
+                float w = (1.0f - x) * (1.0f - x);
+                density += w;
+                accumulatedColor += neighbor->color * w;
+                totalWeight += w;
+            }
+        }
+
+        if (totalWeight > 1e-6) {
+            return {density, accumulatedColor / totalWeight};
+        }
+        
+        return {0.0f, {0.0f, 0.0f, 0.0f}};
+    }
+
+    std::unique_ptr<Mesh> mergeMeshes(std::vector<Mesh*>& meshes, int objectId) {
+        if (meshes.empty()) return nullptr;
+
+        std::vector<Eigen::Vector3f> mergedVertices;
+        std::vector<std::vector<int>> mergedPolys;
+        std::map<Eigen::Vector3f, int, Vector3fCompare> vertexMap;
+        
+        for (auto& mesh_ptr : meshes) {
+            if (!mesh_ptr) continue;
+            Mesh& mesh = *mesh_ptr;
+
+            auto mesh_verts = mesh.vertices();
+            auto mesh_tris = mesh.polys();
+            std::vector<int> index_map(mesh_verts.size());
+
+            for (size_t i = 0; i < mesh_verts.size(); ++i) {
+                auto it = vertexMap.find(mesh_verts[i]);
+                if (it == vertexMap.end()) {
+                    int new_idx = mergedVertices.size();
+                    vertexMap[mesh_verts[i]] = new_idx;
+                    mergedVertices.push_back(mesh_verts[i]);
+                    index_map[i] = new_idx;
+                } else {
+                    index_map[i] = it->second;
+                }
+            }
+
+            for (auto& poly : mesh_tris) {
+                mergedPolys.push_back({index_map[poly[0]], index_map[poly[1]], index_map[poly[2]]});
+            }
+        }
+        
+        if (mergedVertices.empty()) return nullptr;
+        
+        return std::make_unique<Mesh>(objectId, mergedVertices, mergedPolys, std::vector<Eigen::Vector3f>{ {1.f, 1.f, 1.f} });
     }
 
 public:
@@ -1192,6 +1332,81 @@ public:
         surfaceNodes.shrink_to_fit();
 
         return surfaceNodes;
+    }
+
+    std::shared_ptr<Mesh> generateMesh(int objectId, float isolevel = 0.5f, int resolution = 32) {
+        TIME_FUNCTION;
+        if (!root_) return nullptr;
+
+        std::vector<std::shared_ptr<NodeData>> nodes;
+        collectNodesByObjectId(root_.get(), objectId, nodes);
+        if(nodes.empty()) return nullptr;
+
+        PointType minB = nodes[0]->position;
+        PointType maxB = nodes[0]->position;
+        float maxRadius = 0.0f;
+
+        for(auto& n : nodes) {
+            minB = minB.cwiseMin(n->position);
+            maxB = maxB.cwiseMax(n->position);
+            maxRadius = std::max(maxRadius, n->size);
+        }
+        
+        float padding = maxRadius * 2.0f; 
+        minB -= PointType::Constant(padding);
+        maxB += PointType::Constant(padding);
+
+        PointType size = maxB - minB;
+        PointType step = size / static_cast<float>(resolution);
+
+        std::vector<PointType> vertices;
+        std::vector<Eigen::Vector3f> vertexColors;
+        std::vector<Eigen::Vector3i> triangles;
+
+        for(int z = 0; z < resolution; ++z) {
+            for(int y = 0; y < resolution; ++y) {
+                for(int x = 0; x < resolution; ++x) {
+                    
+                    PointType currPos(
+                        minB.x() + x * step.x(),
+                        minB.y() + y * step.y(),
+                        minB.z() + z * step.z()
+                    );
+
+                    GridCell cell;
+                    
+                    PointType offsets[8] = {
+                        {0,0,0}, {step.x(),0,0}, {step.x(),step.y(),0}, {0,step.y(),0},
+                        {0,0,step.z()}, {step.x(),0,step.z()}, {step.x(),step.y(),step.z()}, {0,step.y(),step.z()}
+                    };
+
+                    bool hasInside = false;
+                    bool hasOutside = false;
+                    bool activeCell = false;
+                    for(int i=0; i<8; ++i) {
+                        cell.p[i] = currPos + offsets[i];
+                        auto [density, color] = getScalarFieldValue(cell.p[i], objectId, maxRadius * 2.0f);
+                        cell.val[i] = density;
+                        cell.color[i] = color;
+                        if(cell.val[i] >= isolevel) hasInside = true;
+                        else hasOutside = true;
+                    }
+
+                    if(hasInside && hasOutside) {
+                        polygonise(cell, isolevel, vertices, vertexColors, triangles);
+                    }
+                }
+            }
+        }
+
+        if(vertices.empty()) return nullptr;
+
+        std::vector<std::vector<int>> polys;
+        for(auto& t : triangles) {
+            polys.push_back({t[0], t[1], t[2]});
+        }
+        
+        return std::make_shared<Mesh>(objectId, vertices, polys, vertexColors);
     }
 
     void printStats(std::ostream& os = std::cout) const {
