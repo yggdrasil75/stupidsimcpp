@@ -37,7 +37,7 @@ struct defaults {
     float lodDropoff = 0.1;
     PNoise2 noise = PNoise2(42);
     
-    int meshResolution = 128;
+    int meshResolution = 16;
     float meshIsoLevel = 0.4f;
 };
 
@@ -190,8 +190,8 @@ void livePreview(Octree<int>& grid, defaults& config, const Camera& cam) {
     
     if (meshNeedsUpdate) {
         scene.clear();
-        std::shared_ptr<Mesh> planetMesh = grid.generateMesh(1, config.meshIsoLevel, config.meshResolution);
-        std::shared_ptr<Mesh> starMesh = grid.generateMesh(2, config.meshIsoLevel, config.meshResolution / 4);
+        std::shared_ptr<Mesh> planetMesh = grid.generateMesh(1, config.meshIsoLevel, pow(config.meshResolution, 2));
+        std::shared_ptr<Mesh> starMesh = grid.generateMesh(2, config.meshIsoLevel, config.meshResolution);
 
         scene.addMesh(planetMesh);
         scene.addMesh(starMesh);
@@ -506,7 +506,7 @@ int main() {
             
             ImGui::Separator();
             ImGui::Text("Marching Cubes Config");
-            if (ImGui::SliderInt("Mesh Resolution", &config.meshResolution, 16, 128)) {
+            if (ImGui::SliderInt("Mesh Resolution", &config.meshResolution, 1, 64)) {
                 meshNeedsUpdate = true;
             }
             if (ImGui::SliderFloat("Iso Level", &config.meshIsoLevel, 0.01f, 1.0f)) {

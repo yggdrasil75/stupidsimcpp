@@ -39,14 +39,19 @@ private:
     std::vector<std::vector<int>> _polys;
     std::vector<Color> _colors;
     mutable std::vector<Eigen::Vector3i> _tris;
+    mutable std::vector<Vector3f> _triNormals; 
     mutable bool _needs_triangulation = true;
+    mutable bool _needs_norm_calc = true;
     
     inline static float edgeFunction(const Vector2f& a, const Vector2f& b, const Vector2f& c) {
         return (c.x() - a.x()) * (b.y() - a.y()) - (c.y() - a.y()) * (b.x() - a.x());
     }
 public:
     Mesh(int id, const std::vector<Vector3f>& verts, const std::vector<std::vector<int>>& polys, const std::vector<Color>& colors)
-        : id(id), _vertices(verts), _polys(polys), _colors(colors) {}
+        : id(id), _vertices(verts), _polys(polys), _colors(colors) {
+            _needs_triangulation = true;
+            _needs_norm_calc = true;
+    }
 
     std::vector<Vector3f> vertices() {
         return _vertices;
@@ -56,11 +61,13 @@ public:
         if (verts.size() != _colors.size()) {
             if (_colors.size() == 1) {
                 _vertices = verts;
+                _needs_norm_calc = true; 
                 return true;
             }
             return false;
         } else {
             _vertices = verts;
+            _needs_norm_calc = true;
             return true;
         }
     }
@@ -72,6 +79,7 @@ public:
     void triangulate() {
         if (!_needs_triangulation) return;
         std::vector<Eigen::Vector3i> newPols;
+        newPols.reserve(_polys.size() * 2); 
         for (auto& pol : _polys) {
             if (pol.size() > 3) {
                 auto v0 = pol[0];
@@ -84,7 +92,33 @@ public:
             }
         }
         _tris = newPols;
+        
+        _polys.clear();
+        _polys.shrink_to_fit();
+
         _needs_triangulation = false; 
+        _needs_norm_calc = true;
+    }
+
+    void calculateNormals() {
+        if (!_needs_norm_calc) return;
+        
+        _triNormals.clear();
+        _triNormals.reserve(_tris.size());
+
+        for (const auto& tri : _tris) {
+            Vector3f v0 = _vertices[tri.x()];
+            Vector3f v1 = _vertices[tri.y()];
+            Vector3f v2 = _vertices[tri.z()];
+
+            Vector3f edge1 = v1 - v0;
+            Vector3f edge2 = v2 - v0;
+
+            // Normalized cross product gives the face normal
+            Vector3f normal = edge1.cross(edge2).normalized();
+            _triNormals.push_back(normal);
+        }
+        _needs_norm_calc = false;
     }
 
     std::vector<Color> colors() {
@@ -101,8 +135,10 @@ public:
 
     std::vector<Triangle2D> project_2d(Camera cam, int height, int width, float near, float far) {
         triangulate();
+        calculateNormals();
 
         std::vector<Triangle2D> renderList;
+        renderList.reserve(_tris.size());
 
         Vector3f forward = cam.forward();
         Vector3f right = cam.right();
@@ -160,7 +196,19 @@ public:
             validVerts[i] = true;
         }
 
-        for (const auto& triIdx : _tris) {
+        Vector3f camPos = cam.origin;
+        size_t triCount = _tris.size();
+
+        for (size_t t = 0; t < triCount; ++t) {
+            const auto& triIdx = _tris[t];
+            
+            Vector3f p0 = _vertices[triIdx.x()];
+            Vector3f viewDir = (p0 - camPos).normalized();
+            
+            if (viewDir.dot(_triNormals[t]) >= 0.0f) {
+                continue;
+            }
+
             int i0 = triIdx.x();
             int i1 = triIdx.y();
             int i2 = triIdx.z();
@@ -250,7 +298,9 @@ public:
         os << "Structure:\n";
         os << "  Total Vertices    : " << _vertices.size() << "\n";
         os << "  Total Tris        : " << _tris.size() << "\n";
-        os << "  Total Polys       : " << _polys.size() << "\n";
+        os << "  Tri Normals       : " << _triNormals.size() << "\n";
+        if (_needs_triangulation) os << "  Total Polys       : " << _polys.size() << "\n";
+        else os << "  Polys (Cleared)   : " << 0 << "\n"; 
         os << "  colors            : " << _colors.size() << "\n";
     }
 };
@@ -267,10 +317,12 @@ public:
 
     void addMesh(std::shared_ptr<Mesh> mesh) {
         _meshes.push_back(mesh);
+        updateStats();
     }
 
     void clear() {
         _meshes.clear();
+        updateStats();
     }
 
     frame render(Camera cam, int height, int width, float near, float far, frame::colormap colorformat = frame::colormap::RGB) {
