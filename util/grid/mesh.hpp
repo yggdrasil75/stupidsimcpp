@@ -9,10 +9,16 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <chrono>
 #include "../../eigen/Eigen/Dense"
 #include "../../eigen/Eigen/Geometry"
 #include "./camera.hpp"
 #include "../output/frame.hpp"
+#include "../imgui/imgui.h"
+#include "../imgui/backends/imgui_impl_glfw.h"
+#include "../imgui/backends/imgui_impl_opengl3.h"
+#include <GLFW/glfw3.h>
+#include "../stb/stb_image.h"
 
 using Vector2f = Eigen::Vector2f;
 using Vector3f = Eigen::Vector3f;
@@ -236,13 +242,26 @@ public:
         outFrame.setData(buffer, colorformat);
         return outFrame;
     }
-};
 
+    void printStats(std::ostream& os = std::cout) const {
+        os << "========================================\n";
+        os << "              Mesh STATS                \n";
+        os << "========================================\n";
+        os << "Structure:\n";
+        os << "  Total Vertices    : " << _vertices.size() << "\n";
+        os << "  Total Tris        : " << _tris.size() << "\n";
+        os << "  Total Polys       : " << _polys.size() << "\n";
+        os << "  colors            : " << _colors.size() << "\n";
+    }
+};
 
 class Scene {
 private:
     std::vector<std::shared_ptr<Mesh>> _meshes;
-
+    std::string cachedStats;
+    std::chrono::steady_clock::time_point lastStatsUpdate;
+    bool statsNeedUpdate = true;
+    const std::chrono::seconds STATS_UPDATE_INTERVAL{60};
 public:
     Scene() {}
 
@@ -267,6 +286,115 @@ public:
         });
 
         return Mesh::rasterizeTriangles(allTriangles, width, height, colorformat);
+    }
+
+    void drawSceneWindow(const char* windowTitle, Camera& cam, float nearClip = 0.1f, float farClip = 1000.0f, bool showFps = true) {
+        ImGui::Begin(windowTitle);
+
+        // Get the position and size of the content area within the ImGui window
+        ImVec2 canvas_p = ImGui::GetCursorScreenPos();
+        ImVec2 canvas_sz = ImGui::GetContentRegionAvail();
+
+        if (canvas_sz.x < 1.0f || canvas_sz.y < 1.0f) {
+            ImGui::End();
+            return;
+        }
+
+        ImDrawList* draw_list = ImGui::GetWindowDrawList();
+        
+        // Clip drawing to the specific window area
+        draw_list->PushClipRect(canvas_p, ImVec2(canvas_p.x + canvas_sz.x, canvas_p.y + canvas_sz.y), true);
+
+        // Draw background
+        draw_list->AddRectFilled(canvas_p, ImVec2(canvas_p.x + canvas_sz.x, canvas_p.y + canvas_sz.y), IM_COL32(20, 20, 20, 255));
+        
+        // Collect and project triangles
+        std::vector<Triangle2D> allTriangles;
+        for (auto& mesh : _meshes) {
+            std::vector<Triangle2D> meshTris = mesh->project_2d(cam, (int)canvas_sz.y, (int)canvas_sz.x, nearClip, farClip);
+            allTriangles.insert(allTriangles.end(), meshTris.begin(), meshTris.end());
+        }
+
+        // Sort by depth (Painter's Algorithm)
+        std::sort(allTriangles.begin(), allTriangles.end(), [](const Triangle2D& a, const Triangle2D& b) {
+            return a.depth > b.depth;
+        });
+
+        // Draw triangles
+        for (const auto& tri : allTriangles) {
+            ImVec2 p1(canvas_p.x + tri.a.x(), canvas_p.y + tri.a.y());
+            ImVec2 p2(canvas_p.x + tri.b.x(), canvas_p.y + tri.b.y());
+            ImVec2 p3(canvas_p.x + tri.c.x(), canvas_p.y + tri.c.y());
+
+            // Simple culling optimization
+            // float minX = std::min({p1.x, p2.x, p3.x});
+            // float minY = std::min({p1.y, p2.y, p3.y});
+            // float maxX = std::max({p1.x, p2.x, p3.x});
+            // float maxY = std::max({p1.y, p2.y, p3.y});
+
+            // if (maxX < canvas_p.x || minX > canvas_p.x + canvas_sz.x || 
+            //     maxY < canvas_p.y || minY > canvas_p.y + canvas_sz.y) {
+            //     continue;
+            // }
+
+            // float r = std::clamp(tri.color.x(), 0.0f, 1.0f);
+            // float g = std::clamp(tri.color.y(), 0.0f, 1.0f);
+            // float b = std::clamp(tri.color.z(), 0.0f, 1.0f);
+            
+            ImU32 col = ImGui::ColorConvertFloat4ToU32(ImVec4(tri.color.x(), tri.color.y(), tri.color.z(), 1.0f));
+            draw_list->AddTriangleFilled(p1, p2, p3, col);
+        }
+
+        // Draw FPS Counter
+        if (showFps) {
+            char fpsText[32];
+            snprintf(fpsText, sizeof(fpsText), "FPS: %.1f", ImGui::GetIO().Framerate);
+            
+            ImVec2 txtSz = ImGui::CalcTextSize(fpsText);
+            // Position: Top Right with 10px padding
+            ImVec2 txtPos = ImVec2(canvas_p.x + canvas_sz.x - txtSz.x - 10.0f, canvas_p.y + 10.0f);
+            
+            // Semi-transparent background for text
+            draw_list->AddRectFilled(
+                ImVec2(txtPos.x - 5.0f, txtPos.y - 2.0f), 
+                ImVec2(txtPos.x + txtSz.x + 5.0f, txtPos.y + txtSz.y + 2.0f), 
+                IM_COL32(0, 0, 0, 150), 
+                4.0f
+            );
+            
+            draw_list->AddText(txtPos, IM_COL32(255, 255, 255, 255), fpsText);
+        }
+
+        draw_list->PopClipRect();
+
+        // Invisible button to handle inputs over the viewport area
+        ImGui::InvisibleButton("viewport_btn", canvas_sz);
+
+        ImGui::End();
+    }
+
+    void printStats(std::ostream& os = std::cout) const {
+        os << "========================================\n";
+        os << "             Scene STATS                \n";
+        os << "========================================\n";
+        for (auto m : _meshes) {
+            m->printStats(os);
+        }
+    }
+
+    void drawGridStats() {
+        auto now = std::chrono::steady_clock::now();
+        if ((now - lastStatsUpdate) > STATS_UPDATE_INTERVAL || statsNeedUpdate) {
+            std::stringstream meshStats;
+            printStats(meshStats);
+            cachedStats = meshStats.str();
+            lastStatsUpdate = std::chrono::steady_clock::now();
+            statsNeedUpdate = false;
+        }
+        ImGui::TextUnformatted(cachedStats.c_str());
+    }
+    void updateStats() {
+        statsNeedUpdate = true;
     }
 };
 

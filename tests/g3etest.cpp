@@ -37,7 +37,7 @@ struct defaults {
     float lodDropoff = 0.1;
     PNoise2 noise = PNoise2(42);
     
-    int meshResolution = 32;
+    int meshResolution = 128;
     float meshIsoLevel = 0.4f;
 };
 
@@ -81,12 +81,6 @@ const int FRAME_HISTORY_SIZE = 60;
 std::vector<double> renderFrameTimes;
 int frameHistoryIndex = 0;
 bool firstFrameMeasured = false;
-
-// Stats update timer
-std::chrono::steady_clock::time_point lastStatsUpdate;
-const std::chrono::seconds STATS_UPDATE_INTERVAL(60);
-std::string cachedStats;
-bool statsNeedUpdate = true;
 
 Scene scene;
 bool meshNeedsUpdate = false;
@@ -188,13 +182,6 @@ void addStar(const defaults& config, const stardefaults& starconf, Octree<int>& 
     meshNeedsUpdate = true;
 }
 
-void updateStatsCache(Octree<int>& grid) {
-    std::stringstream gridstats;
-    grid.printStats(gridstats);
-    cachedStats = gridstats.str();
-    lastStatsUpdate = std::chrono::steady_clock::now();
-    statsNeedUpdate = false;
-}
 
 void livePreview(Octree<int>& grid, defaults& config, const Camera& cam) {
     std::lock_guard<std::mutex> lock(PreviewMutex);
@@ -204,7 +191,7 @@ void livePreview(Octree<int>& grid, defaults& config, const Camera& cam) {
     if (meshNeedsUpdate) {
         scene.clear();
         std::shared_ptr<Mesh> planetMesh = grid.generateMesh(1, config.meshIsoLevel, config.meshResolution);
-        std::shared_ptr<Mesh> starMesh = grid.generateMesh(2, config.meshIsoLevel, config.meshResolution);
+        std::shared_ptr<Mesh> starMesh = grid.generateMesh(2, config.meshIsoLevel, config.meshResolution / 4);
 
         scene.addMesh(planetMesh);
         scene.addMesh(starMesh);
@@ -213,7 +200,6 @@ void livePreview(Octree<int>& grid, defaults& config, const Camera& cam) {
         // planetMesh.setIsoLevel(config.meshIsoLevel);
         // planetMesh.update(grid);
         meshNeedsUpdate = false;
-        statsNeedUpdate = true;
     }
 
     auto renderStart = std::chrono::high_resolution_clock::now();
@@ -254,10 +240,6 @@ void livePreview(Octree<int>& grid, defaults& config, const Camera& cam) {
     }
     
     auto now = std::chrono::steady_clock::now();
-    if (statsNeedUpdate || (now - lastStatsUpdate) > STATS_UPDATE_INTERVAL) {
-        updateStatsCache(grid);
-    }
-    
     if (textu == 0) {
         glGenTextures(1, &textu);
     }
@@ -404,13 +386,10 @@ int main() {
     float deltaTime = 0.016f;
     renderFrameTimes.resize(FRAME_HISTORY_SIZE, 0.0);
     
-    lastStatsUpdate = std::chrono::steady_clock::now();
-    statsNeedUpdate = true;
     bool worldPreview = false;
     
     if (grid.load("output/Treegrid.yggs")) {
         gridInitialized = true;
-        updateStatsCache(grid);
         resetView(cam, config.gridSizecube);
         meshNeedsUpdate = true;
     }
@@ -565,7 +544,7 @@ int main() {
                 createSphere(config, sphereConf, grid);
                 addStar(config, starConf, grid); 
                 gridInitialized = true;
-                statsNeedUpdate = true;
+                scene.updateStats();
                 
                 resetView(cam, config.gridSizecube);
                 grid.generateLODs();
@@ -585,53 +564,8 @@ int main() {
             fluidUI.renderUI();
         }
 
-        {
-            ImGui::Begin("Planet Preview");
-            if (worldPreview) {
-                if (gridInitialized) {
-                    livePreview(grid, config, cam);
-                }
-            }
-
-            if (gridInitialized && textureInitialized) {
-                ImGui::Image((void*)(intptr_t)textu, ImVec2(config.outWidth, config.outHeight));
-            } else if (gridInitialized) {
-                ImGui::Text("Preview not generated yet");
-            } else {
-                ImGui::Text("No grid generated");
-            }
-            
-            ImGui::Text("Render Performance:");
-            if (renderFPS > 0) {
-                // Color code based on FPS
-                ImVec4 fpsColor;
-                if (renderFPS >= 30.0) {
-                    fpsColor = ImVec4(0.0f, 1.0f, 0.0f, 1.0f); // Green for good FPS
-                } else if (renderFPS >= 15.0) {
-                    fpsColor = ImVec4(1.0f, 1.0f, 0.0f, 1.0f); // Yellow for okay FPS
-                } else {
-                    fpsColor = ImVec4(1.0f, 0.0f, 0.0f, 1.0f); // Red for poor FPS
-                }
-                
-                ImGui::TextColored(fpsColor, "FPS: %.1f", renderFPS);
-                ImGui::Text("Frame time: %.1f ms", avgRenderFrameTime * 1000.0);
-                
-                // Simple progress bar for frame time
-                ImGui::Text("%.1f/100 ms", avgRenderFrameTime * 1000.0);
-                
-                // Show latest frame time
-                ImGui::Text("Latest: %.1f ms", renderFrameTime * 1000.0);
-            }
-            
-            ImGui::Separator();
-
-            if (gridInitialized) {
-                auto now = std::chrono::steady_clock::now();
-                if ((now - lastStatsUpdate) > STATS_UPDATE_INTERVAL) updateStatsCache(grid);
-                ImGui::TextUnformatted(cachedStats.c_str());
-            }
-            ImGui::End();
-        }
+        scene.drawSceneWindow("Planet Preview", cam, 0.01, 1000);
+        scene.drawGridStats();
 
         {
             ImGui::Begin("controls");
