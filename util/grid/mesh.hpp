@@ -291,7 +291,6 @@ public:
     void drawSceneWindow(const char* windowTitle, Camera& cam, float nearClip = 0.1f, float farClip = 1000.0f, bool showFps = true) {
         ImGui::Begin(windowTitle);
 
-        // Get the position and size of the content area within the ImGui window
         ImVec2 canvas_p = ImGui::GetCursorScreenPos();
         ImVec2 canvas_sz = ImGui::GetContentRegionAvail();
 
@@ -302,20 +301,16 @@ public:
 
         ImDrawList* draw_list = ImGui::GetWindowDrawList();
         
-        // Clip drawing to the specific window area
         draw_list->PushClipRect(canvas_p, ImVec2(canvas_p.x + canvas_sz.x, canvas_p.y + canvas_sz.y), true);
 
-        // Draw background
         draw_list->AddRectFilled(canvas_p, ImVec2(canvas_p.x + canvas_sz.x, canvas_p.y + canvas_sz.y), IM_COL32(20, 20, 20, 255));
         
-        // Collect and project triangles
         std::vector<Triangle2D> allTriangles;
         for (auto& mesh : _meshes) {
             std::vector<Triangle2D> meshTris = mesh->project_2d(cam, (int)canvas_sz.y, (int)canvas_sz.x, nearClip, farClip);
             allTriangles.insert(allTriangles.end(), meshTris.begin(), meshTris.end());
         }
 
-        // Sort by depth (Painter's Algorithm)
         std::sort(allTriangles.begin(), allTriangles.end(), [](const Triangle2D& a, const Triangle2D& b) {
             return a.depth > b.depth;
         });
@@ -325,50 +320,26 @@ public:
             ImVec2 p1(canvas_p.x + tri.a.x(), canvas_p.y + tri.a.y());
             ImVec2 p2(canvas_p.x + tri.b.x(), canvas_p.y + tri.b.y());
             ImVec2 p3(canvas_p.x + tri.c.x(), canvas_p.y + tri.c.y());
-
-            // Simple culling optimization
-            // float minX = std::min({p1.x, p2.x, p3.x});
-            // float minY = std::min({p1.y, p2.y, p3.y});
-            // float maxX = std::max({p1.x, p2.x, p3.x});
-            // float maxY = std::max({p1.y, p2.y, p3.y});
-
-            // if (maxX < canvas_p.x || minX > canvas_p.x + canvas_sz.x || 
-            //     maxY < canvas_p.y || minY > canvas_p.y + canvas_sz.y) {
-            //     continue;
-            // }
-
-            // float r = std::clamp(tri.color.x(), 0.0f, 1.0f);
-            // float g = std::clamp(tri.color.y(), 0.0f, 1.0f);
-            // float b = std::clamp(tri.color.z(), 0.0f, 1.0f);
-            
             ImU32 col = ImGui::ColorConvertFloat4ToU32(ImVec4(tri.color.x(), tri.color.y(), tri.color.z(), 1.0f));
             draw_list->AddTriangleFilled(p1, p2, p3, col);
         }
 
-        // Draw FPS Counter
         if (showFps) {
             char fpsText[32];
             snprintf(fpsText, sizeof(fpsText), "FPS: %.1f", ImGui::GetIO().Framerate);
             
             ImVec2 txtSz = ImGui::CalcTextSize(fpsText);
-            // Position: Top Right with 10px padding
             ImVec2 txtPos = ImVec2(canvas_p.x + canvas_sz.x - txtSz.x - 10.0f, canvas_p.y + 10.0f);
             
-            // Semi-transparent background for text
-            draw_list->AddRectFilled(
-                ImVec2(txtPos.x - 5.0f, txtPos.y - 2.0f), 
+            draw_list->AddRectFilled(ImVec2(txtPos.x - 5.0f, txtPos.y - 2.0f), 
                 ImVec2(txtPos.x + txtSz.x + 5.0f, txtPos.y + txtSz.y + 2.0f), 
-                IM_COL32(0, 0, 0, 150), 
-                4.0f
+                IM_COL32(0, 0, 0, 150), 4.0f
             );
             
             draw_list->AddText(txtPos, IM_COL32(255, 255, 255, 255), fpsText);
         }
 
         draw_list->PopClipRect();
-
-        // Invisible button to handle inputs over the viewport area
-        ImGui::InvisibleButton("viewport_btn", canvas_sz);
 
         ImGui::End();
     }
