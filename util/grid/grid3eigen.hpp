@@ -35,6 +35,7 @@ public:
         T data;
         PointType position;
         int objectId;
+        int subId;
         bool active;
         bool visible;
         float size;
@@ -45,13 +46,13 @@ public:
         float reflection;
 
         NodeData(const T& data, const PointType& pos, bool visible, Eigen::Vector3f color, float size = 0.01f,
-                 bool active = true, int objectId = -1, bool light = false, float emittance = 0.0f, 
+                 bool active = true, int objectId = -1, int subId = 0, bool light = false, float emittance = 0.0f, 
                  float refraction = 0.0f, float reflection = 0.0f) 
-                : data(data), position(pos), objectId(objectId), active(active), visible(visible), 
+                : data(data), position(pos), objectId(objectId), subId(subId), active(active), visible(visible), 
                 color(color), size(size), light(light), emittance(emittance), refraction(refraction), 
                 reflection(reflection) {}
         
-        NodeData() : objectId(-1), active(false), visible(false), size(0.0f), light(false), 
+        NodeData() : objectId(-1), subId(0), active(false), visible(false), size(0.0f), light(false), 
                      emittance(0.0f), refraction(0.0f), reflection(0.0f) {}
         
         // Helper method to get half-size for cube
@@ -104,6 +105,30 @@ private:
     
     Eigen::Vector3f skylight_ = {0.1f, 0.1f, 0.1f};
     Eigen::Vector3f backgroundColor_ = {0.53f, 0.81f, 0.92f};
+    
+    std::map<std::pair<int, int>, std::shared_ptr<Mesh>> meshCache_;
+    std::set<std::pair<int, int>> dirtyMeshes_;
+    int nextSubIdGenerator_ = 1;
+    
+    void invalidateMesh(int objectId, int subId) {
+        if (objectId < 0) return;
+        dirtyMeshes_.insert({objectId, subId});
+    }
+    
+    void collectNodesBySubId(OctreeNode* node, int objId, int subId, std::vector<std::shared_ptr<NodeData>>& results) const {
+        if (!node) return;
+        if (node->isLeaf) {
+            for (const auto& pt : node->points) {
+                if (pt->active && pt->objectId == objId && pt->subId == subId) {
+                    results.push_back(pt);
+                }
+            }
+        } else {
+            for (const auto& child : node->children) {
+                if (child) collectNodesBySubId(child.get(), objId, subId, results);
+            }
+        }
+    }
 
     float lodFalloffRate_ = 0.1f; // Lower = better, higher = worse. 0-1
     float lodMinDistance_ = 100.0f;
@@ -855,34 +880,45 @@ public:
     
         auto pointData = find(oldPos, tolerance);
         if (!pointData) return false;
+
+        int oldSubId = pointData->subId;
+        int targetObjId = (newObjectId != -2) ? newObjectId : pointData->objectId;
         
-        T dataCopy = pointData->data;
-        bool activeCopy = pointData->active;
-        bool visibleCopy = pointData->visible;
-        Eigen::Vector3f colorCopy = pointData->color;
-        float sizeCopy = pointData->size;
-        int objectIdCopy = pointData->objectId;
-        bool lightCopy = pointData->light;
-        float emittanceCopy = pointData->emittance;
-        float refractionCopy = pointData->refraction;
-        float reflectionCopy = pointData->reflection;
+        int finalSubId = oldSubId;
         
-        // Remove the old point
-        if (!remove(oldPos, tolerance)) {
-            return false;
+        if (oldSubId == 0 && targetObjId == pointData->objectId) {
+            finalSubId = nextSubIdGenerator_++; 
+            
+            auto neighbors = findInRadius(oldPos, newSize * 3.0f, targetObjId);
+            for(auto& n : neighbors) {
+                if(n->subId == 0) {
+                    n->subId = finalSubId;
+                    invalidateMesh(targetObjId, 0);
+                }
+            }
         }
         
-        // Insert at new position with updated properties
-        return set(newData, newPos, 
-                newVisible ? newVisible : visibleCopy,
-                newColor != Eigen::Vector3f(1.0f, 1.0f, 1.0f) ? newColor : colorCopy,
-                newSize > 0 ? newSize : sizeCopy,
-                newActive ? newActive : activeCopy,
-                newObjectId != -2 ? newObjectId : objectIdCopy,
-                newLight ? newLight : lightCopy,
-                newEmittance > 0 ? newEmittance : emittanceCopy,
-                newRefraction >= 0 ? newRefraction : refractionCopy,
-                newReflection >= 0 ? newReflection : reflectionCopy);
+        if (!remove(oldPos, tolerance)) return false;
+        
+        bool res = set(newData, newPos, 
+                newVisible,
+                newColor != Eigen::Vector3f(1.0f, 1.0f, 1.0f) ? newColor : pointData->color,
+                newSize > 0 ? newSize : pointData->size,
+                newActive,
+                targetObjId,
+                finalSubId,
+                newLight,
+                newEmittance > 0 ? newEmittance : pointData->emittance,
+                newRefraction >= 0 ? newRefraction : pointData->refraction,
+                newReflection >= 0 ? newReflection : pointData->reflection);
+        
+        if(res) {
+            // Mark relevant meshes dirty
+            invalidateMesh(targetObjId, finalSubId);
+            if(finalSubId != oldSubId) invalidateMesh(targetObjId, oldSubId);
+        }
+
+        return res;
     }
 
     bool move(const PointType& pos, const PointType& newPos) {
@@ -1407,6 +1443,140 @@ public:
         }
         
         return std::make_shared<Mesh>(objectId, vertices, polys, vertexColors);
+    }
+
+    std::shared_ptr<Mesh> generateSubMesh(int objectId, int subId, float isolevel = 0.5f, int resolution = 32) {
+        if (subId == -999) return nullptr;
+
+        std::vector<std::shared_ptr<NodeData>> nodes;
+        collectNodesBySubId(root_.get(), objectId, subId, nodes);
+        if (nodes.empty()) return nullptr;
+
+        PointType minB = nodes[0]->position;
+        PointType maxB = nodes[0]->position;
+        float maxRadius = 0.0f;
+
+        for(auto& n : nodes) {
+            minB = minB.cwiseMin(n->position);
+            maxB = maxB.cwiseMax(n->position);
+            maxRadius = std::max(maxRadius, n->size);
+        }
+        
+        float padding = maxRadius * 2.5f; 
+        minB -= PointType::Constant(padding);
+        maxB += PointType::Constant(padding);
+
+        PointType size = maxB - minB;
+        PointType step = size / static_cast<float>(resolution);
+
+        std::vector<PointType> vertices;
+        std::vector<Eigen::Vector3f> vertexColors;
+        std::vector<Eigen::Vector3i> triangles;
+
+        // Marching Cubes Loop
+        for(int z = 0; z < resolution; ++z) {
+            for(int y = 0; y < resolution; ++y) {
+                for(int x = 0; x < resolution; ++x) {
+                    PointType currPos(minB.x() + x * step.x(), minB.y() + y * step.y(), minB.z() + z * step.z());
+
+                    GridCell cell;
+                    PointType offsets[8] = {{0,0,0}, {step.x(),0,0}, {step.x(),step.y(),0}, {0,step.y(),0},
+                                          {0,0,step.z()}, {step.x(),0,step.z()}, {step.x(),step.y(),step.z()}, {0,step.y(),step.z()}};
+
+                    bool activeCell = false;
+                    for(int i=0; i<8; ++i) {
+                        cell.p[i] = currPos + offsets[i];
+                        auto [density, color] = getScalarFieldValue(cell.p[i], objectId, maxRadius * 2.0f);
+                        cell.val[i] = density;
+                        cell.color[i] = color;
+                        if(cell.val[i] >= isolevel) activeCell = true;
+                    }
+
+                    if(activeCell) {
+                        auto owner = find(currPos + step*0.5f, maxRadius * 2.0f);
+                        if (owner && owner->objectId == objectId && owner->subId == subId) {
+                            polygonise(cell, isolevel, vertices, vertexColors, triangles);
+                        }
+                    }
+                }
+            }
+        }
+
+        if(vertices.empty()) return nullptr;
+
+        std::vector<std::vector<int>> polys;
+        for(auto& t : triangles) polys.push_back({t[0], t[1], t[2]});
+        
+        return std::make_shared<Mesh>(objectId, vertices, polys, vertexColors, subId);
+    }
+
+    std::vector<std::shared_ptr<Mesh>> getMeshes(int objectId) {
+        std::vector<std::shared_ptr<Mesh>> result;
+        
+        std::set<int> relevantSubIds;
+        for(auto const& [key, val] : meshCache_) if(key.first == objectId) relevantSubIds.insert(key.second);
+        for(auto const& key : dirtyMeshes_) if(key.first == objectId) relevantSubIds.insert(key.second);
+
+        for(int subId : relevantSubIds) {
+            if(dirtyMeshes_.count({objectId, subId})) {
+                auto newMesh = generateSubMesh(objectId, subId);
+                if(newMesh) meshCache_[{objectId, subId}] = newMesh;
+                else meshCache_.erase({objectId, subId});
+                dirtyMeshes_.erase({objectId, subId});
+            }
+        }
+
+        for(auto const& [key, mesh] : meshCache_) {
+            if(key.first == objectId && mesh) result.push_back(mesh);
+        }
+        return result;
+    }
+
+    void isolateInternalNodes(int objectId) {
+        std::vector<std::shared_ptr<NodeData>> nodes;
+        collectNodesByObjectId(root_.get(), objectId, nodes); 
+
+        if(nodes.empty()) return;
+        float checkRad = nodes[0]->size * 1.5f;
+
+        for(auto& node : nodes) {
+            int hiddenSides = 0;
+            PointType dirs[6] = {{1,0,0}, {-1,0,0}, {0,1,0}, {0,-1,0}, {0,0,1}, {0,0,-1}};
+            for(int i=0; i<6; ++i) {
+                auto neighbor = find(node->position + dirs[i] * node->size, checkRad);
+                if(neighbor && neighbor->objectId == objectId && neighbor->active && neighbor->refraction < 0.01f) {
+                    hiddenSides++;
+                }
+            }
+
+            if(hiddenSides == 6) {
+                if(node->subId != -999) {
+                    invalidateMesh(objectId, node->subId);
+                    node->subId = -999; 
+                }
+            }
+        }
+    }
+
+    bool moveObject(int objectId, const PointType& offset) {
+        if (!root_) return false;
+        
+        std::vector<std::shared_ptr<NodeData>> nodes;
+        collectNodesByObjectId(root_.get(), objectId, nodes);
+        if(nodes.empty()) return false;
+
+        for(auto& n : nodes) remove(n->position);
+        for(auto& n : nodes) {
+            n->position += offset;
+            insertRecursive(root_.get(), n, 0);
+        }
+
+        for (auto& [key, mesh] : meshCache_) {
+            if (key.first == objectId && mesh) {
+                mesh->translate(offset); 
+            }
+        }
+        return true;
     }
 
     void printStats(std::ostream& os = std::cout) const {

@@ -35,6 +35,7 @@ struct Triangle2D {
 class Mesh {
 private:
     int id;
+    int _subId;
     std::vector<Vector3f> _vertices;
     std::vector<std::vector<int>> _polys;
     std::vector<Color> _colors;
@@ -46,30 +47,61 @@ private:
     inline static float edgeFunction(const Vector2f& a, const Vector2f& b, const Vector2f& c) {
         return (c.x() - a.x()) * (b.y() - a.y()) - (c.y() - a.y()) * (b.x() - a.x());
     }
+
 public:
-    Mesh(int id, const std::vector<Vector3f>& verts, const std::vector<std::vector<int>>& polys, const std::vector<Color>& colors)
-        : id(id), _vertices(verts), _polys(polys), _colors(colors) {
+    Mesh(int id, const std::vector<Vector3f>& verts, const std::vector<std::vector<int>>& polys, const std::vector<Color>& colors, int subId = 0)
+        : id(id), _subId(subId), _vertices(verts), _polys(polys), _colors(colors) {
             _needs_triangulation = true;
             _needs_norm_calc = true;
+    }
+
+    int getId() const { 
+        return id; 
+    }
+
+    int getSubId() const { 
+        return _subId; 
+    }
+
+    void setSubId(int s) { 
+        _subId = s; 
     }
 
     std::vector<Vector3f> vertices() {
         return _vertices;
     }
 
-    bool vertices(std::vector<Vector3f> verts) {
-        if (verts.size() != _colors.size()) {
-            if (_colors.size() == 1) {
-                _vertices = verts;
-                _needs_norm_calc = true; 
-                return true;
-            }
-            return false;
-        } else {
-            _vertices = verts;
+    bool updateVertex(size_t index, const Vector3f& newPos) {
+        if (index < _vertices.size()) {
+            _vertices[index] = newPos;
             _needs_norm_calc = true;
             return true;
         }
+        return false;
+    }
+
+    void translate(const Vector3f& offset) {
+        for(auto& v : _vertices) {
+            v += offset;
+        }
+        _needs_norm_calc = false;
+    }
+
+    void replace(const std::vector<Vector3f>& verts, const std::vector<std::vector<int>>& polys, const std::vector<Color>& colors) {
+        _vertices = verts;
+        _polys = polys;
+        _colors = colors;
+        _needs_triangulation = true;
+        _needs_norm_calc = true;
+    }
+    
+    bool vertices(std::vector<Vector3f> verts) {
+        if (verts.size() != _colors.size() && _colors.size() != 1) {
+            return false;
+        }
+        _vertices = verts;
+        _needs_norm_calc = true;
+        return true;
     }
 
     std::vector<std::vector<int>> polys() {
@@ -319,6 +351,11 @@ public:
         _meshes.push_back(mesh);
         updateStats();
     }
+    
+    void addMeshes(const std::vector<std::shared_ptr<Mesh>>& meshes) {
+        _meshes.insert(_meshes.end(), meshes.begin(), meshes.end());
+        updateStats();
+    }
 
     void clear() {
         _meshes.clear();
@@ -400,6 +437,7 @@ public:
         os << "========================================\n";
         os << "             Scene STATS                \n";
         os << "========================================\n";
+        os << "Total Meshes: " << _meshes.size() << "\n";
         for (auto m : _meshes) {
             m->printStats(os);
         }
