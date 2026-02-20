@@ -27,14 +27,8 @@ constexpr int Dim2 = 2;
 template<typename T>
 class Grid2 {
 public:
-    using PointType = Eigen::Matrix<float, Dim2, 1>; // Eigen::Vector2f
+    using PointType = Eigen::Matrix<float, Dim2, 1>;
     using BoundingBox = std::pair<PointType, PointType>;
-    
-    // Shape for 2D is usually a Circle or a Square (AABB)
-    enum class Shape {
-        CIRCLE,
-        SQUARE
-    };
     
     struct NodeData {
         T data;
@@ -42,27 +36,15 @@ public:
         int objectId;
         bool active;
         bool visible;
-        float size; // Radius or half-width
-        Eigen::Vector4f color; // RGBA
-        
-        // Physics properties
-        float temperature;
-        float conductivity;
-        float specific_heat;
-        float density;
-        float next_temperature; // For double-buffering simulation
-
-        Shape shape;
+        float size;
+        Eigen::Vector4f color;
 
         NodeData(const T& data, const PointType& pos, bool visible, Eigen::Vector4f color, float size = 1.0f,
                  bool active = true, int objectId = -1, Shape shape = Shape::SQUARE) 
                 : data(data), position(pos), objectId(objectId), active(active), visible(visible), 
-                color(color), size(size), shape(shape),
-                temperature(0.0f), conductivity(1.0f), specific_heat(1.0f), density(1.0f), next_temperature(0.0f) {}
+                color(color), size(size) {}
         
-        NodeData() : objectId(-1), active(false), visible(false), size(0.0f), 
-                     color(0,0,0,0), shape(Shape::SQUARE),
-                     temperature(0.0f), conductivity(1.0f), specific_heat(1.0f), density(1.0f), next_temperature(0.0f) {}
+        NodeData() : objectId(-1), active(false), visible(false), size(0.0f), color(0,0,0,0) {}
 
         // Helper for Square bounds
         BoundingBox getSquareBounds() const {
@@ -74,7 +56,7 @@ public:
     struct QuadNode {
         BoundingBox bounds;
         std::vector<std::shared_ptr<NodeData>> points;
-        std::array<std::unique_ptr<QuadNode>, 4> children; // 4 quadrants
+        std::array<std::unique_ptr<QuadNode>, 4> children;
         PointType center;
         bool isLeaf;
 
@@ -106,35 +88,19 @@ private:
     Eigen::Vector4f backgroundColor_ = {0.0f, 0.0f, 0.0f, 0.0f};
     PNoise2 noisegen;
 
-    // Determine quadrant: 0:SW, 1:SE, 2:NW, 3:NE
     uint8_t getQuadrant(const PointType& point, const PointType& center) const {
-        uint8_t quad = 0;
-        if (point.x() >= center.x()) quad |= 1; // Right
-        if (point.y() >= center.y()) quad |= 2; // Top
-        return quad;
+        return (point.x() >= center.x()) | ((point.y() >= center.y()) << 1);
     }
 
     BoundingBox createChildBounds(const QuadNode* node, uint8_t quad) const {
         PointType childMin, childMax;
         PointType center = node->center;
         
-        // X axis
-        if (quad & 1) { // Right
-            childMin.x() = center.x();
-            childMax.x() = node->bounds.second.x();
-        } else { // Left
-            childMin.x() = node->bounds.first.x();
-            childMax.x() = center.x();
-        }
+        childMin[0] = (quad & 1) ? center[0] : node->bounds.first[0];
+        childMax[0] = (quad & 1) ? node->bounds.second[0] : center[0];
 
-        // Y axis
-        if (quad & 2) { // Top
-            childMin.y() = center.y();
-            childMax.y() = node->bounds.second.y();
-        } else { // Bottom
-            childMin.y() = node->bounds.first.y();
-            childMax.y() = center.y();
-        }
+        childMin[1] = (quad & 2) ? center[1] : node->bounds.first[1];
+        childMax[1] = (quad & 2) ? node->bounds.second[1] : center[1];
         
         return {childMin, childMax};
     }
