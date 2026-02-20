@@ -31,9 +31,9 @@ struct defaults {
     bool slowRender = false;
     bool globalIllumination = true;
     bool useLod = true;
-    int rayCount = 3;
+    int rayCount = 5;
     int reflectCount = 3;
-    int lodDist = 500;
+    int lodDist = 50000;
     float lodDropoff = 0.1;
     PNoise2 noise = PNoise2(42);
     
@@ -81,6 +81,12 @@ const int FRAME_HISTORY_SIZE = 60;
 std::vector<double> renderFrameTimes;
 int frameHistoryIndex = 0;
 bool firstFrameMeasured = false;
+
+// Stats update timer
+std::chrono::steady_clock::time_point lastStatsUpdate;
+const std::chrono::seconds STATS_UPDATE_INTERVAL(10);
+std::string cachedStats;
+bool statsNeedUpdate = true;
 
 Scene scene;
 bool meshNeedsUpdate = false;
@@ -182,38 +188,45 @@ void addStar(const defaults& config, const stardefaults& starconf, Octree<int>& 
     meshNeedsUpdate = true;
 }
 
+void updateStatsCache(Octree<int>& grid) {
+    std::stringstream gridstats;
+    grid.printStats(gridstats);
+    cachedStats = gridstats.str();
+    lastStatsUpdate = std::chrono::steady_clock::now();
+    statsNeedUpdate = false;
+}
 
 void livePreview(Octree<int>& grid, defaults& config, const Camera& cam) {
     std::lock_guard<std::mutex> lock(PreviewMutex);
     updatePreview = true;
 
     
-    if (meshNeedsUpdate) {
-        scene.clear();
-        std::shared_ptr<Mesh> planetMesh = grid.generateMesh(1, config.meshIsoLevel, pow(config.meshResolution, 2));
-        std::shared_ptr<Mesh> starMesh = grid.generateMesh(2, config.meshIsoLevel, config.meshResolution);
+    // if (meshNeedsUpdate) {
+    //     scene.clear();
+    //     std::shared_ptr<Mesh> planetMesh = grid.generateMesh(1, config.meshIsoLevel, pow(config.meshResolution, 2));
+    //     std::shared_ptr<Mesh> starMesh = grid.generateMesh(2, config.meshIsoLevel, config.meshResolution);
 
-        scene.addMesh(planetMesh);
-        scene.addMesh(starMesh);
+    //     scene.addMesh(planetMesh);
+    //     scene.addMesh(starMesh);
         
-        // planetMesh.setResolution(config.meshResolution);
-        // planetMesh.setIsoLevel(config.meshIsoLevel);
-        // planetMesh.update(grid);
-        meshNeedsUpdate = false;
-    }
+    //     // planetMesh.setResolution(config.meshResolution);
+    //     // planetMesh.setIsoLevel(config.meshIsoLevel);
+    //     // planetMesh.update(grid);
+    //     meshNeedsUpdate = false;
+    // }
 
     auto renderStart = std::chrono::high_resolution_clock::now();
     frame currentPreviewFrame;
 
-    currentPreviewFrame = scene.render(cam, config.outWidth, config.outHeight, 0.1f, 10000.0f, frame::colormap::RGB);
+    // currentPreviewFrame = scene.render(cam, config.outWidth, config.outHeight, 0.1f, 10000.0f, frame::colormap::RGB);
     
-    // grid.setLODMinDistance(config.lodDist);
-    // grid.setLODFalloff(config.lodDropoff);
-    // if (config.slowRender) {
-    //     currentPreviewFrame = grid.renderFrame(cam, config.outWidth, config.outHeight, frame::colormap::RGB, config.rayCount, config.reflectCount, config.globalIllumination, config.useLod);
-    // } else {
-    //     currentPreviewFrame = grid.fastRenderFrame(cam, config.outWidth, config.outHeight, frame::colormap::RGB);
-    // }
+    grid.setLODMinDistance(config.lodDist);
+    grid.setLODFalloff(config.lodDropoff);
+    if (config.slowRender) {
+        currentPreviewFrame = grid.renderFrame(cam, config.outWidth, config.outHeight, frame::colormap::RGB, config.rayCount, config.reflectCount, config.globalIllumination, config.useLod);
+    } else {
+        currentPreviewFrame = grid.fastRenderFrame(cam, config.outWidth, config.outHeight, frame::colormap::RGB);
+    }
     
     auto renderEnd = std::chrono::high_resolution_clock::now();
     renderFrameTime = std::chrono::duration<double>(renderEnd - renderStart).count();
@@ -330,7 +343,7 @@ int main() {
     defaults config;
     PointType minBound(-config.gridSizecube, -config.gridSizecube, -config.gridSizecube);
     PointType maxBound(config.gridSizecube, config.gridSizecube, config.gridSizecube);
-    Octree<int> grid(minBound, maxBound, 16, 16);
+    Octree<int> grid(minBound, maxBound, 8, 32);
     bool gridInitialized = false;
     float ghalf = config.gridSizecube / 2.f;
     
@@ -505,22 +518,22 @@ int main() {
             ImGui::ColorEdit3("Color", sphereConf.color);
             
             ImGui::Separator();
-            ImGui::Text("Marching Cubes Config");
-            if (ImGui::SliderInt("Mesh Resolution", &config.meshResolution, 1, 64)) {
-                meshNeedsUpdate = true;
-            }
-            if (ImGui::SliderFloat("Iso Level", &config.meshIsoLevel, 0.01f, 1.0f)) {
-                meshNeedsUpdate = true;
-            }
-
-            ImGui::Separator();
-            ImGui::Checkbox("Is Light", &sphereConf.light);
-            // if(sphereConf.light) {
-            //     ImGui::DragFloat("Emittance", &sphereConf.emittance, 0.1f, 0.0f, 100.0f);
+            // ImGui::Text("Marching Cubes Config");
+            // if (ImGui::SliderInt("Mesh Resolution", &config.meshResolution, 1, 64)) {
+            //     meshNeedsUpdate = true;
             // }
-            // ImGui::SliderFloat("Reflection", &sphereConf.reflection, 0.0f, 1.0f);
-            // ImGui::SliderFloat("Refraction", &sphereConf.refraction, 0.0f, 1.0f);
-            // ImGui::Checkbox("Fill Inside", &sphereConf.fillInside);
+            // if (ImGui::SliderFloat("Iso Level", &config.meshIsoLevel, 0.01f, 1.0f)) {
+            //     meshNeedsUpdate = true;
+            // }
+
+            // ImGui::Separator();
+            // ImGui::Checkbox("Is Light", &sphereConf.light);
+            if(sphereConf.light) {
+                ImGui::DragFloat("Emittance", &sphereConf.emittance, 0.1f, 0.0f, 100.0f);
+            }
+            ImGui::SliderFloat("Reflection", &sphereConf.reflection, 0.0f, 1.0f);
+            ImGui::SliderFloat("Refraction", &sphereConf.refraction, 0.0f, 1.0f);
+            ImGui::Checkbox("Fill Inside", &sphereConf.fillInside);
 
             if (ImGui::CollapsingHeader("Star/Sun Parameters", ImGuiTreeNodeFlags_DefaultOpen)) {
                 ImGui::Checkbox("Enable Star", &starConf.enabled);
@@ -564,8 +577,56 @@ int main() {
             fluidUI.renderUI();
         }
 
-        scene.drawSceneWindow("Planet Preview", cam, 0.01, 1000);
-        scene.drawGridStats();
+        // scene.drawSceneWindow("Planet Preview", cam, 0.01, 1000);
+        // scene.drawGridStats();
+
+        {
+            ImGui::Begin("Planet Preview");
+            if (worldPreview) {
+                if (gridInitialized) {
+                    livePreview(grid, config, cam);
+                }
+            }
+
+            if (gridInitialized && textureInitialized) {
+                ImGui::Image((void*)(intptr_t)textu, ImVec2(config.outWidth, config.outHeight));
+            } else if (gridInitialized) {
+                ImGui::Text("Preview not generated yet");
+            } else {
+                ImGui::Text("No grid generated");
+            }
+            
+            ImGui::Text("Render Performance:");
+            if (renderFPS > 0) {
+                // Color code based on FPS
+                ImVec4 fpsColor = ImVec4(1.0f, 1.0f, 0.0f, 1.0f);
+                // if (renderFPS >= 30.0) {
+                //     fpsColor = ImVec4(0.0f, 1.0f, 0.0f, 1.0f); // Green for good FPS
+                // } else if (renderFPS >= 15.0) {
+                //     fpsColor = ImVec4(1.0f, 1.0f, 0.0f, 1.0f); // Yellow for okay FPS
+                // } else {
+                //     fpsColor = ImVec4(1.0f, 0.0f, 0.0f, 1.0f); // Red for poor FPS
+                // }
+                
+                ImGui::TextColored(fpsColor, "FPS: %.1f", renderFPS);
+                ImGui::Text("Frame time: %.1f ms", avgRenderFrameTime * 1000.0);
+                
+                // Simple progress bar for frame time
+                ImGui::Text("%.1f/100 ms", avgRenderFrameTime * 1000.0);
+                
+                // Show latest frame time
+                ImGui::Text("Latest: %.1f ms", renderFrameTime * 1000.0);
+            }
+            
+            ImGui::Separator();
+
+            if (gridInitialized) {
+                auto now = std::chrono::steady_clock::now();
+                if ((now - lastStatsUpdate) > STATS_UPDATE_INTERVAL) updateStatsCache(grid);
+                ImGui::TextUnformatted(cachedStats.c_str());
+            }
+            ImGui::End();
+        }
 
         {
             ImGui::Begin("controls");
@@ -759,19 +820,18 @@ int main() {
 
             ImGui::Separator();
 
-            ImGui::Checkbox("Continuous Preview", &worldPreview);
+            // ImGui::Checkbox("Continuous Preview", &worldPreview);
 
-            // Removed Raytracing specific controls (Global Illum, LOD) as they don't apply to raster mesh
-            // ImGui::Checkbox("update Preview", &worldPreview);
-            // ImGui::Checkbox("Use Slower renderer", &config.slowRender);
-            // if (config.slowRender) {
-            //     ImGui::InputInt("Rays per pixel", &config.rayCount);
-            //     ImGui::InputInt("Max reflections", &config.reflectCount);
-            // }
-            // ImGui::InputFloat("Lod dropoff", &config.lodDropoff);
-            // ImGui::InputInt("lod minimum Distance", &config.lodDist);
-            // ImGui::Checkbox("use Global illumination", &config.globalIllumination);
-            // ImGui::Checkbox("use Lod", &config.useLod);
+            ImGui::Checkbox("update Preview", &worldPreview);
+            ImGui::Checkbox("Use Slower renderer", &config.slowRender);
+            if (config.slowRender) {
+                ImGui::InputInt("Rays per pixel", &config.rayCount);
+                ImGui::InputInt("Max reflections", &config.reflectCount);
+            }
+            ImGui::InputFloat("Lod dropoff", &config.lodDropoff);
+            ImGui::InputInt("lod minimum Distance", &config.lodDist);
+            ImGui::Checkbox("use Global illumination", &config.globalIllumination);
+            ImGui::Checkbox("use Lod", &config.useLod);
 
             ImGui::End();
         }
