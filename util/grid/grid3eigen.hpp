@@ -1272,7 +1272,7 @@ public:
         for (int y = 0; y < height; ++y) {
             for (int x = 0; x < width; ++x) {
                 int pidx = (y * width + x);
-                int idx = pidx * channels;
+                int idx = pidx * 3;
 
                 float px = (2.0f * (x + 0.5f) / width - 1.0f) * tanfovx;
                 float py = (1.0f - 2.0f * (y + 0.5f) / height) * tanfovy;
