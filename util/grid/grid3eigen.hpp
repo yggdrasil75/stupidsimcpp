@@ -1177,10 +1177,10 @@ public:
         Ray oray(origin, direction);
         
         float tMin, tMax;
-        // if (rayBoxIntersect(oray, root_->bounds, tMin, tMax)) {
+        if (rayBoxIntersect(oray, root_->bounds, tMin, tMax)) {
             tMax = std::min(tMax, maxDist);
             voxelTraverseRecursive(root_.get(), tMin, tMax, maxDist, enableLOD, oray, hit, invLodf);
-        // }
+        }
         return hit;
     }
 
@@ -1255,15 +1255,18 @@ public:
         
         frame outFrame(width, height, colorformat);
         std::vector<float> colorBuffer;
-        int channels;
-        channels = 3;
-        colorBuffer.resize(width * height * channels);
+        colorBuffer.resize(width * height * 3);
 
-        float aspect = static_cast<float>(width) / height;
-        float fovRad = cam.fovRad();
-        float tanHalfFov = tan(fovRad * 0.5f);
-        float tanfovy = tanHalfFov;
-        float tanfovx = tanHalfFov * aspect;
+        const float aspect = static_cast<float>(width) / height;
+        const float fovRad = cam.fovRad();
+        const float tanHalfFov = tan(fovRad * 0.5f);
+        const float tanfovy = tanHalfFov;
+        const float tanfovx = tanHalfFov * aspect;
+        
+        const PointType globalLightDir = PointType(-3000.0f, 0.0f, 0.0f).normalized();
+        const float fogStart = 1000.0f;
+        const float fogEnd = 4000.0f;
+        const float minVisibility = 0.2f; 
         
         #pragma omp parallel for schedule(dynamic) collapse(2)
         for (int y = 0; y < height; ++y) {
@@ -1283,18 +1286,27 @@ public:
                 if (hit != nullptr) {
                     auto obj = hit;
                     
+                    float t = 0.0f;
+                    PointType normal, hitPoint;
+
+                    rayCubeIntersect(ray, obj.get(), t, normal, hitPoint);
                     color = obj->color;
                     
                     if (obj->light) {
                         color = color * obj->emittance;
+                    } else {
+                        float diffuse = std::max(0.0f, normal.dot(globalLightDir));
+                        float ambient = 0.35f;
+                        float intensity = std::min(1.0f, ambient + diffuse * 0.65f);
+                        color = color * intensity;
                     }
                     
-                    PointType normal = -rayDir;
+                    float fogFactor = std::clamp((fogEnd - t) / (fogEnd - fogStart), minVisibility, 1.0f);
                     
-                    // Simple directional lighting
-                    float lightDot = std::max(0.2f, normal.dot(-rayDir));
-                    color = color * lightDot;
+                    color = color * fogFactor + backgroundColor_ * (1.0f - fogFactor);
                 }
+
+                color = color.cwiseMax(0.0f).cwiseMin(1.0f);
 
                 colorBuffer[idx    ] = color[0];
                 colorBuffer[idx + 1] = color[1];
