@@ -378,13 +378,12 @@ private:
             float dist = (node->center - ray.origin).norm();
             float ratio = dist / node->nodeSize;
             
-            if (dist > lodMinDistance_ && ratio > invLodf) {
-                ensureLOD(node);
+            if (dist > lodMinDistance_ && ratio > invLodf && node->lodData) {
                 float t;
                 PointType n;
                 PointType h;
                 if (rayCubeIntersect(ray, node->lodData.get(), t, n, h)) {
-                    if (t >= 0 && t <= maxDist) hit =node->lodData;
+                    if (t >= 0 && t <= maxDist) hit = node->lodData;
                 }
                 return;
             }
@@ -467,11 +466,9 @@ private:
         Eigen::Vector3f npc = Eigen::Vector3f::Zero();
         PointType nextDir;
         PointType bias = normal * 0.002f;
-        bool didHit = false;
 
         if (roll < diffuseProb) {
             nextDir = randomInHemisphere(normal, rngState);
-            float cosTheta = std::max(0.0f, normal.dot(nextDir));
             Eigen::Vector3f incoming = traceRay(hitPoint + bias, nextDir, bounces + 1, rngState, maxBounces, globalIllumination, useLod);
             npc = obj->color.cwiseProduct(incoming);
         } else if (roll < diffuseProb + refl) {
@@ -521,10 +518,8 @@ private:
         node->isLeaf = true;
     }
 
-    void printStatsRecursive(const OctreeNode* node, size_t depth, 
-                            size_t& totalNodes, size_t& leafNodes, size_t& actualPoints, 
-                            size_t& maxTreeDepth, size_t& maxPointsInLeaf, size_t& minPointsInLeaf, 
-                            size_t& lodGeneratedNodes) const {
+    void printStatsRecursive(const OctreeNode* node, size_t depth, size_t& totalNodes, size_t& leafNodes, size_t& actualPoints, 
+                            size_t& maxTreeDepth, size_t& maxPointsInLeaf, size_t& minPointsInLeaf, size_t& lodGeneratedNodes) const {
         if (!node) return;
         
         totalNodes++;
@@ -800,9 +795,9 @@ private:
     };
 
     std::pair<PointType, PointType> vertexInterpolate(float isolevel, const PointType& p1, const PointType& p2, float val1, float val2, const PointType& c1, const PointType& c2) {
-        if (std::abs(isolevel - val1) < 1e-5) return {p1, c1};
-        if (std::abs(isolevel - val2) < 1e-5) return {p2, c2};
-        if (std::abs(val1 - val2) < 1e-5) return {p1, c1};
+        if (std::abs(isolevel - val1) < EPSILON) return {p1, c1};
+        if (std::abs(isolevel - val2) < EPSILON) return {p2, c2};
+        if (std::abs(val1 - val2) < EPSILON) return {p1, c1};
         float mu = (isolevel - val1) / (val2 - val1);
         PointType pos = p1 + mu * (p2 - p1);
         PointType color = c1 + mu * (c2 - c1);
@@ -1182,6 +1177,7 @@ public:
 
     frame renderFrame(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB, int samplesPerPixel = 2,
                     int maxBounces = 4, bool globalIllumination = false, bool useLod = true) {
+        generateLODs();
         PointType origin = cam.origin;
         PointType dir = cam.direction.normalized();
         PointType up = cam.up.normalized();
@@ -1244,6 +1240,8 @@ public:
     }
 
     frame fastRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB) {
+        //TIME_FUNCTION;
+        generateLODs();
         PointType origin = cam.origin;
         PointType dir = cam.direction.normalized();
         PointType up = cam.up.normalized();
@@ -1259,12 +1257,12 @@ public:
         const float tanfovy = tanHalfFov;
         const float tanfovx = tanHalfFov * aspect;
         
-        const PointType globalLightDir = PointType(-3000.0f, 0.0f, 0.0f).normalized();
+        const PointType globalLightDir = (-cam.direction * 0.2f).normalized();
         const float fogStart = 1000.0f;
         const float fogEnd = 4000.0f;
         const float minVisibility = 0.2f; 
         
-        #pragma omp parallel for schedule(dynamic) collapse(2)
+        #pragma omp parallel for schedule(dynamic, 128) collapse(2)
         for (int y = 0; y < height; ++y) {
             for (int x = 0; x < width; ++x) {
                 int pidx = (y * width + x);
@@ -1338,9 +1336,8 @@ public:
 
                 if (neighbor == nullptr || !neighbor->active || neighbor->objectId != node->objectId) {
                     isExposed = true;
+                    break;
                 }
-
-                if (isExposed) break;
             }
 
             if (isExposed) {
