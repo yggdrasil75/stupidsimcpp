@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <queue>
 #include <unordered_map>
+#include <map>
 
 #include "../grid/grid3eigen.hpp"
 #include "../timing_decorator.cpp"
@@ -58,6 +59,7 @@ struct Particle {
     float soundSpeed = 100.0f;
 
     std::unordered_map<int, float> neighbors;
+    std::map<float, int> nearNeighbors;
 };
 
 struct planetConfig {
@@ -94,16 +96,17 @@ struct planetConfig {
 };
 
 struct PlateConfig {
-    int plateId;
+    int plateId = -1;
     Eigen::Vector3f plateEulerPole;
     Eigen::Vector3f direction;
-    float angularVelocity;
-    float thickness;
-    float density;
-    float rigidity;
-    float temperature;
+    float angularVelocity = 0;
+    float thickness = 0;
+    float density = 0;
+    float rigidity = 0;
+    float temperature = 0;
     Eigen::Vector3f debugColor;
-    PlateType ptype;
+    PlateType ptype = PlateType::MIXED;
+    std::vector<int> assignedNodes;
 };
 
 class planetsim {
@@ -235,7 +238,17 @@ public:
                     plates[i].plateId = i;
                     config.surfaceNodes[seedIndex].plateID = i; 
                     float colorVal = static_cast<float>(seedid) / config.surfaceNodes.size();
-                    plates[i].debugColor = v3(colorVal,colorVal,colorVal);
+                    if (i % 3 == 0) {
+                        float r = static_cast<float>(seedid * seedid) / config.surfaceNodes.size();
+                        plates[i].debugColor = v3(r, colorVal, colorVal);   
+                    } else if (i % 3 == 1) {
+                        float g = static_cast<float>(seedid * seedid) / config.surfaceNodes.size();
+                        plates[i].debugColor = v3(colorVal, g, colorVal);
+                    } else {
+                        float b = static_cast<float>(seedid * seedid) / config.surfaceNodes.size();
+                        plates[i].debugColor = v3(colorVal, colorVal, b);
+                    }
+                    
                     foundValidSeed = true;
                 }
                 
@@ -246,39 +259,89 @@ public:
                 selectedSeedIndices.push_back(seedIndex);
                 plates[i].plateId = i;
                 float colorVal = static_cast<float>(seedIndex) / config.surfaceNodes.size();
-                plates[i].debugColor = v3(colorVal,colorVal,colorVal);
+                if (i % 3 == 0) {
+                    float r = static_cast<float>(seedid * seedid) / config.surfaceNodes.size();
+                    plates[i].debugColor = v3(r, colorVal, colorVal);   
+                } else if (i % 3 == 1) {
+                    float g = static_cast<float>(seedid * seedid) / config.surfaceNodes.size();
+                    plates[i].debugColor = v3(colorVal, g, colorVal);
+                } else {
+                    float b = static_cast<float>(seedid * seedid) / config.surfaceNodes.size();
+                    plates[i].debugColor = v3(colorVal, colorVal, b);
+                }
                 config.surfaceNodes[seedIndex].plateID = i; 
             }
         }
         
     }
 
-
     void buildAdjacencyList() {
         TIME_FUNCTION;
         for (int i = 0; i < config.surfaceNodes.size(); i++) {
-            Particle in = config.surfaceNodes[i];
-            v3 inn = in.basePos.normalized();
-            for (int j = 1; j < config.surfaceNodes.size(); j++) {
-                if (i == j) {
-                    continue;
-                }
-                auto ij = config.surfaceNodes[j];
-                if (ij.neighbors.contains(i)){
-                    in.neighbors[j] = ij.neighbors[i];
-                }
+            Particle& in = config.surfaceNodes[i];
+            int test_idx = 0;
+            if (test_idx == i) test_idx++;
+            float current_radius = (in.basePos - config.surfaceNodes[test_idx].basePos).norm();
+            in.neighbors[test_idx] = current_radius; 
+            std::vector<std::pair<float, int>> valid_results;
 
-                v3 ijn = ij.basePos.normalized();
-                float cosangle = inn.dot(ijn);
-                float angle = std::acos(cosangle);
+            int safety_counter = 0;
+            while (safety_counter++ < 1000) { 
+                auto results = grid.findInRadius(in.basePos, current_radius);
+                valid_results.clear();
+                valid_results.reserve(results.size());
+            
+                for (const auto& node : results) {
+                    int j = node->subId;
+                    if (i == j) continue;
+                    float dist = (in.basePos - node->position).norm();
+                    in.neighbors[j] = dist; 
+                    valid_results.push_back({dist, j});
+                }
                 
-                in.neighbors[j] = angle;
+                int count = valid_results.size();
+                
+                if (count < 8) {
+                    test_idx++;
+                    if (test_idx == i) test_idx++;
+                    if (test_idx >= config.surfaceNodes.size()) break;
+                    
+                    current_radius = (in.basePos - config.surfaceNodes[test_idx].basePos).norm();
+                    in.neighbors[test_idx] = current_radius;
+                } 
+                else if (count > 16) {
+                    float new_radius = valid_results[0].first;
+                    if (new_radius >= current_radius || new_radius == 0.0f) {
+                        current_radius *= 0.9f; 
+                    } else {
+                        current_radius = new_radius;
+                    }
+                }
+            }
+            
+            std::sort(valid_results.begin(), valid_results.end());
+            
+            int max_neighbors = std::min(8, (int)valid_results.size());
+            for (int k = 0; k < max_neighbors; k++) {
+                in.nearNeighbors[valid_results[k].first] = valid_results[k].second;
             }
         }
     }
 
     void growPlatesRandom() {
         TIME_FUNCTION;
+        std::uniform_int_distribution<int> distPlate(0, config.numPlates);
+        std::vector<int> unassigned;
+        for (int i = 0; i < config.surfaceNodes.size(); i++) {
+            if (config.surfaceNodes[i].plateID != -1)
+                unassigned.emplace_back(i);
+            else plates[config.surfaceNodes[i].plateID].assignedNodes.emplace_back(i);
+        }
+
+        while (!unassigned.empty()) {
+            int selPlate = distPlate(rng);
+            
+        }
     }
 
     void growPlatesCellular() {
