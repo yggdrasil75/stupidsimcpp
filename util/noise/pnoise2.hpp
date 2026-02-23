@@ -9,6 +9,7 @@
 #include <limits>
 #include "../../eigen/Eigen/Core"
 #include "../timing_decorator.hpp"
+#include "../basicdefines.hpp"
 
 class PNoise2 {
 private:

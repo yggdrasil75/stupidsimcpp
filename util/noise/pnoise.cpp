@@ -6,8 +6,11 @@
 #include <cstring>
 #include <algorithm>
 #include <iostream>
+#include <fstream>
+#include <sstream>
 
 #include "./pnoise2.hpp"
+#include "../jsonhelper.hpp"
 #include "../timing_decorator.hpp"
 #include "../../imgui/imgui.h"
 #include <GLFW/glfw3.h>
@@ -194,11 +197,94 @@ inline void updateNoiseTexture(NoisePreviewState& state) {
     state.needsUpdate = false;
 }
 
+inline void saveNoiseState(const NoisePreviewState& state, const std::string& filename) {
+    std::ofstream out(filename);
+    if (!out) return;
+
+    out << "{\n";
+    out << "  \"masterSeed\": " << state.masterSeed << ",\n";
+    out << "  \"offsetX\": " << state.offset[0] << ",\n";
+    out << "  \"offsetY\": " << state.offset[1] << ",\n";
+    out << "  \"layers\": [\n";
+    
+    for (size_t i = 0; i < state.layers.size(); ++i) {
+        const auto& l = state.layers[i];
+        out << "    {\n";
+        out << "      \"enabled\": " << (l.enabled ? "true" : "false") << ",\n";
+        out << "      \"name\": \"" << l.name << "\",\n";
+        out << "      \"type\": " << (int)l.type << ",\n";
+        out << "      \"blend\": " << (int)l.blend << ",\n";
+        out << "      \"seedOffset\": " << l.seedOffset << ",\n";
+        out << "      \"scale\": " << l.scale << ",\n";
+        out << "      \"strength\": " << l.strength << ",\n";
+        out << "      \"octaves\": " << l.octaves << ",\n";
+        out << "      \"persistence\": " << l.persistence << ",\n";
+        out << "      \"lacunarity\": " << l.lacunarity << ",\n";
+        out << "      \"ridgeOffset\": " << l.ridgeOffset << "\n";
+        out << "    }" << (i < state.layers.size() - 1 ? "," : "") << "\n";
+    }
+    
+    out << "  ]\n";
+    out << "}\n";
+}
+
+inline void loadNoiseState(NoisePreviewState& state, const std::string& filename) {
+    std::ifstream in(filename);
+    if (!in) return;
+
+    std::stringstream buffer;
+    buffer << in.rdbuf();
+    std::string json = buffer.str();
+
+    state.masterSeed = JsonHelper::parseInt(json, "masterSeed", 1337);
+    state.offset[0] = JsonHelper::parseFloat(json, "offsetX", 0.0f);
+    state.offset[1] = JsonHelper::parseFloat(json, "offsetY", 0.0f);
+    
+    auto layerStrs = JsonHelper::parseArray(json, "layers");
+    state.layers.clear();
+    
+    for (const auto& lStr : layerStrs) {
+        NoiseLayer l;
+        l.enabled = JsonHelper::parseBool(lStr, "enabled", true);
+        std::string name = JsonHelper::parseString(lStr, "name");
+        if (!name.empty()) {
+            std::strncpy(l.name, name.c_str(), 31);
+            l.name[31] = '\0';
+        }
+        l.type = (NoiseType)JsonHelper::parseInt(lStr, "type", 0);
+        l.blend = (BlendMode)JsonHelper::parseInt(lStr, "blend", 0);
+        l.seedOffset = JsonHelper::parseInt(lStr, "seedOffset", 0);
+        l.scale = JsonHelper::parseFloat(lStr, "scale", 0.02f);
+        l.strength = JsonHelper::parseFloat(lStr, "strength", 1.0f);
+        l.octaves = JsonHelper::parseInt(lStr, "octaves", 4);
+        l.persistence = JsonHelper::parseFloat(lStr, "persistence", 0.5f);
+        l.lacunarity = JsonHelper::parseFloat(lStr, "lacunarity", 2.0f);
+        l.ridgeOffset = JsonHelper::parseFloat(lStr, "ridgeOffset", 1.0f);
+        
+        state.layers.push_back(l);
+    }
+    state.needsUpdate = true;
+}
+
 inline void drawNoiseLab(NoisePreviewState& noiseState) {
     ImGui::Begin("2D Noise Lab");
     
-    // Master Controls
     bool changed = false;
+    
+    static char filenameBuffer[128] = "output/noise_preset.json";
+    ImGui::InputText("File", filenameBuffer, sizeof(filenameBuffer));
+    ImGui::SameLine();
+    if (ImGui::Button("Save JSON")) {
+        saveNoiseState(noiseState, filenameBuffer);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Load JSON")) {
+        loadNoiseState(noiseState, filenameBuffer);
+        changed = true;
+    }
+
+    ImGui::Separator();
+
     changed |= ImGui::InputInt("Master Seed", &noiseState.masterSeed);
     changed |= ImGui::DragFloat2("Pan Offset", noiseState.offset, 1.0f);
     
@@ -254,7 +340,7 @@ inline void drawNoiseLab(NoisePreviewState& noiseState) {
         }
 
         if (open) {
-            ImGui::Checkbox("##enabled", &layer.enabled);
+            if (ImGui::Checkbox("##enabled", &layer.enabled)) changed = true;
             ImGui::SameLine();
             ImGui::InputText("##name", layer.name, 32);
 

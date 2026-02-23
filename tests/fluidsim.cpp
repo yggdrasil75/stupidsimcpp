@@ -71,7 +71,7 @@ public:
     void update() {
         if (isRunning) {
             if (sim.getParticleCount() < (size_t)totalParticleCap) {
-                 sim.spawnParticles(baseParticle, particlesToSpawnPerFrame);
+                sim.spawnParticles(baseParticle, particlesToSpawnPerFrame);
             }
             sim.applyPhysics();
         }

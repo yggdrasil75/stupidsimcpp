@@ -957,9 +957,9 @@ public:
     }
 
     bool set(const T& data, const PointType& pos, bool visible, Eigen::Vector3f color, float size, bool active,
-            int objectId = -1, bool light = false, float emittance = 0.0f, float refraction = 0.0f, 
+            int objectId = -1, int subId = 0, bool light = false, float emittance = 0.0f, float refraction = 0.0f, 
             float reflection = 0.0f) {
-        auto pointData = std::make_shared<NodeData>(data, pos, visible, color, size, active, objectId,
+        auto pointData = std::make_shared<NodeData>(data, pos, visible, color, size, active, objectId, subId,
                                                     light, emittance, refraction, reflection);
         if (insertRecursive(root_.get(), pointData, 0)) {
             this->size++;
@@ -1073,14 +1073,10 @@ public:
         
         if (!remove(oldPos, tolerance)) return false;
         
-        bool res = set(newData, newPos, 
-                newVisible,
+        bool res = set(newData, newPos, newVisible,
                 newColor != Eigen::Vector3f(1.0f, 1.0f, 1.0f) ? newColor : pointData->color,
                 newSize > 0 ? newSize : pointData->size,
-                newActive,
-                targetObjId,
-                finalSubId,
-                newLight,
+                newActive, targetObjId, finalSubId, newLight,
                 newEmittance > 0 ? newEmittance : pointData->emittance,
                 newRefraction >= 0 ? newRefraction : pointData->refraction,
                 newReflection >= 0 ? newReflection : pointData->reflection);
