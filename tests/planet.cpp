@@ -18,8 +18,8 @@ private:
     bool updatePreview = false;
     bool textureInitialized = false;
     frame currentPreviewFrame;
-    int outWidth = 512;
-    int outHeight = 512;
+    int outWidth = 1024;
+    int outHeight = 1024;
     float fps = 60;
     int rayCount = 3;
     int reflectCount = 4;
@@ -90,16 +90,12 @@ public:
             ImGui::Text("Current Step: %d", sim.config.currentStep);
             ImGui::Text("Nodes: %zu", sim.config.surfaceNodes.size());
         }
-        if (ImGui::Button("Apply Tectonics")) {
-            simulateTectonics();
-        }
 
         if (ImGui::CollapsingHeader("Physics Parameters")) {
             ImGui::DragFloat("Gravity (G)", &sim.config.G_ATTRACTION, 0.1f);
             ImGui::DragFloat("Time Step", &sim.config.TIMESTEP, 0.001f, 0.0001f, 0.1f);
             ImGui::DragFloat("Viscosity", &sim.config.dampingFactor, 0.001f, 0.0f, 1.0f);
             ImGui::DragFloat("Pressure Stiffness", &sim.config.pressureStiffness, 10.0f);
-            ImGui::DragInt("Num Plates", &sim.config.numPlates, 1, 1, 50);
         }
 
         if (ImGui::CollapsingHeader("Tectonic Simulation")) {
@@ -201,6 +197,7 @@ public:
 
     void simulateTectonics() {
         sim.assignSeeds();
+        sim.buildAdjacencyList();
         // sim.growPlatesCellular();
         sim.growPlatesRandom();
         //sim.fixBoundaries();
