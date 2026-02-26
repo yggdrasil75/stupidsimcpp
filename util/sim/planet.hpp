@@ -59,8 +59,6 @@ struct Particle {
     float mass;
     bool isStatic = false;
     float soundSpeed = 100.0f;
-    float temperature = 0.0f;
-    float water = 0.0f;
     float sandcontent = 0.0f;
     float siltcontent = 0.0f;
     float claycontent = 0.0f;
