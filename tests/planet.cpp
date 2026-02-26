@@ -34,6 +34,29 @@ private:
     float rotationRadius = 2500;
     float angle = 0.0f;
     const float ω = (std::pow(M_PI, 2) / 30) / 10;
+    bool tectonicGenned = false;
+    bool doFixPlates = true;
+    bool platesUseCellular = false;
+
+    enum class DebugColorMode {
+        BASE,
+        PLATES,
+        NOISE,
+        RESERVED
+    };
+    DebugColorMode currentColorMode = DebugColorMode::BASE;
+
+    enum class DebugMapMode {
+        NONE,
+        BASE,
+        NOISE,
+        TECTONIC,
+        TECTONICCOLOR,
+        CURRENT
+    };
+    DebugMapMode currentMapMode = DebugMapMode::NONE;
+    GLuint mapTexture = 0;
+    frame mapFrame;
 
 public:
     planetSimUI() {
@@ -48,11 +71,28 @@ public:
         if (textu != 0) {
             glDeleteTextures(1, &textu);
         }
+        if (mapTexture != 0) {
+            glDeleteTextures(1, &mapTexture);
+        }
         sim.grid.clear();
     }
 
     void renderUI(GLFWwindow* window) {
+        handleCameraControls(window);
         ImGui::Begin("Planet Simulation");
+        if (ImGui::BeginTable("MainLayout", 2, ImGuiTableFlags_Resizable | ImGuiTableFlags_BordersOuter)) {
+            ImGui::TableSetupColumn("Controls", ImGuiTableColumnFlags_WidthStretch, 0.3f);
+            ImGui::TableSetupColumn("Preview", ImGuiTableColumnFlags_WidthStretch, 0.7f);
+            ImGui::TableNextColumn();
+            renderControlsPanel();
+            ImGui::TableNextColumn();
+            renderPreviewPanel();
+            ImGui::EndTable();
+        }
+        ImGui::End();
+    }
+
+    void handleCameraControls(GLFWwindow* window) {
         if (orbitEquator) {
             angle += cam.rotationSpeed * deltaTime * ω;
             
@@ -75,6 +115,10 @@ public:
         if (keyStates[GLFW_KEY_X]) cam.moveDown(deltaTime);
         if (keyStates[GLFW_KEY_Q]) cam.rotateYaw(deltaTime);
         if (keyStates[GLFW_KEY_R]) cam.rotateYaw(-deltaTime);
+    }
+
+    void renderControlsPanel() {
+        ImGui::BeginChild("ControlsScroll", ImVec2(0, 0), true);
         
         if (ImGui::CollapsingHeader("Base Configuration", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::DragFloat("Radius", &sim.config.radius, 1.0f, 10.0f, 10000.0f);
@@ -86,9 +130,11 @@ public:
             
             if (ImGui::Button("1. Generate Fib Sphere", ImVec2(-1, 40))) {
                 sim.generateFibSphere();
+                applyDebugColorMode();
             }
             ImGui::Text("Current Step: %d", sim.config.currentStep);
             ImGui::Text("Nodes: %zu", sim.config.surfaceNodes.size());
+            ImGui::InputFloat("Noise strength", &sim.config.noiseStrength, 0.01, 1, "%.4f");
         }
 
         if (ImGui::CollapsingHeader("Physics Parameters")) {
@@ -100,19 +146,115 @@ public:
 
         if (ImGui::CollapsingHeader("Tectonic Simulation")) {
             ImGui::DragInt("Num Plates", &sim.config.numPlates, 1, 1, 100);
-            ImGui::DragFloat("Plate Randomness", &sim.config.plateRandom, 0.01f, 0.0f, 2.0f);
             ImGui::DragInt("Smoothing Passes", &sim.config.smoothingPasses, 1, 0, 10);
             ImGui::DragFloat("Mountain Height", &sim.config.mountHeight, 1.0f, 0.0f, 1000.0f);
             ImGui::DragFloat("Valley Depth", &sim.config.valleyDepth, 1.0f, -1000.0f, 0.0f);
             ImGui::DragFloat("Transform Roughness", &sim.config.transformRough, 1.0f, 0.0f, 500.0f);
             ImGui::DragInt("Stress Passes", &sim.config.stressPasses, 1, 0, 20);
+            ImGui::DragFloat("Max Elevation Ratio", &sim.config.maxElevationRatio, 1.0f, 0.0f, 1.0f);
+            ImGui::Checkbox("Fix Boundaries", &doFixPlates);
+            ImGui::Checkbox("use Cellular", &platesUseCellular);
 
             if (ImGui::Button("2. Simulate Tectonics", ImVec2(-1, 40))) {
                 simulateTectonics();
             }
         }
 
-        if (ImGui::CollapsingHeader("Camera Controls")) {
+        if (ImGui::CollapsingHeader("Celestial Bodies")) {
+            ///TODO: add controls for moon, star.
+        }
+
+        if (ImGui::CollapsingHeader("Fillings")) {
+            if (ImGui::Button("Interpolate surface", ImVec2(-1, 40))) {
+                interpolateSurface();
+            }
+            if (ImGui::Button("Fill Planet", ImVec2(-1, 40))) {
+                fillPlanet();
+            }
+        }
+
+        if (ImGui::CollapsingHeader("Debug Views")) {
+            ImGui::Text("3D Planet Color Mode:");
+            bool colorChanged = false;
+            if (ImGui::RadioButton("Base Color", currentColorMode == DebugColorMode::BASE)) { 
+                currentColorMode = DebugColorMode::BASE;
+                colorChanged = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::RadioButton("Plates", currentColorMode == DebugColorMode::PLATES)) { 
+                currentColorMode = DebugColorMode::PLATES;
+                colorChanged = true;
+            }
+            
+            if (ImGui::RadioButton("Noise", currentColorMode == DebugColorMode::NOISE)) { 
+                currentColorMode = DebugColorMode::NOISE;
+                colorChanged = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::RadioButton("Reserved", currentColorMode == DebugColorMode::RESERVED)) { 
+                currentColorMode = DebugColorMode::RESERVED; 
+                colorChanged = true; 
+            }
+
+            if (colorChanged) {
+                applyDebugColorMode();
+            }
+
+            ImGui::Separator();
+            ImGui::Text("2D Height Map Mode:");
+            bool mapChanged = false;
+            
+            if (ImGui::RadioButton("None", currentMapMode == DebugMapMode::NONE)) { 
+                currentMapMode = DebugMapMode::NONE; 
+                mapChanged = true; 
+            }
+            ImGui::SameLine();
+            if (ImGui::RadioButton("Base Pos", currentMapMode == DebugMapMode::BASE)) { 
+                currentMapMode = DebugMapMode::BASE; 
+                mapChanged = true; 
+            }
+            ImGui::SameLine();
+            if (ImGui::RadioButton("Noise Pos", currentMapMode == DebugMapMode::NOISE)) { 
+                currentMapMode = DebugMapMode::NOISE; 
+                mapChanged = true; 
+            }
+
+            if (!tectonicGenned) ImGui::BeginDisabled();
+            
+            ImGui::SameLine();
+            if (ImGui::RadioButton("Tectonic Pos", currentMapMode == DebugMapMode::TECTONIC)) { 
+                currentMapMode = DebugMapMode::TECTONIC; 
+                mapChanged = true; 
+            }
+
+            if (ImGui::RadioButton("Tectonic Color", currentMapMode == DebugMapMode::TECTONICCOLOR)) { 
+                currentMapMode = DebugMapMode::TECTONICCOLOR;
+                mapChanged = true; 
+            }
+            ImGui::SameLine();
+            if (!tectonicGenned) ImGui::EndDisabled();
+            
+            if (ImGui::RadioButton("Current Pos", currentMapMode == DebugMapMode::CURRENT)) { 
+                currentMapMode = DebugMapMode::CURRENT; 
+                mapChanged = true; 
+            }
+
+            if (ImGui::Button("Refresh Map", ImVec2(-1, 24))) {
+                mapChanged = true;
+                generateDebugMap(currentMapMode);
+            }
+
+            if (mapChanged && currentMapMode != DebugMapMode::NONE) {
+                generateDebugMap(currentMapMode);
+            }
+
+            if (currentMapMode != DebugMapMode::NONE && mapTexture != 0) {
+                float availWidth = ImGui::GetContentRegionAvail().x;
+                ImGui::Image((void*)(intptr_t)mapTexture, ImVec2(availWidth, availWidth * 0.5f));
+            }
+        }
+
+        if (ImGui::CollapsingHeader("Camera Controls", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::DragFloat3("Origin", cam.origin.data());
             ImGui::DragFloat3("Direction", cam.direction.data(), 0.0001f, -1.0f, 1.0f);
             ImGui::DragFloat("Movement Speed", &cam.movementSpeed, 0.1f, 1.0f, 500.0f);
@@ -129,7 +271,12 @@ public:
 
             if (ImGui::Button(orbitEquator ? "Stop Equator" : "Orbit Equator")) orbitEquator = !orbitEquator;
         }
+        ImGui::EndChild();
+    }
 
+    void renderPreviewPanel() {
+        ImGui::BeginChild("PreviewChild", ImVec2(0, 0), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        
         livePreview();
         if (textureInitialized) {
             float aspect = (float)currentPreviewFrame.getWidth() / (float)currentPreviewFrame.getHeight();
@@ -137,7 +284,179 @@ public:
             ImGui::Image((void*)(intptr_t)textu, ImVec2(availWidth, availWidth / aspect));
         }
 
-        ImGui::End();
+        ImGui::EndChild();
+    }
+
+    void applyDebugColorMode() {
+        if (sim.config.surfaceNodes.empty()) return;
+
+        float minNoise = std::numeric_limits<float>::max();
+        float maxNoise = std::numeric_limits<float>::lowest();
+        int minSub = std::numeric_limits<int>::max();
+        int maxSub = std::numeric_limits<int>::lowest();
+
+        for (const auto& p : sim.config.surfaceNodes) {
+            if (p.noiseDisplacement < minNoise) minNoise = p.noiseDisplacement;
+            if (p.noiseDisplacement > maxNoise) maxNoise = p.noiseDisplacement;
+        }
+
+        for (auto& p : sim.config.surfaceNodes) {
+            v3 color = p.originColor;
+            
+            switch (currentColorMode) {
+                case DebugColorMode::PLATES:
+                    if (p.plateID != -1 && p.plateID < sim.plates.size()) {
+                        color = sim.plates[p.plateID].debugColor;
+                    } else {
+                        color = v3(0.5f, 0.5f, 0.5f);
+                    }
+                    break;
+                case DebugColorMode::NOISE: {
+                    float t = 0.5f;
+                    if (maxNoise > minNoise) t = (p.noiseDisplacement - minNoise) / (maxNoise - minNoise);
+                    color = v3(t, t, t);
+                    break;
+                }
+                case DebugColorMode::BASE:
+                default:
+                    color = p.originColor;
+                    break;
+            }
+
+            sim.grid.update(p.currentPos, p.currentPos, p, true, color, sim.config.voxelSize, true, -2, false, 0.0f, 0.0f, 0.0f);
+        }
+        for (auto& p : sim.config.interpolatedNodes) {
+            v3 color = p.originColor;
+            
+            switch (currentColorMode) {
+                case DebugColorMode::PLATES:
+                    if (p.plateID != -1 && p.plateID < sim.plates.size()) {
+                        color = sim.plates[p.plateID].debugColor;
+                    } else {
+                        color = v3(0.5f, 0.5f, 0.5f);
+                    }
+                    break;
+                case DebugColorMode::NOISE: {
+                    float t = 0.5f;
+                    if (maxNoise > minNoise) t = (p.noiseDisplacement - minNoise) / (maxNoise - minNoise);
+                    color = v3(t, t, t);
+                    break;
+                }
+                case DebugColorMode::BASE:
+                default:
+                    color = p.originColor;
+                    break;
+            }
+
+            sim.grid.update(p.currentPos, p.currentPos, p, true, color, sim.config.voxelSize, true, -2, false, 0.0f, 0.0f, 0.0f);
+        }
+    }
+
+    void generateDebugMap(DebugMapMode mode) {
+        if (mode == DebugMapMode::NONE || sim.config.surfaceNodes.empty()) return;
+
+        int w = 512;
+        int h = 348;
+        std::vector<float> depths(w * h, -1.0f);
+        float minD = std::numeric_limits<float>::max();
+        float maxD = std::numeric_limits<float>::lowest();
+
+        for (const auto& p : sim.config.surfaceNodes) {
+            v3 pos;
+            switch(mode) {
+                case DebugMapMode::BASE: 
+                    pos = p.originalPos; 
+                    break;
+                case DebugMapMode::NOISE: 
+                    pos = p.noisePos; 
+                    break;
+                case DebugMapMode::TECTONIC: 
+                    pos = p.tectonicPos; 
+                    break;
+                case DebugMapMode::CURRENT:
+                default: 
+                    pos = p.currentPos;
+                    break;
+            }
+            float d = pos.norm();
+            if (d < minD) minD = d;
+            if (d > maxD) maxD = d;
+        }
+
+        for (const auto& p : sim.config.surfaceNodes) {
+            v3 pos;
+            switch(mode) {
+                case DebugMapMode::BASE: 
+                    pos = p.originalPos; 
+                    break;
+                case DebugMapMode::NOISE: 
+                    pos = p.noisePos; 
+                    break;
+                case DebugMapMode::TECTONIC: 
+                    pos = p.tectonicPos; 
+                    break;
+                case DebugMapMode::TECTONICCOLOR: 
+                    pos = sim.plates[p.plateID].debugColor; 
+                    break;
+                case DebugMapMode::CURRENT:
+                default:
+                    pos = p.currentPos; 
+                    break;
+            }
+
+            float d = pos.norm();
+            v3 n = p.originalPos.normalized();
+            
+            float u = 0.5f + std::atan2(n.z(), n.x()) / (2.0f * static_cast<float>(M_PI));
+            float v = 0.5f - std::asin(n.y()) / static_cast<float>(M_PI);
+
+            int px = std::clamp(static_cast<int>(u * w), 0, w - 1);
+            int py = std::clamp(static_cast<int>(v * h), 0, h - 1);
+
+            float normalizedD = (maxD > minD) ? (d - minD) / (maxD - minD) : 0.5f;
+
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dx = -1; dx <= 1; dx++) {
+                    int nx = px + dx;
+                    int ny = py + dy;
+                    
+                    if (nx < 0) nx += w;
+                    if (nx >= w) nx -= w;
+                    
+                    if (ny >= 0 && ny < h) {
+                        int idx = ny * w + nx;
+                        if (depths[idx] < 0.0f || normalizedD > depths[idx]) {
+                            depths[idx] = normalizedD;
+                        }
+                    }
+                }
+            }
+        }
+
+        for (int i = 0; i < w * h; i++) {
+            if (depths[i] < 0.0f) depths[i] = 0.0f;
+        }
+
+        std::vector<uint8_t> pixels(w * h * 3);
+        for (int i = 0; i < w * h; i++) {
+            uint8_t val = static_cast<uint8_t>(depths[i] * 255.0f);
+            pixels[i * 3 + 0] = val;
+            pixels[i * 3 + 1] = val;
+            pixels[i * 3 + 2] = val;
+        }
+
+        mapFrame = frame(w, h, frame::colormap::RGB);
+        mapFrame.setData(pixels);
+
+        if (mapTexture == 0) {
+            glGenTextures(1, &mapTexture);
+        }
+        
+        glBindTexture(GL_TEXTURE_2D, mapTexture);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, mapFrame.getData().data());
     }
 
     void applyNoise(const NoisePreviewState& noiseState) {
@@ -159,6 +478,7 @@ public:
             return vYZ * blend.x() + vXZ * blend.y() + vXY * blend.z();
         };
         sim._applyNoise(triplanarNoise);
+        applyDebugColorMode();
     }
 
     void livePreview() {
@@ -196,13 +516,30 @@ public:
     }
 
     void simulateTectonics() {
+        
+        currentColorMode = DebugColorMode::PLATES;
+        
         sim.assignSeeds();
         sim.buildAdjacencyList();
-        // sim.growPlatesCellular();
-        sim.growPlatesRandom();
-        //sim.fixBoundaries();
+        if (platesUseCellular) {
+            sim.growPlatesCellular();
+        } else sim.growPlatesRandom();
+        if (doFixPlates) sim.fixBoundaries();
         sim.extraplateste();
+        sim.boundaryStress();
         sim.finalizeApplyResults();
+
+        applyDebugColorMode();
+        tectonicGenned = true;
+        if(currentMapMode != DebugMapMode::NONE) generateDebugMap(currentMapMode);
+    }
+
+    void interpolateSurface() {
+        sim.interpolateSurface();
+    }
+
+    void fillPlanet() {
+        sim.fillPlanet();
     }
 };
 
