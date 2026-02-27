@@ -717,52 +717,99 @@ public:
 
     void interpolateSurface() {
         TIME_FUNCTION;
-        std::unordered_map<uint64_t, bool> processedEdges;
-        size_t counter = 0;
+        
+        std::set<std::tuple<int, int, int>> uniqueTriangles;
 
         for (int i = 0; i < config.surfaceNodes.size(); i++) {
             Particle& p1 = config.surfaceNodes[i];
-
+            
             for (int j : p1.nearNeighbors) {
-                if (i >= j) continue; 
-
-                uint64_t edgeKey = ((uint64_t)i << 32) | (uint32_t)j;
-                if (processedEdges[edgeKey]) continue;
-                processedEdges[edgeKey] = true;
-
+                if (j >= i) continue; 
+                
                 Particle& p2 = config.surfaceNodes[j];
-                float dist = (p1.currentPos - p2.currentPos).norm();
-
-                // If nodes are too far apart, fill the gap
-                if (dist > config.voxelSize) {
-                    int steps = static_cast<int>(dist / config.voxelSize);
-                    for (int step = 1; step <= steps; step++) {
-                        float t = static_cast<float>(step) / (steps + 1);
-                        
-                        Particle newPt;
-                        newPt.surface = true;
-                        newPt.plateID = (t < 0.5f) ? p1.plateID : p2.plateID;
-                        newPt.originColor = (t < 0.5f) ? p1.originColor : p2.originColor;
-                        
-                        // Spherically interpolate base positions
-                        Eigen::Vector3f baseP1 = p1.originalPos.normalized();
-                        Eigen::Vector3f baseP2 = p2.originalPos.normalized();
-                        
-                        // SLERP (Spherical Linear Interpolation) for perfect curves
-                        float dot = std::clamp(baseP1.dot(baseP2), -1.0f, 1.0f);
-                        float theta = std::acos(dot);
-                        Eigen::Vector3f interpBase = ((std::sin((1.0f - t) * theta) / std::sin(theta)) * baseP1 + 
-                                                      (std::sin(t * theta) / std::sin(theta)) * baseP2).normalized();
-                        
-                        newPt.originalPos = interpBase * config.radius;
-                        newPt.noisePos = p1.noisePos * (1.0f - t) + p2.noisePos * t;
-                        newPt.tectonicPos = p1.tectonicPos * (1.0f - t) + p2.tectonicPos * t;
-                        newPt.currentPos = p1.currentPos * (1.0f - t) + p2.currentPos * t; // Linear for height
-                        
-                        grid.set(newPt, newPt.currentPos, true, newPt.originColor, config.voxelSize, true, 1, 2 /*subid 2 for interpolated*/, false, 0.0f, 0.0f, 0.0f);
-                        config.interpolatedNodes.emplace_back(newPt);
-                        counter++;
+                
+                for (int k : p2.nearNeighbors) {
+                    if (k <= j) continue;
+                    
+                    bool isNeighbor = false;
+                    for(int n : config.surfaceNodes[k].nearNeighbors) {
+                        if(n == i) { isNeighbor = true; break; }
                     }
+
+                    if (isNeighbor) {
+                        uniqueTriangles.insert({i, j, k});
+                    }
+                }
+            }
+        }
+
+        std::cout << "Identified " << uniqueTriangles.size() << " surface triangles. Filling..." << std::endl;
+
+        size_t counter = 0;
+        float halfVoxel = config.voxelSize * 0.5f;
+
+        for (const auto& tri : uniqueTriangles) {
+            int idx1 = std::get<0>(tri);
+            int idx2 = std::get<1>(tri);
+            int idx3 = std::get<2>(tri);
+
+            const Particle& p1 = config.surfaceNodes[idx1];
+            const Particle& p2 = config.surfaceNodes[idx2];
+            const Particle& p3 = config.surfaceNodes[idx3];
+
+            float d1 = (p2.currentPos - p1.currentPos).norm();
+            float d2 = (p3.currentPos - p1.currentPos).norm();
+            float d3 = (p3.currentPos - p2.currentPos).norm();
+            float maxDist = std::max({d1, d2, d3});
+
+            int steps = static_cast<int>(maxDist / config.voxelSize);
+            if (steps < 1) steps = 1;
+
+            for (int u = 0; u <= steps; u++) {
+                for (int v = 0; v <= steps - u; v++) {
+                    float w2 = (float)u / steps;
+                    float w3 = (float)v / steps;
+                    float w1 = 1.0f - w2 - w3;
+                    
+                    if (w1 > 0.99f || w2 > 0.99f || w3 > 0.99f) continue;
+
+                    Particle newPt;
+                    newPt.surface = true;
+                    
+                    if (w1 > w2 && w1 > w3) {
+                        newPt.plateID = p1.plateID;
+                        newPt.originColor = p1.originColor;
+                    } else if (w2 > w3) {
+                        newPt.plateID = p2.plateID;
+                        newPt.originColor = p2.originColor;
+                    } else {
+                        newPt.plateID = p3.plateID;
+                        newPt.originColor = p3.originColor;
+                    }
+
+                    v3 interpNormal = (p1.originalPos.normalized() * w1 + 
+                                       p2.originalPos.normalized() * w2 + 
+                                       p3.originalPos.normalized() * w3);
+                    interpNormal.normalize(); 
+                    
+                    float r1 = p1.currentPos.norm();
+                    float r2 = p2.currentPos.norm();
+                    float r3 = p3.currentPos.norm();
+                    float interpRadius = (r1 * w1) + (r2 * w2) + (r3 * w3);
+
+                    v3 smoothPos = interpNormal * interpRadius;
+
+                    newPt.currentPos.x() = std::round(smoothPos.x() / config.voxelSize) * config.voxelSize;
+                    newPt.currentPos.y() = std::round(smoothPos.y() / config.voxelSize) * config.voxelSize;
+                    newPt.currentPos.z() = std::round(smoothPos.z() / config.voxelSize) * config.voxelSize;
+
+                    newPt.originalPos = interpNormal * config.radius;
+                    newPt.noisePos = p1.noisePos * w1 + p2.noisePos * w2 + p3.noisePos * w3;
+                    newPt.tectonicPos = p1.tectonicPos * w1 + p2.tectonicPos * w2 + p3.tectonicPos * w3;
+
+                    grid.set(newPt, newPt.currentPos, true, newPt.originColor, config.voxelSize, true, 1, 2, false, 0.0f, 0.0f, 0.0f);
+                    
+                    counter++;
                 }
             }
         }
