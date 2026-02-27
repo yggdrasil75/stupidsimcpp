@@ -24,8 +24,9 @@ private:
     int rayCount = 3;
     int reflectCount = 4;
     bool slowRender = false;
-    float lodDist = 4096.0f;
+    float lodDist = 1024.0f;
     float lodDropoff = 0.001f;
+    float maxViewDistance = 4096;
     bool globalIllumination = false;
     bool useLod = true;
     std::map<int, bool> keyStates;
@@ -37,6 +38,9 @@ private:
     bool tectonicGenned = false;
     bool doFixPlates = true;
     bool platesUseCellular = false;
+    std::chrono::steady_clock::time_point lastStatsUpdate;
+    std::string cachedStats;
+    bool statsNeedUpdate = true;
 
     enum class DebugColorMode {
         BASE,
@@ -271,6 +275,10 @@ public:
 
             if (ImGui::Button(orbitEquator ? "Stop Equator" : "Orbit Equator")) orbitEquator = !orbitEquator;
         }
+
+        updateStatsCache();
+        ImGui::TextUnformatted(cachedStats.c_str());
+
         ImGui::EndChild();
     }
 
@@ -487,6 +495,7 @@ public:
         
         sim.grid.setLODMinDistance(lodDist);
         sim.grid.setLODFalloff(lodDropoff);
+        sim.grid.setMaxDistance(maxViewDistance);
         
         if (slowRender) {
             currentPreviewFrame = sim.grid.renderFrame(cam, outWidth, outHeight, frame::colormap::RGB, rayCount, reflectCount, globalIllumination, useLod);
@@ -540,6 +549,14 @@ public:
 
     void fillPlanet() {
         sim.fillPlanet();
+    }
+
+    void updateStatsCache() {
+        std::stringstream gridstats;
+        sim.grid.printStats(gridstats);
+        cachedStats = gridstats.str();
+        lastStatsUpdate = std::chrono::steady_clock::now();
+        statsNeedUpdate = false;
     }
 };
 

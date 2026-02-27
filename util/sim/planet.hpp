@@ -128,7 +128,7 @@ public:
 
     planetsim() {
         config = planetConfig();
-        grid = Octree<Particle>({-config.gridSizeCube,-config.gridSizeCube,-config.gridSizeCube,},{config.gridSizeCube,config.gridSizeCube,config.gridSizeCube});
+        grid = Octree<Particle>(v3(-config.gridSizeCube,-config.gridSizeCube,-config.gridSizeCube),v3(config.gridSizeCube,config.gridSizeCube,config.gridSizeCube), 16, 32);
     }
 
     float evaluate2DStack(const Eigen::Vector2f& point, const NoisePreviewState& state, PNoise2& gen) {
@@ -352,9 +352,9 @@ public:
         std::cout << "have " << unassignedCount << " remaining nodes" << std::endl;
         
         while (unassignedCount > 0) {
-            if (unassignedCount % 100 == 0)  {
-                std::cout << "have " << unassignedCount << " remaining nodes" << std::endl;
-            }
+            // if (unassignedCount % 100 == 0)  {
+            //     std::cout << "have " << unassignedCount << " remaining nodes" << std::endl;
+            // }
             
             int totalWeight = 0;
             for (int i = 0; i < config.numPlates; i++) {

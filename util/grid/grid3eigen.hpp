@@ -18,6 +18,7 @@
 #include <fstream>
 #include <mutex>
 #include <map>
+#include <unordered_set>
 
 #ifdef SSE
 #include <immintrin.h>
@@ -134,6 +135,7 @@ private:
 
     float lodFalloffRate_ = 0.1f; // Lower = better, higher = worse. 0-1
     float lodMinDistance_ = 100.0f;
+    float maxDistance_ = 4096;
     
     struct Ray {
         PointType origin;
@@ -175,6 +177,12 @@ private:
         return {childMin, childMax};
     }
 
+    bool boxIntersectsBox(const BoundingBox& a, const BoundingBox& b) const {
+        return (a.first[0] <= b.second[0] && a.second[0] >= b.first[0] &&
+                a.first[1] <= b.second[1] && a.second[1] >= b.first[1] &&
+                a.first[2] <= b.second[2] && a.second[2] >= b.first[2]);
+    }
+
     void splitNode(OctreeNode* node, int depth) {
         if (depth >= maxDepth) return;
         for (int i = 0; i < 8; ++i) {
@@ -182,12 +190,23 @@ private:
             node->children[i] = std::make_unique<OctreeNode>(childBounds.first, childBounds.second);
         }
 
+        std::vector<std::shared_ptr<NodeData>> keep;
         for (const auto& pointData : node->points) {
-            int octant = getOctant(pointData->position, node->center);
-            node->children[octant]->points.emplace_back(pointData);
+            // Keep massive objects in the parent
+            if (pointData->size >= node->nodeSize) {
+                keep.emplace_back(pointData);
+                continue;
+            }
+
+            BoundingBox cubeBounds = pointData->getCubeBounds();
+            for (int i = 0; i < 8; ++i) {
+                if (boxIntersectsBox(node->children[i]->bounds, cubeBounds)) {
+                    node->children[i]->points.emplace_back(pointData);
+                }
+            }
         }
 
-        node->points.clear();
+        node->points = std::move(keep);
         node->isLeaf = false;
 
         for (int i = 0; i < 8; ++i) {
@@ -203,7 +222,8 @@ private:
             node->lodData = nullptr;
         }
 
-        if (!node->contains(pointData->position)) return false;
+        BoundingBox cubeBounds = pointData->getCubeBounds();
+        if (!boxIntersectsBox(node->bounds, cubeBounds)) return false;
 
         if (node->isLeaf) {
             node->points.emplace_back(pointData);
@@ -212,12 +232,20 @@ private:
             }
             return true;
         } else {
-            int octant = getOctant(pointData->position, node->center);
-            if (node->children[octant]) {
-                return insertRecursive(node->children[octant].get(), pointData, depth + 1);
+            // Keep in parent if size is larger than or equal to the node size
+            if (pointData->size >= node->nodeSize) {
+                node->points.emplace_back(pointData);
+                return true;
             }
+
+            bool inserted = false;
+            for (int i = 0; i < 8; ++i) {
+                if (node->children[i] && boxIntersectsBox(node->children[i]->bounds, cubeBounds)) {
+                    inserted |= insertRecursive(node->children[i].get(), pointData, depth + 1);
+                }
+            }
+            return inserted;
         }
-        return false;
     }
     
     void ensureLOD(const OctreeNode* node) const {
@@ -232,10 +260,10 @@ private:
         bool anyLight = false;
         int count = 0;
         
-        if (node->points.size() == 1) {
+        if (node->isLeaf && node->points.size() == 1) {
             node->lodData = node->points[0];
             return;
-        } else if (node->isLeaf && node->points.size() == 0) {
+        } else if (node->isLeaf && node->points.empty()) {
             return;
         }
 
@@ -249,13 +277,13 @@ private:
             count++;
         };
 
+        for(const auto& pt : node->points) accumulate(pt);
+
         for (const auto& child : node->children) {
             if (child) {
                 ensureLOD(child.get());
                 if (child->lodData) {
                     accumulate(child->lodData);
-                } else if (child->isLeaf && !child->points.empty()) {
-                    for(const auto& pt : child->points) accumulate(pt);
                 }
             }
         }
@@ -305,45 +333,44 @@ private:
         return nullptr;
     }
 
-    bool removeRecursive(OctreeNode* node, const PointType& pos, float tolerance) {
+    bool removeRecursive(OctreeNode* node, const BoundingBox& bounds, const PointType& pos, float tolerance, bool& sizeDecremented) {
         {
             std::lock_guard<std::mutex> lock(node->lodMutex);
             node->lodData = nullptr; 
         }
 
-        if (!node->contains(pos)) return false;
+        if (!boxIntersectsBox(node->bounds, bounds)) return false;
         
-        if (node->isLeaf) {
-            bool found = false;
-            auto it = std::remove_if(node->points.begin(), node->points.end(),
-                [&](const std::shared_ptr<NodeData>& pointData) {
-                    if (!pointData->active) return false;
-                    
-                    float distSq = (pointData->position - pos).squaredNorm();
-                    if (distSq <= tolerance * tolerance) {
-                        found = true;
-                        return true;
-                    }
-                    return false;
-                });
-            
-            if (found) {
-                node->points.erase(it, node->points.end());
+        bool foundAny = false;
+        
+        auto it = std::remove_if(node->points.begin(), node->points.end(),
+            [&](const std::shared_ptr<NodeData>& pointData) {
+                if (!pointData->active) return false;
+                float distSq = (pointData->position - pos).squaredNorm();
+                return (distSq <= tolerance * tolerance);
+            });
+        
+        if (it != node->points.end()) {
+            node->points.erase(it, node->points.end());
+            if (!sizeDecremented) {
                 size--;
-                return true;
+                sizeDecremented = true;
             }
-            return false;
-        } else {
-            int octant = getOctant(pos, node->center);
-            if (node->children[octant]) {
-                return removeRecursive(node->children[octant].get(), pos, tolerance);
+            foundAny = true;
+        }
+
+        if (!node->isLeaf) {
+            for (int i = 0; i < 8; ++i) {
+                if (node->children[i]) {
+                    foundAny |= removeRecursive(node->children[i].get(), bounds, pos, tolerance, sizeDecremented);
+                }
             }
         }
-        return false;
+        return foundAny;
     }
 
-    void searchNode(OctreeNode* node, const PointType& center, float radiusSq, int objectid, 
-                               std::vector<std::shared_ptr<NodeData>>& results) const {
+    void searchNodeRecursive(OctreeNode* node, const PointType& center, float radiusSq, int objectid, 
+                               std::vector<std::shared_ptr<NodeData>>& results, std::unordered_set<std::shared_ptr<NodeData>>& seen) const {
         PointType closestPoint;
         for (int i = 0; i < Dim; ++i) {
             closestPoint[i] = std::max(node->bounds.first[i], std::min(center[i], node->bounds.second[i]));
@@ -354,25 +381,29 @@ private:
             return;
         }
         
-        if (node->isLeaf) {
-            for (const auto& pointData : node->points) {
-                if (!pointData->active) continue;
-                
-                float pointDistSq = (pointData->position - center).squaredNorm();
-                if (pointDistSq <= radiusSq && (pointData->objectId == objectid || objectid == -1)) {
-                    results.emplace_back(pointData);
-                }
+        for (const auto& pointData : node->points) {
+            if (!pointData->active) continue;
+            
+            float pointDistSq = (pointData->position - center).squaredNorm();
+            if (pointDistSq <= radiusSq && (pointData->objectId == objectid || objectid == -1)) {
+                if (seen.insert(pointData).second) results.emplace_back(pointData);
             }
-        } else {
+        }
+        
+        if (!node->isLeaf) {
             for (const auto& child : node->children) {
-                if (child) {
-                    searchNode(child.get(), center, radiusSq, objectid, results);
-                }
+                if (child) searchNodeRecursive(child.get(), center, radiusSq, objectid, results, seen);
             }
         }
     }
 
-    void voxelTraverseRecursive(OctreeNode* node, float tMin, float tMax, float maxDist, 
+    void searchNode(OctreeNode* node, const PointType& center, float radiusSq, int objectid, 
+                               std::vector<std::shared_ptr<NodeData>>& results) const {
+        std::unordered_set<std::shared_ptr<NodeData>> seen;
+        searchNodeRecursive(node, center, radiusSq, objectid, results, seen);
+    }
+
+    void voxelTraverseRecursive(OctreeNode* node, float tMin, float tMax, float& maxDist, 
                                 bool enableLOD, const Ray& ray, std::shared_ptr<NodeData>& hit, float invLodf) const {
         if (enableLOD && !node->isLeaf) {
             float dist = (node->center - ray.origin).norm();
@@ -383,7 +414,10 @@ private:
                 PointType n;
                 PointType h;
                 if (rayCubeIntersect(ray, node->lodData.get(), t, n, h)) {
-                    if (t >= 0 && t <= maxDist) hit = node->lodData;
+                    if (t >= 0 && t <= maxDist) {
+                        hit = node->lodData;
+                        maxDist = t;
+                    }
                 }
                 return;
             }
@@ -395,9 +429,9 @@ private:
             float t;
             PointType normal, hitPoint;
             if (rayCubeIntersect(ray, pointData.get(), t, normal, hitPoint)) {
-                if (t <= maxDist) {
+                if (t >= 0 && t <= maxDist && t <= tMax + 0.001f) {
+                    maxDist = t;
                     hit = pointData;
-                    return;
                 }
             }
         }
@@ -412,7 +446,7 @@ private:
         
         float tNext;
 
-        while(tMin < tMax && !hit) {
+        while(tMin < tMax && tMin <= maxDist) {
             Eigen::Vector3f next_t;
             next_t[0] = (currIdx & 1) ? tMax : ttt[0];
             next_t[1] = (currIdx & 2) ? tMax : ttt[1];
@@ -609,27 +643,27 @@ private:
         node->isLeaf = isLeaf;
         node->lodData = nullptr;
 
-        if (isLeaf) {
-            size_t pointCount;
-            readVal(in, pointCount);
-            node->points.reserve(pointCount);
-            
-            for (size_t i = 0; i < pointCount; ++i) {
-                auto pt = std::make_shared<NodeData>();
-                readVal(in, pt->data);
-                readVec3(in, pt->position);
-                readVal(in, pt->objectId);
-                readVal(in, pt->active);
-                readVal(in, pt->visible);
-                readVal(in, pt->size);
-                readVec3(in, pt->color);
-                readVal(in, pt->light);
-                readVal(in, pt->emittance);
-                readVal(in, pt->refraction);
-                readVal(in, pt->reflection);
-                node->points.push_back(pt);
-            }
-        } else {
+        size_t pointCount;
+        readVal(in, pointCount);
+        node->points.reserve(pointCount);
+        
+        for (size_t i = 0; i < pointCount; ++i) {
+            auto pt = std::make_shared<NodeData>();
+            readVal(in, pt->data);
+            readVec3(in, pt->position);
+            readVal(in, pt->objectId);
+            readVal(in, pt->active);
+            readVal(in, pt->visible);
+            readVal(in, pt->size);
+            readVec3(in, pt->color);
+            readVal(in, pt->light);
+            readVal(in, pt->emittance);
+            readVal(in, pt->refraction);
+            readVal(in, pt->reflection);
+            node->points.push_back(pt);
+        }
+
+        if (!isLeaf) {
             uint8_t childMask;
             readVal(in, childMask);
             
@@ -945,6 +979,7 @@ public:
 
     void setLODFalloff(float rate) { lodFalloffRate_ = rate; }
     void setLODMinDistance(float dist) { lodMinDistance_ = dist; }
+    void setMaxDistance(float dist) { maxDistance_ = dist; }
 
     void generateLODs() {
         if (!root_) return;
@@ -1028,7 +1063,10 @@ public:
     }
 
     bool remove(const PointType& pos, float tolerance = EPSILON) {
-        return removeRecursive(root_.get(), pos, tolerance);
+        auto pt = find(pos, tolerance);
+        if (!pt) return false;
+        bool sizeDecremented = false;
+        return removeRecursive(root_.get(), pt->getCubeBounds(), pos, tolerance, sizeDecremented);
     }
 
     std::vector<std::shared_ptr<NodeData>> findInRadius(const PointType& center, float radius, int objectid = -1) const {
@@ -1170,7 +1208,8 @@ public:
         float tMin, tMax;
         if (rayBoxIntersect(oray, root_->bounds, tMin, tMax)) {
             tMax = std::min(tMax, maxDist);
-            voxelTraverseRecursive(root_.get(), tMin, tMax, maxDist, enableLOD, oray, hit, invLodf);
+            float currentMaxDist = maxDist;
+            voxelTraverseRecursive(root_.get(), tMin, tMax, currentMaxDist, enableLOD, oray, hit, invLodf);
         }
         return hit;
     }
@@ -1234,7 +1273,8 @@ public:
         float tMin, tMax;
         if (rayBoxIntersect(ray, root_->bounds, tMin, tMax)) {
             tMax = std::min(tMax, maxDist);
-            voxelTraverseRecursive(root_.get(), tMin, tMax, maxDist, enableLOD, ray, hit, lodRatio);
+            float currentMaxDist = maxDist;
+            voxelTraverseRecursive(root_.get(), tMin, tMax, currentMaxDist, enableLOD, ray, hit, lodRatio);
         }
         return hit;
     }
@@ -1259,7 +1299,6 @@ public:
         
         const PointType globalLightDir = (-cam.direction * 0.2f).normalized();
         const float fogStart = 1000.0f;
-        const float fogEnd = 4000.0f;
         const float minVisibility = 0.2f; 
         
         #pragma omp parallel for schedule(dynamic, 128) collapse(2)
@@ -1276,7 +1315,7 @@ public:
 
                 Eigen::Vector3f color = backgroundColor_;
                 Ray ray(origin, rayDir);
-                auto hit = fastVoxelTraverse(ray, std::numeric_limits<float>::max(), true);
+                auto hit = fastVoxelTraverse(ray, maxDistance_, true);
                 if (hit != nullptr) {
                     auto obj = hit;
                     
@@ -1295,7 +1334,7 @@ public:
                         color = color * intensity;
                     }
                     
-                    float fogFactor = std::clamp((fogEnd - t) / (fogEnd - fogStart), minVisibility, 1.0f);
+                    float fogFactor = std::clamp((maxDistance_ - t) / (maxDistance_ - fogStart), minVisibility, 1.0f);
                     
                     color = color * fogFactor + backgroundColor_ * (1.0f - fogFactor);
                 }
@@ -1608,6 +1647,7 @@ public:
         os << "  Point Data        : " << (dataMem / 1024.0) << " KB\n";
         os << "========================================\n" << std::defaultfloat;
     }
+
     bool empty() const { return size == 0; }
 
     void clear() {
