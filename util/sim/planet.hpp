@@ -41,29 +41,29 @@ struct Particle {
     Eigen::Vector3f currentPos;
     
     float plateDisplacement = 0.0f;
-    float temperature = -1;
-    float water = -1;
+    // float temperature = -1;
+    // float water = -1;
     Eigen::Vector3f originColor;
     bool surface = false;
 
     //gravity factors:
-    Eigen::Matrix<float, 3, 1> velocity;
-    Eigen::Matrix<float, 3, 1> acceleration;
-    Eigen::Matrix<float, 3, 1> forceAccumulator;
-    float density = 0.0f;
-    float pressure = 0.0f;
-    Eigen::Matrix<float, 3, 1> pressureForce;
-    float viscosity = 0.5f;
-    Eigen::Matrix<float, 3, 1> viscosityForce;
-    float restitution = 5.0f;
-    float mass;
-    bool isStatic = false;
-    float soundSpeed = 100.0f;
-    float sandcontent = 0.0f;
-    float siltcontent = 0.0f;
-    float claycontent = 0.0f;
-    float rockcontent = 0.0f;
-    float metalcontent = 0.0f;
+    // Eigen::Matrix<float, 3, 1> velocity;
+    // Eigen::Matrix<float, 3, 1> acceleration;
+    // Eigen::Matrix<float, 3, 1> forceAccumulator;
+    // float density = 0.0f;
+    // float pressure = 0.0f;
+    // Eigen::Matrix<float, 3, 1> pressureForce;
+    // float viscosity = 0.5f;
+    // Eigen::Matrix<float, 3, 1> viscosityForce;
+    // float restitution = 5.0f;
+    // float mass;
+    // bool isStatic = false;
+    // float soundSpeed = 100.0f;
+    // float sandcontent = 0.0f;
+    // float siltcontent = 0.0f;
+    // float claycontent = 0.0f;
+    // float rockcontent = 0.0f;
+    // float metalcontent = 0.0f;
 
 
     std::unordered_map<int, float> neighbors;
@@ -83,7 +83,7 @@ struct planetConfig {
     float displacementStrength = 200.0f;
     std::vector<Particle> surfaceNodes;
     std::vector<Particle> interpolatedNodes;
-    float noiseStrength = 1.0f;
+    float noiseStrength = 10.0f;
     int numPlates = 15;
     int smoothingPasses = 3;
     float mountHeight = 250.0f;
@@ -207,9 +207,10 @@ public:
             Eigen::Vector3f normal = p.originalPos.normalized();
             p.noisePos = p.originalPos + (normal * displacementValue * config.noiseStrength);
             p.currentPos = p.noisePos;
-
-            grid.update(oldPos, p.currentPos, p, true, p.originColor, config.voxelSize, true, -2, false, 0.0f, 0.0f, 0.0f);
+            grid.move(oldPos, p.currentPos);
+            grid.update(p.currentPos, p);
         }
+        grid.optimize();
     }
 
     void assignSeeds() {
@@ -698,8 +699,10 @@ public:
         for (auto& p : config.surfaceNodes) {
             Eigen::Vector3f oldPos = p.currentPos;
             p.currentPos = p.tectonicPos;
-            grid.update(oldPos, p.currentPos, p, true, p.originColor, config.voxelSize, true, -2, false, 0.0f, 0.0f, 0.0f);
+            grid.move(oldPos, p.currentPos);
+            grid.update(p.currentPos, p);
         }
+        grid.optimize();
         std::cout << "Finalize apply results completed." << std::endl;
     }
 
@@ -787,9 +790,7 @@ public:
                         newPt.originColor = p3.originColor;
                     }
 
-                    v3 interpNormal = (p1.originalPos.normalized() * w1 + 
-                                       p2.originalPos.normalized() * w2 + 
-                                       p3.originalPos.normalized() * w3);
+                    v3 interpNormal = (p1.originalPos.normalized() * w1 + p2.originalPos.normalized() * w2 + p3.originalPos.normalized() * w3);
                     interpNormal.normalize(); 
                     
                     float r1 = p1.currentPos.norm();
@@ -813,6 +814,7 @@ public:
                 }
             }
         }
+        grid.optimize();
         std::cout << "Interpolated " << counter << " surface gaps." << std::endl;
     }
 

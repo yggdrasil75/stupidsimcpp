@@ -331,7 +331,10 @@ public:
                     break;
             }
 
-            sim.grid.update(p.currentPos, p.currentPos, p, true, color, sim.config.voxelSize, true, -2, false, 0.0f, 0.0f, 0.0f);
+            if (!sim.grid.setColor(p.currentPos, color)) {
+                std::cout << "node failed to set" << std::endl;
+            }
+            // sim.grid.update(p.currentPos, p.currentPos, p, true, color, sim.config.voxelSize, true, -2, false, 0.0f, 0.0f, 0.0f);
         }
         for (auto& p : sim.config.interpolatedNodes) {
             v3 color = p.originColor;
@@ -356,7 +359,10 @@ public:
                     break;
             }
 
-            sim.grid.update(p.currentPos, p.currentPos, p, true, color, sim.config.voxelSize, true, -2, false, 0.0f, 0.0f, 0.0f);
+            if (!sim.grid.setColor(p.currentPos, color)) {
+                std::cout << "node failed to set" << std::endl;
+            }
+            // sim.grid.update(p.currentPos, p.currentPos, p, true, color, sim.config.voxelSize, true, -2, false, 0.0f, 0.0f, 0.0f);
         }
     }
 

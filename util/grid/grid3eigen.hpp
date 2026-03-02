@@ -19,6 +19,8 @@
 #include <mutex>
 #include <map>
 #include <unordered_set>
+#include <random>
+#include <chrono>
 
 #ifdef SSE
 #include <immintrin.h>
@@ -31,6 +33,12 @@ class Octree {
 public:
     using PointType = Eigen::Matrix<float, Dim, 1>;
     using BoundingBox = std::pair<PointType, PointType>;
+
+    struct Vector3fCompare {
+        bool operator()(const Eigen::Vector3f& a, const Eigen::Vector3f& b) const {
+            return std::tie(a.x(), a.y(), a.z()) < std::tie(b.x(), b.y(), b.z());
+        }
+    };
     
     struct NodeData {
         T data;
@@ -41,20 +49,21 @@ public:
         bool visible;
         float size;
         Eigen::Vector3f color;
-        bool light;
         float emittance;
-        float refraction; 
-        float reflection;
+        float roughness;
+        float metallic;
+        float transmission;
+        float ior;
 
         NodeData(const T& data, const PointType& pos, bool visible, Eigen::Vector3f color, float size = 0.01f,
-                 bool active = true, int objectId = -1, int subId = 0, bool light = false, float emittance = 0.0f, 
-                 float refraction = 0.0f, float reflection = 0.0f) 
+                 bool active = true, int objectId = -1, int subId = 0, float emittance = 0.0f, 
+                 float roughness = 1.0f, float metallic = 0.0f, float transmission = 0.0f, float ior = 1.45f) 
                 : data(data), position(pos), objectId(objectId), subId(subId), active(active), visible(visible), 
-                color(color), size(size), light(light), emittance(emittance), refraction(refraction), 
-                reflection(reflection) {}
+                  color(color), size(size), emittance(emittance), roughness(roughness), metallic(metallic), 
+                  transmission(transmission), ior(ior) {}
         
-        NodeData() : objectId(-1), subId(0), active(false), visible(false), size(0.0f), light(false), 
-                     emittance(0.0f), refraction(0.0f), reflection(0.0f) {}
+        NodeData() : objectId(-1), subId(0), active(false), visible(false), size(0.0f), emittance(0.0f), 
+                     roughness(1.0f), metallic(0.0f), transmission(0.0f), ior(1.45f) {}
         
         // Helper method to get half-size for cube
         PointType getHalfSize() const {
@@ -110,8 +119,6 @@ private:
     std::map<std::pair<int, int>, std::shared_ptr<Mesh>> meshCache_;
     std::set<std::pair<int, int>> dirtyMeshes_;
     int nextSubIdGenerator_ = 1;
-    constexpr static float ior = 1.45f;
-    constexpr static float η = 1.0f / ior;
     
     void invalidateMesh(int objectId, int subId) {
         if (objectId < 0) return;
@@ -232,19 +239,36 @@ private:
             }
             return true;
         } else {
-            // Keep in parent if size is larger than or equal to the node size
-            if (pointData->size >= node->nodeSize) {
-                node->points.emplace_back(pointData);
-                return true;
-            }
-
             bool inserted = false;
             for (int i = 0; i < 8; ++i) {
                 if (node->children[i] && boxIntersectsBox(node->children[i]->bounds, cubeBounds)) {
+                    size++;
                     inserted |= insertRecursive(node->children[i].get(), pointData, depth + 1);
                 }
             }
             return inserted;
+        }
+    }
+
+    bool invalidateNodeLODRecursive(OctreeNode* node, const BoundingBox& bounds) {
+        if (!boxIntersectsBox(node->bounds, bounds)) return false;
+        {
+            std::lock_guard<std::mutex> lock(node->lodMutex);
+            node->lodData = nullptr;
+        }
+        if (!node->isLeaf) {
+            for (int i = 0; i < 8; ++i) {
+                if (node->children[i]) {
+                    invalidateNodeLODRecursive(node->children[i].get(), bounds);
+                }
+            }
+        }
+        return true;
+    }
+
+    void invalidateLODForPoint(const std::shared_ptr<NodeData>& pointData) {
+        if (root_ && pointData) {
+            invalidateNodeLODRecursive(root_.get(), pointData->getCubeBounds());
         }
     }
     
@@ -255,9 +279,10 @@ private:
         PointType avgPos = PointType::Zero();
         Eigen::Vector3f avgColor = Eigen::Vector3f::Zero();
         float avgEmittance = 0.0f;
-        float avgRefl = 0.0f;
-        float avgRefr = 0.0f;
-        bool anyLight = false;
+        float avgRoughness = 0.0f;
+        float avgMetallic = 0.0f;
+        float avgTransmission = 0.0f;
+        float avgIor = 0.0f;
         int count = 0;
         
         if (node->isLeaf && node->points.size() == 1) {
@@ -271,9 +296,10 @@ private:
             if (!item || !item->active || !item->visible) return;
             avgColor += item->color;
             avgEmittance += item->emittance;
-            avgRefl += item->reflection;
-            avgRefr += item->refraction;
-            if (item->light) anyLight = true;
+            avgRoughness += item->roughness;
+            avgMetallic += item->metallic;
+            avgTransmission += item->transmission;
+            avgIor += item->ior;
             count++;
         };
 
@@ -300,9 +326,10 @@ private:
             lod->size = nodeDims.maxCoeff();
 
             lod->emittance = avgEmittance * invCount;
-            lod->reflection = avgRefl * invCount;
-            lod->refraction = avgRefr * invCount;
-            lod->light = anyLight;
+            lod->roughness = avgRoughness * invCount;
+            lod->metallic = avgMetallic * invCount;
+            lod->transmission = avgTransmission * invCount;
+            lod->ior = avgIor * invCount;
             lod->active = true;
             lod->visible = true;
             lod->objectId = -1; 
@@ -333,7 +360,7 @@ private:
         return nullptr;
     }
 
-    bool removeRecursive(OctreeNode* node, const BoundingBox& bounds, const PointType& pos, float tolerance, bool& sizeDecremented) {
+    bool removeRecursive(OctreeNode* node, const BoundingBox& bounds, const PointType& pos, float tolerance) {
         {
             std::lock_guard<std::mutex> lock(node->lodMutex);
             node->lodData = nullptr; 
@@ -352,17 +379,14 @@ private:
         
         if (it != node->points.end()) {
             node->points.erase(it, node->points.end());
-            if (!sizeDecremented) {
-                size--;
-                sizeDecremented = true;
-            }
+            size--;
             foundAny = true;
         }
 
         if (!node->isLeaf) {
             for (int i = 0; i < 8; ++i) {
                 if (node->children[i]) {
-                    foundAny |= removeRecursive(node->children[i].get(), bounds, pos, tolerance, sizeDecremented);
+                    foundAny |= removeRecursive(node->children[i].get(), bounds, pos, tolerance);
                 }
             }
         }
@@ -465,8 +489,47 @@ private:
         }
     }
 
+    PointType sampleGGX(const PointType& n, float roughness, uint32_t& state) const {
+        float alpha = std::max(EPSILON, roughness * roughness);
+        float r1 = float(rand_r(&state)) / float(RAND_MAX);
+        float r2 = float(rand_r(&state)) / float(RAND_MAX);
+        
+        float phi = 2.0f * M_PI * r1;
+        float denom = 1.0f + (alpha * alpha - 1.0f) * r2;
+        denom = std::max(denom, EPSILON);
+        float cosTheta = std::sqrt(std::max(0.0f, (1.0f - r2) / denom));
+        float sinTheta = std::sqrt(std::max(0.0f, 1.0f - cosTheta * cosTheta));
+        
+        PointType h;
+        h[0] = sinTheta * std::cos(phi);
+        h[1] = sinTheta * std::sin(phi);
+        h[2] = cosTheta;
+        
+        PointType up = std::abs(n.z()) < 0.999f ? PointType(0,0,1) : PointType(1,0,0);
+        PointType tangent = up.cross(n).normalized();
+        PointType bitangent = n.cross(tangent);
+        
+        return (tangent * h[0] + bitangent * h[1] + n * h[2]).normalized();
+    }
+
+    PointType sampleCosineHemisphere(const PointType& n, uint32_t& state) const {
+        float r1 = float(rand_r(&state)) / float(RAND_MAX);
+        float r2 = float(rand_r(&state)) / float(RAND_MAX);
+        float phi = 2.0f * M_PI * r1;
+        float r = std::sqrt(r2);
+        float x = r * std::cos(phi);
+        float y = r * std::sin(phi);
+        float z = std::sqrt(std::max(0.0f, 1.0f - x*x - y*y));
+        
+        PointType up = std::abs(n.z()) < 0.999f ? PointType(0,0,1) : PointType(1,0,0);
+        PointType tangent = up.cross(n).normalized();
+        PointType bitangent = n.cross(tangent);
+        
+        return (tangent * x + bitangent * y + n * z).normalized();
+    }
+
     Eigen::Vector3f traceRay(const PointType& rayOrig, const PointType& rayDir, int bounces, uint32_t& rngState,
-                                    int maxBounces, bool globalIllumination, bool useLod) {
+                             int maxBounces, bool globalIllumination, bool useLod) {
         if (bounces > maxBounces) return globalIllumination ? skylight_ : Eigen::Vector3f::Zero();
 
         auto hit = voxelTraverse(rayOrig, rayDir, std::numeric_limits<float>::max(), useLod);
@@ -483,58 +546,110 @@ private:
         Ray ray(rayOrig, rayDir);
         rayCubeIntersect(ray, obj.get(), t, normal, hitPoint);
         
-        if (obj->light) {
-            return obj->color * obj->emittance;
-        }
-
         Eigen::Vector3f finalColor = globalIllumination ? skylight_ : Eigen::Vector3f::Zero();
-        if (obj->light) return finalColor;
-
-        float refl = obj->reflection;
-        float refr = obj->refraction;
-        float diffuseProb = 1.0f - refl - refr;
-        float sum = refr + refl + diffuseProb;
-        if (sum <= 0.001f) return finalColor;
-
-        float roll = float(rand_r(&rngState)) / float(RAND_MAX);
-        Eigen::Vector3f npc = Eigen::Vector3f::Zero();
-        PointType nextDir;
-        PointType bias = normal * 0.002f;
-
-        if (roll < diffuseProb) {
-            nextDir = randomInHemisphere(normal, rngState);
-            Eigen::Vector3f incoming = traceRay(hitPoint + bias, nextDir, bounces + 1, rngState, maxBounces, globalIllumination, useLod);
-            npc = obj->color.cwiseProduct(incoming);
-        } else if (roll < diffuseProb + refl) {
-            nextDir = (rayDir - 2.0f * normal.dot(rayDir) * normal).normalized();
-            Eigen::Vector3f incoming = traceRay(hitPoint + bias, nextDir, bounces + 1, rngState, maxBounces, globalIllumination, useLod);
-            npc = obj->color.cwiseProduct(incoming);
-            npc /= refl;
-        } else {
-            float lη = η;
-            PointType n_eff = normal;
-            float cosI = -normal.dot(rayDir);
-            if (cosI < 0) {
-                cosI = -cosI;
-                n_eff = -normal;
-                lη = ior;
-            }
-            float k = 1.0f - lη * lη * (1.0f - cosI * cosI);
-            
-            if (k < 0.0f) {
-                nextDir = (rayDir - 2.0f * rayDir.dot(n_eff) * n_eff).normalized();
-            } else {
-                nextDir = (lη * rayDir + (lη * cosI - std::sqrt(k)) * n_eff).normalized();
-            }
-            Eigen::Vector3f incoming = traceRay(hitPoint - (n_eff * 0.002f), nextDir, bounces + 1, rngState, maxBounces, globalIllumination, useLod);
-            npc = obj->color.cwiseProduct(incoming);
-            
-            npc /= refr;
+        if (obj->emittance > 0.0f) {
+            finalColor += obj->color * obj->emittance;
         }
 
-        return finalColor + npc;
-    }
+        float roughness = std::clamp(obj->roughness, 0.01f, 1.0f);
+        float metallic = std::clamp(obj->metallic, 0.0f, 1.0f);
+        float transmission = std::clamp(obj->transmission, 0.0f, 1.0f);
+        
+        PointType V = -rayDir;
+        float cosThetaI = normal.dot(V);
+        bool isInside = cosThetaI < 0.0f;
+        PointType n_eff = isInside ? -normal : normal;
+        cosThetaI = std::max(0.001f, n_eff.dot(V));
 
+        float coordMax = hitPoint.cwiseAbs().maxCoeff();
+        float rayOffset = std::max(1e-4f, 1e-5f * coordMax);
+
+        Eigen::Vector3f F0 = Eigen::Vector3f::Constant(0.04f);
+        F0 = F0 * (1.0f - metallic) + obj->color * metallic;
+
+        PointType H = sampleGGX(n_eff, roughness, rngState);
+        float VdotH = std::max(0.001f, V.dot(H));
+        
+        Eigen::Vector3f F_spec = F0 + (Eigen::Vector3f::Constant(1.0f) - F0) * std::pow(std::max(0.0f, 1.0f - VdotH), 5.0f);
+        
+        PointType specDir = (2.0f * VdotH * H - V).normalized();
+        Eigen::Vector3f W_spec = Eigen::Vector3f::Zero();
+        
+        if (specDir.dot(n_eff) > 0.0f) {
+            float NdotV = cosThetaI;
+            float NdotL = std::max(0.001f, n_eff.dot(specDir));
+            float NdotH = std::max(0.001f, n_eff.dot(H));
+            
+            float k_smith = (roughness * roughness) / 2.0f;
+            float G = (NdotV / (NdotV * (1.0f - k_smith) + k_smith)) * (NdotL / (NdotL * (1.0f - k_smith) + k_smith));
+            
+            W_spec = F_spec * G * VdotH / (NdotV * NdotH);
+        }
+
+        Eigen::Vector3f W_second = Eigen::Vector3f::Zero();
+        PointType secondDir;
+        PointType secondOrigin;
+
+        float transmissionWeight = transmission * (1.0f - metallic);
+        float diffuseWeight = (1.0f - transmission) * (1.0f - metallic);
+
+        if (transmissionWeight > 0.0f) {
+            float eta = isInside ? obj->ior : (1.0f / obj->ior);
+            float k = 1.0f - eta * eta * (1.0f - VdotH * VdotH);
+            
+            if (k >= 0.0f) {
+                secondDir = ((eta * VdotH - std::sqrt(k)) * H - eta * V).normalized();
+                secondOrigin = hitPoint - n_eff * rayOffset;
+                W_second = (Eigen::Vector3f::Constant(1.0f) - F_spec) * transmissionWeight;
+                W_second = W_second.cwiseProduct(obj->color);
+            } else {
+                Eigen::Vector3f tirWeight = (Eigen::Vector3f::Constant(1.0f) - F_spec) * transmissionWeight;
+                W_spec += tirWeight.cwiseProduct(obj->color);
+            }
+        } else if (diffuseWeight > 0.0f) {
+            secondDir = sampleCosineHemisphere(n_eff, rngState);
+            secondOrigin = hitPoint + n_eff * rayOffset;
+            W_second = (Eigen::Vector3f::Constant(1.0f) - F_spec) * diffuseWeight;
+            W_second = W_second.cwiseProduct(obj->color);
+        }
+
+        W_spec = W_spec.cwiseMin(Eigen::Vector3f::Constant(4.0f));
+        W_second = W_second.cwiseMin(Eigen::Vector3f::Constant(4.0f));
+
+        float lumSpec = W_spec.maxCoeff();
+        float lumSecond = W_second.maxCoeff();
+        
+        bool doSplit = (bounces <= 1);
+
+        if (doSplit) {
+            Eigen::Vector3f specColor = Eigen::Vector3f::Zero();
+            if (lumSpec > 0.001f) {
+                specColor = W_spec.cwiseProduct(traceRay(hitPoint + n_eff * rayOffset, specDir, bounces + 1, rngState, maxBounces, globalIllumination, useLod));
+            }
+            
+            Eigen::Vector3f secondColor = Eigen::Vector3f::Zero();
+            if (lumSecond > 0.001f) {
+                secondColor = W_second.cwiseProduct(traceRay(secondOrigin, secondDir, bounces + 1, rngState, maxBounces, globalIllumination, useLod));
+            }
+            
+            return finalColor + specColor + secondColor;
+        } else {
+            float totalLum = lumSpec + lumSecond;
+            if (totalLum < 0.0001f) return finalColor;
+            
+            float pSpec = lumSpec / totalLum;
+            float roll = float(rand_r(&rngState)) / float(RAND_MAX);
+            
+            if (roll < pSpec) {
+                Eigen::Vector3f sample = traceRay(hitPoint + n_eff * rayOffset, specDir, bounces + 1, rngState, maxBounces, globalIllumination, useLod);
+                return finalColor + (W_spec / std::max(EPSILON, pSpec)).cwiseProduct(sample);
+            } else {
+                Eigen::Vector3f sample = traceRay(secondOrigin, secondDir, bounces + 1, rngState, maxBounces, globalIllumination, useLod);
+                return finalColor + (W_second / std::max(EPSILON, 1.0f - pSpec)).cwiseProduct(sample);
+            }
+        }
+    }
+    
     void clearNode(OctreeNode* node) {
         if (!node) return;
         
@@ -571,6 +686,53 @@ private:
             for (const auto& child : node->children) {
                 printStatsRecursive(child.get(), depth + 1, totalNodes, leafNodes, actualPoints, 
                                     maxTreeDepth, maxPointsInLeaf, minPointsInLeaf, lodGeneratedNodes);
+            }
+        }
+    }
+
+    void optimizeRecursive(OctreeNode* node) {
+        if (!node) return;
+
+        if (node->isLeaf) {
+            return;
+        }
+
+        bool childrenAreLeaves = true;
+        for (int i = 0; i < 8; ++i) {
+            if (node->children[i]) {
+                optimizeRecursive(node->children[i].get());
+                if (!node->children[i]->isLeaf) {
+                    childrenAreLeaves = false;
+                }
+            }
+        }
+
+        if (childrenAreLeaves) {
+            std::vector<std::shared_ptr<NodeData>> allPoints = node->points;
+            for (int i = 0; i < 8; ++i) {
+                if (node->children[i]) {
+                    allPoints.insert(allPoints.end(), node->children[i]->points.begin(), node->children[i]->points.end());
+                }
+            }
+
+            std::sort(allPoints.begin(), allPoints.end(), [](const std::shared_ptr<NodeData>& a, const std::shared_ptr<NodeData>& b) {
+                return a.get() < b.get();
+            });
+            allPoints.erase(std::unique(allPoints.begin(), allPoints.end(), [](const std::shared_ptr<NodeData>& a, const std::shared_ptr<NodeData>& b) {
+                return a.get() == b.get();
+            }), allPoints.end());
+
+            if (allPoints.size() <= maxPointsPerNode) {
+                node->points = std::move(allPoints);
+                for (int i = 0; i < 8; ++i) {
+                    node->children[i].reset(nullptr);
+                }
+                node->isLeaf = true;
+                
+                {
+                    std::lock_guard<std::mutex> lock(node->lodMutex);
+                    node->lodData = nullptr;
+                }
             }
         }
     }
@@ -613,10 +775,11 @@ private:
                 writeVal(out, pt->visible);
                 writeVal(out, pt->size);
                 writeVec3(out, pt->color);
-                writeVal(out, pt->light);
                 writeVal(out, pt->emittance);
-                writeVal(out, pt->refraction);
-                writeVal(out, pt->reflection);
+                writeVal(out, pt->roughness);
+                writeVal(out, pt->metallic);
+                writeVal(out, pt->transmission);
+                writeVal(out, pt->ior);
             }
         } else {
             // Write bitmask of active children
@@ -656,10 +819,11 @@ private:
             readVal(in, pt->visible);
             readVal(in, pt->size);
             readVec3(in, pt->color);
-            readVal(in, pt->light);
             readVal(in, pt->emittance);
-            readVal(in, pt->refraction);
-            readVal(in, pt->reflection);
+            readVal(in, pt->roughness);
+            readVal(in, pt->metallic);
+            readVal(in, pt->transmission);
+            readVal(in, pt->ior);
             node->points.push_back(pt);
         }
 
@@ -751,13 +915,29 @@ private:
     bool rayCubeIntersect(const Ray& ray, const NodeData* cube, float& t, PointType& normal, PointType& hitPoint) const {
         BoundingBox bounds = cube->getCubeBounds();
         
-        float tMin, tMax;
-        if (!rayBoxIntersect(ray, bounds, tMin, tMax)) {
+        float t0x = (bounds.first[0] - ray.origin[0]) * ray.invDir[0];
+        float t1x = (bounds.second[0] - ray.origin[0]) * ray.invDir[0];
+        if (ray.invDir[0] < 0.0f) std::swap(t0x, t1x);
+
+        float t0y = (bounds.first[1] - ray.origin[1]) * ray.invDir[1];
+        float t1y = (bounds.second[1] - ray.origin[1]) * ray.invDir[1];
+        if (ray.invDir[1] < 0.0f) std::swap(t0y, t1y);
+
+        float tMin = std::max(t0x, t0y);
+        float tMax = std::min(t1x, t1y);
+
+        float t0z = (bounds.first[2] - ray.origin[2]) * ray.invDir[2];
+        float t1z = (bounds.second[2] - ray.origin[2]) * ray.invDir[2];
+        if (ray.invDir[2] < 0.0f) std::swap(t0z, t1z);
+
+        tMin = std::max(tMin, t0z);
+        tMax = std::min(tMax, t1z);
+
+        if (tMax < std::max(0.0f, tMin) || tMax < 0.0f) {
             return false;
         }
-        
-        if (tMin < EPSILON) {
-            if (tMax < EPSILON) return false;
+
+        if (tMin < 0.0f) {
             t = tMax;
         } else {
             t = tMin;
@@ -765,14 +945,28 @@ private:
         
         hitPoint = ray.origin + ray.dir * t;
         
-        normal = PointType::Zero();
         PointType dMin = (hitPoint - bounds.first).cwiseAbs();
         PointType dMax = (hitPoint - bounds.second).cwiseAbs();
-        // float thresh = EPSILON * 1.00001f;
-        PointType nMin = (dMin.array() < EPSILON).cast<float>();
-        PointType nMax = (dMax.array() < EPSILON).cast<float>();
         
-        normal = -nMin + nMax;
+        float minDist = std::numeric_limits<float>::max();
+        int minAxis = 0;
+        float sign = 1.0f;
+
+        for (int i = 0; i < Dim; ++i) {
+            if (dMin[i] < minDist) {
+                minDist = dMin[i];
+                minAxis = i;
+                sign = -1.0f;
+            }
+            if (dMax[i] < minDist) {
+                minDist = dMax[i];
+                minAxis = i;
+                sign = 1.0f;
+            }
+        }
+        
+        normal = PointType::Zero();
+        normal[minAxis] = sign;
         return true;
     }
 
@@ -820,12 +1014,6 @@ private:
         std::array<PointType, 8> p;
         std::array<float, 8> val;
         std::array<PointType, 8> color;
-    };
-
-    struct Vector3fCompare {
-        bool operator()(const Eigen::Vector3f& a, const Eigen::Vector3f& b) const {
-            return std::tie(a.x(), a.y(), a.z()) < std::tie(b.x(), b.y(), b.z());
-        }
     };
 
     std::pair<PointType, PointType> vertexInterpolate(float isolevel, const PointType& p1, const PointType& p2, float val1, float val2, const PointType& c1, const PointType& c2) {
@@ -986,13 +1174,12 @@ public:
         ensureLOD(root_.get());
     }
 
-    bool set(const T& data, const PointType& pos, bool visible, Eigen::Vector3f color, float size, bool active,
-            int objectId = -1, int subId = 0, bool light = false, float emittance = 0.0f, float refraction = 0.0f, 
-            float reflection = 0.0f) {
+    bool set(const T& data, const PointType& pos, bool visible, Eigen::Vector3f color, float size = 0.01f, bool active = true,
+             int objectId = -1, int subId = 0, float emittance = 0.0f, float roughness = 1.0f, 
+             float metallic = 0.0f, float transmission = 0.0f, float ior = 1.45f) {
         auto pointData = std::make_shared<NodeData>(data, pos, visible, color, size, active, objectId, subId,
-                                                    light, emittance, refraction, reflection);
+                                                    emittance, roughness, metallic, transmission, ior);
         if (insertRecursive(root_.get(), pointData, 0)) {
-            this->size++;
             return true;
         }
         return false;
@@ -1038,7 +1225,6 @@ public:
         readVal(in, maxPointsPerNode);
         readVal(in, size);
         
-        // Load global settings
         readVec3(in, skylight_);
         readVec3(in, backgroundColor_);
 
@@ -1047,7 +1233,8 @@ public:
         readVec3(in, maxBound);
 
         root_ = std::make_unique<OctreeNode>(minBound, maxBound);
-        deserializeNode(in, root_.get());
+        std::multimap<Eigen::Vector3f, std::shared_ptr<NodeData>, Vector3fCompare> pointMap;
+        deserializeNode(in, root_.get(), pointMap);
 
         in.close();
         std::cout << "successfully loaded grid from " << filename << std::endl;
@@ -1065,8 +1252,7 @@ public:
     bool remove(const PointType& pos, float tolerance = EPSILON) {
         auto pt = find(pos, tolerance);
         if (!pt) return false;
-        bool sizeDecremented = false;
-        return removeRecursive(root_.get(), pt->getCubeBounds(), pos, tolerance, sizeDecremented);
+        return removeRecursive(root_.get(), pt->getCubeBounds(), pos, tolerance);
     }
 
     std::vector<std::shared_ptr<NodeData>> findInRadius(const PointType& center, float radius, int objectid = -1) const {
@@ -1079,22 +1265,27 @@ public:
         return results;
     }
 
+    bool update(const PointType& pos, const T& newData) {
+        auto pointData = find(pos);
+        if (!pointData) return false;
+        else pointData->data = newData;
+        return true;
+    }
+
     bool update(const PointType& oldPos, const PointType& newPos, const T& newData, bool newVisible = true, 
                 Eigen::Vector3f newColor = Eigen::Vector3f(1.0f, 1.0f, 1.0f), float newSize = 0.01f, bool newActive = true,
-                int newObjectId = -2, bool newLight = false, float newEmittance = 0.0f, float newRefraction = 0.0f, 
-                float newReflection = 0.0f, float tolerance = EPSILON) {
+                int newObjectId = -2, float newEmittance = -1.0f, float newRoughness = -1.0f, 
+                float newMetallic = -1.0f, float newTransmission = -1.0f, float newIor = -1.0f, float tolerance = EPSILON) {
 
         auto pointData = find(oldPos, tolerance);
         if (!pointData) return false;
 
         int oldSubId = pointData->subId;
         int targetObjId = (newObjectId != -2) ? newObjectId : pointData->objectId;
-        
         int finalSubId = oldSubId;
         
         if (oldSubId == 0 && targetObjId == pointData->objectId) {
             finalSubId = nextSubIdGenerator_++; 
-            
             auto neighbors = findInRadius(oldPos, newSize * 3.0f, targetObjId);
             for(auto& n : neighbors) {
                 if(n->subId == 0) {
@@ -1104,18 +1295,26 @@ public:
             }
         }
         
-        if (!remove(oldPos, tolerance)) return false;
+        removeRecursive(root_.get(), pointData->getCubeBounds(), oldPos, tolerance);
         
-        bool res = set(newData, newPos, newVisible,
-                newColor != Eigen::Vector3f(1.0f, 1.0f, 1.0f) ? newColor : pointData->color,
-                newSize > 0 ? newSize : pointData->size,
-                newActive, targetObjId, finalSubId, newLight,
-                newEmittance > 0 ? newEmittance : pointData->emittance,
-                newRefraction >= 0 ? newRefraction : pointData->refraction,
-                newReflection >= 0 ? newReflection : pointData->reflection);
+        pointData->data = newData;
+        pointData->position = newPos;
+        pointData->visible = newVisible;
+        if (newColor != Eigen::Vector3f(1.0f, 1.0f, 1.0f)) pointData->color = newColor;
+        if (newSize > 0) pointData->size = newSize;
+        pointData->active = newActive;
+        pointData->objectId = targetObjId;
+        pointData->subId = finalSubId;
+        
+        if (newEmittance >= 0) pointData->emittance = newEmittance;
+        if (newRoughness >= 0) pointData->roughness = newRoughness;
+        if (newMetallic >= 0) pointData->metallic = newMetallic;
+        if (newTransmission >= 0) pointData->transmission = newTransmission;
+        if (newIor >= 0) pointData->ior = newIor;
+        
+        bool res = insertRecursive(root_.get(), pointData, 0);
         
         if(res) {
-            // Mark relevant meshes dirty
             invalidateMesh(targetObjId, finalSubId);
             if(finalSubId != oldSubId) invalidateMesh(targetObjId, oldSubId);
         }
@@ -1126,11 +1325,13 @@ public:
     bool move(const PointType& pos, const PointType& newPos) {
         auto pointData = find(pos);
         if (!pointData) return false;
-        bool success = set(pointData->data, newPos, pointData->visible, pointData->color, pointData->size, 
-                pointData->active, pointData->objectId, pointData->light, pointData->emittance, 
-                pointData->refraction, pointData->reflection);
-        if (success) {
-            remove(pos);
+
+        bool sizeDecremented = false;
+        removeRecursive(root_.get(), pointData->getCubeBounds(), pos, EPSILON);
+        
+        pointData->position = newPos;
+
+        if (insertRecursive(root_.get(), pointData, 0)) {
             return true;
         }
         return false;
@@ -1140,62 +1341,71 @@ public:
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
         pointData->objectId = objectId;
+        invalidateLODForPoint(pointData);
         return true;
     }
 
     bool updateData(const PointType& pos, const T& newData, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
-        
         pointData->data = newData;
+        invalidateLODForPoint(pointData);
         return true;
     }
 
     bool setActive(const PointType& pos, bool active, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
-        
         pointData->active = active;
+        invalidateLODForPoint(pointData);
         return true;
     }
 
     bool setVisible(const PointType& pos, bool visible, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
-        
         pointData->visible = visible;
-        return true;
-    }
-
-    bool setLight(const PointType& pos, bool light, float tolerance = EPSILON) {
-        auto pointData = find(pos, tolerance);
-        if (!pointData) return false;
-        
-        pointData->light = light;
+        invalidateLODForPoint(pointData);
         return true;
     }
 
     bool setColor(const PointType& pos, Eigen::Vector3f color, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
-        
         pointData->color = color;
-        return true;
-    }
-
-    bool setReflection(const PointType& pos, float reflection, float tolerance = EPSILON) {
-        auto pointData = find(pos, tolerance);
-        if (!pointData) return false;
-        
-        pointData->reflection = reflection;
+        invalidateLODForPoint(pointData);
         return true;
     }
 
     bool setEmittance(const PointType& pos, float emittance, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
-        
         pointData->emittance = emittance;
+        invalidateLODForPoint(pointData);
+        return true;
+    }
+
+    bool setRoughness(const PointType& pos, float roughness, float tolerance = EPSILON) {
+        auto pointData = find(pos, tolerance);
+        if (!pointData) return false;
+        pointData->roughness = roughness;
+        invalidateLODForPoint(pointData);
+        return true;
+    }
+
+    bool setMetallic(const PointType& pos, float metallic, float tolerance = EPSILON) {
+        auto pointData = find(pos, tolerance);
+        if (!pointData) return false;
+        pointData->metallic = metallic;
+        invalidateLODForPoint(pointData);
+        return true;
+    }
+
+    bool setTransmission(const PointType& pos, float transmission, float tolerance = EPSILON) {
+        auto pointData = find(pos, tolerance);
+        if (!pointData) return false;
+        pointData->transmission = transmission;
+        invalidateLODForPoint(pointData);
         return true;
     }
 
@@ -1325,7 +1535,7 @@ public:
                     rayCubeIntersect(ray, obj.get(), t, normal, hitPoint);
                     color = obj->color;
                     
-                    if (obj->light) {
+                    if (obj->emittance > 0.0f) {
                         color = color * obj->emittance;
                     } else {
                         float diffuse = std::max(0.0f, normal.dot(globalLightDir));
@@ -1347,6 +1557,163 @@ public:
             }
         }
         
+        outFrame.setData(colorBuffer, frame::colormap::RGB);
+        return outFrame;
+    }
+
+    frame renderFrameTimed(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB, 
+                           double maxTimeSeconds = 0.16, int maxBounces = 4, bool globalIllumination = false, bool useLod = true) {
+        auto startTime = std::chrono::high_resolution_clock::now();
+        
+        generateLODs();
+        PointType origin = cam.origin;
+        PointType dir = cam.direction.normalized();
+        PointType up = cam.up.normalized();
+        PointType right = cam.right();
+        
+        frame outFrame(width, height, colorformat);
+        std::vector<float> colorBuffer(width * height * 3, 0.0f);
+        std::vector<Eigen::Vector3f> accumColor(width * height, Eigen::Vector3f::Zero());
+        std::vector<int> sampleCount(width * height, 0);
+
+        const float aspect = static_cast<float>(width) / height;
+        const float fovRad = cam.fovRad();
+        const float tanHalfFov = std::tan(fovRad * 0.5f);
+        const float tanfovy = tanHalfFov;
+        const float tanfovx = tanHalfFov * aspect;
+        
+        const PointType globalLightDir = (-cam.direction * 0.2f).normalized();
+        const float fogStart = 1000.0f;
+        const float minVisibility = 0.2f; 
+        
+        #pragma omp parallel for schedule(dynamic, 128) collapse(2)
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                int pidx = (y * width + x);
+
+                float px = (2.0f * (x + 0.5f) / width - 1.0f) * tanfovx;
+                float py = (1.0f - 2.0f * (y + 0.5f) / height) * tanfovy;
+                
+                PointType rayDir = dir + (right * px) + (up * py);
+                rayDir.normalize();
+
+                Eigen::Vector3f color = backgroundColor_;
+                Ray ray(origin, rayDir);
+                auto hit = fastVoxelTraverse(ray, maxDistance_, true);
+                if (hit != nullptr) {
+                    auto obj = hit;
+                    
+                    float t = 0.0f;
+                    PointType normal, hitPoint;
+
+                    rayCubeIntersect(ray, obj.get(), t, normal, hitPoint);
+                    color = obj->color;
+                    
+                    if (obj->emittance > 0.0f) {
+                        color = color * obj->emittance;
+                    } else {
+                        float diffuse = std::max(0.0f, normal.dot(globalLightDir));
+                        float ambient = 0.35f;
+                        float intensity = std::min(1.0f, ambient + diffuse * 0.65f);
+                        color = color * intensity;
+                    }
+                    
+                    float fogFactor = std::clamp((maxDistance_ - t) / (maxDistance_ - fogStart), minVisibility, 1.0f);
+                    color = color * fogFactor + backgroundColor_ * (1.0f - fogFactor);
+                }
+                
+                accumColor[pidx] = color;
+                sampleCount[pidx] = 0;
+            }
+        }
+
+        auto now = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> elapsed = now - startTime;
+
+        if (elapsed.count() < maxTimeSeconds) {
+            std::atomic<bool> timeUp(false);
+            std::atomic<uint64_t> counter(0);
+            uint64_t totalPixels = static_cast<uint64_t>(width) * height;
+
+            uint64_t stride = 15485863;
+            auto gcd = [](uint64_t a, uint64_t b) {
+                while (b != 0) {
+                    uint64_t temp = b;
+                    b = a % b;
+                    a = temp;
+                }
+                return a;
+            };
+            while (gcd(stride, totalPixels) != 1) {
+                stride += 2;
+            }
+
+            #pragma omp parallel
+            {
+                uint32_t localSeed = omp_get_thread_num() * 1973 + 9277;
+                int chunkSize = 64;
+                
+                while (!timeUp.load(std::memory_order_relaxed)) {
+                    uint64_t startIdx = counter.fetch_add(chunkSize, std::memory_order_relaxed);
+                    
+                    if (omp_get_thread_num() == 0) {
+                        auto checkTime = std::chrono::high_resolution_clock::now();
+                        std::chrono::duration<double> checkElapsed = checkTime - startTime;
+                        if (checkElapsed.count() >= maxTimeSeconds) {
+                            timeUp.store(true, std::memory_order_relaxed);
+                            break;
+                        }
+                    }
+
+                    if (timeUp.load(std::memory_order_relaxed)) break;
+
+                    for (int i = 0; i < chunkSize; ++i) {
+                        uint64_t currentOffset = startIdx + i;
+                        uint64_t pidx = (currentOffset * stride) % totalPixels;
+                        
+                        int y = pidx / width;
+                        int x = pidx % width;
+
+                        float px = (2.0f * (x + 0.5f) / width - 1.0f) * tanfovx;
+                        float py = (1.0f - 2.0f * (y + 0.5f) / height) * tanfovy;
+                        
+                        PointType rayDir = dir + (right * px) + (up * py);
+                        rayDir.normalize();
+
+                        uint32_t pass = currentOffset / totalPixels;
+                        uint32_t seed = pidx * 1973 + pass * 12345 + localSeed;
+
+                        Eigen::Vector3f pbrColor = traceRay(origin, rayDir, 0, seed, maxBounces, globalIllumination, useLod);
+                        
+                        if (sampleCount[pidx] == 0) {
+                            accumColor[pidx] = pbrColor;
+                            sampleCount[pidx] = 1;
+                        } else {
+                            accumColor[pidx] += pbrColor;
+                            sampleCount[pidx] += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        #pragma omp parallel for schedule(static)
+        for (int pidx = 0; pidx < width * height; ++pidx) {
+            Eigen::Vector3f finalColor = accumColor[pidx];
+            int count = sampleCount[pidx];
+            
+            if (count > 0) {
+                finalColor /= static_cast<float>(count);
+            }
+            
+            finalColor = finalColor.cwiseMax(0.0f).cwiseMin(1.0f);
+            
+            int idx = pidx * 3;
+            colorBuffer[idx]     = finalColor[0];
+            colorBuffer[idx + 1] = finalColor[1];
+            colorBuffer[idx + 2] = finalColor[2];
+        }
+
         outFrame.setData(colorBuffer, frame::colormap::RGB);
         return outFrame;
     }
@@ -1562,7 +1929,7 @@ public:
             PointType dirs[6] = {{1,0,0}, {-1,0,0}, {0,1,0}, {0,-1,0}, {0,0,1}, {0,0,-1}};
             for(int i=0; i<6; ++i) {
                 auto neighbor = find(node->position + dirs[i] * node->size, checkRad);
-                if(neighbor && neighbor->objectId == objectId && neighbor->active && neighbor->refraction < 0.01f) {
+                if(neighbor && neighbor->objectId == objectId && neighbor->active && neighbor->transmission < 0.01f) {
                     hiddenSides++;
                 }
             }
@@ -1595,6 +1962,12 @@ public:
             }
         }
         return true;
+    }
+
+    void optimize() {
+        if (root_) {
+            optimizeRecursive(root_.get());
+        }
     }
 
     void printStats(std::ostream& os = std::cout) const {
