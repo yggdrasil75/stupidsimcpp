@@ -307,6 +307,8 @@ public:
             if (p.noiseDisplacement < minNoise) minNoise = p.noiseDisplacement;
             if (p.noiseDisplacement > maxNoise) maxNoise = p.noiseDisplacement;
         }
+        int snf = 0;
+        int inf = 0;
 
         for (auto& p : sim.config.surfaceNodes) {
             v3 color = p.originColor;
@@ -332,7 +334,7 @@ public:
             }
 
             if (!sim.grid.setColor(p.currentPos, color)) {
-                std::cout << "node failed to set" << std::endl;
+                snf++;
             }
             // sim.grid.update(p.currentPos, p.currentPos, p, true, color, sim.config.voxelSize, true, -2, false, 0.0f, 0.0f, 0.0f);
         }
@@ -360,10 +362,12 @@ public:
             }
 
             if (!sim.grid.setColor(p.currentPos, color)) {
-                std::cout << "node failed to set" << std::endl;
+                inf++;
             }
             // sim.grid.update(p.currentPos, p.currentPos, p, true, color, sim.config.voxelSize, true, -2, false, 0.0f, 0.0f, 0.0f);
         }
+        // std::cout << snf << " original nodes failed to set" << std::endl;
+        // std::cout << inf << " interpolated nodes failed to set" << std::endl;
     }
 
     void generateDebugMap(DebugMapMode mode) {
@@ -551,6 +555,7 @@ public:
 
     void interpolateSurface() {
         sim.interpolateSurface();
+        applyDebugColorMode();
     }
 
     void fillPlanet() {

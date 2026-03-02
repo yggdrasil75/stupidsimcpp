@@ -721,24 +721,21 @@ public:
     void interpolateSurface() {
         TIME_FUNCTION;
         
+        config.interpolatedNodes.clear();
+
         std::set<std::tuple<int, int, int>> uniqueTriangles;
 
         for (int i = 0; i < config.surfaceNodes.size(); i++) {
             Particle& p1 = config.surfaceNodes[i];
-            
             for (int j : p1.nearNeighbors) {
                 if (j >= i) continue; 
-                
                 Particle& p2 = config.surfaceNodes[j];
-                
                 for (int k : p2.nearNeighbors) {
                     if (k <= j) continue;
-                    
                     bool isNeighbor = false;
                     for(int n : config.surfaceNodes[k].nearNeighbors) {
                         if(n == i) { isNeighbor = true; break; }
                     }
-
                     if (isNeighbor) {
                         uniqueTriangles.insert({i, j, k});
                     }
@@ -749,8 +746,7 @@ public:
         std::cout << "Identified " << uniqueTriangles.size() << " surface triangles. Filling..." << std::endl;
 
         size_t counter = 0;
-        float halfVoxel = config.voxelSize * 0.5f;
-
+        
         for (const auto& tri : uniqueTriangles) {
             int idx1 = std::get<0>(tri);
             int idx2 = std::get<1>(tri);
@@ -776,9 +772,34 @@ public:
                     
                     if (w1 > 0.99f || w2 > 0.99f || w3 > 0.99f) continue;
 
+                    // Calculate position
+                    v3 interpNormal = (p1.originalPos.normalized() * w1 + p2.originalPos.normalized() * w2 + p3.originalPos.normalized() * w3);
+                    interpNormal.normalize(); 
+                    
+                    float r1 = p1.currentPos.norm();
+                    float r2 = p2.currentPos.norm();
+                    float r3 = p3.currentPos.norm();
+                    float interpRadius = (r1 * w1) + (r2 * w2) + (r3 * w3);
+
+                    v3 smoothPos = interpNormal * interpRadius;
+                    
+                    // Snapping logic
+                    v3 targetPos;
+                    targetPos.x() = std::round(smoothPos.x() / config.voxelSize) * config.voxelSize;
+                    targetPos.y() = std::round(smoothPos.y() / config.voxelSize) * config.voxelSize;
+                    targetPos.z() = std::round(smoothPos.z() / config.voxelSize) * config.voxelSize;
+
+                    // FIX: Check if this spot is already occupied!
+                    // We use half voxelSize as tolerance to ensure we catch the occupant
+                    if (grid.find(targetPos, config.voxelSize * 0.1f) != nullptr) {
+                        continue; 
+                    }
+
                     Particle newPt;
                     newPt.surface = true;
+                    newPt.currentPos = targetPos;
                     
+                    // Assign properties based on dominant weight
                     if (w1 > w2 && w1 > w3) {
                         newPt.plateID = p1.plateID;
                         newPt.originColor = p1.originColor;
@@ -790,26 +811,16 @@ public:
                         newPt.originColor = p3.originColor;
                     }
 
-                    v3 interpNormal = (p1.originalPos.normalized() * w1 + p2.originalPos.normalized() * w2 + p3.originalPos.normalized() * w3);
-                    interpNormal.normalize(); 
-                    
-                    float r1 = p1.currentPos.norm();
-                    float r2 = p2.currentPos.norm();
-                    float r3 = p3.currentPos.norm();
-                    float interpRadius = (r1 * w1) + (r2 * w2) + (r3 * w3);
-
-                    v3 smoothPos = interpNormal * interpRadius;
-
-                    newPt.currentPos.x() = std::round(smoothPos.x() / config.voxelSize) * config.voxelSize;
-                    newPt.currentPos.y() = std::round(smoothPos.y() / config.voxelSize) * config.voxelSize;
-                    newPt.currentPos.z() = std::round(smoothPos.z() / config.voxelSize) * config.voxelSize;
-
                     newPt.originalPos = interpNormal * config.radius;
                     newPt.noisePos = p1.noisePos * w1 + p2.noisePos * w2 + p3.noisePos * w3;
                     newPt.tectonicPos = p1.tectonicPos * w1 + p2.tectonicPos * w2 + p3.tectonicPos * w3;
 
+                    // Insert into Grid
                     grid.set(newPt, newPt.currentPos, true, newPt.originColor, config.voxelSize, true, 1, 2, false, 0.0f, 0.0f, 0.0f);
                     
+                    // FIX: Save to interpolatedNodes so we don't lose the data reference
+                    config.interpolatedNodes.push_back(newPt);
+
                     counter++;
                 }
             }
