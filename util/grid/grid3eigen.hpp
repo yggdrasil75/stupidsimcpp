@@ -1623,7 +1623,7 @@ public:
                 }
                 
                 accumColor[pidx] = color;
-                sampleCount[pidx] = 0;
+                sampleCount[pidx] = 1;
             }
         }
 
@@ -1635,18 +1635,12 @@ public:
             std::atomic<uint64_t> counter(0);
             uint64_t totalPixels = static_cast<uint64_t>(width) * height;
 
-            uint64_t stride = 15485863;
-            auto gcd = [](uint64_t a, uint64_t b) {
-                while (b != 0) {
-                    uint64_t temp = b;
-                    b = a % b;
-                    a = temp;
-                }
-                return a;
-            };
-            while (gcd(stride, totalPixels) != 1) {
-                stride += 2;
-            }
+            std::vector<uint64_t> pixelIndices(totalPixels);
+            std::iota(pixelIndices.begin(), pixelIndices.end(), 0); 
+            
+            std::random_device rd;
+            std::mt19937 g(rd());
+            std::shuffle(pixelIndices.begin(), pixelIndices.end(), g);
 
             #pragma omp parallel
             {
@@ -1669,7 +1663,7 @@ public:
 
                     for (int i = 0; i < chunkSize; ++i) {
                         uint64_t currentOffset = startIdx + i;
-                        uint64_t pidx = (currentOffset * stride) % totalPixels;
+                        uint64_t pidx = pixelIndices[currentOffset % totalPixels];
                         
                         int y = pidx / width;
                         int x = pidx % width;
@@ -1685,13 +1679,8 @@ public:
 
                         Eigen::Vector3f pbrColor = traceRay(origin, rayDir, 0, seed, maxBounces, globalIllumination, useLod);
                         
-                        if (sampleCount[pidx] == 0) {
-                            accumColor[pidx] = pbrColor;
-                            sampleCount[pidx] = 1;
-                        } else {
-                            accumColor[pidx] += pbrColor;
-                            sampleCount[pidx] += 1;
-                        }
+                        accumColor[pidx] += pbrColor;
+                        sampleCount[pidx] += 1;
                     }
                 }
             }

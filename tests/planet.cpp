@@ -311,7 +311,7 @@ public:
         int inf = 0;
 
         for (auto& p : sim.config.surfaceNodes) {
-            v3 color = p.originColor;
+            v3 color = p.originColor.cast<float>();
             
             switch (currentColorMode) {
                 case DebugColorMode::PLATES:
@@ -329,7 +329,7 @@ public:
                 }
                 case DebugColorMode::BASE:
                 default:
-                    color = p.originColor;
+                    color = p.originColor.cast<float>();
                     break;
             }
 
@@ -339,7 +339,7 @@ public:
             // sim.grid.update(p.currentPos, p.currentPos, p, true, color, sim.config.voxelSize, true, -2, false, 0.0f, 0.0f, 0.0f);
         }
         for (auto& p : sim.config.interpolatedNodes) {
-            v3 color = p.originColor;
+            v3 color = p.originColor.cast<float>();
             
             switch (currentColorMode) {
                 case DebugColorMode::PLATES:
@@ -357,7 +357,7 @@ public:
                 }
                 case DebugColorMode::BASE:
                 default:
-                    color = p.originColor;
+                    color = p.originColor.cast<float>();
                     break;
             }
 
@@ -366,8 +366,10 @@ public:
             }
             // sim.grid.update(p.currentPos, p.currentPos, p, true, color, sim.config.voxelSize, true, -2, false, 0.0f, 0.0f, 0.0f);
         }
-        // std::cout << snf << " original nodes failed to set" << std::endl;
-        // std::cout << inf << " interpolated nodes failed to set" << std::endl;
+        if (snf > 0 || inf > 0) {
+            std::cout << snf << " original nodes failed to set" << std::endl;
+            std::cout << inf << " interpolated nodes failed to set" << std::endl;
+        }
     }
 
     void generateDebugMap(DebugMapMode mode) {
@@ -383,13 +385,13 @@ public:
             v3 pos;
             switch(mode) {
                 case DebugMapMode::BASE: 
-                    pos = p.originalPos; 
+                    pos = p.originalPos.cast<float>();
                     break;
                 case DebugMapMode::NOISE: 
-                    pos = p.noisePos; 
+                    pos = p.noisePos.cast<float>();
                     break;
                 case DebugMapMode::TECTONIC: 
-                    pos = p.tectonicPos; 
+                    pos = p.tectonicPos.cast<float>();
                     break;
                 case DebugMapMode::CURRENT:
                 default: 
@@ -405,25 +407,25 @@ public:
             v3 pos;
             switch(mode) {
                 case DebugMapMode::BASE: 
-                    pos = p.originalPos; 
+                    pos = p.originalPos.cast<float>();
                     break;
                 case DebugMapMode::NOISE: 
-                    pos = p.noisePos; 
+                    pos = p.noisePos.cast<float>();
                     break;
                 case DebugMapMode::TECTONIC: 
-                    pos = p.tectonicPos; 
+                    pos = p.tectonicPos.cast<float>();
                     break;
                 case DebugMapMode::TECTONICCOLOR: 
-                    pos = sim.plates[p.plateID].debugColor; 
+                    pos = sim.plates[p.plateID].debugColor;
                     break;
                 case DebugMapMode::CURRENT:
                 default:
-                    pos = p.currentPos; 
+                    pos = p.currentPos;
                     break;
             }
 
             float d = pos.norm();
-            v3 n = p.originalPos.normalized();
+            v3 n = p.originalPos.cast<float>().normalized();
             
             float u = 0.5f + std::atan2(n.z(), n.x()) / (2.0f * static_cast<float>(M_PI));
             float v = 0.5f - std::asin(n.y()) / static_cast<float>(M_PI);
@@ -508,9 +510,9 @@ public:
         sim.grid.setMaxDistance(maxViewDistance);
         
         if (slowRender) {
-            currentPreviewFrame = sim.grid.renderFrame(cam, outWidth, outHeight, frame::colormap::RGB, rayCount, reflectCount, globalIllumination, useLod);
+            currentPreviewFrame = sim.grid.renderFrame(cam, outHeight, outWidth, frame::colormap::RGB, rayCount, reflectCount, globalIllumination, useLod);
         } else {
-            currentPreviewFrame = sim.grid.fastRenderFrame(cam, outWidth, outHeight, frame::colormap::RGB);
+            currentPreviewFrame = sim.grid.renderFrameTimed(cam, outHeight, outWidth, frame::colormap::RGB);
         }
         
         if (textu == 0) {

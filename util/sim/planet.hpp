@@ -24,6 +24,7 @@
 #include "../stb/stb_image.h"
 
 using v3 = Eigen::Vector3f;
+using v3half = Eigen::Matrix<Eigen::half, 3, 1>; // 16-bit vector alias
 const float Φ = M_PI * (3.0f - std::sqrt(5.0f));
 
 enum class PlateType {
@@ -35,15 +36,15 @@ enum class PlateType {
 struct Particle {
     float noiseDisplacement = 0.0f;
     int plateID = -1;
-    Eigen::Vector3f originalPos;
-    Eigen::Vector3f noisePos;
-    Eigen::Vector3f tectonicPos;
+    v3half originalPos;
+    v3half noisePos;
+    v3half tectonicPos;
     Eigen::Vector3f currentPos;
     
     float plateDisplacement = 0.0f;
     // float temperature = -1;
     // float water = -1;
-    Eigen::Vector3f originColor;
+    v3half originColor;
     bool surface = false;
 
     //gravity factors:
@@ -184,15 +185,15 @@ public:
             v3 dir(x, y, z);
             v3 pos = config.center + dir * config.radius;
             Particle pt;
-            pt.originalPos = pos;
-            pt.noisePos = pos;
-            pt.tectonicPos = pos;
+            pt.originalPos = pos.cast<Eigen::half>();
+            pt.noisePos = pos.cast<Eigen::half>();
+            pt.tectonicPos = pos.cast<Eigen::half>();
             pt.currentPos = pos;
-            pt.originColor = config.color;
+            pt.originColor = config.color.cast<Eigen::half>();
             pt.noiseDisplacement = 0.0f;
             pt.surface = true;
             config.surfaceNodes.emplace_back(pt);
-            grid.set(pt, pt.currentPos, true, pt.originColor, config.voxelSize, true, 1, 0, false, 0.0f, 0.0f, 0.0f);
+            grid.set(pt, pt.currentPos, true, pt.originColor.cast<float>(), config.voxelSize, true, 1, 0, false, 0.0f, 0.0f, 0.0f);
         }
         config.currentStep = 1;
         std::cout << "Step 1 done. base sphere generated" << std::endl;
@@ -202,11 +203,11 @@ public:
     inline void _applyNoise(std::function<float(const Eigen::Vector3f&)> noiseFunc) {
         for (auto& p : config.surfaceNodes) {
             Eigen::Vector3f oldPos = p.currentPos;
-            float displacementValue = noiseFunc(p.originalPos);
+            float displacementValue = noiseFunc(p.originalPos.cast<float>());
             p.noiseDisplacement = displacementValue;
-            Eigen::Vector3f normal = p.originalPos.normalized();
-            p.noisePos = p.originalPos + (normal * displacementValue * config.noiseStrength);
-            p.currentPos = p.noisePos;
+            Eigen::Vector3f normal = p.originalPos.cast<float>().normalized();
+            p.noisePos = (p.originalPos.cast<float>() + (normal * displacementValue * config.noiseStrength)).cast<Eigen::half>();
+            p.currentPos = p.noisePos.cast<float>();
             grid.move(oldPos, p.currentPos);
             grid.update(p.currentPos, p);
         }
@@ -235,7 +236,7 @@ public:
                     const auto& existingSeed = config.surfaceNodes[selectedIndex];
                     const auto& candidateSeed = config.surfaceNodes[seedIndex];
                     
-                    float dot = existingSeed.originalPos.normalized().dot(candidateSeed.originalPos.normalized());
+                    float dot = existingSeed.originalPos.cast<float>().normalized().dot(candidateSeed.originalPos.cast<float>().normalized());
                     float angle = std::acos(std::clamp(dot, -1.0f, 1.0f));
                     float distanceOnSphere = angle * config.radius;
                     
@@ -297,7 +298,7 @@ public:
         std::vector<v3> normPos(numNodes);
         #pragma omp parallel for schedule(static)
         for (int i = 0; i < numNodes; i++) {
-            normPos[i] = config.surfaceNodes[i].originalPos.normalized();
+            normPos[i] = config.surfaceNodes[i].originalPos.cast<float>().normalized();
         }
         
         #pragma omp parallel for schedule(static)
@@ -464,7 +465,7 @@ public:
                         int closestPlate = 0;
                         float minDist = std::numeric_limits<float>::max();
                         for (int p = 0; p < config.numPlates; p++) {
-                            float d = (config.surfaceNodes[i].originalPos - plates[p].plateEulerPole.originalPos).norm();
+                            float d = (config.surfaceNodes[i].originalPos.cast<float>() - plates[p].plateEulerPole.originalPos.cast<float>()).norm();
                             if (d < minDist) {
                                 minDist = d;
                                 closestPlate = p;
@@ -534,7 +535,7 @@ public:
             
             for (int nIdx : plates[i].assignedNodes) {
                 sumElevation += config.surfaceNodes[nIdx].currentPos.norm();
-                centroid += config.surfaceNodes[nIdx].originalPos;
+                centroid += config.surfaceNodes[nIdx].originalPos.cast<float>();
             }
             
             if (!plates[i].assignedNodes.empty()) {
@@ -543,18 +544,18 @@ public:
 
                 float maxSpread = 0.0f;
                 for (int nIdx : plates[i].assignedNodes) {
-                    float d = (config.surfaceNodes[nIdx].originalPos - centroid).norm();
+                    float d = (config.surfaceNodes[nIdx].originalPos.cast<float>() - centroid).norm();
                     if (d > maxSpread) maxSpread = d;
                 }
 
-                float distToCentroid = (plates[i].plateEulerPole.originalPos - centroid).norm();
+                float distToCentroid = (plates[i].plateEulerPole.originalPos.cast<float>() - centroid).norm();
                 
                 if (distToCentroid > maxSpread * 0.6f) {
                     int bestNodeIdx = plates[i].assignedNodes[0];
                     float minDistToCentroid = std::numeric_limits<float>::max();
                     
                     for (int nIdx : plates[i].assignedNodes) {
-                        float d = (config.surfaceNodes[nIdx].originalPos - centroid).norm();
+                        float d = (config.surfaceNodes[nIdx].originalPos.cast<float>() - centroid).norm();
                         if (d < minDistToCentroid) {
                             minDistToCentroid = d;
                             bestNodeIdx = nIdx;
@@ -570,7 +571,7 @@ public:
             Eigen::Vector3f randomDir(distFloat(rng) - 0.5f, distFloat(rng) - 0.5f, distFloat(rng) - 0.5f);
             randomDir.normalize();
             
-            Eigen::Vector3f poleDir = plates[i].plateEulerPole.originalPos.normalized();
+            Eigen::Vector3f poleDir = plates[i].plateEulerPole.originalPos.cast<float>().normalized();
             plates[i].direction = (randomDir - poleDir * randomDir.dot(poleDir)).normalized();
             
             plates[i].angularVelocity = distFloat(rng) * 0.1f + 0.02f;
@@ -611,7 +612,7 @@ public:
         
         std::vector<Eigen::Vector3f> ω(config.numPlates);
         for (int i = 0; i < config.numPlates; i++) {
-            ω[i] = plates[i].plateEulerPole.originalPos.normalized().cross(plates[i].direction) * plates[i].angularVelocity;
+            ω[i] = plates[i].plateEulerPole.originalPos.cast<float>().normalized().cross(plates[i].direction) * plates[i].angularVelocity;
         }
 
         std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
@@ -624,7 +625,7 @@ public:
                 int myPlate = config.surfaceNodes[i].plateID;
                 if (myPlate == -1) continue;
                 
-                Eigen::Vector3f myPos = config.surfaceNodes[i].originalPos.normalized();
+                Eigen::Vector3f myPos = config.surfaceNodes[i].originalPos.cast<float>().normalized();
                 Eigen::Vector3f myVel = ω[myPlate].cross(myPos);
                 
                 float localStress = 0.0f;
@@ -635,7 +636,7 @@ public:
                     int nPlate = config.surfaceNodes[nIdx].plateID;
                     if (nPlate != -1 && myPlate != nPlate) {
                         boundaryCount++;
-                        Eigen::Vector3f nPos = config.surfaceNodes[nIdx].originalPos.normalized();
+                        Eigen::Vector3f nPos = config.surfaceNodes[nIdx].originalPos.cast<float>().normalized();
                         Eigen::Vector3f nVel = ω[nPlate].cross(nPos);
                         
                         Eigen::Vector3f relVel = nVel - myVel;
@@ -687,8 +688,8 @@ public:
             
             float noiseVal = dist(rng) * nodeNoise[i];
             
-            Eigen::Vector3f normal = p.originalPos.normalized();
-            p.tectonicPos = p.noisePos + (normal * (p.plateDisplacement + noiseVal));
+            Eigen::Vector3f normal = p.originalPos.cast<float>().normalized();
+            p.tectonicPos = (p.noisePos.cast<float>() + (normal * (p.plateDisplacement + noiseVal))).cast<Eigen::half>();
         }
     }
 
@@ -698,7 +699,7 @@ public:
 
         for (auto& p : config.surfaceNodes) {
             Eigen::Vector3f oldPos = p.currentPos;
-            p.currentPos = p.tectonicPos;
+            p.currentPos = p.tectonicPos.cast<float>();
             grid.move(oldPos, p.currentPos);
             grid.update(p.currentPos, p);
         }
@@ -773,7 +774,7 @@ public:
                     if (w1 > 0.99f || w2 > 0.99f || w3 > 0.99f) continue;
 
                     // Calculate position
-                    v3 interpNormal = (p1.originalPos.normalized() * w1 + p2.originalPos.normalized() * w2 + p3.originalPos.normalized() * w3);
+                    v3 interpNormal = (p1.originalPos.cast<float>().normalized() * w1 + p2.originalPos.cast<float>().normalized() * w2 + p3.originalPos.cast<float>().normalized() * w3);
                     interpNormal.normalize(); 
                     
                     float r1 = p1.currentPos.norm();
@@ -782,22 +783,14 @@ public:
                     float interpRadius = (r1 * w1) + (r2 * w2) + (r3 * w3);
 
                     v3 smoothPos = interpNormal * interpRadius;
-                    
-                    // Snapping logic
-                    v3 targetPos;
-                    targetPos.x() = std::round(smoothPos.x() / config.voxelSize) * config.voxelSize;
-                    targetPos.y() = std::round(smoothPos.y() / config.voxelSize) * config.voxelSize;
-                    targetPos.z() = std::round(smoothPos.z() / config.voxelSize) * config.voxelSize;
 
-                    // FIX: Check if this spot is already occupied!
-                    // We use half voxelSize as tolerance to ensure we catch the occupant
-                    if (grid.find(targetPos, config.voxelSize * 0.1f) != nullptr) {
+                    if (grid.find(smoothPos, config.voxelSize * 0.1f) != nullptr) {
                         continue; 
                     }
 
                     Particle newPt;
                     newPt.surface = true;
-                    newPt.currentPos = targetPos;
+                    newPt.currentPos = smoothPos;
                     
                     // Assign properties based on dominant weight
                     if (w1 > w2 && w1 > w3) {
@@ -811,12 +804,12 @@ public:
                         newPt.originColor = p3.originColor;
                     }
 
-                    newPt.originalPos = interpNormal * config.radius;
-                    newPt.noisePos = p1.noisePos * w1 + p2.noisePos * w2 + p3.noisePos * w3;
-                    newPt.tectonicPos = p1.tectonicPos * w1 + p2.tectonicPos * w2 + p3.tectonicPos * w3;
+                    newPt.originalPos = (interpNormal * config.radius).cast<Eigen::half>();
+                    newPt.noisePos = (p1.noisePos.cast<float>() * w1 + p2.noisePos.cast<float>() * w2 + p3.noisePos.cast<float>() * w3).cast<Eigen::half>();
+                    newPt.tectonicPos = (p1.tectonicPos.cast<float>() * w1 + p2.tectonicPos.cast<float>() * w2 + p3.tectonicPos.cast<float>() * w3).cast<Eigen::half>();
 
                     // Insert into Grid
-                    grid.set(newPt, newPt.currentPos, true, newPt.originColor, config.voxelSize, true, 1, 2, false, 0.0f, 0.0f, 0.0f);
+                    grid.set(newPt, newPt.currentPos, true, newPt.originColor.cast<float>(), config.voxelSize, true, 1, 2, false, 0.0f, 0.0f, 0.0f);
                     
                     // FIX: Save to interpolatedNodes so we don't lose the data reference
                     config.interpolatedNodes.push_back(newPt);
@@ -827,12 +820,233 @@ public:
         }
         grid.optimize();
         std::cout << "Interpolated " << counter << " surface gaps." << std::endl;
+        
+        sealCracks();
+    }
+
+    void sealCracks() {
+        TIME_FUNCTION;
+        std::vector<Particle> patchNodes;
+        float vsize = config.voxelSize;
+
+        std::vector<Particle*> candidates;
+        candidates.reserve(config.interpolatedNodes.size() + config.surfaceNodes.size());
+        for(auto& p : config.surfaceNodes) candidates.push_back(&p);
+        for(auto& p : config.interpolatedNodes) candidates.push_back(&p);
+
+        int patchedCount = 0;
+        
+        std::vector<v3> directions = {
+            v3(vsize,0,0), v3(-vsize,0,0),
+            v3(0,vsize,0), v3(0,-vsize,0),
+            v3(0,0,vsize), v3(0,0,-vsize)
+        };
+
+        for (Particle* p : candidates) {
+            for (const auto& dir : directions) {
+                v3 checkPos = p->currentPos + dir;
+                
+                if (grid.find(checkPos, vsize * 0.1f) == nullptr) {
+                    
+                    int neighborsFound = 0;
+                    for (const auto& nDir : directions) {
+                        if (grid.find(checkPos + nDir, vsize * 0.1f) != nullptr) {
+                            neighborsFound++;
+                        }
+                    }
+
+                    if (neighborsFound >= 4) {
+                        Particle patch = *p;
+                        patch.currentPos = checkPos;
+                        patch.tectonicPos = checkPos.cast<Eigen::half>();
+                        
+                        bool alreadyPatched = false;
+                        for(const auto& pp : patchNodes) {
+                            if((pp.currentPos - checkPos).norm() < 1.0f) { alreadyPatched=true; break; }
+                        }
+                        
+                        if (!alreadyPatched) {
+                            patchNodes.push_back(patch);
+                            grid.set(patch, checkPos, true, patch.originColor.cast<float>(), vsize, true, 1, 2, false, 0.0f, 0.0f, 0.0f);
+                            patchedCount++;
+                        }
+                    }
+                }
+            }
+        }
+
+        for(const auto& p : patchNodes) {
+            config.interpolatedNodes.push_back(p);
+        }
+        
+        std::cout << "Sealed " << patchedCount << " surface cracks." << std::endl;
+        grid.optimize();
     }
 
     void fillPlanet() {
         TIME_FUNCTION;
-        ///TODO: completely fill the planet, interpolating the entire planet.
-        //same as interpolatesurface, these should be kept separate. but since they will probably be bigger than a vector I dont know how.
+        std::cout << "Starting Volume Fill (Naive)..." << std::endl;
+
+        std::vector<Particle*> hullPtrs;
+        hullPtrs.reserve(config.surfaceNodes.size() + config.interpolatedNodes.size());
+        
+        float maxDistSq = 0.0f;
+        for (size_t i = 0; i < config.surfaceNodes.size(); i++) {
+            hullPtrs.push_back(&config.surfaceNodes[i]);
+            float d2 = config.surfaceNodes[i].currentPos.squaredNorm();
+            if (d2 > maxDistSq) maxDistSq = d2;
+        }
+        for (size_t i = 0; i < config.interpolatedNodes.size(); i++) {
+            hullPtrs.push_back(&config.interpolatedNodes[i]);
+            float d2 = config.interpolatedNodes[i].currentPos.squaredNorm();
+            if (d2 > maxDistSq) maxDistSq = d2;
+        }
+
+        float maxRadius = std::sqrt(maxDistSq);
+        float step = config.voxelSize * 0.5f; 
+        
+        float cellScale = 1.0f / (config.voxelSize * 2.0f);
+        int tableSize = hullPtrs.size() * 2 + 1;
+        
+        std::vector<int> head(tableSize, -1);
+        std::vector<int> next(hullPtrs.size(), -1);
+
+        for (int i = 0; i < hullPtrs.size(); i++) {
+            v3 p = hullPtrs[i]->currentPos;
+            int64_t x = static_cast<int64_t>(std::floor(p.x() * cellScale));
+            int64_t y = static_cast<int64_t>(std::floor(p.y() * cellScale));
+            int64_t z = static_cast<int64_t>(std::floor(p.z() * cellScale));
+            
+            uint64_t h = (x * 73856093) ^ (y * 19349663) ^ (z * 83492791);
+            int bucket = h % tableSize;
+            
+            next[i] = head[bucket];
+            head[bucket] = i;
+        }
+
+        std::cout << "Spatial Map Built. Scanning volume..." << std::endl;
+
+        struct ThreadData {
+            std::vector<Particle> gridCandidates;
+            std::vector<Particle> surfaceCandidates;
+        };
+        
+        int gridLimit = static_cast<int>(std::ceil(maxRadius / step));
+
+        #pragma omp parallel
+        {
+            ThreadData tData;
+            
+            #pragma omp for collapse(3) schedule(dynamic, 8)
+            for (int x = -gridLimit; x <= gridLimit; x++) {
+                for (int y = -gridLimit; y <= gridLimit; y++) {
+                    for (int z = -gridLimit; z <= gridLimit; z++) {
+                        
+                        v3 pos(x * step, y * step, z * step);
+                        float dCentSq = pos.squaredNorm();
+
+                        if (dCentSq > maxDistSq) continue;
+
+                        if (grid.find(pos, step * 0.1f) != nullptr) continue;
+
+                        Particle* nearest[3] = {nullptr, nullptr, nullptr};
+                        float dists[3] = {1e20f, 1e20f, 1e20f};
+                        int foundCount = 0;
+
+                        int64_t bx = static_cast<int64_t>(std::floor(pos.x() * cellScale));
+                        int64_t by = static_cast<int64_t>(std::floor(pos.y() * cellScale));
+                        int64_t bz = static_cast<int64_t>(std::floor(pos.z() * cellScale));
+
+                        for (int ox = -1; ox <= 1; ox++) {
+                            for (int oy = -1; oy <= 1; oy++) {
+                                for (int oz = -1; oz <= 1; oz++) {
+                                    uint64_t h = ((bx + ox) * 73856093) ^ ((by + oy) * 19349663) ^ ((bz + oz) * 83492791);
+                                    int bucket = h % tableSize;
+                                    
+                                    int curr = head[bucket];
+                                    while (curr != -1) {
+                                        Particle* p = hullPtrs[curr];
+                                        float d2 = (p->currentPos - pos).squaredNorm();
+
+                                        if (d2 < dists[2]) {
+                                            if (d2 < dists[1]) {
+                                                if (d2 < dists[0]) {
+                                                    dists[2] = dists[1];
+                                                    nearest[2] = nearest[1];
+                                                    dists[1] = dists[0];
+                                                    nearest[1] = nearest[0];
+                                                    dists[0] = d2;
+                                                    nearest[0] = p;
+                                                } else {
+                                                    dists[2] = dists[1];
+                                                    nearest[2] = nearest[1];
+                                                    dists[1] = d2;
+                                                    nearest[1] = p;
+                                                }
+                                            } else {
+                                                dists[2] = d2;
+                                                nearest[2] = p;
+                                            }
+                                        }
+                                        curr = next[curr];
+                                    }
+                                }
+                            }
+                        }
+
+                        if (nearest[2] == nullptr) continue;
+
+                        v3 p1 = nearest[0]->currentPos;
+                        v3 p2 = nearest[1]->currentPos;
+                        v3 p3 = nearest[2]->currentPos;
+
+                        v3 v1 = p2 - p1;
+                        v3 v2 = p3 - p1;
+                        v3 normal = v1.cross(v2).normalized();
+
+                        v3 triCenter = (p1 + p2 + p3) * 0.3333f;
+                        if (triCenter.dot(normal) < 0) normal = -normal;
+
+                        v3 toCand = pos - p1;
+                        float dotVal = toCand.dot(normal);
+
+                        if (dotVal < -1e-4f) {
+                            Particle newPt;
+                            newPt.currentPos = pos;
+                            newPt.tectonicPos = pos.cast<Eigen::half>();
+                            newPt.originalPos = pos.cast<Eigen::half>(); 
+                            newPt.surface = false;
+                            
+                            newPt.plateID = nearest[0]->plateID;
+                            newPt.originColor = nearest[0]->originColor;
+
+                            if (std::sqrt(dists[0]) < config.voxelSize * 1.5f) {
+                                tData.surfaceCandidates.push_back(newPt);
+                            } else {
+                                tData.gridCandidates.push_back(newPt);
+                            }
+                        }
+                    }
+                }
+            }
+
+            #pragma omp critical
+            {
+                config.interpolatedNodes.insert(config.interpolatedNodes.end(), 
+                                                tData.surfaceCandidates.begin(), 
+                                                tData.surfaceCandidates.end());
+                
+                for(const auto& p : tData.surfaceCandidates) {
+                    grid.set(p, p.currentPos, true, p.originColor.cast<float>(), config.voxelSize, true, 1, 0, false, 0.0f, 0.0f, 0.0f);
+                }
+                for(const auto& p : tData.gridCandidates) {
+                    grid.set(p, p.currentPos, true, p.originColor.cast<float>(), config.voxelSize, true, 1, 0, false, 0.0f, 0.0f, 0.0f);
+                }
+            }
+        }
+
+        std::cout << "Volume Fill Complete." << std::endl;
+        grid.optimize();
     }
 
     void simulateImpacts() {
