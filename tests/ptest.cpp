@@ -2,17 +2,12 @@
 #include <vector>
 #include <string>
 
-// Include GLAD/GLFW
-// Ensure these are in your include path
 #include <GLFW/glfw3.h>
 
-// ImGui
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
 
-// Include your implementation files
-// (Unity build style as requested)
 #include "../util/noise/pnoise.cpp"
 #include "planet.cpp"
 #include "../util/basicdefines.hpp"
