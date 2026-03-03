@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <queue>
 #include <unordered_map>
+#include <set>
 
 #include "../grid/grid3eigen.hpp"
 #include "../timing_decorator.cpp"
@@ -522,12 +523,10 @@ public:
     void extraplateste() {
         TIME_FUNCTION;
         std::uniform_real_distribution<float> distFloat(0.0f, 1.0f);
-        
-        struct PlateStats {
-            int id;
-            float avgElevation;
-        };
-        std::vector<PlateStats> stats(config.numPlates);
+        std::vector<std::pair<int, float>> plateStats;
+        for (int i = 0; i < config.numPlates; i++) {
+            plateStats.emplace_back(std::make_pair(i, 0.0f));
+        }
 
         for (int i = 0; i < config.numPlates; i++) {
             float sumElevation = 0.0f;
@@ -539,7 +538,7 @@ public:
             }
             
             if (!plates[i].assignedNodes.empty()) {
-                stats[i].avgElevation = sumElevation / plates[i].assignedNodes.size();
+                plateStats[i].first = sumElevation / plates[i].assignedNodes.size();
                 centroid /= plates[i].assignedNodes.size();
 
                 float maxSpread = 0.0f;
@@ -564,9 +563,8 @@ public:
                     plates[i].plateEulerPole = config.surfaceNodes[bestNodeIdx]; 
                 }
             } else {
-                stats[i].avgElevation = config.radius;
+                plateStats[i].first = config.radius;
             }
-            stats[i].id = i;
             
             Eigen::Vector3f randomDir(distFloat(rng) - 0.5f, distFloat(rng) - 0.5f, distFloat(rng) - 0.5f);
             randomDir.normalize();
@@ -579,15 +577,15 @@ public:
             plates[i].temperature = distFloat(rng) * 1000.0f;
         }
         
-        std::sort(stats.begin(), stats.end(), [](const PlateStats& a, const PlateStats& b) {
-            return a.avgElevation < b.avgElevation;
+        std::sort(plateStats.begin(), plateStats.end(), [](const std::pair<int, float>& a, const std::pair<int, float>& b) {
+            return a.second < b.second;
         });
         
         int oneThird = config.numPlates / 3;
         int twoThirds = (2 * config.numPlates) / 3;
         
         for (int i = 0; i < config.numPlates; i++) {
-            int pID = stats[i].id;
+            int pID = plateStats[i].first;
             if (i < oneThird) {
                 plates[pID].ptype = PlateType::OCEANIC;
                 plates[pID].thickness = distFloat(rng) * 10.0f + 5.0f;
@@ -773,7 +771,6 @@ public:
                     
                     if (w1 > 0.99f || w2 > 0.99f || w3 > 0.99f) continue;
 
-                    // Calculate position
                     v3 interpNormal = (p1.originalPos.cast<float>().normalized() * w1 + p2.originalPos.cast<float>().normalized() * w2 + p3.originalPos.cast<float>().normalized() * w3);
                     interpNormal.normalize(); 
                     
@@ -792,7 +789,6 @@ public:
                     newPt.surface = true;
                     newPt.currentPos = smoothPos;
                     
-                    // Assign properties based on dominant weight
                     if (w1 > w2 && w1 > w3) {
                         newPt.plateID = p1.plateID;
                         newPt.originColor = p1.originColor;
@@ -808,10 +804,8 @@ public:
                     newPt.noisePos = (p1.noisePos.cast<float>() * w1 + p2.noisePos.cast<float>() * w2 + p3.noisePos.cast<float>() * w3).cast<Eigen::half>();
                     newPt.tectonicPos = (p1.tectonicPos.cast<float>() * w1 + p2.tectonicPos.cast<float>() * w2 + p3.tectonicPos.cast<float>() * w3).cast<Eigen::half>();
 
-                    // Insert into Grid
                     grid.set(newPt, newPt.currentPos, true, newPt.originColor.cast<float>(), config.voxelSize, true, 1, 2, false, 0.0f, 0.0f, 0.0f);
                     
-                    // FIX: Save to interpolatedNodes so we don't lose the data reference
                     config.interpolatedNodes.push_back(newPt);
 
                     counter++;
@@ -820,233 +814,60 @@ public:
         }
         grid.optimize();
         std::cout << "Interpolated " << counter << " surface gaps." << std::endl;
-        
-        sealCracks();
-    }
-
-    void sealCracks() {
-        TIME_FUNCTION;
-        std::vector<Particle> patchNodes;
-        float vsize = config.voxelSize;
-
-        std::vector<Particle*> candidates;
-        candidates.reserve(config.interpolatedNodes.size() + config.surfaceNodes.size());
-        for(auto& p : config.surfaceNodes) candidates.push_back(&p);
-        for(auto& p : config.interpolatedNodes) candidates.push_back(&p);
-
-        int patchedCount = 0;
-        
-        std::vector<v3> directions = {
-            v3(vsize,0,0), v3(-vsize,0,0),
-            v3(0,vsize,0), v3(0,-vsize,0),
-            v3(0,0,vsize), v3(0,0,-vsize)
-        };
-
-        for (Particle* p : candidates) {
-            for (const auto& dir : directions) {
-                v3 checkPos = p->currentPos + dir;
-                
-                if (grid.find(checkPos, vsize * 0.1f) == nullptr) {
-                    
-                    int neighborsFound = 0;
-                    for (const auto& nDir : directions) {
-                        if (grid.find(checkPos + nDir, vsize * 0.1f) != nullptr) {
-                            neighborsFound++;
-                        }
-                    }
-
-                    if (neighborsFound >= 4) {
-                        Particle patch = *p;
-                        patch.currentPos = checkPos;
-                        patch.tectonicPos = checkPos.cast<Eigen::half>();
-                        
-                        bool alreadyPatched = false;
-                        for(const auto& pp : patchNodes) {
-                            if((pp.currentPos - checkPos).norm() < 1.0f) { alreadyPatched=true; break; }
-                        }
-                        
-                        if (!alreadyPatched) {
-                            patchNodes.push_back(patch);
-                            grid.set(patch, checkPos, true, patch.originColor.cast<float>(), vsize, true, 1, 2, false, 0.0f, 0.0f, 0.0f);
-                            patchedCount++;
-                        }
-                    }
-                }
-            }
-        }
-
-        for(const auto& p : patchNodes) {
-            config.interpolatedNodes.push_back(p);
-        }
-        
-        std::cout << "Sealed " << patchedCount << " surface cracks." << std::endl;
-        grid.optimize();
     }
 
     void fillPlanet() {
         TIME_FUNCTION;
-        std::cout << "Starting Volume Fill (Naive)..." << std::endl;
-
-        std::vector<Particle*> hullPtrs;
-        hullPtrs.reserve(config.surfaceNodes.size() + config.interpolatedNodes.size());
-        
-        float maxDistSq = 0.0f;
-        for (size_t i = 0; i < config.surfaceNodes.size(); i++) {
-            hullPtrs.push_back(&config.surfaceNodes[i]);
-            float d2 = config.surfaceNodes[i].currentPos.squaredNorm();
-            if (d2 > maxDistSq) maxDistSq = d2;
+        if (config.interpolatedNodes.empty()) {
+            std::cout << "Please run interpolate surface first." << std::endl;
+            return;
         }
-        for (size_t i = 0; i < config.interpolatedNodes.size(); i++) {
-            hullPtrs.push_back(&config.interpolatedNodes[i]);
-            float d2 = config.interpolatedNodes[i].currentPos.squaredNorm();
-            if (d2 > maxDistSq) maxDistSq = d2;
-        }
+        std::cout << "Starting Volume Fill..." << std::endl;
 
-        float maxRadius = std::sqrt(maxDistSq);
-        float step = config.voxelSize * 0.5f; 
-        
-        float cellScale = 1.0f / (config.voxelSize * 2.0f);
-        int tableSize = hullPtrs.size() * 2 + 1;
-        
-        std::vector<int> head(tableSize, -1);
-        std::vector<int> next(hullPtrs.size(), -1);
+        float safeRadius = config.radius - std::abs(config.valleyDepth) - (config.noiseStrength * 2.0f) - config.voxelSize;
+        if (safeRadius <= 0) safeRadius = config.radius * 0.5f;
 
-        for (int i = 0; i < hullPtrs.size(); i++) {
-            v3 p = hullPtrs[i]->currentPos;
-            int64_t x = static_cast<int64_t>(std::floor(p.x() * cellScale));
-            int64_t y = static_cast<int64_t>(std::floor(p.y() * cellScale));
-            int64_t z = static_cast<int64_t>(std::floor(p.z() * cellScale));
-            
-            uint64_t h = (x * 73856093) ^ (y * 19349663) ^ (z * 83492791);
-            int bucket = h % tableSize;
-            
-            next[i] = head[bucket];
-            head[bucket] = i;
-        }
+        int maxSteps = std::ceil(safeRadius / config.voxelSize);
+        size_t fillCount = 0;
 
-        std::cout << "Spatial Map Built. Scanning volume..." << std::endl;
+        for (int x = -maxSteps; x <= maxSteps; ++x) {
+            for (int y = -maxSteps; y <= maxSteps; ++y) {
+                for (int z = -maxSteps; z <= maxSteps; ++z) {
+                    v3 pos = config.center + v3(x, y, z) * config.voxelSize;
+                    float dist = (pos - config.center).norm();
 
-        struct ThreadData {
-            std::vector<Particle> gridCandidates;
-            std::vector<Particle> surfaceCandidates;
-        };
-        
-        int gridLimit = static_cast<int>(std::ceil(maxRadius / step));
+                    if (dist <= safeRadius) {
+                        if (grid.find(pos, config.voxelSize * 0.5f) == nullptr) {
+                            Particle ip;
+                            ip.surface = false;
+                            ip.plateID = -1;
+                            ip.currentPos = pos;
+                            ip.originalPos = pos.cast<Eigen::half>();
+                            ip.noisePos = pos.cast<Eigen::half>();
+                            ip.tectonicPos = pos.cast<Eigen::half>();
 
-        #pragma omp parallel
-        {
-            ThreadData tData;
-            
-            #pragma omp for collapse(3) schedule(dynamic, 8)
-            for (int x = -gridLimit; x <= gridLimit; x++) {
-                for (int y = -gridLimit; y <= gridLimit; y++) {
-                    for (int z = -gridLimit; z <= gridLimit; z++) {
-                        
-                        v3 pos(x * step, y * step, z * step);
-                        float dCentSq = pos.squaredNorm();
+                            float depthRatio = dist / safeRadius;
+                            Eigen::Vector3f coreColor(1.0f, 0.9f, 0.4f);
+                            Eigen::Vector3f mantleColor(0.8f, 0.15f, 0.0f);
+                            Eigen::Vector3f finalColor = mantleColor;
 
-                        if (dCentSq > maxDistSq) continue;
-
-                        if (grid.find(pos, step * 0.1f) != nullptr) continue;
-
-                        Particle* nearest[3] = {nullptr, nullptr, nullptr};
-                        float dists[3] = {1e20f, 1e20f, 1e20f};
-                        int foundCount = 0;
-
-                        int64_t bx = static_cast<int64_t>(std::floor(pos.x() * cellScale));
-                        int64_t by = static_cast<int64_t>(std::floor(pos.y() * cellScale));
-                        int64_t bz = static_cast<int64_t>(std::floor(pos.z() * cellScale));
-
-                        for (int ox = -1; ox <= 1; ox++) {
-                            for (int oy = -1; oy <= 1; oy++) {
-                                for (int oz = -1; oz <= 1; oz++) {
-                                    uint64_t h = ((bx + ox) * 73856093) ^ ((by + oy) * 19349663) ^ ((bz + oz) * 83492791);
-                                    int bucket = h % tableSize;
-                                    
-                                    int curr = head[bucket];
-                                    while (curr != -1) {
-                                        Particle* p = hullPtrs[curr];
-                                        float d2 = (p->currentPos - pos).squaredNorm();
-
-                                        if (d2 < dists[2]) {
-                                            if (d2 < dists[1]) {
-                                                if (d2 < dists[0]) {
-                                                    dists[2] = dists[1];
-                                                    nearest[2] = nearest[1];
-                                                    dists[1] = dists[0];
-                                                    nearest[1] = nearest[0];
-                                                    dists[0] = d2;
-                                                    nearest[0] = p;
-                                                } else {
-                                                    dists[2] = dists[1];
-                                                    nearest[2] = nearest[1];
-                                                    dists[1] = d2;
-                                                    nearest[1] = p;
-                                                }
-                                            } else {
-                                                dists[2] = d2;
-                                                nearest[2] = p;
-                                            }
-                                        }
-                                        curr = next[curr];
-                                    }
-                                }
+                            if (depthRatio < 0.5f) {
+                                float blend = depthRatio * 2.0f;
+                                finalColor = coreColor * (1.0f - blend) + mantleColor * blend;
                             }
-                        }
 
-                        if (nearest[2] == nullptr) continue;
+                            ip.originColor = finalColor.cast<Eigen::half>();
 
-                        v3 p1 = nearest[0]->currentPos;
-                        v3 p2 = nearest[1]->currentPos;
-                        v3 p3 = nearest[2]->currentPos;
-
-                        v3 v1 = p2 - p1;
-                        v3 v2 = p3 - p1;
-                        v3 normal = v1.cross(v2).normalized();
-
-                        v3 triCenter = (p1 + p2 + p3) * 0.3333f;
-                        if (triCenter.dot(normal) < 0) normal = -normal;
-
-                        v3 toCand = pos - p1;
-                        float dotVal = toCand.dot(normal);
-
-                        if (dotVal < -1e-4f) {
-                            Particle newPt;
-                            newPt.currentPos = pos;
-                            newPt.tectonicPos = pos.cast<Eigen::half>();
-                            newPt.originalPos = pos.cast<Eigen::half>(); 
-                            newPt.surface = false;
-                            
-                            newPt.plateID = nearest[0]->plateID;
-                            newPt.originColor = nearest[0]->originColor;
-
-                            if (std::sqrt(dists[0]) < config.voxelSize * 1.5f) {
-                                tData.surfaceCandidates.push_back(newPt);
-                            } else {
-                                tData.gridCandidates.push_back(newPt);
-                            }
+                            grid.set(ip, pos, true, finalColor, config.voxelSize, true, 1, 3, false, 0.0f, 0.0f, 0.0f);
+                            fillCount++;
                         }
                     }
                 }
             }
-
-            #pragma omp critical
-            {
-                config.interpolatedNodes.insert(config.interpolatedNodes.end(), 
-                                                tData.surfaceCandidates.begin(), 
-                                                tData.surfaceCandidates.end());
-                
-                for(const auto& p : tData.surfaceCandidates) {
-                    grid.set(p, p.currentPos, true, p.originColor.cast<float>(), config.voxelSize, true, 1, 0, false, 0.0f, 0.0f, 0.0f);
-                }
-                for(const auto& p : tData.gridCandidates) {
-                    grid.set(p, p.currentPos, true, p.originColor.cast<float>(), config.voxelSize, true, 1, 0, false, 0.0f, 0.0f, 0.0f);
-                }
-            }
         }
 
-        std::cout << "Volume Fill Complete." << std::endl;
         grid.optimize();
+        std::cout << "Volume Fill Complete. Inserted " << fillCount << " interior nodes directly into the grid." << std::endl;
     }
 
     void simulateImpacts() {

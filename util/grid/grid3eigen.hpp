@@ -21,6 +21,7 @@
 #include <unordered_set>
 #include <random>
 #include <chrono>
+#include <cstdint>
 
 #ifdef SSE
 #include <immintrin.h>
@@ -28,7 +29,7 @@
 
 constexpr int Dim = 3;
 
-template<typename T>
+template<typename T, typename IndexType = uint16_t>
 class Octree {
 public:
     using PointType = Eigen::Matrix<float, Dim, 1>;
@@ -39,38 +40,49 @@ public:
             return std::tie(a.x(), a.y(), a.z()) < std::tie(b.x(), b.y(), b.z());
         }
     };
-    
-    struct NodeData {
-        T data;
-        PointType position;
-        int objectId;
-        int subId;
-        bool active;
-        bool visible;
-        float size;
-        Eigen::Vector3f color;
+
+    struct Material {
         float emittance;
         float roughness;
         float metallic;
         float transmission;
         float ior;
 
-        NodeData(const T& data, const PointType& pos, bool visible, Eigen::Vector3f color, float size = 0.01f,
-                 bool active = true, int objectId = -1, int subId = 0, float emittance = 0.0f, 
-                 float roughness = 1.0f, float metallic = 0.0f, float transmission = 0.0f, float ior = 1.45f) 
-                : data(data), position(pos), objectId(objectId), subId(subId), active(active), visible(visible), 
-                  color(color), size(size), emittance(emittance), roughness(roughness), metallic(metallic), 
-                  transmission(transmission), ior(ior) {}
+        Material(float e = 0.0f, float r = 1.0f, float m = 0.0f, float t = 0.0f, float i = 1.45f)
+            : emittance(e), roughness(r), metallic(m), transmission(t), ior(i) {}
+
+        bool operator<(const Material& o) const {
+            if (emittance != o.emittance) return emittance < o.emittance;
+            if (roughness != o.roughness) return roughness < o.roughness;
+            if (metallic != o.metallic) return metallic < o.metallic;
+            if (transmission != o.transmission) return transmission < o.transmission;
+            return ior < o.ior;
+        }
+    };
+    
+    struct NodeData {
+        T data;
+        PointType position;
+        int objectId;
+        int subId;
+        float size;
+        IndexType colorIdx;
+        IndexType materialIdx;
+        bool active;
+        bool visible;
+
+        NodeData(const T& data, const PointType& pos, bool visible, IndexType colorIdx, float size = 0.01f,
+                 bool active = true, int objectId = -1, int subId = 0, IndexType materialIdx = 0) 
+                : data(data), position(pos), objectId(objectId), subId(subId), size(size), 
+                  colorIdx(colorIdx), materialIdx(materialIdx), active(active), visible(visible) {}
         
-        NodeData() : objectId(-1), subId(0), active(false), visible(false), size(0.0f), emittance(0.0f), 
-                     roughness(1.0f), metallic(0.0f), transmission(0.0f), ior(1.45f) {}
+        NodeData() : objectId(-1), subId(0), size(0.0f), colorIdx(0), materialIdx(0), 
+                     active(false), visible(false) {}
         
-        // Helper method to get half-size for cube
         PointType getHalfSize() const {
             return PointType(size * 0.5f, size * 0.5f, size * 0.5f);
         }
         
-        // Helper method to get bounding box for cube
         BoundingBox getCubeBounds() const {
             PointType halfSize = getHalfSize();
             return {position - halfSize, position + halfSize};
@@ -116,10 +128,85 @@ private:
     Eigen::Vector3f skylight_ = {0.1f, 0.1f, 0.1f};
     Eigen::Vector3f backgroundColor_ = {0.53f, 0.81f, 0.92f};
     
+    // Addressable Maps
+    std::unique_ptr<std::mutex> mapMutex_;
+    std::vector<Eigen::Vector3f> colorMap_;
+    std::map<Eigen::Vector3f, IndexType, Vector3fCompare> colorToIndex_;
+    
+    std::vector<Material> materialMap_;
+    std::map<Material, IndexType> materialToIndex_;
+
     std::map<std::pair<int, int>, std::shared_ptr<Mesh>> meshCache_;
     std::set<std::pair<int, int>> dirtyMeshes_;
     int nextSubIdGenerator_ = 1;
     
+public:
+    inline IndexType getColorIndex(const Eigen::Vector3f& color) {
+        std::lock_guard<std::mutex> lock(*mapMutex_);
+        auto it = colorToIndex_.find(color);
+        if (it != colorToIndex_.end()) return it->second;
+        
+        if (colorMap_.size() >= std::numeric_limits<IndexType>::max()) {
+            IndexType bestIdx = 0;
+            float bestDist = std::numeric_limits<float>::max();
+            for (size_t i = 0; i < colorMap_.size(); ++i) {
+                float dist = (colorMap_[i] - color).squaredNorm();
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    bestIdx = static_cast<IndexType>(i);
+                }
+            }
+            return bestIdx;
+        }
+
+        IndexType idx = static_cast<IndexType>(colorMap_.size());
+        colorMap_.push_back(color);
+        colorToIndex_[color] = idx;
+        return idx;
+    }
+
+    inline const Eigen::Vector3f& getColor(IndexType idx) const {
+        if (idx < colorMap_.size()) return colorMap_[idx];
+        static const Eigen::Vector3f fallback = Eigen::Vector3f::Zero();
+        return fallback;
+    }
+
+    inline IndexType getMaterialIndex(const Material& mat) {
+        std::lock_guard<std::mutex> lock(*mapMutex_);
+        auto it = materialToIndex_.find(mat);
+        if (it != materialToIndex_.end()) return it->second;
+
+        if (materialMap_.size() >= std::numeric_limits<IndexType>::max()) {
+            IndexType bestIdx = 0;
+            float bestDist = std::numeric_limits<float>::max();
+            for (size_t i = 0; i < materialMap_.size(); ++i) {
+                float d_e = materialMap_[i].emittance - mat.emittance;
+                float d_r = materialMap_[i].roughness - mat.roughness;
+                float d_m = materialMap_[i].metallic - mat.metallic;
+                float d_t = materialMap_[i].transmission - mat.transmission;
+                float d_i = materialMap_[i].ior - mat.ior;
+                float dist = d_e*d_e + d_r*d_r + d_m*d_m + d_t*d_t + d_i*d_i;
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    bestIdx = static_cast<IndexType>(i);
+                }
+            }
+            return bestIdx;
+        }
+
+        IndexType idx = static_cast<IndexType>(materialMap_.size());
+        materialMap_.push_back(mat);
+        materialToIndex_[mat] = idx;
+        return idx;
+    }
+
+    inline const Material& getMaterial(IndexType idx) const {
+        if (idx < materialMap_.size()) return materialMap_[idx];
+        static const Material fallback;
+        return fallback;
+    }
+
+private:
     void invalidateMesh(int objectId, int subId) {
         if (objectId < 0) return;
         dirtyMeshes_.insert({objectId, subId});
@@ -272,7 +359,7 @@ private:
         }
     }
     
-    void ensureLOD(const OctreeNode* node) const {
+    void ensureLOD(OctreeNode* node) {
         std::lock_guard<std::mutex> lock(node->lodMutex);
         if (node->lodData != nullptr) return;
 
@@ -294,12 +381,13 @@ private:
 
         auto accumulate = [&](const std::shared_ptr<NodeData>& item) {
             if (!item || !item->active || !item->visible) return;
-            avgColor += item->color;
-            avgEmittance += item->emittance;
-            avgRoughness += item->roughness;
-            avgMetallic += item->metallic;
-            avgTransmission += item->transmission;
-            avgIor += item->ior;
+            avgColor += getColor(item->colorIdx);
+            Material mat = getMaterial(item->materialIdx);
+            avgEmittance += mat.emittance;
+            avgRoughness += mat.roughness;
+            avgMetallic += mat.metallic;
+            avgTransmission += mat.transmission;
+            avgIor += mat.ior;
             count++;
         };
 
@@ -318,18 +406,16 @@ private:
             float invCount = 1.0f / count;
             
             auto lod = std::make_shared<NodeData>();
-            
             lod->position = node->center;
-            lod->color = avgColor * invCount;
             
             PointType nodeDims = node->bounds.second - node->bounds.first;
             lod->size = nodeDims.maxCoeff();
 
-            lod->emittance = avgEmittance * invCount;
-            lod->roughness = avgRoughness * invCount;
-            lod->metallic = avgMetallic * invCount;
-            lod->transmission = avgTransmission * invCount;
-            lod->ior = avgIor * invCount;
+            lod->colorIdx = getColorIndex(avgColor * invCount);
+            Material avgMat(avgEmittance * invCount, avgRoughness * invCount, 
+                            avgMetallic * invCount, avgTransmission * invCount, avgIor * invCount);
+            lod->materialIdx = getMaterialIndex(avgMat);
+            
             lod->active = true;
             lod->visible = true;
             lod->objectId = -1; 
@@ -546,14 +632,17 @@ private:
         Ray ray(rayOrig, rayDir);
         rayCubeIntersect(ray, obj.get(), t, normal, hitPoint);
         
+        Eigen::Vector3f objColor = getColor(obj->colorIdx);
+        Material objMat = getMaterial(obj->materialIdx);
+
         Eigen::Vector3f finalColor = globalIllumination ? skylight_ : Eigen::Vector3f::Zero();
-        if (obj->emittance > 0.0f) {
-            finalColor += obj->color * obj->emittance;
+        if (objMat.emittance > 0.0f) {
+            finalColor += objColor * objMat.emittance;
         }
 
-        float roughness = std::clamp(obj->roughness, 0.01f, 1.0f);
-        float metallic = std::clamp(obj->metallic, 0.0f, 1.0f);
-        float transmission = std::clamp(obj->transmission, 0.0f, 1.0f);
+        float roughness = std::clamp(objMat.roughness, 0.01f, 1.0f);
+        float metallic = std::clamp(objMat.metallic, 0.0f, 1.0f);
+        float transmission = std::clamp(objMat.transmission, 0.0f, 1.0f);
         
         PointType V = -rayDir;
         float cosThetaI = normal.dot(V);
@@ -565,7 +654,7 @@ private:
         float rayOffset = std::max(1e-4f, 1e-5f * coordMax);
 
         Eigen::Vector3f F0 = Eigen::Vector3f::Constant(0.04f);
-        F0 = F0 * (1.0f - metallic) + obj->color * metallic;
+        F0 = F0 * (1.0f - metallic) + objColor * metallic;
 
         PointType H = sampleGGX(n_eff, roughness, rngState);
         float VdotH = std::max(0.001f, V.dot(H));
@@ -594,23 +683,23 @@ private:
         float diffuseWeight = (1.0f - transmission) * (1.0f - metallic);
 
         if (transmissionWeight > 0.0f) {
-            float eta = isInside ? obj->ior : (1.0f / obj->ior);
+            float eta = isInside ? objMat.ior : (1.0f / objMat.ior);
             float k = 1.0f - eta * eta * (1.0f - VdotH * VdotH);
             
             if (k >= 0.0f) {
                 secondDir = ((eta * VdotH - std::sqrt(k)) * H - eta * V).normalized();
                 secondOrigin = hitPoint - n_eff * rayOffset;
                 W_second = (Eigen::Vector3f::Constant(1.0f) - F_spec) * transmissionWeight;
-                W_second = W_second.cwiseProduct(obj->color);
+                W_second = W_second.cwiseProduct(objColor);
             } else {
                 Eigen::Vector3f tirWeight = (Eigen::Vector3f::Constant(1.0f) - F_spec) * transmissionWeight;
-                W_spec += tirWeight.cwiseProduct(obj->color);
+                W_spec += tirWeight.cwiseProduct(objColor);
             }
         } else if (diffuseWeight > 0.0f) {
             secondDir = sampleCosineHemisphere(n_eff, rngState);
             secondOrigin = hitPoint + n_eff * rayOffset;
             W_second = (Eigen::Vector3f::Constant(1.0f) - F_spec) * diffuseWeight;
-            W_second = W_second.cwiseProduct(obj->color);
+            W_second = W_second.cwiseProduct(objColor);
         }
 
         W_spec = W_spec.cwiseMin(Eigen::Vector3f::Constant(4.0f));
@@ -738,22 +827,22 @@ private:
     }
 
     template<typename V>
-    void writeVal(std::ofstream& out, const V& val) const {
+    inline void writeVal(std::ofstream& out, const V& val) const {
         out.write(reinterpret_cast<const char*>(&val), sizeof(V));
     }
 
     template<typename V>
-    void readVal(std::ifstream& in, V& val) {
+    inline void readVal(std::ifstream& in, V& val) {
         in.read(reinterpret_cast<char*>(&val), sizeof(V));
     }
 
-    void writeVec3(std::ofstream& out, const Eigen::Vector3f& vec) const {
+    inline void writeVec3(std::ofstream& out, const Eigen::Vector3f& vec) const {
         writeVal(out, vec.x());
         writeVal(out, vec.y());
         writeVal(out, vec.z());
     }
 
-    void readVec3(std::ifstream& in, Eigen::Vector3f& vec) {
+    inline void readVec3(std::ifstream& in, Eigen::Vector3f& vec) {
         float x, y, z;
         readVal(in, x); readVal(in, y); readVal(in, z);
         vec = Eigen::Vector3f(x, y, z);
@@ -766,20 +855,14 @@ private:
             size_t pointCount = node->points.size();
             writeVal(out, pointCount);
             for (const auto& pt : node->points) {
-                // Write raw data T (Must be POD)
                 writeVal(out, pt->data);
-                // Write properties
                 writeVec3(out, pt->position);
                 writeVal(out, pt->objectId);
                 writeVal(out, pt->active);
                 writeVal(out, pt->visible);
                 writeVal(out, pt->size);
-                writeVec3(out, pt->color);
-                writeVal(out, pt->emittance);
-                writeVal(out, pt->roughness);
-                writeVal(out, pt->metallic);
-                writeVal(out, pt->transmission);
-                writeVal(out, pt->ior);
+                writeVal(out, pt->colorIdx);
+                writeVal(out, pt->materialIdx);
             }
         } else {
             // Write bitmask of active children
@@ -818,12 +901,8 @@ private:
             readVal(in, pt->active);
             readVal(in, pt->visible);
             readVal(in, pt->size);
-            readVec3(in, pt->color);
-            readVal(in, pt->emittance);
-            readVal(in, pt->roughness);
-            readVal(in, pt->metallic);
-            readVal(in, pt->transmission);
-            readVal(in, pt->ior);
+            readVal(in, pt->colorIdx);
+            readVal(in, pt->materialIdx);
             node->points.push_back(pt);
         }
 
@@ -1093,7 +1172,7 @@ private:
                 float x = distSq / rSq;
                 float w = (1.0f - x) * (1.0f - x);
                 density += w;
-                accumulatedColor += neighbor->color * w;
+                accumulatedColor += getColor(neighbor->colorIdx) * w;
                 totalWeight += w;
             }
         }
@@ -1145,9 +1224,9 @@ private:
 public:
     Octree(const PointType& minBound, const PointType& maxBound, size_t maxPointsPerNode=8, size_t maxDepth = 16) :
     root_(std::make_unique<OctreeNode>(minBound, maxBound)), maxPointsPerNode(maxPointsPerNode),
-    maxDepth(maxDepth), size(0) {}
+    maxDepth(maxDepth), size(0), mapMutex_(std::make_unique<std::mutex>()) {}
 
-    Octree() : root_(nullptr), maxPointsPerNode(8), maxDepth(16), size(0) {}
+    Octree() : root_(nullptr), maxPointsPerNode(8), maxDepth(16), size(0), mapMutex_(std::make_unique<std::mutex>()) {}
 
     void setSkylight(const Eigen::Vector3f& skylight) { 
         skylight_ = skylight; 
@@ -1177,8 +1256,13 @@ public:
     bool set(const T& data, const PointType& pos, bool visible, Eigen::Vector3f color, float size = 0.01f, bool active = true,
              int objectId = -1, int subId = 0, float emittance = 0.0f, float roughness = 1.0f, 
              float metallic = 0.0f, float transmission = 0.0f, float ior = 1.45f) {
-        auto pointData = std::make_shared<NodeData>(data, pos, visible, color, size, active, objectId, subId,
-                                                    emittance, roughness, metallic, transmission, ior);
+        
+        IndexType cIdx = getColorIndex(color);
+        Material mat(emittance, roughness, metallic, transmission, ior);
+        IndexType mIdx = getMaterialIndex(mat);
+        
+        auto pointData = std::make_shared<NodeData>(data, pos, visible, cIdx, size, active, objectId, subId, mIdx);
+        
         if (insertRecursive(root_.get(), pointData, 0)) {
             return true;
         }
@@ -1196,9 +1280,27 @@ public:
         writeVal(out, maxPointsPerNode);
         writeVal(out, size);
         
-        // Save global settings
         writeVec3(out, skylight_);
         writeVec3(out, backgroundColor_);
+
+        {
+            std::lock_guard<std::mutex> lock(*mapMutex_);
+            size_t cMapSize = colorMap_.size();
+            writeVal(out, cMapSize);
+            for (const auto& c : colorMap_) {
+                writeVec3(out, c);
+            }
+
+            size_t mMapSize = materialMap_.size();
+            writeVal(out, mMapSize);
+            for (const auto& m : materialMap_) {
+                writeVal(out, m.emittance);
+                writeVal(out, m.roughness);
+                writeVal(out, m.metallic);
+                writeVal(out, m.transmission);
+                writeVal(out, m.ior);
+            }
+        }
         
         writeVec3(out, root_->bounds.first);
         writeVec3(out, root_->bounds.second);
@@ -1228,13 +1330,40 @@ public:
         readVec3(in, skylight_);
         readVec3(in, backgroundColor_);
 
+        {
+            std::lock_guard<std::mutex> lock(*mapMutex_);
+            colorMap_.clear();
+            colorToIndex_.clear();
+            materialMap_.clear();
+            materialToIndex_.clear();
+
+            size_t cMapSize;
+            readVal(in, cMapSize);
+            colorMap_.resize(cMapSize);
+            for (size_t i = 0; i < cMapSize; ++i) {
+                readVec3(in, colorMap_[i]);
+                colorToIndex_[colorMap_[i]] = static_cast<IndexType>(i);
+            }
+
+            size_t mMapSize;
+            readVal(in, mMapSize);
+            materialMap_.resize(mMapSize);
+            for (size_t i = 0; i < mMapSize; ++i) {
+                readVal(in, materialMap_[i].emittance);
+                readVal(in, materialMap_[i].roughness);
+                readVal(in, materialMap_[i].metallic);
+                readVal(in, materialMap_[i].transmission);
+                readVal(in, materialMap_[i].ior);
+                materialToIndex_[materialMap_[i]] = static_cast<IndexType>(i);
+            }
+        }
+
         PointType minBound, maxBound;
         readVec3(in, minBound);
         readVec3(in, maxBound);
 
         root_ = std::make_unique<OctreeNode>(minBound, maxBound);
-        std::multimap<Eigen::Vector3f, std::shared_ptr<NodeData>, Vector3fCompare> pointMap;
-        deserializeNode(in, root_.get(), pointMap);
+        deserializeNode(in, root_.get());
 
         in.close();
         std::cout << "successfully loaded grid from " << filename << std::endl;
@@ -1300,17 +1429,36 @@ public:
         pointData->data = newData;
         pointData->position = newPos;
         pointData->visible = newVisible;
-        if (newColor != Eigen::Vector3f(1.0f, 1.0f, 1.0f)) pointData->color = newColor;
+        
+        if (newColor != Eigen::Vector3f(1.0f, 1.0f, 1.0f)) pointData->colorIdx = getColorIndex(newColor);
         if (newSize > 0) pointData->size = newSize;
         pointData->active = newActive;
         pointData->objectId = targetObjId;
         pointData->subId = finalSubId;
         
-        if (newEmittance >= 0) pointData->emittance = newEmittance;
-        if (newRoughness >= 0) pointData->roughness = newRoughness;
-        if (newMetallic >= 0) pointData->metallic = newMetallic;
-        if (newTransmission >= 0) pointData->transmission = newTransmission;
-        if (newIor >= 0) pointData->ior = newIor;
+        Material mat = getMaterial(pointData->materialIdx);
+        bool matChanged = false;
+        if (newEmittance >= 0) {
+            mat.emittance = newEmittance;
+            matChanged = true;
+        }
+        if (newRoughness >= 0) { 
+            mat.roughness = newRoughness;
+            matChanged = true;
+        }
+        if (newMetallic >= 0) { 
+            mat.metallic = newMetallic;
+            matChanged = true;
+        }
+        if (newTransmission >= 0) { 
+            mat.transmission = newTransmission;
+            matChanged = true;
+        }
+        if (newIor >= 0) { 
+            mat.ior = newIor;
+            matChanged = true;
+        }
+        if (matChanged) pointData->materialIdx = getMaterialIndex(mat);
         
         bool res = insertRecursive(root_.get(), pointData, 0);
         
@@ -1326,9 +1474,7 @@ public:
         auto pointData = find(pos);
         if (!pointData) return false;
 
-        bool sizeDecremented = false;
         removeRecursive(root_.get(), pointData->getCubeBounds(), pos, EPSILON);
-        
         pointData->position = newPos;
 
         if (insertRecursive(root_.get(), pointData, 0)) {
@@ -1372,7 +1518,7 @@ public:
     bool setColor(const PointType& pos, Eigen::Vector3f color, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
-        pointData->color = color;
+        pointData->colorIdx = getColorIndex(color);
         invalidateLODForPoint(pointData);
         return true;
     }
@@ -1380,7 +1526,9 @@ public:
     bool setEmittance(const PointType& pos, float emittance, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
-        pointData->emittance = emittance;
+        Material mat = getMaterial(pointData->materialIdx);
+        mat.emittance = emittance;
+        pointData->materialIdx = getMaterialIndex(mat);
         invalidateLODForPoint(pointData);
         return true;
     }
@@ -1388,7 +1536,9 @@ public:
     bool setRoughness(const PointType& pos, float roughness, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
-        pointData->roughness = roughness;
+        Material mat = getMaterial(pointData->materialIdx);
+        mat.roughness = roughness;
+        pointData->materialIdx = getMaterialIndex(mat);
         invalidateLODForPoint(pointData);
         return true;
     }
@@ -1396,7 +1546,9 @@ public:
     bool setMetallic(const PointType& pos, float metallic, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
-        pointData->metallic = metallic;
+        Material mat = getMaterial(pointData->materialIdx);
+        mat.metallic = metallic;
+        pointData->materialIdx = getMaterialIndex(mat);
         invalidateLODForPoint(pointData);
         return true;
     }
@@ -1404,7 +1556,9 @@ public:
     bool setTransmission(const PointType& pos, float transmission, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
-        pointData->transmission = transmission;
+        Material mat = getMaterial(pointData->materialIdx);
+        mat.transmission = transmission;
+        pointData->materialIdx = getMaterialIndex(mat);
         invalidateLODForPoint(pointData);
         return true;
     }
@@ -1533,10 +1687,11 @@ public:
                     PointType normal, hitPoint;
 
                     rayCubeIntersect(ray, obj.get(), t, normal, hitPoint);
-                    color = obj->color;
+                    color = getColor(obj->colorIdx);
+                    Material objMat = getMaterial(obj->materialIdx);
                     
-                    if (obj->emittance > 0.0f) {
-                        color = color * obj->emittance;
+                    if (objMat.emittance > 0.0f) {
+                        color = color * objMat.emittance;
                     } else {
                         float diffuse = std::max(0.0f, normal.dot(globalLightDir));
                         float ambient = 0.35f;
@@ -1607,10 +1762,11 @@ public:
                     PointType normal, hitPoint;
 
                     rayCubeIntersect(ray, obj.get(), t, normal, hitPoint);
-                    color = obj->color;
+                    color = getColor(obj->colorIdx);
+                    Material objMat = getMaterial(obj->materialIdx);
                     
-                    if (obj->emittance > 0.0f) {
-                        color = color * obj->emittance;
+                    if (objMat.emittance > 0.0f) {
+                        color = color * objMat.emittance;
                     } else {
                         float diffuse = std::max(0.0f, normal.dot(globalLightDir));
                         float ambient = 0.35f;
@@ -1847,7 +2003,6 @@ public:
         std::vector<Eigen::Vector3f> vertexColors;
         std::vector<Eigen::Vector3i> triangles;
 
-        // Marching Cubes Loop
         for(int z = 0; z < resolution; ++z) {
             for(int y = 0; y < resolution; ++y) {
                 for(int x = 0; x < resolution; ++x) {
@@ -1918,8 +2073,11 @@ public:
             PointType dirs[6] = {{1,0,0}, {-1,0,0}, {0,1,0}, {0,-1,0}, {0,0,1}, {0,0,-1}};
             for(int i=0; i<6; ++i) {
                 auto neighbor = find(node->position + dirs[i] * node->size, checkRad);
-                if(neighbor && neighbor->objectId == objectId && neighbor->active && neighbor->transmission < 0.01f) {
-                    hiddenSides++;
+                if(neighbor && neighbor->objectId == objectId && neighbor->active) {
+                    Material nMat = getMaterial(neighbor->materialIdx);
+                    if (nMat.transmission < 0.01f) {
+                        hiddenSides++;
+                    }
                 }
             }
 
@@ -1981,6 +2139,8 @@ public:
         
         size_t nodeMem = totalNodes * sizeof(OctreeNode);
         size_t dataMem = actualPoints * (sizeof(NodeData) + 16); 
+        size_t mapMem = colorMap_.size() * sizeof(Eigen::Vector3f) + materialMap_.size() * sizeof(Material);
+        size_t maxSize = ((1 << (sizeof(IndexType)*8 - 2) - 1) * 2) + 1;
 
         os << "========================================\n";
         os << "             OCTREE STATS               \n";
@@ -2001,12 +2161,16 @@ public:
         os << "  Points/Leaf (Avg) : " << std::fixed << std::setprecision(2) << avgPointsPerLeaf << "\n";
         os << "  Points/Leaf (Min) : " << minPointsInLeaf << "\n";
         os << "  Points/Leaf (Max) : " << maxPointsInLeaf << "\n";
+        os << "Maps:\n";
+        os << "  Unique Colors     : " << colorMap_.size() << "/" << maxSize << "\n";
+        os << "  Unique Materials  : " << materialMap_.size() << "/" << maxSize << "\n";
         os << "Bounds:\n";
         os << "  Min               : [" << root_->bounds.first.transpose() << "]\n";
         os << "  Max               : [" << root_->bounds.second.transpose() << "]\n";
         os << "Memory (Approx):\n";
         os << "  Node Structure    : " << (nodeMem / 1024.0) << " KB\n";
         os << "  Point Data        : " << (dataMem / 1024.0) << " KB\n";
+        os << "  Dictionary Maps   : " << (mapMem / 1024.0) << " KB\n";
         os << "========================================\n" << std::defaultfloat;
     }
 
@@ -2019,6 +2183,14 @@ public:
         PointType minBound = root_->bounds.first;
         PointType maxBound = root_->bounds.second;
         root_ = std::make_unique<OctreeNode>(minBound, maxBound);
+        
+        {
+            std::lock_guard<std::mutex> lock(*mapMutex_);
+            colorMap_.clear();
+            colorToIndex_.clear();
+            materialMap_.clear();
+            materialToIndex_.clear();
+        }
         
         size = 0;
     }

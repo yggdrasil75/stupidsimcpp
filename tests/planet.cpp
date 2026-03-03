@@ -41,6 +41,7 @@ private:
     std::chrono::steady_clock::time_point lastStatsUpdate;
     std::string cachedStats;
     bool statsNeedUpdate = true;
+    float framerate = 60.0;
 
     enum class DebugColorMode {
         BASE,
@@ -264,6 +265,7 @@ public:
             ImGui::DragFloat("Movement Speed", &cam.movementSpeed, 0.1f, 1.0f, 500.0f);
             ImGui::DragFloat("Rotation Speed", &cam.rotationSpeed, M_1_PI, M_1_PI, M_PI);
             ImGui::InputFloat("Rotation Distance", &rotationRadius, 10, 100);
+            ImGui::InputFloat("Max Framerate", &framerate, 1, 10);
 
             ImGui::Checkbox("Use Slower Render", &slowRender);
 
@@ -508,11 +510,12 @@ public:
         sim.grid.setLODMinDistance(lodDist);
         sim.grid.setLODFalloff(lodDropoff);
         sim.grid.setMaxDistance(maxViewDistance);
+        float invFrameRate = 1 / framerate;
         
         if (slowRender) {
-            currentPreviewFrame = sim.grid.renderFrame(cam, outHeight, outWidth, frame::colormap::RGB, rayCount, reflectCount, globalIllumination, useLod);
+            currentPreviewFrame = sim.grid.renderFrameTimed(cam, outHeight, outWidth, frame::colormap::RGB, invFrameRate, reflectCount, globalIllumination, useLod);
         } else {
-            currentPreviewFrame = sim.grid.renderFrameTimed(cam, outHeight, outWidth, frame::colormap::RGB);
+            currentPreviewFrame = sim.grid.fastRenderFrame(cam, outHeight, outWidth, frame::colormap::RGB);
         }
         
         if (textu == 0) {
