@@ -387,13 +387,13 @@ public:
             v3 pos;
             switch(mode) {
                 case DebugMapMode::BASE: 
-                    pos = p.originalPos.cast<float>();
+                    pos = p.altPos->originalPos.cast<float>();
                     break;
                 case DebugMapMode::NOISE: 
-                    pos = p.noisePos.cast<float>();
+                    pos = p.altPos->noisePos.cast<float>();
                     break;
                 case DebugMapMode::TECTONIC: 
-                    pos = p.tectonicPos.cast<float>();
+                    pos = p.altPos->tectonicPos.cast<float>();
                     break;
                 case DebugMapMode::CURRENT:
                 default: 
@@ -409,13 +409,13 @@ public:
             v3 pos;
             switch(mode) {
                 case DebugMapMode::BASE: 
-                    pos = p.originalPos.cast<float>();
+                    pos = p.altPos->originalPos.cast<float>();
                     break;
                 case DebugMapMode::NOISE: 
-                    pos = p.noisePos.cast<float>();
+                    pos = p.altPos->noisePos.cast<float>();
                     break;
                 case DebugMapMode::TECTONIC: 
-                    pos = p.tectonicPos.cast<float>();
+                    pos = p.altPos->tectonicPos.cast<float>();
                     break;
                 case DebugMapMode::TECTONICCOLOR: 
                     pos = sim.plates[p.plateID].debugColor;
@@ -427,7 +427,7 @@ public:
             }
 
             float d = pos.norm();
-            v3 n = p.originalPos.cast<float>().normalized();
+            v3 n = p.altPos->originalPos.cast<float>().normalized();
             
             float u = 0.5f + std::atan2(n.z(), n.x()) / (2.0f * static_cast<float>(M_PI));
             float v = 0.5f - std::asin(n.y()) / static_cast<float>(M_PI);

@@ -14,6 +14,7 @@
 #include <queue>
 #include <unordered_map>
 #include <set>
+#include <memory>
 
 #include "../grid/grid3eigen.hpp"
 #include "../timing_decorator.cpp"
@@ -34,12 +35,23 @@ enum class PlateType {
     MIXED
 };
 
-struct Particle {
-    float noiseDisplacement = 0.0f;
-    int plateID = -1;
+struct AltPositions {
     v3half originalPos;
     v3half noisePos;
     v3half tectonicPos;
+};
+
+struct NeighborData {
+    int index = -1;
+    float distance = 0.0f;
+};
+
+struct Particle {
+    float noiseDisplacement = 0.0f;
+    int plateID = -1;
+    
+    std::unique_ptr<AltPositions> altPos = nullptr;
+
     Eigen::Vector3f currentPos;
     
     float plateDisplacement = 0.0f;
@@ -67,9 +79,51 @@ struct Particle {
     // float rockcontent = 0.0f;
     // float metalcontent = 0.0f;
 
+    NeighborData nearNeighbors[8];
 
-    std::unordered_map<int, float> neighbors;
-    std::vector<int> nearNeighbors;
+    Particle() = default;
+
+    Particle(const Particle& other) {
+        noiseDisplacement = other.noiseDisplacement;
+        plateID = other.plateID;
+        currentPos = other.currentPos;
+        plateDisplacement = other.plateDisplacement;
+        originColor = other.originColor;
+        surface = other.surface;
+        
+        for(int i = 0; i < 8; ++i) {
+            nearNeighbors[i] = other.nearNeighbors[i];
+        }
+        
+        if (other.altPos) {
+            altPos = std::make_unique<AltPositions>(*other.altPos);
+        }
+    }
+
+    Particle& operator=(const Particle& other) {
+        if (this != &other) {
+            noiseDisplacement = other.noiseDisplacement;
+            plateID = other.plateID;
+            currentPos = other.currentPos;
+            plateDisplacement = other.plateDisplacement;
+            originColor = other.originColor;
+            surface = other.surface;
+            
+            for(int i = 0; i < 8; ++i) {
+                nearNeighbors[i] = other.nearNeighbors[i];
+            }
+            
+            if (other.altPos) {
+                altPos = std::make_unique<AltPositions>(*other.altPos);
+            } else {
+                altPos.reset();
+            }
+        }
+        return *this;
+    }
+
+    Particle(Particle&&) noexcept = default;
+    Particle& operator=(Particle&&) noexcept = default;
 };
 
 struct planetConfig {
@@ -186,9 +240,12 @@ public:
             v3 dir(x, y, z);
             v3 pos = config.center + dir * config.radius;
             Particle pt;
-            pt.originalPos = pos.cast<Eigen::half>();
-            pt.noisePos = pos.cast<Eigen::half>();
-            pt.tectonicPos = pos.cast<Eigen::half>();
+            
+            pt.altPos = std::make_unique<AltPositions>();
+            pt.altPos->originalPos = pos.cast<Eigen::half>();
+            pt.altPos->noisePos = pos.cast<Eigen::half>();
+            pt.altPos->tectonicPos = pos.cast<Eigen::half>();
+            
             pt.currentPos = pos;
             pt.originColor = config.color.cast<Eigen::half>();
             pt.noiseDisplacement = 0.0f;
@@ -204,11 +261,11 @@ public:
     inline void _applyNoise(std::function<float(const Eigen::Vector3f&)> noiseFunc) {
         for (auto& p : config.surfaceNodes) {
             Eigen::Vector3f oldPos = p.currentPos;
-            float displacementValue = noiseFunc(p.originalPos.cast<float>());
+            float displacementValue = noiseFunc(p.altPos->originalPos.cast<float>());
             p.noiseDisplacement = displacementValue;
-            Eigen::Vector3f normal = p.originalPos.cast<float>().normalized();
-            p.noisePos = (p.originalPos.cast<float>() + (normal * displacementValue * config.noiseStrength)).cast<Eigen::half>();
-            p.currentPos = p.noisePos.cast<float>();
+            Eigen::Vector3f normal = p.altPos->originalPos.cast<float>().normalized();
+            p.altPos->noisePos = (p.altPos->originalPos.cast<float>() + (normal * displacementValue * config.noiseStrength)).cast<Eigen::half>();
+            p.currentPos = p.altPos->noisePos.cast<float>();
             grid.move(oldPos, p.currentPos);
             grid.update(p.currentPos, p);
         }
@@ -237,7 +294,7 @@ public:
                     const auto& existingSeed = config.surfaceNodes[selectedIndex];
                     const auto& candidateSeed = config.surfaceNodes[seedIndex];
                     
-                    float dot = existingSeed.originalPos.cast<float>().normalized().dot(candidateSeed.originalPos.cast<float>().normalized());
+                    float dot = existingSeed.altPos->originalPos.cast<float>().normalized().dot(candidateSeed.altPos->originalPos.cast<float>().normalized());
                     float angle = std::acos(std::clamp(dot, -1.0f, 1.0f));
                     float distanceOnSphere = angle * config.radius;
                     
@@ -299,7 +356,7 @@ public:
         std::vector<v3> normPos(numNodes);
         #pragma omp parallel for schedule(static)
         for (int i = 0; i < numNodes; i++) {
-            normPos[i] = config.surfaceNodes[i].originalPos.cast<float>().normalized();
+            normPos[i] = config.surfaceNodes[i].altPos->originalPos.cast<float>().normalized();
         }
         
         #pragma omp parallel for schedule(static)
@@ -322,10 +379,12 @@ public:
                     top8.push({angle, j});
                 }
             }
-            in.nearNeighbors.clear();
-            while (!top8.empty()) {
-                in.nearNeighbors.push_back(top8.top().second);
-                in.neighbors[top8.top().second] = top8.top().first;
+            
+            int nIdx = 0;
+            while (!top8.empty() && nIdx < 8) {
+                in.nearNeighbors[nIdx].index = top8.top().second;
+                in.nearNeighbors[nIdx].distance = top8.top().first;
+                nIdx++;
                 top8.pop();
             }
         }
@@ -343,7 +402,9 @@ public:
                 unassignedCount++;
             } else {
                 plates[pID].assignedNodes.push_back(i);
-                for (int nIdx : config.surfaceNodes[i].nearNeighbors) {
+                for (int n = 0; n < 8; n++) {
+                    int nIdx = config.surfaceNodes[i].nearNeighbors[n].index;
+                    if (nIdx == -1) break;
                     if (config.surfaceNodes[nIdx].plateID == -1) {
                         frontiers[pID].push_back(nIdx);
                     }
@@ -355,10 +416,6 @@ public:
         std::cout << "have " << unassignedCount << " remaining nodes" << std::endl;
         
         while (unassignedCount > 0) {
-            // if (unassignedCount % 100 == 0)  {
-            //     std::cout << "have " << unassignedCount << " remaining nodes" << std::endl;
-            // }
-            
             int totalWeight = 0;
             for (int i = 0; i < config.numPlates; i++) {
                 totalWeight += plateWeights[i];
@@ -397,7 +454,9 @@ public:
                     unassignedCount--;
                     successfulGrowth = true;
 
-                    for (int nIdx : config.surfaceNodes[candIdx].nearNeighbors) {
+                    for (int n = 0; n < 8; n++) {
+                        int nIdx = config.surfaceNodes[candIdx].nearNeighbors[n].index;
+                        if (nIdx == -1) break;
                         if (config.surfaceNodes[nIdx].plateID == -1) {
                             frontiers[selPlate].push_back(nIdx);
                         }
@@ -435,7 +494,9 @@ public:
                     int bestPlate = -1;
                     int maxCount = 0;
                     
-                    for (int nIdx : config.surfaceNodes[i].nearNeighbors) {
+                    for (int n = 0; n < 8; n++) {
+                        int nIdx = config.surfaceNodes[i].nearNeighbors[n].index;
+                        if (nIdx == -1) break;
                         int pID = config.surfaceNodes[nIdx].plateID;
                         if (pID != -1) {
                             counts[pID]++;
@@ -466,7 +527,7 @@ public:
                         int closestPlate = 0;
                         float minDist = std::numeric_limits<float>::max();
                         for (int p = 0; p < config.numPlates; p++) {
-                            float d = (config.surfaceNodes[i].originalPos.cast<float>() - plates[p].plateEulerPole.originalPos.cast<float>()).norm();
+                            float d = (config.surfaceNodes[i].altPos->originalPos.cast<float>() - plates[p].plateEulerPole.altPos->originalPos.cast<float>()).norm();
                             if (d < minDist) {
                                 minDist = d;
                                 closestPlate = p;
@@ -490,7 +551,9 @@ public:
                 std::unordered_map<int, int> counts;
                 counts[config.surfaceNodes[i].plateID]++;
                 
-                for (int nIdx : config.surfaceNodes[i].nearNeighbors) {
+                for (int n = 0; n < 8; n++) {
+                    int nIdx = config.surfaceNodes[i].nearNeighbors[n].index;
+                    if (nIdx == -1) break;
                     counts[config.surfaceNodes[nIdx].plateID]++;
                 }
                 
@@ -534,27 +597,27 @@ public:
             
             for (int nIdx : plates[i].assignedNodes) {
                 sumElevation += config.surfaceNodes[nIdx].currentPos.norm();
-                centroid += config.surfaceNodes[nIdx].originalPos.cast<float>();
+                centroid += config.surfaceNodes[nIdx].altPos->originalPos.cast<float>();
             }
             
             if (!plates[i].assignedNodes.empty()) {
-                plateStats[i].first = sumElevation / plates[i].assignedNodes.size();
+                plateStats[i].second = sumElevation / plates[i].assignedNodes.size();
                 centroid /= plates[i].assignedNodes.size();
 
                 float maxSpread = 0.0f;
                 for (int nIdx : plates[i].assignedNodes) {
-                    float d = (config.surfaceNodes[nIdx].originalPos.cast<float>() - centroid).norm();
+                    float d = (config.surfaceNodes[nIdx].altPos->originalPos.cast<float>() - centroid).norm();
                     if (d > maxSpread) maxSpread = d;
                 }
 
-                float distToCentroid = (plates[i].plateEulerPole.originalPos.cast<float>() - centroid).norm();
+                float distToCentroid = (plates[i].plateEulerPole.altPos->originalPos.cast<float>() - centroid).norm();
                 
                 if (distToCentroid > maxSpread * 0.6f) {
                     int bestNodeIdx = plates[i].assignedNodes[0];
                     float minDistToCentroid = std::numeric_limits<float>::max();
                     
                     for (int nIdx : plates[i].assignedNodes) {
-                        float d = (config.surfaceNodes[nIdx].originalPos.cast<float>() - centroid).norm();
+                        float d = (config.surfaceNodes[nIdx].altPos->originalPos.cast<float>() - centroid).norm();
                         if (d < minDistToCentroid) {
                             minDistToCentroid = d;
                             bestNodeIdx = nIdx;
@@ -563,13 +626,13 @@ public:
                     plates[i].plateEulerPole = config.surfaceNodes[bestNodeIdx]; 
                 }
             } else {
-                plateStats[i].first = config.radius;
+                plateStats[i].second = config.radius;
             }
             
             Eigen::Vector3f randomDir(distFloat(rng) - 0.5f, distFloat(rng) - 0.5f, distFloat(rng) - 0.5f);
             randomDir.normalize();
             
-            Eigen::Vector3f poleDir = plates[i].plateEulerPole.originalPos.cast<float>().normalized();
+            Eigen::Vector3f poleDir = plates[i].plateEulerPole.altPos->originalPos.cast<float>().normalized();
             plates[i].direction = (randomDir - poleDir * randomDir.dot(poleDir)).normalized();
             
             plates[i].angularVelocity = distFloat(rng) * 0.1f + 0.02f;
@@ -610,7 +673,7 @@ public:
         
         std::vector<Eigen::Vector3f> ω(config.numPlates);
         for (int i = 0; i < config.numPlates; i++) {
-            ω[i] = plates[i].plateEulerPole.originalPos.cast<float>().normalized().cross(plates[i].direction) * plates[i].angularVelocity;
+            ω[i] = plates[i].plateEulerPole.altPos->originalPos.cast<float>().normalized().cross(plates[i].direction) * plates[i].angularVelocity;
         }
 
         std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
@@ -623,18 +686,21 @@ public:
                 int myPlate = config.surfaceNodes[i].plateID;
                 if (myPlate == -1) continue;
                 
-                Eigen::Vector3f myPos = config.surfaceNodes[i].originalPos.cast<float>().normalized();
+                Eigen::Vector3f myPos = config.surfaceNodes[i].altPos->originalPos.cast<float>().normalized();
                 Eigen::Vector3f myVel = ω[myPlate].cross(myPos);
                 
                 float localStress = 0.0f;
                 float localNoise = 0.0f;
                 int boundaryCount = 0;
                 
-                for (int nIdx : config.surfaceNodes[i].nearNeighbors) {
+                for (int n = 0; n < 8; n++) {
+                    int nIdx = config.surfaceNodes[i].nearNeighbors[n].index;
+                    if (nIdx == -1) break;
+                    
                     int nPlate = config.surfaceNodes[nIdx].plateID;
                     if (nPlate != -1 && myPlate != nPlate) {
                         boundaryCount++;
-                        Eigen::Vector3f nPos = config.surfaceNodes[nIdx].originalPos.cast<float>().normalized();
+                        Eigen::Vector3f nPos = config.surfaceNodes[nIdx].altPos->originalPos.cast<float>().normalized();
                         Eigen::Vector3f nVel = ω[nPlate].cross(nPos);
                         
                         Eigen::Vector3f relVel = nVel - myVel;
@@ -667,13 +733,20 @@ public:
                 } else {
                     float sumS = 0.0f;
                     float sumN = 0.0f;
-                    for (int nIdx : config.surfaceNodes[i].nearNeighbors) {
+                    int validNeighbors = 0;
+                    
+                    for (int n = 0; n < 8; n++) {
+                        int nIdx = config.surfaceNodes[i].nearNeighbors[n].index;
+                        if (nIdx == -1) break;
                         sumS += nodeStress[nIdx];
                         sumN += nodeNoise[nIdx];
+                        validNeighbors++;
                     }
-                    float decay = 0.95f; 
-                    newStress[i] = (sumS / config.surfaceNodes[i].nearNeighbors.size()) * decay;
-                    newNoise[i] = (sumN / config.surfaceNodes[i].nearNeighbors.size()) * decay;
+                    if (validNeighbors > 0) {
+                        float decay = 0.95f; 
+                        newStress[i] = (sumS / validNeighbors) * decay;
+                        newNoise[i] = (sumN / validNeighbors) * decay;
+                    }
                 }
             }
             nodeStress = newStress;
@@ -686,8 +759,8 @@ public:
             
             float noiseVal = dist(rng) * nodeNoise[i];
             
-            Eigen::Vector3f normal = p.originalPos.cast<float>().normalized();
-            p.tectonicPos = (p.noisePos.cast<float>() + (normal * (p.plateDisplacement + noiseVal))).cast<Eigen::half>();
+            Eigen::Vector3f normal = p.altPos->originalPos.cast<float>().normalized();
+            p.altPos->tectonicPos = (p.altPos->noisePos.cast<float>() + (normal * (p.plateDisplacement + noiseVal))).cast<Eigen::half>();
         }
     }
 
@@ -697,7 +770,7 @@ public:
 
         for (auto& p : config.surfaceNodes) {
             Eigen::Vector3f oldPos = p.currentPos;
-            p.currentPos = p.tectonicPos.cast<float>();
+            p.currentPos = p.altPos->tectonicPos.cast<float>();
             grid.move(oldPos, p.currentPos);
             grid.update(p.currentPos, p);
         }
@@ -726,14 +799,22 @@ public:
 
         for (int i = 0; i < config.surfaceNodes.size(); i++) {
             Particle& p1 = config.surfaceNodes[i];
-            for (int j : p1.nearNeighbors) {
+            for (int n1 = 0; n1 < 8; n1++) {
+                int j = p1.nearNeighbors[n1].index;
+                if (j == -1) break;
                 if (j >= i) continue; 
+                
                 Particle& p2 = config.surfaceNodes[j];
-                for (int k : p2.nearNeighbors) {
+                for (int n2 = 0; n2 < 8; n2++) {
+                    int k = p2.nearNeighbors[n2].index;
+                    if (k == -1) break;
                     if (k <= j) continue;
+                    
                     bool isNeighbor = false;
-                    for(int n : config.surfaceNodes[k].nearNeighbors) {
-                        if(n == i) { isNeighbor = true; break; }
+                    for (int n3 = 0; n3 < 8; n3++) {
+                        int nIdx = config.surfaceNodes[k].nearNeighbors[n3].index;
+                        if (nIdx == -1) break;
+                        if (nIdx == i) { isNeighbor = true; break; }
                     }
                     if (isNeighbor) {
                         uniqueTriangles.insert({i, j, k});
@@ -771,7 +852,9 @@ public:
                     
                     if (w1 > 0.99f || w2 > 0.99f || w3 > 0.99f) continue;
 
-                    v3 interpNormal = (p1.originalPos.cast<float>().normalized() * w1 + p2.originalPos.cast<float>().normalized() * w2 + p3.originalPos.cast<float>().normalized() * w3);
+                    v3 interpNormal = (p1.altPos->originalPos.cast<float>().normalized() * w1 + 
+                                       p2.altPos->originalPos.cast<float>().normalized() * w2 + 
+                                       p3.altPos->originalPos.cast<float>().normalized() * w3);
                     interpNormal.normalize(); 
                     
                     float r1 = p1.currentPos.norm();
@@ -788,6 +871,7 @@ public:
                     Particle newPt;
                     newPt.surface = true;
                     newPt.currentPos = smoothPos;
+                    // Note: originalPos, noisePos, tectonicPos remain null for these lightweight models!
                     
                     if (w1 > w2 && w1 > w3) {
                         newPt.plateID = p1.plateID;
@@ -799,10 +883,6 @@ public:
                         newPt.plateID = p3.plateID;
                         newPt.originColor = p3.originColor;
                     }
-
-                    newPt.originalPos = (interpNormal * config.radius).cast<Eigen::half>();
-                    newPt.noisePos = (p1.noisePos.cast<float>() * w1 + p2.noisePos.cast<float>() * w2 + p3.noisePos.cast<float>() * w3).cast<Eigen::half>();
-                    newPt.tectonicPos = (p1.tectonicPos.cast<float>() * w1 + p2.tectonicPos.cast<float>() * w2 + p3.tectonicPos.cast<float>() * w3).cast<Eigen::half>();
 
                     grid.set(newPt, newPt.currentPos, true, newPt.originColor.cast<float>(), config.voxelSize, true, 1, 2, false, 0.0f, 0.0f, 0.0f);
                     
@@ -842,9 +922,7 @@ public:
                             ip.surface = false;
                             ip.plateID = -1;
                             ip.currentPos = pos;
-                            ip.originalPos = pos.cast<Eigen::half>();
-                            ip.noisePos = pos.cast<Eigen::half>();
-                            ip.tectonicPos = pos.cast<Eigen::half>();
+                            // Alternate memory-heavy positions stay natively cleanly null!
 
                             float depthRatio = dist / safeRadius;
                             Eigen::Vector3f coreColor(1.0f, 0.9f, 0.4f);
