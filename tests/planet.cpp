@@ -167,6 +167,9 @@ public:
 
         if (ImGui::CollapsingHeader("Celestial Bodies")) {
             ///TODO: add controls for moon, star.
+            if (ImGui::Button("Add Star", ImVec2(-1, 40))) {
+                sim.addStar();
+            }
         }
 
         if (ImGui::CollapsingHeader("Fillings")) {

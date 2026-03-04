@@ -235,7 +235,7 @@ private:
 
     float lodFalloffRate_ = 0.1f; // Lower = better, higher = worse. 0-1
     float lodMinDistance_ = 100.0f;
-    float maxDistance_ = 4096;
+    float maxDistance_ = size * size;
     
     struct Ray {
         PointType origin;
@@ -339,7 +339,11 @@ private:
         } else {
             bool inserted = false;
             for (int i = 0; i < 8; ++i) {
-                if (node->children[i] && boxIntersectsBox(node->children[i]->bounds, cubeBounds)) {
+                BoundingBox childBounds = createChildBounds(node, i);
+                if (boxIntersectsBox(childBounds, cubeBounds)) {
+                    if (!node->children[i]) {
+                        node->children[i] = std::make_unique<OctreeNode>(childBounds.first, childBounds.second);
+                    }
                     inserted |= insertRecursive(node->children[i].get(), pointData, depth + 1);
                 }
             }
@@ -369,6 +373,56 @@ private:
         }
     }
     
+    void ensureBounds(const BoundingBox& targetBounds) {
+        if (!root_) {
+            PointType center = (targetBounds.first + targetBounds.second) * 0.5f;
+            PointType size = targetBounds.second - targetBounds.first;
+            float maxDim = size.maxCoeff();
+            if (maxDim <= 0.0f) maxDim = 1.0f;
+            PointType halfSize = PointType::Constant(maxDim * 0.5f);
+            root_ = std::make_unique<OctreeNode>(center - halfSize, center + halfSize);
+            return;
+        }
+
+        while (true) {
+            bool xInside = root_->bounds.first.x() <= targetBounds.first.x() && root_->bounds.second.x() >= targetBounds.second.x();
+            bool yInside = root_->bounds.first.y() <= targetBounds.first.y() && root_->bounds.second.y() >= targetBounds.second.y();
+            bool zInside = root_->bounds.first.z() <= targetBounds.first.z() && root_->bounds.second.z() >= targetBounds.second.z();
+
+            if (xInside && yInside && zInside) {
+                break;
+            }
+
+            PointType min = root_->bounds.first;
+            PointType max = root_->bounds.second;
+            PointType size = max - min;
+            
+            int expandX = (targetBounds.first.x() < min.x()) ? -1 : 1;
+            int expandY = (targetBounds.first.y() < min.y()) ? -1 : 1;
+            int expandZ = (targetBounds.first.z() < min.z()) ? -1 : 1;
+            
+            PointType newMin = min;
+            PointType newMax = max;
+            
+            if (expandX < 0) newMin.x() -= size.x(); else newMax.x() += size.x();
+            if (expandY < 0) newMin.y() -= size.y(); else newMax.y() += size.y();
+            if (expandZ < 0) newMin.z() -= size.z(); else newMax.z() += size.z();
+            
+            auto newRoot = std::make_unique<OctreeNode>(newMin, newMax);
+            newRoot->isLeaf = false;
+            
+            uint8_t oldOctant = 0;
+            if (expandX < 0) oldOctant |= 1;
+            if (expandY < 0) oldOctant |= 2;
+            if (expandZ < 0) oldOctant |= 4;
+            
+            newRoot->children[oldOctant] = std::move(root_);
+            root_ = std::move(newRoot);
+            
+            maxDepth++; 
+        }
+    }
+
     void ensureLOD(OctreeNode* node) {
         std::lock_guard<std::mutex> lock(node->lodMutex);
         if (node->lodData != nullptr) return;
@@ -1276,6 +1330,8 @@ public:
         
         auto pointData = std::make_shared<NodeData>(data, pos, visible, cIdx, size, active, objectId, subId, mIdx);
         
+        ensureBounds(pointData->getCubeBounds());
+        
         if (insertRecursive(root_.get(), pointData, 0)) {
             this->size++;
             return true;
@@ -1478,6 +1534,7 @@ public:
         }
         if (matChanged) pointData->materialIdx = getMaterialIndex(mat);
         
+        ensureBounds(pointData->getCubeBounds());
         bool res = insertRecursive(root_.get(), pointData, 0);
         
         if(res) {
@@ -1496,6 +1553,7 @@ public:
 
         removeRecursive(root_.get(), pointData->getCubeBounds(), pointData);
         pointData->position = newPos;
+        ensureBounds(pointData->getCubeBounds());
 
         if (insertRecursive(root_.get(), pointData, 0)) {
             return true;
@@ -2118,10 +2176,17 @@ public:
         collectNodesByObjectId(root_.get(), objectId, nodes);
         if(nodes.empty()) return false;
 
-        for(auto& n : nodes) remove(n->position);
+        for(auto& n : nodes) {
+            if (removeRecursive(root_.get(), n->getCubeBounds(), n)) {
+                size--;
+            }
+        }
         for(auto& n : nodes) {
             n->position += offset;
-            insertRecursive(root_.get(), n, 0);
+            ensureBounds(n->getCubeBounds());
+            if (insertRecursive(root_.get(), n, 0)) {
+                size++;
+            }
         }
 
         for (auto& [key, mesh] : meshCache_) {

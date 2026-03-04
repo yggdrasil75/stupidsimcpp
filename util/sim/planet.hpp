@@ -26,7 +26,7 @@
 #include "../stb/stb_image.h"
 
 using v3 = Eigen::Vector3f;
-using v3half = Eigen::Matrix<Eigen::half, 3, 1>; // 16-bit vector alias
+using v3half = Eigen::Matrix<Eigen::half, 3, 1>;
 const float Φ = M_PI * (3.0f - std::sqrt(5.0f));
 
 enum class PlateType {
@@ -149,7 +149,7 @@ struct planetConfig {
     float maxElevationRatio = 0.25f;
 
     float gridSizeCube = 65536; //absolute max size for all nodes
-    float gridSizeCubeMin = 16384; //max size, if something leaves this, then it probably needs to be purged before it leaves the grid and becomes lost
+    float gridSizeCubeMin = 4096; //max size, if something leaves this, then it probably needs to be purged before it leaves the grid and becomes lost
     float SMOOTHING_RADIUS = 1024.0f;
     float REST_DENSITY = 0.00005f;
     float TIMESTEP = 0.016f;
@@ -184,7 +184,7 @@ public:
 
     planetsim() {
         config = planetConfig();
-        grid = Octree<Particle>(v3(-config.gridSizeCube,-config.gridSizeCube,-config.gridSizeCube),v3(config.gridSizeCube,config.gridSizeCube,config.gridSizeCube), 16, 32);
+        grid = Octree<Particle>(v3(-config.gridSizeCubeMin,-config.gridSizeCubeMin,-config.gridSizeCubeMin),v3(config.gridSizeCubeMin,config.gridSizeCubeMin,config.gridSizeCubeMin), 16, 32);
     }
 
     float evaluate2DStack(const Eigen::Vector2f& point, const NoisePreviewState& state, PNoise2& gen) {
@@ -255,7 +255,7 @@ public:
         }
         config.currentStep = 1;
         std::cout << "Step 1 done. base sphere generated" << std::endl;
-        grid.save("output/fibSphere");
+        grid.save("output/fibSphere.yggs");
     }
 
     inline void _applyNoise(std::function<float(const Eigen::Vector3f&)> noiseFunc) {
@@ -776,10 +776,66 @@ public:
         }
         grid.optimize();
         std::cout << "Finalize apply results completed." << std::endl;
+        grid.save("output/plateworld.yggs");
     }
 
     void addStar() {
-        ///TODO: add a star at roughly earth distance scaled based on planet radius.
+        TIME_FUNCTION;
+
+        const float realEarthRadiusKm = 6371.0f;
+        const float realSunRadiusKm = 696340.0f;
+        const float realAuKm = 149597870.0f;
+        float simScale = config.radius / realEarthRadiusKm;
+
+        float starRadius = realSunRadiusKm * simScale;
+        float orbitDistance = realAuKm * simScale;
+
+        std::cout << "--- STAR GENERATION ---" << std::endl;
+        std::cout << "Sim Scale: " << simScale << " units/km" << std::endl;
+        std::cout << "Star Radius: " << starRadius << " units" << std::endl;
+        std::cout << "Orbit Distance: " << orbitDistance << " units" << std::endl;
+
+        if (orbitDistance > config.gridSizeCube) {
+            std::cout << "[WARNING] Star distance (" << orbitDistance 
+                      << ") exceeds octree bounds (" << config.gridSizeCube 
+                      << "). Please increase gridSizeCube or the star will be outside the grid!" << std::endl;
+        }
+
+        v3 starCenter = config.center + v3(orbitDistance, 0.0f, 0.0f);
+        v3 starColor = v3(1.0f, 0.95f, 0.8f);
+
+        int starPoints = config.surfacePoints * 10; 
+
+        for (int i = 0; i < starPoints; i++) {
+            float y = 1.0f - (i * 2.0f) / (starPoints - 1);
+            float radiusY = std::sqrt(1.0f - y * y);
+            float Θ = Φ * i;
+            float x = std::cos(Θ) * radiusY;
+            float z = std::sin(Θ) * radiusY;
+
+            v3 dir(x, y, z);
+            v3 pos = starCenter + dir * starRadius;
+            Particle pt;
+            
+            pt.altPos = std::make_unique<AltPositions>();
+            pt.altPos->originalPos = pos.cast<Eigen::half>();
+            pt.altPos->noisePos = pos.cast<Eigen::half>();
+            pt.altPos->tectonicPos = pos.cast<Eigen::half>();
+            
+            pt.currentPos = pos;
+            pt.originColor = starColor.cast<Eigen::half>();
+            pt.noiseDisplacement = 0.0f;
+            pt.surface = true;
+            pt.plateID = -2;
+            
+            config.surfaceNodes.emplace_back(pt);
+            
+            grid.set(pt, pt.currentPos, true, pt.originColor.cast<float>(), config.voxelSize, true, 2, 0, 1.0, 0.0f, 0.0f, 1.0f);
+        }
+        
+        grid.optimize();
+        config.currentStep = 1;
+        std::cout << "Star generation complete. Placed " << starPoints << " nodes." << std::endl;
     }
 
     void addMoon() {
