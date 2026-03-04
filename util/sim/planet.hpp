@@ -797,12 +797,6 @@ public:
         std::cout << "Star Radius: " << starRadius << " units" << std::endl;
         std::cout << "Orbit Distance: " << orbitDistance << " units" << std::endl;
 
-        if (orbitDistance > config.gridSizeCube) {
-            std::cout << "[WARNING] Star distance (" << orbitDistance 
-                      << ") exceeds octree bounds (" << config.gridSizeCube 
-                      << "). Please increase gridSizeCube or the star will be outside the grid!" << std::endl;
-        }
-
         v3 starCenter = config.center + v3(orbitDistance, 0.0f, 0.0f);
         v3 starColor = v3(1.0f, 0.95f, 0.8f);
 
