@@ -181,6 +181,7 @@ public:
     Octree<Particle> grid;
     std::vector<PlateConfig> plates;
     std::mt19937 rng = std::mt19937(42);
+    bool starAdded = false;
 
     planetsim() {
         config = planetConfig();
@@ -780,6 +781,7 @@ public:
     }
 
     void addStar() {
+        if (starAdded) return;
         TIME_FUNCTION;
 
         const float realEarthRadiusKm = 6371.0f;
@@ -836,6 +838,7 @@ public:
         grid.optimize();
         config.currentStep = 1;
         std::cout << "Star generation complete. Placed " << starPoints << " nodes." << std::endl;
+        starAdded = true;
     }
 
     void addMoon() {
