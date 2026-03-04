@@ -211,20 +211,26 @@ private:
         if (objectId < 0) return;
         dirtyMeshes_.insert({objectId, subId});
     }
-    
-    void collectNodesBySubId(OctreeNode* node, int objId, int subId, std::vector<std::shared_ptr<NodeData>>& results) const {
+
+    void collectNodesBySubIdRecursive(OctreeNode* node, int objId, int subId, std::vector<std::shared_ptr<NodeData>>& results, std::unordered_set<std::shared_ptr<NodeData>>& seen) const {
         if (!node) return;
-        if (node->isLeaf) {
-            for (const auto& pt : node->points) {
-                if (pt->active && pt->objectId == objId && pt->subId == subId) {
+        for (const auto& pt : node->points) {
+            if (pt->active && pt->objectId == objId && pt->subId == subId) {
+                if (seen.insert(pt).second) {
                     results.push_back(pt);
                 }
             }
-        } else {
+        }
+        if (!node->isLeaf) {
             for (const auto& child : node->children) {
-                if (child) collectNodesBySubId(child.get(), objId, subId, results);
+                if (child) collectNodesBySubIdRecursive(child.get(), objId, subId, results, seen);
             }
         }
+    }
+    
+    void collectNodesBySubId(OctreeNode* node, int objId, int subId, std::vector<std::shared_ptr<NodeData>>& results) const {
+        std::unordered_set<std::shared_ptr<NodeData>> seen;
+        collectNodesBySubIdRecursive(node, objId, subId, results, seen);
     }
 
     float lodFalloffRate_ = 0.1f; // Lower = better, higher = worse. 0-1
@@ -319,6 +325,11 @@ private:
         BoundingBox cubeBounds = pointData->getCubeBounds();
         if (!boxIntersectsBox(node->bounds, cubeBounds)) return false;
 
+        if (!node->isLeaf && pointData->size >= node->nodeSize) {
+            node->points.emplace_back(pointData);
+            return true;
+        }
+
         if (node->isLeaf) {
             node->points.emplace_back(pointData);
             if (node->points.size() > maxPointsPerNode && depth < maxDepth) {
@@ -329,7 +340,6 @@ private:
             bool inserted = false;
             for (int i = 0; i < 8; ++i) {
                 if (node->children[i] && boxIntersectsBox(node->children[i]->bounds, cubeBounds)) {
-                    size++;
                     inserted |= insertRecursive(node->children[i].get(), pointData, depth + 1);
                 }
             }
@@ -427,17 +437,16 @@ private:
     std::shared_ptr<NodeData> findRecursive(OctreeNode* node, const PointType& pos, float tolerance) const {
         if (!node->contains(pos)) return nullptr;
         
-        if (node->isLeaf) {
-            for (const auto& pointData : node->points) {
-                if (!pointData->active) continue;
-                
-                float distSq = (pointData->position - pos).squaredNorm();
-                if (distSq <= tolerance * tolerance) {
-                    return pointData;
-                }
+        for (const auto& pointData : node->points) {
+            if (!pointData->active) continue;
+            
+            float distSq = (pointData->position - pos).squaredNorm();
+            if (distSq <= tolerance * tolerance) {
+                return pointData;
             }
-            return nullptr;
-        } else {
+        }
+
+        if (!node->isLeaf) {
             int octant = getOctant(pos, node->center);
             if (node->children[octant]) {
                 return findRecursive(node->children[octant].get(), pos, tolerance);
@@ -446,7 +455,7 @@ private:
         return nullptr;
     }
 
-    bool removeRecursive(OctreeNode* node, const BoundingBox& bounds, const PointType& pos, float tolerance) {
+    bool removeRecursive(OctreeNode* node, const BoundingBox& bounds, const std::shared_ptr<NodeData>& targetPt) {
         {
             std::lock_guard<std::mutex> lock(node->lodMutex);
             node->lodData = nullptr; 
@@ -458,21 +467,18 @@ private:
         
         auto it = std::remove_if(node->points.begin(), node->points.end(),
             [&](const std::shared_ptr<NodeData>& pointData) {
-                if (!pointData->active) return false;
-                float distSq = (pointData->position - pos).squaredNorm();
-                return (distSq <= tolerance * tolerance);
+                return pointData == targetPt;
             });
         
         if (it != node->points.end()) {
             node->points.erase(it, node->points.end());
-            size--;
             foundAny = true;
         }
 
         if (!node->isLeaf) {
             for (int i = 0; i < 8; ++i) {
                 if (node->children[i]) {
-                    foundAny |= removeRecursive(node->children[i].get(), bounds, pos, tolerance);
+                    foundAny |= removeRecursive(node->children[i].get(), bounds, targetPt);
                 }
             }
         }
@@ -545,10 +551,9 @@ private:
                 }
             }
         }
+
         // DDA Traversal
         PointType center = node->center;
-        
-        // Calculate plane intersections relative to center
         Eigen::Vector3f ttt = (center - ray.origin).cwiseProduct(ray.invDir);
 
         int currIdx = 0;
@@ -764,11 +769,12 @@ private:
         maxTreeDepth = std::max(maxTreeDepth, depth);
 
         if (node->lodData) lodGeneratedNodes++;
+        
+        size_t pts = node->points.size();
+        actualPoints += pts;
 
         if (node->isLeaf) {
             leafNodes++;
-            size_t pts = node->points.size();
-            actualPoints += pts;
             maxPointsInLeaf = std::max(maxPointsInLeaf, pts);
             minPointsInLeaf = std::min(minPointsInLeaf, pts);
         } else {
@@ -851,20 +857,21 @@ private:
     void serializeNode(std::ofstream& out, const OctreeNode* node) const {
         writeVal(out, node->isLeaf);
 
-        if (node->isLeaf) {
-            size_t pointCount = node->points.size();
-            writeVal(out, pointCount);
-            for (const auto& pt : node->points) {
-                writeVal(out, pt->data);
-                writeVec3(out, pt->position);
-                writeVal(out, pt->objectId);
-                writeVal(out, pt->active);
-                writeVal(out, pt->visible);
-                writeVal(out, pt->size);
-                writeVal(out, pt->colorIdx);
-                writeVal(out, pt->materialIdx);
-            }
-        } else {
+        // ALWAYS serialize points, unconditionally
+        size_t pointCount = node->points.size();
+        writeVal(out, pointCount);
+        for (const auto& pt : node->points) {
+            writeVal(out, pt->data);
+            writeVec3(out, pt->position);
+            writeVal(out, pt->objectId);
+            writeVal(out, pt->active);
+            writeVal(out, pt->visible);
+            writeVal(out, pt->size);
+            writeVal(out, pt->colorIdx);
+            writeVal(out, pt->materialIdx);
+        }
+
+        if (!node->isLeaf) {
             // Write bitmask of active children
             uint8_t childMask = 0;
             for (int i = 0; i < 8; ++i) {
@@ -1071,22 +1078,28 @@ private:
         return randomDir;
     }
 
-    void collectNodesByObjectId(OctreeNode* node, int id, std::vector<std::shared_ptr<NodeData>>& results) const {
+    void collectNodesByObjectIdRecursive(OctreeNode* node, int id, std::vector<std::shared_ptr<NodeData>>& results, std::unordered_set<std::shared_ptr<NodeData>>& seen) const {
         if (!node) return;
         
-        if (node->isLeaf) {
-            for (const auto& pt : node->points) {
-                if (pt->active && (id == -1 || pt->objectId == id)) {
+        for (const auto& pt : node->points) {
+            if (pt->active && (id == -1 || pt->objectId == id)) {
+                if (seen.insert(pt).second) {
                     results.push_back(pt);
                 }
             }
-        } else {
+        }
+        if (!node->isLeaf) {
             for (const auto& child : node->children) {
                 if (child) {
-                    collectNodesByObjectId(child.get(), id, results);
+                    collectNodesByObjectIdRecursive(child.get(), id, results, seen);
                 }
             }
         }
+    }
+
+    void collectNodesByObjectId(OctreeNode* node, int id, std::vector<std::shared_ptr<NodeData>>& results) const {
+        std::unordered_set<std::shared_ptr<NodeData>> seen;
+        collectNodesByObjectIdRecursive(node, id, results, seen);
     }
 
     struct GridCell {
@@ -1264,6 +1277,7 @@ public:
         auto pointData = std::make_shared<NodeData>(data, pos, visible, cIdx, size, active, objectId, subId, mIdx);
         
         if (insertRecursive(root_.get(), pointData, 0)) {
+            this->size++;
             return true;
         }
         return false;
@@ -1381,7 +1395,11 @@ public:
     bool remove(const PointType& pos, float tolerance = EPSILON) {
         auto pt = find(pos, tolerance);
         if (!pt) return false;
-        return removeRecursive(root_.get(), pt->getCubeBounds(), pos, tolerance);
+        if (removeRecursive(root_.get(), pt->getCubeBounds(), pt)) {
+            size--;
+            return true;
+        }
+        return false;
     }
 
     std::vector<std::shared_ptr<NodeData>> findInRadius(const PointType& center, float radius, int objectid = -1) const {
@@ -1424,7 +1442,7 @@ public:
             }
         }
         
-        removeRecursive(root_.get(), pointData->getCubeBounds(), oldPos, tolerance);
+        removeRecursive(root_.get(), pointData->getCubeBounds(), pointData);
         
         pointData->data = newData;
         pointData->position = newPos;
@@ -1465,6 +1483,8 @@ public:
         if(res) {
             invalidateMesh(targetObjId, finalSubId);
             if(finalSubId != oldSubId) invalidateMesh(targetObjId, oldSubId);
+        } else {
+            size--;
         }
 
         return res;
@@ -1474,12 +1494,13 @@ public:
         auto pointData = find(pos);
         if (!pointData) return false;
 
-        removeRecursive(root_.get(), pointData->getCubeBounds(), pos, EPSILON);
+        removeRecursive(root_.get(), pointData->getCubeBounds(), pointData);
         pointData->position = newPos;
 
         if (insertRecursive(root_.get(), pointData, 0)) {
             return true;
         }
+        size--;
         return false;
     }
 
