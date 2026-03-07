@@ -71,14 +71,39 @@ public:
         bool active;
         bool visible;
 
+        // --- NEW ACCUMULATION FIELDS ---
+        Eigen::Vector3f accumColorSum; // Sum of all samples currently in the "bucket"
+        float accumWeight;             // Current number of samples in the "bucket"
+        int lastUpdateFrame;           // Frame number this node was last hit
+        mutable std::mutex lightMutex; // Thread safety
+        // -------------------------------
+
         NodeData(const T& data, const PointType& pos, bool visible, IndexType colorIdx, float size = 0.01f,
                  bool active = true, int objectId = -1, int subId = 0, IndexType materialIdx = 0) 
                 : data(data), position(pos), objectId(objectId), subId(subId), size(size), 
-                  colorIdx(colorIdx), materialIdx(materialIdx), active(active), visible(visible) {}
+                  colorIdx(colorIdx), materialIdx(materialIdx), active(active), visible(visible),
+                  accumColorSum(Eigen::Vector3f::Zero()), accumWeight(0.0f), lastUpdateFrame(-1) {}
         
         NodeData() : objectId(-1), subId(0), size(0.0f), colorIdx(0), materialIdx(0), 
-                     active(false), visible(false) {}
+                     active(false), visible(false), 
+                     accumColorSum(Eigen::Vector3f::Zero()), accumWeight(0.0f), lastUpdateFrame(-1) {}
         
+        // Manual copy constructor needed because std::mutex is not copyable
+        NodeData(const NodeData& other) {
+            data = other.data;
+            position = other.position;
+            objectId = other.objectId;
+            subId = other.subId;
+            size = other.size;
+            colorIdx = other.colorIdx;
+            materialIdx = other.materialIdx;
+            active = other.active;
+            visible = other.visible;
+            accumColorSum = Eigen::Vector3f::Zero();
+            accumWeight = 0.0f;
+            lastUpdateFrame = -1;
+        }
+
         PointType getHalfSize() const {
             return PointType(size * 0.5f, size * 0.5f, size * 0.5f);
         }
@@ -127,6 +152,11 @@ private:
     
     Eigen::Vector3f skylight_ = {0.1f, 0.1f, 0.1f};
     Eigen::Vector3f backgroundColor_ = {0.53f, 0.81f, 0.92f};
+
+    // Parallel Lightmap (Sun) settings
+    Eigen::Vector3f sunDirection_ = {0.0f, 1.0f, 0.0f}; // Default straight up
+    Eigen::Vector3f sunColor_ = {1.0f, 1.0f, 0.9f};
+    float sunIntensity_ = 1.0f; // 0.0 = disabled
     
     // Addressable Maps
     std::unique_ptr<std::mutex> mapMutex_;
@@ -139,6 +169,9 @@ private:
     std::map<std::pair<int, int>, std::shared_ptr<Mesh>> meshCache_;
     std::set<std::pair<int, int>> dirtyMeshes_;
     int nextSubIdGenerator_ = 1;
+
+    // Temporal Coherence
+    int frameCount_ = 0;
     
 public:
     inline IndexType getColorIndex(const Eigen::Vector3f& color) {
@@ -254,11 +287,6 @@ private:
 
     uint8_t getOctant(const PointType& point, const PointType& center) const {
         return (point[0] >= center[0]) | ((point[1] >= center[1]) << 1) | ((point[2] >= center[2]) << 2);
-        // uint8_t octant = 0;
-        // if (point[0] >= center[0]) octant |= 1;
-        // if (point[1] >= center[1]) octant |= 2;
-        // if (point[2] >= center[2]) octant |= 4;
-        // return octant;
     }
 
     BoundingBox createChildBounds(const OctreeNode* node, uint8_t octant) const {
@@ -677,26 +705,52 @@ private:
                              int maxBounces, bool globalIllumination, bool useLod) {
         if (bounces > maxBounces) return globalIllumination ? skylight_ : Eigen::Vector3f::Zero();
 
-        auto hit = voxelTraverse(rayOrig, rayDir, std::numeric_limits<float>::max(), useLod);
+        PointType currOrig = rayOrig;
+        std::shared_ptr<NodeData> hit = nullptr;
+        PointType hitPoint;
+        PointType normal;
+        float t = 0.0f;
+
+        // Loop to skip internal boundaries of transmissive objects
+        int safety = 0;
+        while(safety++ < 5000) {
+            hit = voxelTraverse(currOrig, rayDir, std::numeric_limits<float>::max(), useLod);
+            if (!hit) break;
+
+            Ray ray(currOrig, rayDir);
+            rayCubeIntersect(ray, hit.get(), t, normal, hitPoint);
+            
+            Material objMat = getMaterial(hit->materialIdx);
+
+            if (objMat.transmission > 0.0f && rayDir.dot(normal) > 0.0f) {
+                float coordMax = hitPoint.cwiseAbs().maxCoeff();
+                float rayOffset = std::max(1e-4f, 1e-5f * coordMax);
+                PointType checkPos = hitPoint + rayDir * (rayOffset * 2.0f);
+                
+                auto nextNode = find(checkPos);
+                
+                if (nextNode && nextNode->active && nextNode->materialIdx == hit->materialIdx) {
+                    currOrig = checkPos;
+                    continue;
+                }
+            }
+            break;
+        }
+
         if (!hit) {
             if (bounces == 0) return backgroundColor_;
             return globalIllumination ? skylight_ : Eigen::Vector3f::Zero();
         }
 
         auto obj = hit;
-        
-        PointType hitPoint;
-        PointType normal;
-        float t = 0.0f;
-        Ray ray(rayOrig, rayDir);
-        rayCubeIntersect(ray, obj.get(), t, normal, hitPoint);
+        Eigen::Vector3f calculatedColor = Eigen::Vector3f::Zero();
         
         Eigen::Vector3f objColor = getColor(obj->colorIdx);
         Material objMat = getMaterial(obj->materialIdx);
 
-        Eigen::Vector3f finalColor = globalIllumination ? skylight_ : Eigen::Vector3f::Zero();
+        Eigen::Vector3f lighting = globalIllumination ? skylight_ : Eigen::Vector3f::Zero();
         if (objMat.emittance > 0.0f) {
-            finalColor += objColor * objMat.emittance;
+            lighting += objColor * objMat.emittance;
         }
 
         float roughness = std::clamp(objMat.roughness, 0.01f, 1.0f);
@@ -714,6 +768,36 @@ private:
 
         Eigen::Vector3f F0 = Eigen::Vector3f::Constant(0.04f);
         F0 = F0 * (1.0f - metallic) + objColor * metallic;
+        
+        if (sunIntensity_ > 0.0f) {
+            PointType L = sunDirection_.normalized();
+            PointType shadowOrig = hitPoint + n_eff * rayOffset;
+            
+            auto shadowHit = voxelTraverse(shadowOrig, L, std::numeric_limits<float>::max(), useLod);
+            
+            if (!shadowHit) {
+                float NdotL = std::max(0.001f, n_eff.dot(L));
+                PointType H_sun = (V + L).normalized();
+                float VdotH_sun = std::max(0.001f, V.dot(H_sun));
+                float NdotH_sun = std::max(0.001f, n_eff.dot(H_sun));
+                
+                Eigen::Vector3f F_sun = F0 + (Eigen::Vector3f::Constant(1.0f) - F0) * std::pow(std::max(0.0f, 1.0f - VdotH_sun), 5.0f);
+                
+                float alpha2 = roughness * roughness * roughness * roughness;
+                float denom = (NdotH_sun * NdotH_sun * (alpha2 - 1.0f) + 1.0f);
+                float D = alpha2 / (M_PI * denom * denom);
+                
+                float k = (roughness + 1.0f) * (roughness + 1.0f) / 8.0f;
+                float G = (NdotL / (NdotL * (1.0f - k) + k)) * (cosThetaI / (cosThetaI * (1.0f - k) + k));
+                
+                Eigen::Vector3f spec = (F_sun * D * G) / (4.0f * NdotL * cosThetaI + EPSILON);
+                
+                Eigen::Vector3f kD = (Eigen::Vector3f::Constant(1.0f) - F_sun) * (1.0f - metallic);
+                Eigen::Vector3f diff = kD.cwiseProduct(objColor) / M_PI;
+                
+                lighting += (diff + spec).cwiseProduct(sunColor_) * sunIntensity_ * NdotL;
+            }
+        }
 
         PointType H = sampleGGX(n_eff, roughness, rngState);
         float VdotH = std::max(0.001f, V.dot(H));
@@ -780,22 +864,74 @@ private:
                 secondColor = W_second.cwiseProduct(traceRay(secondOrigin, secondDir, bounces + 1, rngState, maxBounces, globalIllumination, useLod));
             }
             
-            return finalColor + specColor + secondColor;
+            calculatedColor = lighting + specColor + secondColor;
         } else {
             float totalLum = lumSpec + lumSecond;
-            if (totalLum < 0.0001f) return finalColor;
-            
-            float pSpec = lumSpec / totalLum;
-            float roll = float(rand_r(&rngState)) / float(RAND_MAX);
-            
-            if (roll < pSpec) {
-                Eigen::Vector3f sample = traceRay(hitPoint + n_eff * rayOffset, specDir, bounces + 1, rngState, maxBounces, globalIllumination, useLod);
-                return finalColor + (W_spec / std::max(EPSILON, pSpec)).cwiseProduct(sample);
-            } else {
-                Eigen::Vector3f sample = traceRay(secondOrigin, secondDir, bounces + 1, rngState, maxBounces, globalIllumination, useLod);
-                return finalColor + (W_second / std::max(EPSILON, 1.0f - pSpec)).cwiseProduct(sample);
+            if (totalLum < 0.0001f) calculatedColor = lighting;
+            else {
+                float pSpec = lumSpec / totalLum;
+                float roll = float(rand_r(&rngState)) / float(RAND_MAX);
+                
+                if (roll < pSpec) {
+                    Eigen::Vector3f sample = traceRay(hitPoint + n_eff * rayOffset, specDir, bounces + 1, rngState, maxBounces, globalIllumination, useLod);
+                    calculatedColor = lighting + (W_spec / std::max(EPSILON, pSpec)).cwiseProduct(sample);
+                } else {
+                    Eigen::Vector3f sample = traceRay(secondOrigin, secondDir, bounces + 1, rngState, maxBounces, globalIllumination, useLod);
+                    calculatedColor = lighting + (W_second / std::max(EPSILON, 1.0f - pSpec)).cwiseProduct(sample);
+                }
             }
         }
+        std::lock_guard<std::mutex> lock(obj->lightMutex);
+
+        // 1. Calculate Capacity based on Material Properties
+        // How many frames do we keep in the "bucket" before removing the oldest?
+        
+        float capacity = 60.0f; // Base capacity (e.g. Diffuse surfaces)
+
+        // REFLECTIONS: Fade out VERY fast (low capacity) to prevent ghosting on moving objects
+        // If it's metallic and smooth, we might only keep the last 2-5 frames.
+        float reflectionIntensity = metallic * (1.0f - roughness);
+        if (reflectionIntensity > 0.0f) {
+            // Reduces capacity down to a minimum of 2.0 frames for perfect mirrors
+            capacity = std::max(2.0f, capacity * (1.0f - reflectionIntensity)); 
+        }
+
+        // REFRACTIONS: Keep longer (high capacity) to stabilize noise
+        if (transmission > 0.0f) {
+            capacity += transmission * 40.0f; 
+        }
+
+        // 2. Handle Time Gaps (Age Limit)
+        // If this node wasn't hit last frame, the object or camera moved. 
+        // Decay aggressively.
+        if (obj->lastUpdateFrame != -1) {
+            int framesMissed = frameCount_ - obj->lastUpdateFrame;
+            if (framesMissed > 1) {
+                // Divide accumulated weight by 2 for every missed frame
+                float decay = std::pow(0.5f, (float)framesMissed);
+                obj->accumColorSum *= decay;
+                obj->accumWeight *= decay;
+            }
+        }
+
+        // 3. The "Leaky Bucket" Eviction
+        // If the bucket is full (weight >= capacity), we "pour out" the average old value
+        // before adding the new one.
+        if (obj->accumWeight >= capacity) {
+            // Scale down the sum and weight so that adding 1.0 brings it back to capacity
+            float keepRatio = (capacity - 1.0f) / obj->accumWeight;
+            obj->accumColorSum *= keepRatio;
+            obj->accumWeight *= keepRatio;
+        }
+
+        // 4. Accumulate
+        obj->accumColorSum += calculatedColor;
+        obj->accumWeight += 1.0f;
+        obj->lastUpdateFrame = frameCount_;
+
+        // 5. Return the Average
+        // This average represents the last 'capacity' frames moving average
+        return obj->accumColorSum / obj->accumWeight;
     }
     
     void clearNode(OctreeNode* node) {
@@ -923,6 +1059,7 @@ private:
             writeVal(out, pt->size);
             writeVal(out, pt->colorIdx);
             writeVal(out, pt->materialIdx);
+            // accumulatedLight is transient cache, do not serialize
         }
 
         if (!node->isLeaf) {
@@ -964,6 +1101,8 @@ private:
             readVal(in, pt->size);
             readVal(in, pt->colorIdx);
             readVal(in, pt->materialIdx);
+            pt->accumulatedLight = Eigen::Vector3f::Zero(); // Initialize clean
+            pt->lastUpdateFrame = -1;
             node->points.push_back(pt);
         }
 
@@ -1244,7 +1383,7 @@ private:
             }
         }
 
-        if (totalWeight > 1e-6) {
+        if (totalWeight > EPSILON) {
             return {density, accumulatedColor / totalWeight};
         }
         
@@ -1311,6 +1450,12 @@ public:
         return backgroundColor_; 
     }
 
+    void setSun(const Eigen::Vector3f& direction, const Eigen::Vector3f& color, float intensity) {
+        sunDirection_ = direction.normalized();
+        sunColor_ = color;
+        sunIntensity_ = intensity;
+    }
+
     void setLODFalloff(float rate) { lodFalloffRate_ = rate; }
     void setLODMinDistance(float dist) { lodMinDistance_ = dist; }
     void setMaxDistance(float dist) { maxDistance_ = dist; }
@@ -1352,6 +1497,10 @@ public:
         
         writeVec3(out, skylight_);
         writeVec3(out, backgroundColor_);
+
+        writeVec3(out, sunDirection_);
+        writeVec3(out, sunColor_);
+        writeVal(out, sunIntensity_);
 
         {
             std::lock_guard<std::mutex> lock(*mapMutex_);
@@ -1399,6 +1548,10 @@ public:
         
         readVec3(in, skylight_);
         readVec3(in, backgroundColor_);
+
+        readVec3(in, sunDirection_);
+        readVec3(in, sunColor_);
+        readVal(in, sunIntensity_);
 
         {
             std::lock_guard<std::mutex> lock(*mapMutex_);
@@ -1659,6 +1812,7 @@ public:
 
     frame renderFrame(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB, int samplesPerPixel = 2,
                     int maxBounces = 4, bool globalIllumination = false, bool useLod = true) {
+        frameCount_++; // Advance time
         generateLODs();
         PointType origin = cam.origin;
         PointType dir = cam.direction.normalized();
@@ -1680,7 +1834,7 @@ public:
         for (int y = 0; y < height; ++y) {
             for (int x = 0; x < width; ++x) {
                 int pidx = (y * width + x);
-                uint32_t seed = pidx * 1973 + 9277;
+                uint32_t seed = pidx * 1973 + 9277 + frameCount_ * 12345;
                 int idx = pidx * channels;
 
                 float px = (2.0f * (x + 0.5f) / width - 1.0f) * tanfovx;
@@ -1724,6 +1878,7 @@ public:
 
     frame fastRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB) {
         //TIME_FUNCTION;
+        frameCount_++;
         generateLODs();
         PointType origin = cam.origin;
         PointType dir = cam.direction.normalized();
@@ -1740,7 +1895,7 @@ public:
         const float tanfovy = tanHalfFov;
         const float tanfovx = tanHalfFov * aspect;
         
-        const PointType globalLightDir = (-cam.direction * 0.2f).normalized();
+        const PointType globalLightDir = sunDirection_.normalized();
         const float fogStart = 1000.0f;
         const float minVisibility = 0.2f; 
         
@@ -1772,9 +1927,12 @@ public:
                     if (objMat.emittance > 0.0f) {
                         color = color * objMat.emittance;
                     } else {
+                        // Use Sun Direction for quick shading
                         float diffuse = std::max(0.0f, normal.dot(globalLightDir));
                         float ambient = 0.35f;
                         float intensity = std::min(1.0f, ambient + diffuse * 0.65f);
+                        if (sunIntensity_ > 0.0f) intensity = std::min(1.0f, ambient + diffuse * sunIntensity_);
+                        
                         color = color * intensity;
                     }
                     
@@ -1798,6 +1956,7 @@ public:
     frame renderFrameTimed(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB, 
                            double maxTimeSeconds = 0.16, int maxBounces = 4, bool globalIllumination = false, bool useLod = true) {
         auto startTime = std::chrono::high_resolution_clock::now();
+        frameCount_++;
         
         generateLODs();
         PointType origin = cam.origin;
@@ -1816,7 +1975,7 @@ public:
         const float tanfovy = tanHalfFov;
         const float tanfovx = tanHalfFov * aspect;
         
-        const PointType globalLightDir = (-cam.direction * 0.2f).normalized();
+        const PointType globalLightDir = sunDirection_.normalized();
         const float fogStart = 1000.0f;
         const float minVisibility = 0.2f; 
         
@@ -1850,6 +2009,7 @@ public:
                         float diffuse = std::max(0.0f, normal.dot(globalLightDir));
                         float ambient = 0.35f;
                         float intensity = std::min(1.0f, ambient + diffuse * 0.65f);
+                        if (sunIntensity_ > 0.0f) intensity = std::min(1.0f, ambient + diffuse * sunIntensity_);
                         color = color * intensity;
                     }
                     
@@ -1910,7 +2070,7 @@ public:
                         rayDir.normalize();
 
                         uint32_t pass = currentOffset / totalPixels;
-                        uint32_t seed = pidx * 1973 + pass * 12345 + localSeed;
+                        uint32_t seed = pidx * 1973 + pass * 12345 + localSeed + frameCount_ * 777;
 
                         Eigen::Vector3f pbrColor = traceRay(origin, rayDir, 0, seed, maxBounces, globalIllumination, useLod);
                         
@@ -2279,6 +2439,7 @@ public:
         }
         
         size = 0;
+        frameCount_ = 0;
     }
 };
 
