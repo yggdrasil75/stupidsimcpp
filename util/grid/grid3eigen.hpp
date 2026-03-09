@@ -598,7 +598,7 @@ private:
             
             float t;
             PointType normal, hitPoint;
-            if (rayCubeIntersect(ray, pointData.get(), t, normal, hitPoint)) {
+            if (rayCubeIntersect(ray, pointData.get(), t, normal, hitPoint) && pointData->visible) {
                 if (t >= 0 && t <= maxDist && t <= tMax + 0.001f) {
                     maxDist = t;
                     hit = pointData;

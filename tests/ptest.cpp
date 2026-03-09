@@ -10,6 +10,7 @@
 
 #include "../util/noise/pnoise.cpp"
 #include "planet.cpp"
+#include "plant.cpp"
 #include "../util/basicdefines.hpp"
 
 void framebuffer_size_callback(GLFWwindow* window, int width, int height) {
@@ -80,6 +81,7 @@ int main() {
 
     planetSimUI planetApp;
     NoisePreviewState noiseState;
+    PlantSimUI plantApp;
 
     if (noiseState.layers.empty()) {
         NoiseLayer defaultLayer;
@@ -101,6 +103,7 @@ int main() {
         ImGui::GetMainViewport();
         drawNoiseLab(noiseState);
         planetApp.renderUI(window);
+        plantApp.renderUI(window);
 
         ImGui::Begin("Integration Control");
         ImGui::Text("Bridge: Noise Lab -> Planet Sim");
