@@ -16,9 +16,8 @@ struct Material {
     float density;
     float speedOfSound;
     float audioAbsorption;
-    Eigen::Vector3f rgb; //for the fast version.
+    Eigen::Vector3f rgb;
 
-    // Constructor with sensible defaults
     Material(float ior = 1.5f, float dispersion = 0.0f, float chromaticity = 550.0f, 
              float bandwidth = 100.0f, float transmission = 0.0f, float roughness = 0.8f, 
              float emittance = 0.0f, float density = 1000.0f, float speedOfSound = 343.0f,

@@ -71,13 +71,11 @@ public:
         bool active;
         bool visible;
 
-        // --- NEW ACCUMULATION FIELDS ---
-        Eigen::Vector3f accumColorSum; // Sum of all samples currently in the "bucket"
-        float accumWeight;             // Current number of samples in the "bucket"
-        int lastUpdateFrame;           // Frame number this node was last hit
-        mutable std::mutex lightMutex; // Thread safety
-        // -------------------------------
-
+        Eigen::Vector3f accumColorSum;
+        float accumWeight;
+        int lastUpdateFrame;
+        mutable std::mutex lightMutex;
+        
         NodeData(const T& data, const PointType& pos, bool visible, IndexType colorIdx, float size = 0.01f,
                  bool active = true, int objectId = -1, int subId = 0, IndexType materialIdx = 0) 
                 : data(data), position(pos), objectId(objectId), subId(subId), size(size), 
