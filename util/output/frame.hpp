@@ -190,8 +190,7 @@ public:
         newData.reserve(inputData.size());
 
         for (float val : inputData) {
-            // Clamp between 0.0 and 1.0, scale to 255
-            float v = std::max(0.0f, std::min(1.0f, val));
+            float v = std::clamp(val, 0.0f, 1.0f);
             newData.push_back(static_cast<uint8_t>(v * 255.0f));
         }
 
@@ -627,7 +626,7 @@ private:
                 dict[nextdict++] = seq;
             }
         }
-        cformat == compresstype::RAW;
+        cformat = compresstype::RAW;
 
         return *this;
     }

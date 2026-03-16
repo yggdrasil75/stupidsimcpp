@@ -19,6 +19,8 @@
 #include <sstream>
 #include <string>
 #include "../basicdefines.hpp"
+#include "nodeData.hpp"
+#include "octreeNode.hpp"
 
 #ifdef SSE
 #include <immintrin.h>
@@ -106,413 +108,176 @@ public:
         }
     };
 
-    class NodeData {
-        T data;
-        private:
-            PointLow position;
-            Eigen::Quaternion<low> orientation;
-            int objectId;
-            low size;
+    struct CelestialBody {
+        PointMedium direction;
+        float angularRadius;
+        float cosAngularRadius;
+        uint8_t r, g, b, emittance;
+        bool baked;
+        struct PixelBackup {
+            size_t x, y;
+            std::vector<uint8_t> data;
+        };
+        std::vector<PixelBackup> backup;
 
-            IndexSize colorIDX;
-            IndexSize materialIDX;
-            uint8_t flags;
-            
-        public:
-            NodeData(const T& data, const PointLow& pos, bool visible, IndexSize colorIDX, float size = 0.01f,
-                    bool active = true, int objectId = -1, IndexSize materialIdx = 0, bool staticnode = false)
-                    : data(data), position(pos), objectId(objectId), size(static_cast<low>(size)), 
-                    colorIDX(colorIDX), materialIDX(materialIdx), flags(0) {
-                        setActive(active);
-                        setVisible(visible);
-                        setStatic(staticnode);
-                        orientation.setIdentity();
-                    }
-            
-            NodeData() : objectId(-1), size(0.0), colorIDX(0), materialIDX(0), flags(0) {
-                orientation.setIdentity();
-            }
-
-            inline T getData() const { return data; }
-
-            inline bool isActive() const {
-                return flags & ACTIVE_BIT;
-            }
-            inline bool isVISIBLE() const {
-                return flags & VISIBLE_BIT;
-            }
-            inline bool isStatic() const {
-                return flags & STATIC_BIT;
-            }
-            inline bool isActiveAndVisible() const {
-                return ((flags & ACTIVE_BIT) != 0) && ((flags & VISIBLE_BIT) != 0);
-            }
-            
-            inline void setActive(bool val) {
-                val ? (flags |= ACTIVE_BIT) : (flags &= ~ACTIVE_BIT);
-            }
-            inline void setVisible(bool val) {
-                val ? (flags |= VISIBLE_BIT) : (flags &= ~VISIBLE_BIT);
-            }
-            inline void setStatic(bool val) {
-                val ? (flags |= STATIC_BIT) : (flags &= ~STATIC_BIT);
-            }
-
-            inline IndexSize getColorIDX() const {
-                return colorIDX;
-            }
-
-            inline IndexSize getMaterialIDX() const {
-                return materialIDX;
-            }
-
-            inline void setColorIdx(IndexSize idx) {
-                colorIDX = idx;
-            }
-
-            inline void setMaterialIDX(IndexSize idx) {
-                materialIDX = idx;
-            }
-
-            inline PointLow getPosition() const { 
-                return position;
-            }
-
-            inline void setPosition(const PointLow& pos) { 
-                position = pos;
-            }
-
-            PointLow getHalfSize() const {
-                return PointLow(size * 0.5f, size * 0.5f, size * 0.5f);
-            }
-            
-            OBoundingBox getCubeBounds(const PointHigh& nodeCenter) const {
-                OBoundingBox obb;
-                obb.center = nodeCenter.template cast<medium>() + position.template cast<medium>();
-                obb.extents = getHalfSize().template cast<medium>();
-                obb.orientation = orientation;
-                return obb;
-            }
-
-            PointMedium center(const PointHigh& nodeCenter) const {
-                return nodeCenter + position.template cast<medium>();
-            }
-
-            void serialize(std::ostream& os) const {
-                os.write(reinterpret_cast<const char*>(&data), sizeof(T));
-                os.write(reinterpret_cast<const char*>(&position), sizeof(position));
-                os.write(reinterpret_cast<const char*>(&orientation), sizeof(orientation));
-                os.write(reinterpret_cast<const char*>(&objectId), sizeof(objectId));
-                os.write(reinterpret_cast<const char*>(&size), sizeof(size));
-                os.write(reinterpret_cast<const char*>(&colorIDX), sizeof(colorIDX));
-                os.write(reinterpret_cast<const char*>(&materialIDX), sizeof(materialIDX));
-                os.write(reinterpret_cast<const char*>(&flags), sizeof(flags));
-            }
-
-            void deserialize(std::istream& is) {
-                is.read(reinterpret_cast<char*>(&data), sizeof(T));
-                is.read(reinterpret_cast<char*>(&position), sizeof(position));
-                is.read(reinterpret_cast<char*>(&orientation), sizeof(orientation));
-                is.read(reinterpret_cast<char*>(&objectId), sizeof(objectId));
-                is.read(reinterpret_cast<char*>(&size), sizeof(size));
-                is.read(reinterpret_cast<char*>(&colorIDX), sizeof(colorIDX));
-                is.read(reinterpret_cast<char*>(&materialIDX), sizeof(materialIDX));
-                is.read(reinterpret_cast<char*>(&flags), sizeof(flags));
-            }
+        CelestialBody() : angularRadius(0), cosAngularRadius(1), r(255), g(255), b(255), emittance(255), baked(false) {}
     };
 
-    struct OctreeNode {
-        private:
-            BoundingBox bounds;
-            PointHigh center;
+    struct Skybox {
+        frame skybox;
+        std::map<int, CelestialBody> bodies;
+        Eigen::Quaternion<medium> skyRotation;
 
-            inline void setLodValid(bool val) { 
-                val ? (flags |= NODE_LOD_VALID_BIT) : (flags &= ~NODE_LOD_VALID_BIT);
+        Skybox(size_t w = 1024, size_t h = 1024) : skybox(w, h, frame::colormap::RGBA), skyRotation(Eigen::Quaternion<medium>::Identity()) { }
+
+        void dirToUV(const PointMedium& dir, float& u, float& v) const {
+            PointMedium d = dir.normalized();
+            u = 0.5f + (std::atan2(d.z(), d.x()) / (2.0f * M_PI));
+            v = 0.5f - (std::asin(d.y()) / M_PI);
+        }
+
+        PointMedium uvToDir(float u, float v) const {
+            float θ = (u - 0.5f) * 2.0f * M_PI;
+            float φ = (0.5f - v) * M_PI;
+            float y = std::sin(φ);
+            float cosφ = std::cos(φ);
+            float x = std::cos(θ) * cosφ;
+            float z = std::sin(θ) * cosφ;
+            return PointMedium(x, y, z);
+        }
+        
+        std::vector<uint8_t> sample(const PointMedium& dir) {
+            PointMedium rotatedDir = skyRotation * dir;
+            for (auto it = bodies.rbegin(); it != bodies.rend(); ++it) {
+                if (!it->second.baked) {
+                    if (rotatedDir.dot(it->second.direction) >= it->second.cosAngularRadius) {
+                        return getFormattedColor(it->second.r, it->second.g, it->second.b, it->second.emittance);
+                    }
+                }
             }
 
-            inline void setLeaf(bool val) { 
-                val ? (flags |= NODE_LEAF_BIT) : (flags &= ~NODE_LEAF_BIT);
+            float u, v;
+            dirToUV(rotatedDir, u, v);
+
+            u = std::clamp(u, 0.0f, 0.9999f);
+            v = std::clamp(v, 0.0f, 0.9999f);
+            size_t x = static_cast<size_t>(u * skybox.getWidth());
+            size_t y = static_cast<size_t>(v * skybox.getHeight());
+
+            return skybox.getPixel(x, y);
+        }
+
+        void setBackground(float r, float g, float b, float e) {
+            size_t w = skybox.getWidth();
+            size_t h = skybox.getHeight();
+            std::vector<float> data(w * h * 4);
+
+            for (size_t i = 0; i < data.size(); i += 4) {
+                data[i] = r;
+                data[i + 1] = g;
+                data[i + 2] = b;
+                data[i + 3] = e;
+            }
+            skybox.setData(data);
+        }
+        
+        void addBody(int id, const PointMedium& dir, float angularRadius, uint8_t r, uint8_t g, uint8_t b, uint8_t emittance) {
+            removeBody(id);
+            CelestialBody body;
+            body.direction = dir.normalized();
+            body.angularRadius = angularRadius;
+            body.cosAngularRadius = std::cos(angularRadius);
+            body.r = r;
+            body.g = g;
+            body.b = b;
+            body.emittance = emittance;
+            body.baked = false;
+            bodies[id] = std::move(body);
+        }
+
+        void removeBody(int id) {
+            auto it = bodies.find(id);
+            if (it != bodies.end()) {
+                if (it->second.baked) {
+                    resetBody(id);
+                }
+                bodies.erase(it);
+            }
+        }
+
+        void moveBody(int id, const PointMedium& newDir) {
+            auto it = bodies.find(id);
+            if (it != bodies.end()) {
+                bool wasBaked = it->second.baked;
+                if (wasBaked) resetBody(id);
+                
+                it = bodies.find(id);
+                it->second.direction = newDir.normalized();
+                
+                if (wasBaked) bakeBody(id);
+            }
+        }
+
+        void bakeBody(int id) {
+            auto it = bodies.find(id);
+            if (it == bodies.end() || it->second.baked) return;
+
+            if (skybox.getCompressionType() != frame::compresstype::RAW) {
+                skybox.decompress();
             }
 
-            inline void setLoaded(bool val) { 
-                val ? (flags |= NODE_LOADED_BIT) : (flags &= ~NODE_LOADED_BIT);
-            }
-        public:
-            std::vector<std::shared_ptr<NodeData>> points;
-            std::array<std::unique_ptr<OctreeNode>, 8> children;
-            uint8_t flags;
+            size_t w = skybox.getWidth();
+            size_t h = skybox.getHeight();
+            std::vector<uint8_t> newColor = getFormattedColor(it->second.r, it->second.g, it->second.b, it->second.emittance);
             
-            mutable std::shared_ptr<NodeData> lodData;
-            mutable std::mutex lodMutex; 
+            it->second.backup.clear();
 
-            OctreeNode(const PointHigh& min, const PointHigh& max) : flags(NODE_LEAF_BIT | NODE_LOADED_BIT), lodData(nullptr) {
-                bounds.bounds[0] = min;
-                bounds.bounds[1] = max;
-                center = (min + max) * 0.5;
-            }
-
-            inline bool isLeaf() const { 
-                return flags & NODE_LEAF_BIT;
-            }
-            
-            inline bool isLoaded() const { 
-                return flags & NODE_LOADED_BIT;
-            }
-            
-            inline bool isLodValid() const { 
-                return flags & NODE_LOD_VALID_BIT;
-            }
-            
-            inline void invalidateLod() {
-                setLodValid(false);
-            }
-
-            bool contains(const PointHigh& point) const {
-                return (point[0] >= bounds.bounds[0][0] && point[0] <= bounds.bounds[1][0] &&
-                        point[1] >= bounds.bounds[0][1] && point[1] <= bounds.bounds[1][1] &&
-                        point[2] >= bounds.bounds[0][2] && point[2] <= bounds.bounds[1][2]);
-            }
-
-            std::string getRegionName() const {
-                std::ostringstream oss;
-                oss << static_cast<int>(std::floor(center.x())) << "." << static_cast<int>(std::floor(center.y())) << "." << static_cast<int>(std::floor(center.z()));
-                return oss.str();
-            }
-
-            void generateLod() const {
-                if (isLodValid()) return;
-                std::lock_guard<std::mutex> lock(lodMutex);
-
-                if (isLeaf()) {
-                    if (points.empty()) {
-                        lodData = nullptr;
-                    } else {
-                        PointHigh avgPos = PointHigh::Zero();
-                        std::unordered_map<IndexSize, int> colors;
-                        std::unordered_map<IndexSize, int> mats;
-                        for (const auto& p : points) {
-                            avgPos += p->getPosition().template cast<high>();
-                            colors[p->getColorIDX()]++;
-                            mats[p->getMaterialIDX()]++;
-                        }
-
-                        size_t count = points.size();
-                        avgPos /= static_cast<high>(count);
+            for (size_t y = 0; y < h; ++y) {
+                float v = (static_cast<float>(y) + 0.5f) / h; 
+                for (size_t x = 0; x < w; ++x) {
+                    float u = (static_cast<float>(x) + 0.5f) / w;
+                    PointMedium pixelDir = uvToDir(u, v);
+                    
+                    if (pixelDir.dot(it->second.direction) >= it->second.cosAngularRadius) {
+                        CelestialBody::PixelBackup backup;
+                        backup.x = x;
+                        backup.y = y;
+                        backup.data = skybox.getPixel(x, y);
+                        it->second.backup.push_back(std::move(backup));
                         
-                        
+                        skybox.setPixel(x, y, newColor);
                     }
                 }
             }
+            it->second.baked = true;
+        }
 
-            void saveStructure(std::ostream& os) const {
-                os.write(reinterpret_cast<const char*>(&bounds), sizeof(bounds));
-                os.write(reinterpret_cast<const char*>(&center), sizeof(center));
-                os.write(reinterpret_cast<const char*>(&flags), sizeof(flags));
-                
-                uint8_t childMask = 0;
-                for (int i = 0; i < 8; ++i) {
-                    if (children[i]) childMask |= (1 << i);
-                }
-                os.write(reinterpret_cast<const char*>(&childMask), sizeof(childMask));
-                
-                if (!isLeaf()) {
-                    for (int i = 0; i < 8; ++i) {
-                        if (children[i]) children[i]->saveStructure(os);
-                    }
-                }
+        void resetBody(int id) {
+            auto it = bodies.find(id);
+            if (it == bodies.end() || !it->second.baked) return;
+
+            if (skybox.getCompressionType() != frame::compresstype::RAW) {
+                skybox.decompress();
             }
 
-            void loadStructure(std::istream& is) {
-                is.read(reinterpret_cast<char*>(&bounds), sizeof(bounds));
-                is.read(reinterpret_cast<char*>(&center), sizeof(center));
-                is.read(reinterpret_cast<char*>(&flags), sizeof(flags));
-                
-                uint8_t childMask = 0;
-                is.read(reinterpret_cast<char*>(&childMask), sizeof(childMask));
-                
-                if (!isLeaf()) {
-                    for (int i = 0; i < 8; ++i) {
-                        if (childMask & (1 << i)) {
-                            children[i] = std::make_unique<OctreeNode>(PointHigh::Zero(), PointHigh::Zero());
-                            children[i]->loadStructure(is);
-                        }
-                    }
-                }
-                setLoaded(false);
+            for (const auto& backup : it->second.backup) {
+                skybox.setPixel(backup.x, backup.y, backup.data);
             }
-
-            void saveData(const std::filesystem::path& currentDir) {
-                if (isLeaf()) {
-                    if (!isLoaded()) return;
-                    
-                    std::filesystem::create_directories(currentDir);
-                    std::filesystem::path filePath = currentDir / (getRegionName() + ".leaf");
-                    std::ofstream os(filePath, std::ios::binary);
-                    
-                    size_t numPoints = points.size();
-                    os.write(reinterpret_cast<const char*>(&numPoints), sizeof(numPoints));
-                    for (const auto& pt : points) {
-                        pt->serialize(os);
-                    }
-                } else {
-                    std::filesystem::path subDir = currentDir / getRegionName();
-                    std::filesystem::create_directories(subDir);
-                    for (auto& child : children) {
-                        if (child) child->saveData(subDir);
-                    }
-                }
-            }
-
-            void loadData(const std::filesystem::path& currentDir) {
-                if (isLeaf()) {
-                    if (isLoaded()) return;
-                    
-                    std::filesystem::path filePath = currentDir / (getRegionName() + ".leaf");
-                    if (!std::filesystem::exists(filePath)) return;
-                    
-                    std::ifstream is(filePath, std::ios::binary);
-                    size_t numPoints = 0;
-                    is.read(reinterpret_cast<char*>(&numPoints), sizeof(numPoints));
-                    
-                    points.clear();
-                    points.reserve(numPoints);
-                    for (size_t i = 0; i < numPoints; ++i) {
-                        auto pt = std::make_shared<NodeData>();
-                        pt->deserialize(is);
-                        points.push_back(pt);
-                    }
-                    setLoaded(true);
-                } else {
-                    std::filesystem::path subDir = currentDir / getRegionName();
-                    for (auto& child : children) {
-                        if (child) child->loadData(subDir);
-                    }
-                }
-            }
-
-            bool intersectsBounds(const PointHigh& bMin, const PointHigh& bMax) const {
-                return (bounds.bounds[0][0] <= bMax[0] && bounds.bounds[1][0] >= bMin[0]) &&
-                    (bounds.bounds[0][1] <= bMax[1] && bounds.bounds[1][1] >= bMin[1]) &&
-                    (bounds.bounds[0][2] <= bMax[2] && bounds.bounds[1][2] >= bMin[2]);
-            }
-
-            void offloadRegion(const std::filesystem::path& currentDir, const PointHigh& minB, const PointHigh& maxB) {
-                if (!intersectsBounds(minB, maxB)) return;
-                
-                if (isLeaf() && isLoaded()) {
-                    saveData(currentDir); // Write to disk
-                    points.clear();       // Free RAM
-                    points.shrink_to_fit();
-                    setLoaded(false);
-                } else if (!isLeaf()) {
-                    std::filesystem::path subDir = currentDir / getRegionName();
-                    for (auto& child : children) {
-                        if (child) child->offloadRegion(subDir, minB, maxB);
-                    }
-                }
-            }
-
-            void loadRegion(const std::filesystem::path& currentDir, const PointHigh& minB, const PointHigh& maxB) {
-                if (!intersectsBounds(minB, maxB)) return;
-                
-                if (isLeaf() && !isLoaded()) {
-                    loadData(currentDir);
-                } else if (!isLeaf()) {
-                    std::filesystem::path subDir = currentDir / getRegionName();
-                    for (auto& child : children) {
-                        if (child) child->loadRegion(subDir, minB, maxB);
-                    }
-                }
-            }
-
-            bool isEmpty() const {
-                return points.empty();
-            }
-
-            void split(const std::filesystem::path& currentDir = "") {
-                if (!isLeaf()) return;
-                if (!currentDir.empty()) loadData(currentDir);
-
-                PointHigh minB = bounds.bounds[0].template cast<high>();
-                PointHigh maxB = bounds.bounds[1].template cast<high>();
-
-                for (int i = 0; i < 8; ++i) {
-                    PointHigh childMin, childMax;
-                    
-                    childMin[0] = (i & 1) ? center[0] : minB[0];
-                    childMax[0] = (i & 1) ? maxB[0] : center[0];
-                    
-                    childMin[1] = (i & 2) ? center[1] : minB[1];
-                    childMax[1] = (i & 2) ? maxB[1] : center[1];
-                    
-                    childMin[2] = (i & 4) ? center[2] : minB[2];
-                    childMax[2] = (i & 4) ? maxB[2] : center[2];
-
-                    children[i] = std::make_unique<OctreeNode>(childMin, childMax);
-                }
-                setLeaf(false);
-            }
-
-            void insert(const std::shared_ptr<NodeData>& point, const PointHigh& ptAbsCenter, const PointHigh& ptHalfSize, 
-                        size_t maxPoints, size_t maxDepth, size_t currentDepth) {
-                if (!point) return;
-                invalidateLod();
-
-                high childSize = static_cast<high>((bounds.bounds[1] - bounds.bounds[0]).maxCoeff() * 0.5);
-                high ptSize = ptHalfSize.maxCoeff() * 2.0;
-
-                if (!isLeaf() && ptSize >= childSize) {
-                    points.push_back(point);
-                    return;
-                }
-
-                if (isLeaf()) {
-                    points.push_back(point);
-
-                    if (points.size() > maxPoints && currentDepth < maxDepth) {
-                        split();
-
-                        std::vector<std::shared_ptr<NodeData>> keptPoints;
-                        auto currentPoints = std::move(points);
-                        points.clear();
-
-                        for (const auto& p : currentPoints) {
-                            PointHigh pCenter = p->center(this->center).template cast<high>();
-                            PointHigh pHalf = p->getHalfSize().template cast<high>();
-                            high pSz = pHalf.maxCoeff() * 2.0;
-
-                            if (pSz >= childSize) {
-                                keptPoints.push_back(p);
-                            } else {
-                                PointHigh pMin = pCenter - pHalf;
-                                PointHigh pMax = pCenter + pHalf;
-
-                                for (int i = 0; i < 8; ++i) {
-                                    if (children[i]->intersectsBounds(pMin, pMax)) {
-                                        children[i]->insert(p, pCenter, pHalf, maxPoints, maxDepth, currentDepth + 1);
-                                    }
-                                }
-                            }
-                        }
-                        points = std::move(keptPoints);
-                    }
-                } else {
-                    PointHigh pMin = ptAbsCenter - ptHalfSize;
-                    PointHigh pMax = ptAbsCenter + ptHalfSize;
-
-                    for (int i = 0; i < 8; ++i) {
-                        if (children[i]->intersectsBounds(pMin, pMax)) {
-                            children[i]->insert(point, ptAbsCenter, ptHalfSize, maxPoints, maxDepth, currentDepth + 1);
-                        }
-                    }
-                }
-            }
+            
+            it->second.backup.clear();
+            it->second.backup.shrink_to_fit();
+            it->second.baked = false;
+        }
     };
+
 private:
-    std::unique_ptr<OctreeNode> root_;
-    size_t maxDepth;
-    size_t size;
-    size_t maxPointsPerNode;
+    std::unique_ptr<OctreeNode<T, IndexSize, high, medium, low>> root_;
+    size_t maxDepth = 16;
+    size_t size = 0;
+    size_t maxPointsPerNode = 8;
+    float lodFalloffRate = 0.01f;
+    float lodMinDistance = 1000.0f;
+    float maxDistance = lodMinDistance * 10;
     
     std::map<IndexSize, Eigen::Vector3f> colorMap;
     std::shared_mutex colormutex;
@@ -522,6 +287,7 @@ private:
     Eigen::Vector3f globalColor;
     float globalIntensity;
     std::filesystem::path storageBasePath;
+    Skybox skybox;
 
     struct SpatialUsage {
         PointHigh sumPos = PointHigh::Zero();
@@ -549,7 +315,7 @@ private:
         return (xx * 4) + (yy * 2) + zz;
     }
 
-    void accumulateUsage(const OctreeNode* node, 
+    void accumulateUsage(const OctreeNode<T, IndexSize, high, medium, low>* node, 
                          std::map<IndexSize, SpatialUsage>& cUsage,
                          std::map<IndexSize, SpatialUsage>& mUsage) const {
         if (!node) return;
@@ -584,7 +350,7 @@ private:
             remapTreeIndices(child.get(), cRemap, mRemap);
         }
     }
-    void checkColorUsage(const OctreeNode* node, std::unordered_set<IndexSize>& usedColors) const {
+    void checkColorUsage(const OctreeNode<T, IndexSize, high, medium, low>* node, std::unordered_set<IndexSize>& usedColors) const {
         if (!node) return;
         for (const auto& point: node->points) {
             if (point) usedColors.insert(point->getColorIDX());
@@ -659,7 +425,6 @@ private:
         dist += (a.rgb.template cast<float>() - b.rgb.template cast<float>()).norm();
         return dist;
     }
-
 public:
     void optimize() {
         std::unique_lock<std::shared_mutex> lock_c(colormutex, std::defer_lock);
@@ -802,7 +567,7 @@ public:
         }
 
         if (materialMap.size() == MAX_INDEX) {
-            optimizeMaterialMapLocked();
+            optimizeMaterialMap();
         }
 
         if (materialMap.size() >= MAX_INDEX) {
@@ -866,6 +631,7 @@ public:
             materialMap[idx] = mat;
         }
     }
+    
     void save() {
         if (storageBasePath.empty()) return;
         std::filesystem::create_directories(storageBasePath);
@@ -879,6 +645,7 @@ public:
             
             root_->saveData(storageBasePath);
         }
+        saveSkybox();
     }
 
     void loadAll(bool loadPayloadsIntoMemory = false) {
@@ -888,13 +655,14 @@ public:
         
         std::ifstream is(storageBasePath / "tree_struct.bin", std::ios::binary);
         if (is) {
-            root_ = std::make_unique<OctreeNode>(PointHigh::Zero(), PointHigh::Zero());
+            root_ = std::make_unique<OctreeNode<T, IndexSize, high, medium, low>>(PointHigh::Zero(), PointHigh::Zero());
             root_->loadStructure(is);
             is.close();
             if (loadPayloadsIntoMemory) {
                 root_->loadData(storageBasePath);
             }
         }
+        loadSkybox();
     }
 
     void offloadRegion(const PointHigh& minBounds, const PointHigh& maxBounds) {
@@ -907,6 +675,344 @@ public:
         if (root_ && !storageBasePath.empty()) {
             root_->loadRegion(storageBasePath, minBounds, maxBounds);
         }
+    }
+
+    bool set(const PointHigh& pos, const T& data, float ptSize = 0.01f, 
+             const Eigen::Vector3f& color = Eigen::Vector3f(1,1,1), 
+             const Material& mat = Material(), bool visible = true, 
+             bool active = true, int objectId = -1, bool staticNode = false,
+             const Eigen::Quaternion<low>& orientation = Eigen::Quaternion<low>::Identity()) {
+        if (!root_) return false;
+        IndexSize cIdx = getColorIndex(color);
+        IndexSize mIdx = getMaterialIndex(mat);
+        
+        auto node = std::make_shared<NodeData<T, IndexSize, high, medium, low>>(
+            data, PointLow::Zero(), visible, cIdx, ptSize, active, objectId, mIdx, staticNode);
+        node->setOrientation(orientation);
+        
+        PointHigh halfSize = PointHigh::Constant(ptSize * 0.5);
+        root_->insert(node, pos, halfSize, maxPointsPerNode, maxDepth, 0);
+        this->size++;
+        return true;
+    }
+
+    bool update(const PointHigh& pos, const T& newData) {
+        auto pt = find(pos);
+        if (pt) {
+            pt->setData(newData);
+            return true;
+        }
+        return false;
+    }
+
+    bool update(const PointHigh& pos, const T& newData, float ptSize, 
+                const Eigen::Vector3f& color, const Material& mat, 
+                bool visible, bool active, int objectId, bool staticNode,
+                const Eigen::Quaternion<low>& orientation) {
+        auto pt = find(pos);
+        if (pt) {
+            pt->setData(newData);
+            pt->setColorIdx(getColorIndex(color));
+            pt->setMaterialIDX(getMaterialIndex(mat));
+            pt->setVisible(visible);
+            pt->setActive(active);
+            pt->setObjectId(objectId);
+            pt->setStatic(staticNode);
+            pt->setOrientation(orientation);
+            
+            if (std::abs(pt->getHalfSize().x() * 2.0f - ptSize) > 1e-5) {
+                pt->setSize(ptSize);
+                remove(pos);
+                PointHigh halfSize = PointHigh::Constant(ptSize * 0.5);
+                root_->insert(pt, pos, halfSize, maxPointsPerNode, maxDepth, 0);
+                this->size++;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    bool setDebugColor(const PointHigh& pos, const Eigen::Vector3f& color) {
+        auto pt = find(pos);
+        if (pt) {
+            pt->setColorIdx(getColorIndex(color));
+            return true;
+        }
+        return false;
+    }
+
+    bool setColor(const PointHigh& pos, const Eigen::Vector3f& color, const Material& mat) {
+        auto pt = find(pos);
+        if (pt) {
+            pt->setColorIdx(getColorIndex(color));
+            pt->setMaterialIDX(getMaterialIndex(mat));
+            return true;
+        }
+        return false;
+    }
+
+    bool setColor(const PointHigh& pos, const Eigen::Vector3f& color) {
+        auto pt = find(pos);
+        if (pt) {
+            pt->setColorIdx(getColorIndex(color));
+            return true;
+        }
+        return false;
+    }
+
+    bool setMaterial(const PointHigh& pos, const Material& mat) {
+        auto pt = find(pos);
+        if (pt) {
+            pt->setMaterialIDX(getMaterialIndex(mat));
+            return true;
+        }
+        return false;
+    }
+
+    bool move(const PointHigh& oldPos, const PointHigh& newPos) {
+        if (!root_) return false;
+        auto pt = root_->remove(oldPos);
+        if (pt) {
+            PointHigh halfSize = pt->getHalfSize().template cast<high>();
+            root_->insert(pt, newPos, halfSize, maxPointsPerNode, maxDepth, 0);
+            return true;
+        }
+        return false;
+    }
+
+    bool remove(const PointHigh& pos, int objectId = -1) {
+        if (!root_) return false;
+        auto pt = root_->remove(pos, objectId);
+        if (pt) {
+            this->size--;
+            return true;
+        }
+        return false;
+    }
+
+    bool setVisible(const PointHigh& pos, bool visible) {
+        auto pt = find(pos);
+        if (pt) {
+            pt->setVisible(visible);
+            return true;
+        }
+        return false;
+    }
+
+    bool setActive(const PointHigh& pos, bool active) {
+        auto pt = find(pos);
+        if (pt) {
+            pt->setActive(active);
+            return true;
+        }
+        return false;
+    }
+    
+    bool resize(const PointHigh& pos, float newSize) {
+        if (!root_) return false;
+        auto pt = root_->remove(pos);
+        if (pt) {
+            pt->setSize(newSize);
+            PointHigh halfSize = PointHigh::Constant(newSize * 0.5);
+            root_->insert(pt, pos, halfSize, maxPointsPerNode, maxDepth, 0);
+            return true;
+        }
+        return false;
+    }
+
+    bool rotate(const PointHigh& pos, const Eigen::Quaternion<low>& newRot) {
+        auto pt = find(pos);
+        if (pt) {
+            pt->setOrientation(newRot);
+            return true;
+        }
+        return false;
+    }
+
+    std::shared_ptr<NodeData<T, IndexSize, high, medium, low>> find(const PointHigh& pos) const {
+        if (!root_) return nullptr;
+        return root_->find(pos);
+    }
+
+    std::shared_ptr<NodeData<T, IndexSize, high, medium, low>> find(const PointHigh& pos, int objectId) const {
+        if (!root_) return nullptr;
+        return root_->find(pos, objectId);
+    }
+
+    std::vector<std::shared_ptr<NodeData<T, IndexSize, high, medium, low>>> findradius(const PointHigh& center, high radius) const {
+        std::vector<std::shared_ptr<NodeData<T, IndexSize, high, medium, low>>> result;
+        if (root_) root_->findRadius(center, radius, result);
+        return result;
+    }
+
+    std::vector<std::shared_ptr<NodeData<T, IndexSize, high, medium, low>>> findObject(int objectId) const {
+        std::vector<std::shared_ptr<NodeData<T, IndexSize, high, medium, low>>> result;
+        if (root_) root_->findObject(objectId, result);
+        return result;
+    }
+
+    bool moveObjectBy(int objectId, const PointHigh& offset) {
+        if (!root_) return false;
+        std::vector<std::pair<std::shared_ptr<NodeData<T, IndexSize, high, medium, low>>, PointHigh>> pts;
+        root_->removeObject(objectId, pts);
+        if (pts.empty()) return false;
+        
+        for (auto& pair : pts) {
+            PointHigh newPos = pair.second + offset;
+            PointHigh halfSize = pair.first->getHalfSize().template cast<high>();
+            root_->insert(pair.first, newPos, halfSize, maxPointsPerNode, maxDepth, 0);
+        }
+        return true;
+    }
+
+    bool saveSkybox() {
+        if (storageBasePath.empty()) return false;
+        std::filesystem::path p = storageBasePath / "skybox.bin";
+        std::ofstream os(p, std::ios::binary);
+        if (!os) return false;
+
+        size_t numBodies = skybox.bodies.size();
+        os.write(reinterpret_cast<const char*>(&numBodies), sizeof(numBodies));
+        for (const auto& kv : skybox.bodies) {
+            os.write(reinterpret_cast<const char*>(&kv.first), sizeof(kv.first));
+            os.write(reinterpret_cast<const char*>(&kv.second.direction), sizeof(PointMedium));
+            os.write(reinterpret_cast<const char*>(&kv.second.angularRadius), sizeof(float));
+            os.write(reinterpret_cast<const char*>(&kv.second.r), sizeof(uint8_t));
+            os.write(reinterpret_cast<const char*>(&kv.second.g), sizeof(uint8_t));
+            os.write(reinterpret_cast<const char*>(&kv.second.b), sizeof(uint8_t));
+            os.write(reinterpret_cast<const char*>(&kv.second.emittance), sizeof(uint8_t));
+        }
+        os.write(reinterpret_cast<const char*>(&skybox.skyRotation), sizeof(skybox.skyRotation));
+        return true;
+    }
+
+    bool loadSkybox() {
+        if (storageBasePath.empty()) return false;
+        std::filesystem::path p = storageBasePath / "skybox.bin";
+        if (!std::filesystem::exists(p)) return false;
+        
+        std::ifstream is(p, std::ios::binary);
+        if (!is) return false;
+
+        size_t numBodies = 0;
+        is.read(reinterpret_cast<char*>(&numBodies), sizeof(numBodies));
+        skybox.bodies.clear();
+        for (size_t i = 0; i < numBodies; i++) {
+            int id;
+            PointMedium dir;
+            float angRad;
+            uint8_t r, g, b, e;
+            is.read(reinterpret_cast<char*>(&id), sizeof(id));
+            is.read(reinterpret_cast<char*>(&dir), sizeof(PointMedium));
+            is.read(reinterpret_cast<char*>(&angRad), sizeof(float));
+            is.read(reinterpret_cast<char*>(&r), sizeof(uint8_t));
+            is.read(reinterpret_cast<char*>(&g), sizeof(uint8_t));
+            is.read(reinterpret_cast<char*>(&b), sizeof(uint8_t));
+            is.read(reinterpret_cast<char*>(&e), sizeof(uint8_t));
+            skybox.addBody(id, dir, angRad, r, g, b, e);
+        }
+        is.read(reinterpret_cast<char*>(&skybox.skyRotation), sizeof(skybox.skyRotation));
+        return true;
+    }
+
+    bool clear() {
+        size = 0;
+        colorMap.clear();
+        materialMap.clear();
+        return true;
+    }
+
+    void setLODFalloff(float rate) {
+        lodFalloffRate = rate;
+    }
+    void setLODMinDistance(float dist) {
+        lodMinDistance = dist;
+    }
+    void setMaxDistance(float dist) {
+        maxDistance = dist;
+    }
+
+    void addSkyboxBody(int id, const PointMedium& dir, float angularRadius, uint8_t r, uint8_t g, uint8_t b, uint8_t emittance) {
+        skybox.addBody(id, dir, angularRadius, r, g, b, emittance);
+    }
+    
+    void removeSkyboxBody(int id) {
+        skybox.removeBody(id);
+    }
+    
+    void moveSkyboxBody(int id, const PointMedium& newDir) {
+        skybox.moveBody(id, newDir);
+    }
+    
+    void bakeSkyboxBody(int id) {
+        skybox.bakeBody(id);
+    }
+    
+    void setSkyboxBackground(float r, float g, float b, float e) {
+        skybox.setBackground(r, g, b, e);
+    }
+
+    void printStats(std::ostream& os = std::cout) const {
+        if (!root_) return;
+        size_t totalNodes = 0, leafNodes = 0, lodGeneratedNodes = 0, maxTreeDepth = 0, actualPoints = 0;
+        size_t minPointsInLeaf = std::numeric_limits<size_t>::max();
+        size_t maxPointsInLeaf = 0;
+        
+        auto collectStats = [&](auto& self, const OctreeNode<T, IndexSize, high, medium, low>* node, size_t depth) -> void {
+            if (!node) return;
+            totalNodes++;
+            maxTreeDepth = std::max(maxTreeDepth, depth);
+            if (node->isLeaf()) {
+                leafNodes++;
+                actualPoints += node->points.size();
+                minPointsInLeaf = std::min(minPointsInLeaf, node->points.size());
+                maxPointsInLeaf = std::max(maxPointsInLeaf, node->points.size());
+            }
+            if (node->isLodValid()) lodGeneratedNodes++;
+            for (int i = 0; i < 8; ++i) {
+                self(self, node->children[i].get(), depth + 1);
+            }
+        };
+        
+        collectStats(collectStats, root_.get(), 0);
+        
+        if (minPointsInLeaf == std::numeric_limits<size_t>::max()) minPointsInLeaf = 0;
+        double avgPointsPerLeaf = leafNodes > 0 ? static_cast<double>(actualPoints) / leafNodes : 0;
+        
+        size_t nodeMem = totalNodes * sizeof(OctreeNode<T, IndexSize, high, medium, low>);
+        size_t dataMem = actualPoints * sizeof(NodeData<T, IndexSize, high, medium, low>);
+        size_t mapMem = colorMap.size() * (sizeof(IndexSize) + sizeof(Eigen::Vector3f)) + materialMap.size() * (sizeof(IndexSize) + sizeof(Material));
+
+        os << "========================================\n";
+        os << "             OCTREE STATS               \n";
+        os << "========================================\n";
+        os << "Config:\n";
+        os << "  Max Depth Allowed : " << maxDepth << "\n";
+        os << "  Max Pts Per Node  : " << maxPointsPerNode << "\n";
+        os << "  LOD Falloff Rate  : " << lodFalloffRate << "\n";
+        os << "  LOD Min Distance  : " << lodMinDistance << "\n";
+        os << "Structure:\n";
+        os << "  Total Nodes       : " << totalNodes << "\n";
+        os << "  Leaf Nodes        : " << leafNodes << "\n";
+        os << "  Non-Leaf Nodes    : " << (totalNodes - leafNodes) << "\n";
+        os << "  LODs Generated    : " << lodGeneratedNodes << "\n";
+        os << "  Tree Height       : " << maxTreeDepth << "\n";
+        os << "Data:\n";
+        os << "  Total Points      : " << size << " (Tracked) / " << actualPoints << " (Counted)\n";
+        os << "  Points/Leaf (Avg) : " << std::fixed << std::setprecision(2) << avgPointsPerLeaf << "\n";
+        os << "  Points/Leaf (Min) : " << minPointsInLeaf << "\n";
+        os << "  Points/Leaf (Max) : " << maxPointsInLeaf << "\n";
+        os << "Maps:\n";
+        os << "  Unique Colors     : " << colorMap.size() << "/" << MAX_INDEX << "\n";
+        os << "  Unique Materials  : " << materialMap.size() << "/" << MAX_INDEX << "\n";
+        os << "Bounds:\n";
+        os << "  Min               : [" << root_->bounds.bounds[0].transpose() << "]\n";
+        os << "  Max               : [" << root_->bounds.bounds[1].transpose() << "]\n";
+        os << "Memory (Approx):\n";
+        os << "  Node Structure    : " << (nodeMem / 1024.0) << " KB\n";
+        os << "  Point Data        : " << (dataMem / 1024.0) << " KB\n";
+        os << "  Dictionary Maps   : " << (mapMem / 1024.0) << " KB\n";
+        os << "========================================\n" << std::defaultfloat;
     }
 };
 
