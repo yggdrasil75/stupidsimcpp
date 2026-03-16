@@ -4,6 +4,8 @@
 #include "../../eigen/Eigen/Dense"
 #include "colors.hpp"
 
+using ev3fh = Eigen::Matrix<Eigen::half, 3, 1>;
+
 struct Material {
     float ior;
     float dispersion;
@@ -16,7 +18,7 @@ struct Material {
     float density;
     float speedOfSound;
     float audioAbsorption;
-    Eigen::Vector3f rgb;
+    ev3fh rgb;
 
     Material(float ior = 1.5f, float dispersion = 0.0f, float chromaticity = 550.0f, 
              float bandwidth = 100.0f, float transmission = 0.0f, float roughness = 0.8f, 
@@ -41,7 +43,7 @@ struct Material {
         float bandwidth = 10.0f + (1.0f - saturation) * 290.0f;
 
         Material outerial(ior, 0.02f, wavelength, bandwidth, transmission, roughness, emittance, 2.0f, 3000.0f, 0.1f, isLight);
-        outerial.rgb = Eigen::Vector3f(r, g, b);
+        outerial.rgb = Eigen::Vector3f(r, g, b).cast<Eigen::half>();
         return outerial;
     }
 };
