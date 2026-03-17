@@ -9,8 +9,21 @@
 template<typename T, typename IndexSize = uint16_t, typename high = double, typename medium = float, typename low = Eigen::half>
 class Octree;
 
+class BoundingBox;
+class OBoundingBox : BoundingBox;
+class Ray;
+
+static constexpr uint8_t NODE_LEAF_BIT = 1 << 0;
+static constexpr uint8_t NODE_LOADED_BIT = 1 << 1;
+static constexpr uint8_t NODE_LOD_VALID_BIT = 1 << 2;
+
 template<typename T, typename IndexSize, typename high, typename medium, typename low>
-struct OctreeNode {
+struct OctreeNode_ {
+    using PointMax = Eigen::Matrix<long double, 3, 1>;
+    using PointHigh = Eigen::Matrix<high, 3, 1>;
+    using PointMedium = Eigen::Matrix<medium, 3, 1>;
+    using PointLow = Eigen::Matrix<low, 3, 1>;
+
     private:
         typename Octree<T, IndexSize, high, medium, low>::BoundingBox bounds;
         PointHigh center;
@@ -27,16 +40,16 @@ struct OctreeNode {
             val ? (flags |= NODE_LOADED_BIT) : (flags &= ~NODE_LOADED_BIT);
         }
     public:
-        std::vector<std::shared_ptr<NodeData<T, IndexSize, high, medium, low>>> points;
-        std::array<std::unique_ptr<OctreeNode>, 8> children;
+        std::vector<std::shared_ptr<NodeData_<T, IndexSize, high, medium, low>>> points;
+        std::array<std::unique_ptr<OctreeNode_>, 8> children;
         uint8_t flags;
         
-        mutable std::shared_ptr<NodeData<T, IndexSize, high, medium, low>> lodData;
+        mutable std::shared_ptr<NodeData_<T, IndexSize, high, medium, low>> lodData;
         mutable std::mutex lodMutex; 
 
-        OctreeNode(const PointHigh& min, const PointHigh& max) : flags(NODE_LEAF_BIT | NODE_LOADED_BIT), lodData(nullptr) {
-            bounds.bounds[0] = min;
-            bounds.bounds[1] = max;
+        OctreeNode_(const PointHigh& min, const PointHigh& max) : flags(NODE_LEAF_BIT | NODE_LOADED_BIT), lodData(nullptr) {
+            bounds.bounds[0] = min.template cast<medium>();
+            bounds.bounds[1] = max.template cast<medium>();
             center = (min + max) * 0.5;
         }
 
@@ -50,6 +63,18 @@ struct OctreeNode {
         
         inline bool isLodValid() const { 
             return flags & NODE_LOD_VALID_BIT;
+        }
+
+        inline bool isStatic() const {
+            for (const auto& pt : points) {
+                if (pt && !pt->isStatic()) return false;
+            }
+            if (!isLeaf()) {
+                for (int i = 0; i < 8; ++i) {
+                    if (children[i] && !children[i]->isStatic()) return false;
+                }
+            }
+            return true;
         }
         
         inline void invalidateLod() {
@@ -71,26 +96,10 @@ struct OctreeNode {
         void generateLod() const {
             if (isLodValid()) return;
             std::lock_guard<std::mutex> lock(lodMutex);
-            if (isLodValid()) return; 
-
-            if (isLeaf()) {
-                if (points.empty()) {
-                    lodData = nullptr;
-                } else {
-                    PointHigh avgPos = PointHigh::Zero();
-                    std::unordered_map<IndexSize, int> colors;
-                    std::unordered_map<IndexSize, int> mats;
-                    for (const auto& p : points) {
-                        avgPos += p->center(this->center).template cast<high>();
-                        colors[p->getColorIDX()]++;
-                        mats[p->getMaterialIDX()]++;
-                    }
-
-                    size_t count = points.size();
-                    avgPos /= static_cast<high>(count);
-                    
-                    ///TODO: average colors and average materials
-                }
+            
+            if (!isEmpty()) {
+                ///TODO: average children recursively, average points in this node.
+                ///ignore unless active and visible
             }
         }
 
@@ -123,7 +132,7 @@ struct OctreeNode {
             if (!isLeaf()) {
                 for (int i = 0; i < 8; ++i) {
                     if (childMask & (1 << i)) {
-                        children[i] = std::make_unique<OctreeNode>(PointHigh::Zero(), PointHigh::Zero());
+                        children[i] = std::make_unique<OctreeNode_>(PointHigh::Zero(), PointHigh::Zero());
                         children[i]->loadStructure(is);
                     }
                 }
@@ -167,7 +176,7 @@ struct OctreeNode {
                 points.clear();
                 points.reserve(numPoints);
                 for (size_t i = 0; i < numPoints; ++i) {
-                    auto pt = std::make_shared<NodeData<T, IndexSize, high, medium, low>>();
+                    auto pt = std::make_shared<NodeData_<T, IndexSize, high, medium, low>>();
                     pt->deserialize(is);
                     points.push_back(pt);
                 }
@@ -216,7 +225,13 @@ struct OctreeNode {
         }
 
         bool isEmpty() const {
-            return points.empty();
+            if (!points.empty()) return false;
+            if (!isLeaf()) {
+                for (int i = 0; i < 8; ++i) {
+                    if (children[i] && !children[i]->isEmpty()) return false;
+                }
+            }
+            return true;
         }
 
         void split(const std::filesystem::path& currentDir = "") {
@@ -238,12 +253,12 @@ struct OctreeNode {
                 childMin[2] = (i & 4) ? center[2] : minB[2];
                 childMax[2] = (i & 4) ? maxB[2] : center[2];
 
-                children[i] = std::make_unique<OctreeNode>(childMin, childMax);
+                children[i] = std::make_unique<OctreeNode_>(childMin, childMax);
             }
             setLeaf(false);
         }
 
-        void insert(const std::shared_ptr<NodeData<T, IndexSize, high, medium, low>>& point, const PointHigh& ptAbsCenter, const PointHigh& ptHalfSize, 
+        void insert(const std::shared_ptr<NodeData_<T, IndexSize, high, medium, low>>& point, const PointHigh& ptAbsCenter, const PointHigh& ptHalfSize, 
                     size_t maxPoints, size_t maxDepth, size_t currentDepth) {
             if (!point) return;
             invalidateLod();
@@ -264,7 +279,7 @@ struct OctreeNode {
                 if (points.size() > maxPoints && currentDepth < maxDepth) {
                     split();
 
-                    std::vector<std::shared_ptr<NodeData<T, IndexSize, high, medium, low>>> keptPoints;
+                    std::vector<std::shared_ptr<NodeData_<T, IndexSize, high, medium, low>>> keptPoints;
                     auto currentPoints = std::move(points);
                     points.clear();
 
@@ -315,7 +330,7 @@ struct OctreeNode {
             }
         }
 
-        std::shared_ptr<NodeData<T, IndexSize, high, medium, low>> find(const PointHigh& pos, int objectId = -1) const {
+        std::shared_ptr<NodeData_<T, IndexSize, high, medium, low>> find(const PointHigh& pos, int objectId = -1) const {
             if (!contains(pos)) return nullptr;
             
             for (const auto& pt : points) {
@@ -336,8 +351,8 @@ struct OctreeNode {
             return nullptr;
         }
 
-        void findRadius(const PointHigh& centerPos, high radius, std::vector<std::shared_ptr<NodeData<T, IndexSize, high, medium, low>>>& result) const {
-            if (!intersectsSphere(centerPos, radius)) return;
+        void findRadius(const PointHigh& centerPos, high radius, std::vector<std::shared_ptr<NodeData_<T, IndexSize, high, medium, low>>>& result) const {
+            // if (!intersectsSphere(centerPos, radius)) return;
             
             high r2 = radius * radius;
             for (const auto& pt : points) {
@@ -352,7 +367,7 @@ struct OctreeNode {
             }
         }
 
-        void findObject(int objectId, std::vector<std::shared_ptr<NodeData<T, IndexSize, high, medium, low>>>& result) const {
+        void findObject(int objectId, std::vector<std::shared_ptr<NodeData_<T, IndexSize, high, medium, low>>>& result) const {
             for (const auto& pt : points) {
                 if (pt->getObjectId() == objectId) {
                     result.push_back(pt);
@@ -365,7 +380,7 @@ struct OctreeNode {
             }
         }
 
-        std::shared_ptr<NodeData<T, IndexSize, high, medium, low>> remove(const PointHigh& pos, int objectId = -1) {
+        std::shared_ptr<NodeData_<T, IndexSize, high, medium, low>> remove(const PointHigh& pos, int objectId = -1) {
             if (!contains(pos)) return nullptr;
             
             for (auto it = points.begin(); it != points.end(); ++it) {
@@ -388,7 +403,7 @@ struct OctreeNode {
             return nullptr;
         }
 
-        void removeObject(int objectId, std::vector<std::pair<std::shared_ptr<NodeData<T, IndexSize, high, medium, low>>, PointHigh>>& removed) {
+        void removeObject(int objectId, std::vector<std::pair<std::shared_ptr<NodeData_<T, IndexSize, high, medium, low>>, PointHigh>>& removed) {
             for (auto it = points.begin(); it != points.end(); ) {
                 if ((*it)->getObjectId() == objectId) {
                     removed.push_back({*it, (*it)->center(this->center).template cast<high>()});

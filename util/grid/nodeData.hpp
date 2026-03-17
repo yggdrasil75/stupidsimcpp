@@ -5,8 +5,22 @@
 template<typename T, typename IndexSize = uint16_t, typename high = double, typename medium = float, typename low = Eigen::half>
 class Octree;
 
+class BoundingBox;
+class OBoundingBox;
+class Ray;
+
+static constexpr uint8_t ACTIVE_BIT = 1 << 0;
+static constexpr uint8_t VISIBLE_BIT = 1 << 1;
+//gap for future options. static is last because it generally will be set once and never changed, but the rest might be changed
+static constexpr uint8_t STATIC_BIT = 1 << 7;
+
 template<typename T, typename IndexSize, typename high, typename medium, typename low>
-class NodeData {
+class NodeData_ {
+    using PointMax = Eigen::Matrix<long double, 3, 1>;
+    using PointHigh = Eigen::Matrix<high, 3, 1>;
+    using PointMedium = Eigen::Matrix<medium, 3, 1>;
+    using PointLow = Eigen::Matrix<low, 3, 1>;
+
     T data;
     private:
         PointLow position;
@@ -19,7 +33,7 @@ class NodeData {
         uint8_t flags;
         
     public:
-        NodeData(const T& data, const PointLow& pos, bool visible, IndexSize colorIDX, float size = 0.01f,
+        NodeData_(const T& data, const PointLow& pos, bool visible, IndexSize colorIDX, float size = 0.01f,
                 bool active = true, int objectId = -1, IndexSize materialIdx = 0, bool staticnode = false)
                 : data(data), position(pos), objectId(objectId), size(static_cast<low>(size)), 
                 colorIDX(colorIDX), materialIDX(materialIdx), flags(0) {
@@ -29,7 +43,7 @@ class NodeData {
                     orientation.setIdentity();
                 }
         
-        NodeData() : objectId(-1), size(0.0), colorIDX(0), materialIDX(0), flags(0) {
+        NodeData_() : objectId(-1), size(0.0), colorIDX(0), materialIDX(0), flags(0) {
             orientation.setIdentity();
         }
 

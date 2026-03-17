@@ -26,14 +26,7 @@
 #include <immintrin.h>
 #endif
 
-static constexpr uint8_t ACTIVE_BIT = 1 << 0;
-static constexpr uint8_t VISIBLE_BIT = 1 << 1;
-//gap for future options. static is last because it generally will be set once and never changed, but the rest might be changed
-static constexpr uint8_t STATIC_BIT = 1 << 7;
 
-static constexpr uint8_t NODE_LEAF_BIT = 1 << 0;
-static constexpr uint8_t NODE_LOADED_BIT = 1 << 1;
-static constexpr uint8_t NODE_LOD_VALID_BIT = 1 << 2;
 
 template<typename T, typename IndexSize = uint16_t, typename high = double, typename medium = float, typename low = Eigen::half>
 class Octree {
@@ -42,6 +35,8 @@ public:
     using PointHigh = Eigen::Matrix<high, 3, 1>;
     using PointMedium = Eigen::Matrix<medium, 3, 1>;
     using PointLow = Eigen::Matrix<low, 3, 1>;
+    using OctreeNode = OctreeNode_<T, IndexSize, high, medium, low>;
+    using NodeData = NodeData_<T, IndexSize, high, medium, low>;
 
     struct Ray {
         PointMedium origin;
@@ -49,6 +44,7 @@ public:
         PointMedium invDir;
         uint8_t sign[3];
         uint8_t signMask;
+        float dist;
         Ray(const PointMedium& orig, const PointMedium& dir) : origin(orig), dir(dir) {
             invDir = dir.cwiseInverse();
             sign[0] = (invDir[0] < 0);
@@ -271,11 +267,12 @@ public:
     };
 
 private:
-    std::unique_ptr<OctreeNode<T, IndexSize, high, medium, low>> root_;
+    std::unique_ptr<OctreeNode> root_;
     size_t maxDepth = 16;
     size_t size = 0;
     size_t maxPointsPerNode = 8;
     float lodFalloffRate = 0.01f;
+    float invlodf;
     float lodMinDistance = 1000.0f;
     float maxDistance = lodMinDistance * 10;
     
@@ -315,7 +312,7 @@ private:
         return (xx * 4) + (yy * 2) + zz;
     }
 
-    void accumulateUsage(const OctreeNode<T, IndexSize, high, medium, low>* node, 
+    void accumulateUsage(const OctreeNode* node, 
                          std::map<IndexSize, SpatialUsage>& cUsage,
                          std::map<IndexSize, SpatialUsage>& mUsage) const {
         if (!node) return;
@@ -350,7 +347,8 @@ private:
             remapTreeIndices(child.get(), cRemap, mRemap);
         }
     }
-    void checkColorUsage(const OctreeNode<T, IndexSize, high, medium, low>* node, std::unordered_set<IndexSize>& usedColors) const {
+    
+    void checkColorUsage(const OctreeNode* node, std::unordered_set<IndexSize>& usedColors) const {
         if (!node) return;
         for (const auto& point: node->points) {
             if (point) usedColors.insert(point->getColorIDX());
@@ -395,17 +393,17 @@ private:
     }
 
     IndexSize getNextAvailableColorID() const {
-        for (IndexSize i = 0; i < MAX_INDEX; ++i) {
+        for (IndexSize i = 0; i < std::numeric_limits<IndexSize>::max(); ++i) {
             if (colorMap.find(i) == colorMap.end()) return i;
         }
-        return MAX_INDEX;
+        return std::numeric_limits<IndexSize>::max();
     }
 
     IndexSize getNextAvailableMaterialId() const {
-        for (IndexSize i = 0; i < MAX_INDEX; ++i) {
+        for (IndexSize i = 0; i < std::numeric_limits<IndexSize>::max(); ++i) {
             if (materialMap.find(i) == materialMap.end()) return i;
         }
-        return MAX_INDEX;
+        return std::numeric_limits<IndexSize>::max();
     }
 
     inline float calculateMaterialDistance(const Material& a, const Material& b) const {
@@ -425,7 +423,308 @@ private:
         dist += (a.rgb.template cast<float>() - b.rgb.template cast<float>()).norm();
         return dist;
     }
+
+    float randomValueNormalDistribution(uint32_t& state) {
+        std::mt19937 gen(state);
+        state = gen();
+        std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+        float θ = 2 * M_PI * dist(gen);
+        float ρ = sqrt(-2 * log(dist(gen)));
+        return ρ * cos(θ);
+    }
+
+    PointType randomInHemisphere(const PointType& normal, uint32_t& state) {
+        float x = randomValueNormalDistribution(state);
+        float y = randomValueNormalDistribution(state);
+        float z = randomValueNormalDistribution(state);
+        PointType randomDir(x, y, z);
+        randomDir.normalize();
+        
+        if (randomDir.dot(normal) < 0.0f) {
+            return -randomDir;
+        }
+        return randomDir;
+    }
+
+    bool rayCubeIntersect(const Ray& ray, const NodeData* pointData, const PointMedium& nodeCenter, float& tHit, PointMedium& normal) const {
+        OBoundingBox obb = pointData->getCubeBounds(nodeCenter.template cast<high>());
+        float tMin, tMax;
+        if (obb.intersect(ray, tMin, tMax)) {
+            if (tMax < 0.0f) return false;
+            tHit = tMin >= 0.0f ? tMin : tMax;
+            
+            // Re-project position to abstract bounds to interpret standard discrete bounding normal.
+            PointMedium hitPoint = ray.origin + ray.dir * tHit;
+            PointMedium localHit = obb.orientation.conjugate().template cast<medium>() * (hitPoint - obb.center);
+            PointMedium absLocalHit = localHit.cwiseAbs();
+            
+            PointMedium dist = obb.extents - absLocalHit;
+            PointMedium localNormal = PointMedium::Zero();
+            
+            // Assign Normal based on the smallest distance to the local oriented plane
+            if (dist.x() <= dist.y() && dist.x() <= dist.z()) {
+                localNormal.x() = localHit.x() > 0 ? 1 : -1;
+            } else if (dist.y() <= dist.x() && dist.y() <= dist.z()) {
+                localNormal.y() = localHit.y() > 0 ? 1 : -1;
+            } else {
+                localNormal.z() = localHit.z() > 0 ? 1 : -1;
+            }
+            
+            normal = (obb.orientation.template cast<medium>() * localNormal).normalized();
+            return true;
+        }
+        return false;
+    }
+
+    std::shared_ptr<NodeData> voxelTraverse(const Ray& ray, PointMedium& hitNormal, bool enableLod = true) const {
+        std::shared_ptr<NodeData> hit;
+        float tMin, tMax;
+        float newMax = maxDistance - ray.dist;
+        if (root_->bounds.intersect(ray, tMin, tMax)) {
+            tMax = std::min(tMax, newMax);
+            voxelTraverseRecursive(root_.get(), tMin, tMax, newMax, enableLod, ray, hit, hitNormal);
+        }
+        return hit;
+    }
+
+    void voxelTraverseRecursive(OctreeNode* node, float tMin, float tMax, float& maxDist, bool enableLod, const Ray& ray, std::shared_ptr<NodeData>& hit, PointMedium& hitNormal) const {
+        if (enableLod && !node->isLeaf()) {
+            float dist = (node->center - ray.origin).norm();
+            float ratio = dist / (node->bounds.bounds[1] - node->bounds.bounds[0]).maxCoeff();
+            if (node->lodData && dist > lodMinDistance && ratio > invlodf) {
+                float t;
+                PointMedium n;
+                if (rayCubeIntersect(ray, node->lodData.get(), t, n)) {
+                    if (t >= 0 && t <= maxDist) {
+                        hit = node->lodData;
+                        hitNormal = n;
+                        maxDist = t;
+                        return;
+                    }
+                }
+            }
+        }
+
+        for (const auto& pointData : node->points) {
+            if (!pointData->isActiveAndVisible()) continue;
+
+            float t;
+            PointMedium n;
+            if (rayCubeIntersect(ray, pointData.get(), t, n)) {
+                maxDist = t;
+                hitNormal = n;
+                hit = pointData;
+                return;
+            }
+        }
+
+        PointMedium center = node->center;
+        PointMedium ttt = (center - ray.origin).cwiseProduct(ray.invDir);
+        int curridx = 0;
+        curridx = ((tMin >= ttt.x()) ? 1 : 0 ) | ((tMin >= ttt.y()) ? 2 : 0) | ((tMin >= ttt.z()) ? 4 : 0);
+        float tNext;
+
+        while (tMin < tMax && tMin <= maxDist) {
+            PointMedium next_t;
+            next_t[0] = (curridx & 1) ? tMax : ttt[0];
+            next_t[1] = (curridx & 2) ? tMax : ttt[1];
+            next_t[2] = (curridx & 4) ? tMax : ttt[2];
+            tNext = next_t.minCoeff();
+
+            int physIdx = curridx ^ ray.signMask;
+            
+            if (node->children[physIdx]) {
+                voxelTraverseRecursive(node->children[physIdx].get(), tMin, tNext, maxDist, enableLod, ray, hit, hitNormal);
+            }
+            tMin = tNext;
+            curridx |= ((next_t[0] <= tNext) ? 1 : 0) | ((next_t[1] <= tNext) ? 2 : 0) | ((next_t[2] <= tNext) ? 4 : 0);
+        }
+    }
 public:
+    Eigen::Vector3f traceRayFast(const PointMedium& rayOrig, const PointMedium& rayDir, uint32_t& rngState, int maxBounces = 3, bool useLod = true) const {
+        Eigen::Vector3f throughput(1.0f, 1.0f, 1.0f);
+        Eigen::Vector3f radiance(0.0f, 0.0f, 0.0f);
+        
+        for (int bounce = 0; bounce < maxBounces; ++bounce) {
+            Ray ray(rayOrig, rayDir);
+            ray.dist = 0.0f;
+            float hitT = -1.0f;
+            PointMedium hitNormal;
+            
+            auto hitNode = voxelTraverse(ray, hitNormal, useLod);
+            
+            if (!hitNode) {
+                std::vector<uint8_t> skyColor = const_cast<Skybox*>(&skybox)->sample(rayDir);
+                Eigen::Vector3f skyEmittance(skyColor[0] / 255.0f, skyColor[1] / 255.0f, skyColor[2] / 255.0f);
+                float emitPower = (skyColor.size() == 4) ? (skyColor[3] / 25.5f) : 1.0f; 
+                radiance += throughput.cwiseProduct(skyEmittance * emitPower);
+                break;
+            }
+            
+            IndexSize cIdx = hitNode->getColorIDX();
+            Eigen::Vector3f hitColor;
+            {
+                std::shared_lock<std::shared_mutex> lock(colormutex);
+                auto it = colorMap.find(cIdx);
+                if (it != colorMap.end()) hitColor = it->second;
+                else hitColor = Eigen::Vector3f(1.0f, 0.0f, 1.0f);
+            }
+            
+            rayOrig = rayOrig + rayDir + hitNormal * 0.001f;
+            rayDir = randomInHemisphere(rngState, hitNormal);
+            throughput = throughput.cwiseProduct(hitColor);
+            
+            if (bounce > 2) {
+                float p = std::max({throughput.x(), throughput.y(), throughput.z()});
+                if (randomFloat(rngState) > p) break;
+                throughput /= p;
+            }
+        }
+        return radiance;
+    }
+    
+    Eigen::Vector3f traceRay(const PointMedium& rayOrig, const PointMedium& rayDir, uint32_t& rngState,
+                    int maxBounces = 3, bool globalIllumination = true, bool useLod = true) const {
+        Eigen::Vector3f throughput(1.0f, 1.0f, 1.0f);
+        Eigen::Vector3f radiance(0.0f, 0.0f, 0.0f);
+        
+        for (int bounce = 0; bounce < maxBounces; ++bounce) {
+            Ray ray(rayOrig, rayDir);
+            ray.dist = 0.0f;
+            PointMedium hitNormal;
+            
+            auto hitNode = voxelTraverse(ray, hitNormal, useLod);
+            
+            if (!hitNode) {
+                std::vector<uint8_t> skyColor = const_cast<Skybox*>(&skybox)->sample(rayDir);
+                Eigen::Vector3f skyEmittance(skyColor[0] / 255.0f, skyColor[1] / 255.0f, skyColor[2] / 255.0f);
+                float emitPower = (skyColor.size() == 4) ? (skyColor[3] / 25.5f) : 1.0f;
+                radiance += throughput.cwiseProduct(skyEmittance * emitPower);
+                break;
+            }
+            
+            IndexSize mIdx = hitNode->getMaterialIDX();
+            Material mat;
+            {
+                std::shared_lock<std::shared_mutex> lock(materialmutex);
+                auto it = materialMap.find(mIdx);
+                if (it != materialMap.end()) mat = it->second;
+                else mat = globalMat;
+            }
+            
+            Eigen::Vector3f matColor = mat.rgb.template cast<float>();
+            
+            if (mat.light || mat.emittance > 0.0f) {
+                float emitPower = mat.emittance > 0.0f ? mat.emittance : 1.0f;
+                radiance += throughput.cwiseProduct(matColor * emitPower);
+                if (!globalIllumination) break;
+            }
+            
+            PointMedium hitPoint = rayOrig + rayDir;
+            bool inside = rayDir.dot(hitNormal) > 0.0f;
+            PointMedium n = inside ? -hitNormal : hitNormal;
+            
+            float n1 = 1.0f;
+            float n2 = mat.ior;
+            float η = inside ? (n2 / n1) : (n1 / n2);
+            
+            float cosθI = -rayDir.dot(n);
+            float sin2θT = η * η * (1.0f - cosθI * cosθI);
+            
+            float r0 = (n1 - n2) / (n1 + n2);
+            r0 = r0 * r0;
+            float fresnel = r0 + (1.0f - r0) * std::pow(1.0f - cosθI, 5.0f);
+            
+            bool doRefraction = (mat.transmission > 0.0f) && (randomFloat(rngState) < mat.transmission);
+            
+            if (doRefraction && sin2θT <= 1.0f && randomFloat(rngState) > fresnel) {
+                float cosθT = std::sqrt(1.0f - sin2θT);
+                PointMedium refractDir = η * rayDir + (η * cosθI - cosθT) * n;
+                
+                if (mat.roughness > 0.0f) {
+                    PointMedium scatterDir = randomDirection(rngState, refractDir);
+                    refractDir = (refractDir + scatterDir * mat.roughness).normalized();
+                }
+                
+                rayDir = refractDir;
+                rayOrig = hitPoint - hitNormal * 0.001f;
+                throughput = throughput.cwiseProduct(matColor);
+            } else {
+                PointMedium reflectDir = rayDir - 2.0f * rayDir.dot(n) * n;
+                PointMedium diffuseDir = randomDirection(rngState, n);
+                
+                rayDir = (reflectDir * (1.0f - mat.roughness) + diffuseDir * mat.roughness).normalized();
+                rayOrig = hitPoint + hitNormal * 0.001f;
+                throughput = throughput.cwiseProduct(matColor);
+            }
+            
+            if (bounce > 2) {
+                float p = std::max({throughput.x(), throughput.y(), throughput.z()});
+                if (randomFloat(rngState) > p) break;
+                throughput /= p;
+            }
+        }
+        
+        return radiance;
+    }
+
+    frame renderFrame(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB, int samplesPerPixel = 2,
+                    int maxBounces = 4, bool globalIllumination = false, bool useLod = true) const {
+        
+        frame result(width, height, colorformat);
+        int spp = std::max(1, samplesPerPixel);
+        
+        std::vector<float> rgbData(width * height * 3, 0.0f);
+
+        float aspectRatio = static_cast<float>(width) / static_cast<float>(height);
+        float fovRad = cam.fovRad();
+        float halfHeight = std::tan(fovRad / 2.0f);
+        float halfWidth = aspectRatio * halfHeight;
+
+        Eigen::Vector3f camOrigin = cam.origin;
+        Eigen::Vector3f camForward = cam.forward();
+        Eigen::Vector3f camRight = cam.right();
+        Eigen::Vector3f camUp = cam.up;
+
+        #pragma omp parallel for schedule(dynamic)
+        for (int py = 0; py < height; ++py) {
+            uint32_t rngState = (py * 1973) ^ 0x9e3779b9; 
+            
+            for (int px = 0; px < width; ++px) {
+                Eigen::Vector3f pixelColor = Eigen::Vector3f::Zero();
+                
+                for (int s = 0; s < spp; ++s) {
+                    float r1 = (spp > 1) ? randomFloat(rngState) : 0.5f;
+                    float r2 = (spp > 1) ? randomFloat(rngState) : 0.5f;
+                    
+                    float ndcX = (px + r1) / static_cast<float>(width);
+                    float ndcY = (py + r2) / static_cast<float>(height);
+                    
+                    float screenX = (2.0f * ndcX - 1.0f) * halfWidth;
+                    float screenY = (1.0f - 2.0f * ndcY) * halfHeight; 
+                    
+                    Eigen::Vector3f rayDir = (camForward + screenX * camRight + screenY * camUp).normalized();
+                    
+                    PointMedium rOrig = camOrigin.cast<medium>();
+                    PointMedium rDir = rayDir.cast<medium>();
+                    
+                    pixelColor += traceRay(rOrig, rDir, rngState, maxBounces, globalIllumination, useLod);
+                }
+                
+                pixelColor /= static_cast<float>(spp);
+                
+                size_t idx = (static_cast<size_t>(py) * width + px) * 3;
+                rgbData[idx]     = pixelColor.x();
+                rgbData[idx + 1] = pixelColor.y();
+                rgbData[idx + 2] = pixelColor.z();
+            }
+        }
+
+        result.setData(rgbData, frame::colormap::RGB);
+        
+        return result;
+    }
+
     void optimize() {
         std::unique_lock<std::shared_mutex> lock_c(colormutex, std::defer_lock);
         std::unique_lock<std::shared_mutex> lock_m(materialmutex, std::defer_lock);
@@ -528,11 +827,11 @@ public:
                 return pair.first;
             }
         }
-        if (colorMap.size() == MAX_INDEX) {
+        if (colorMap.size() == std::numeric_limits<IndexSize>::max()) {
             optimizeColorMap();
         }
 
-        if (colorMap.size() >= MAX_INDEX) {
+        if (colorMap.size() >= std::numeric_limits<IndexSize>::max()) {
             std::cerr << "Warning: Color palette limits reached! All indices utilized in Tree. Using nearest color.\n";
             return closestIdx;
         }
@@ -566,11 +865,11 @@ public:
             if (dist < EPSILON) return pair.first;
         }
 
-        if (materialMap.size() == MAX_INDEX) {
+        if (materialMap.size() == std::numeric_limits<IndexSize>::max()) {
             optimizeMaterialMap();
         }
 
-        if (materialMap.size() >= MAX_INDEX) {
+        if (materialMap.size() >= std::numeric_limits<IndexSize>::max()) {
             std::cerr << "Warning: Material map limit reached! All indices utilized in Tree. Using nearest material.\n";
             return closestIdx;
         }
@@ -655,7 +954,7 @@ public:
         
         std::ifstream is(storageBasePath / "tree_struct.bin", std::ios::binary);
         if (is) {
-            root_ = std::make_unique<OctreeNode<T, IndexSize, high, medium, low>>(PointHigh::Zero(), PointHigh::Zero());
+            root_ = std::make_unique<OctreeNode>(PointHigh::Zero(), PointHigh::Zero());
             root_->loadStructure(is);
             is.close();
             if (loadPayloadsIntoMemory) {
@@ -924,6 +1223,7 @@ public:
 
     void setLODFalloff(float rate) {
         lodFalloffRate = rate;
+        invlodf = 1.0f / rate;
     }
     void setLODMinDistance(float dist) {
         lodMinDistance = dist;
@@ -958,7 +1258,7 @@ public:
         size_t minPointsInLeaf = std::numeric_limits<size_t>::max();
         size_t maxPointsInLeaf = 0;
         
-        auto collectStats = [&](auto& self, const OctreeNode<T, IndexSize, high, medium, low>* node, size_t depth) -> void {
+        auto collectStats = [&](auto& self, const OctreeNode* node, size_t depth) -> void {
             if (!node) return;
             totalNodes++;
             maxTreeDepth = std::max(maxTreeDepth, depth);
@@ -979,7 +1279,7 @@ public:
         if (minPointsInLeaf == std::numeric_limits<size_t>::max()) minPointsInLeaf = 0;
         double avgPointsPerLeaf = leafNodes > 0 ? static_cast<double>(actualPoints) / leafNodes : 0;
         
-        size_t nodeMem = totalNodes * sizeof(OctreeNode<T, IndexSize, high, medium, low>);
+        size_t nodeMem = totalNodes * sizeof(OctreeNode);
         size_t dataMem = actualPoints * sizeof(NodeData<T, IndexSize, high, medium, low>);
         size_t mapMem = colorMap.size() * (sizeof(IndexSize) + sizeof(Eigen::Vector3f)) + materialMap.size() * (sizeof(IndexSize) + sizeof(Material));
 
@@ -1003,8 +1303,8 @@ public:
         os << "  Points/Leaf (Min) : " << minPointsInLeaf << "\n";
         os << "  Points/Leaf (Max) : " << maxPointsInLeaf << "\n";
         os << "Maps:\n";
-        os << "  Unique Colors     : " << colorMap.size() << "/" << MAX_INDEX << "\n";
-        os << "  Unique Materials  : " << materialMap.size() << "/" << MAX_INDEX << "\n";
+        os << "  Unique Colors     : " << colorMap.size() << "/" << std::numeric_limits<IndexSize>::max() << "\n";
+        os << "  Unique Materials  : " << materialMap.size() << "/" << std::numeric_limits<IndexSize>::max() << "\n";
         os << "Bounds:\n";
         os << "  Min               : [" << root_->bounds.bounds[0].transpose() << "]\n";
         os << "  Max               : [" << root_->bounds.bounds[1].transpose() << "]\n";

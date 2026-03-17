@@ -7,7 +7,7 @@
 // Include Eigen and project headers
 #include "../eigen/Eigen/Dense" 
 #include "../util/grid/camera.hpp"
-#include "../util/grid/grid3eigen.hpp"
+#include "../util/grid/g3eigen.hpp"
 #include "../util/output/frame.hpp"
 #include "../util/output/bmpwriter.hpp"
 #include "../util/output/aviwriter.hpp"
@@ -22,6 +22,9 @@ void createBox(Octree<int>& octree, const Eigen::Vector3f& center, const Eigen::
     Eigen::Vector3f halfSize = size / 2.0f;
     Eigen::Vector3f minB = center - halfSize;
     Eigen::Vector3f maxB = center + halfSize;
+    bool isLight = (emission > 0.0f);
+    Material mat = Material::fromRGB(albedo.x(), albedo.y(), albedo.z(), 
+                                     ior, transmission, roughness, emission, isLight);
     
     for (float x = minB.x(); x <= maxB.x(); x += step) {
         for (float y = minB.y(); y <= maxB.y(); y += step) {
@@ -29,7 +32,9 @@ void createBox(Octree<int>& octree, const Eigen::Vector3f& center, const Eigen::
                 Eigen::Vector3f pos(x, y, z);
                 
                 // .set(data, pos, visible, albedo, size, active, objectId, subId, emission, roughness, metallic, transmission, ior)
-                octree.set(1, pos, true, albedo, step, true, -1, 0, emission, roughness, metallic, transmission, ior);
+                // octree.set(1, pos, true, albedo, step, true, -1, 0, emission, roughness, metallic, transmission, ior);
+
+                octree.set(pos, 1, step, albedo, mat, true, true, -1, true);
             }
         }
     }
@@ -42,6 +47,9 @@ void createCheckerBox(Octree<int>& octree, const Eigen::Vector3f& center, const 
     Eigen::Vector3f halfSize = size / 2.0f;
     Eigen::Vector3f minB = center - halfSize;
     Eigen::Vector3f maxB = center + halfSize;
+    
+    Material mat1 = Material::fromRGB(color1.x(), color1.y(), color1.z(), 1.0f, 0.0f, 0.8f, 0.0f, false);
+    Material mat2 = Material::fromRGB(color2.x(), color2.y(), color2.z(), 1.0f, 0.0f, 0.8f, 0.0f, false);
     
     for (float x = minB.x(); x <= maxB.x(); x += step) {
         for (float y = minB.y(); y <= maxB.y(); y += step) {
@@ -57,7 +65,9 @@ void createCheckerBox(Octree<int>& octree, const Eigen::Vector3f& center, const 
                 bool isEven = ((cx + cy + cz) % 2 == 0);
                 Eigen::Vector3f albedo = isEven ? color1 : color2;
                 
-                octree.set(1, pos, true, albedo, step, true, -1, 0, 0.0f, 0.8f, 0.1f, 0.0f, 1.0f);
+                Material& mat = isEven ? mat1 : mat2;
+                
+                octree.set(pos, 1, step, albedo, mat, true, true, -1, true);
             }
         }
     }
@@ -66,14 +76,10 @@ void createCheckerBox(Octree<int>& octree, const Eigen::Vector3f& center, const 
 int main() {
     std::cout << "Initializing Octree..." << std::endl;
 
-    // 1. Initialize Octree bounds
-    Eigen::Vector3f minBound(-10.0f, -10.0f, -10.0f);
-    Eigen::Vector3f maxBound(10.0f, 10.0f, 10.0f);
-    Octree<int> octree(minBound, maxBound, 8, 16);
+    Octree<int> octree;
     
     // Set a dark background to emphasize the PBR light emission
-    octree.setBackgroundColor(Eigen::Vector3f(0.02f, 0.02f, 0.02f));
-    octree.setSkylight(Eigen::Vector3f(0.01f, 0.01f, 0.01f));
+    octree.setSkyboxBackground(0.02f, 0.02f, 0.02f, 1.0f);
 
     std::cout << "Building scene..." << std::endl;
 
@@ -122,8 +128,8 @@ int main() {
     // Placed near the ceiling (Z=7.4), made large (8x8) to cast soft shadows evenly over the whole 3x3 grid
     createBox(octree, Eigen::Vector3f(0.0f, 0.0f, 7.4f), Eigen::Vector3f(8.0f, 8.0f, 0.2f), Eigen::Vector3f(1.0f, 1.0f, 1.0f), 15.0f);
 
-    std::cout << "Optimizing and Generating LODs..." << std::endl;
-    octree.generateLODs();
+    std::cout << "Optimizing dictionaries and Structure maps..." << std::endl;
+    octree.optimize();
     octree.printStats();
 
     // 3. Setup video rendering
@@ -131,10 +137,10 @@ int main() {
     int height = 512;
     
     // --- Video Animation Parameters ---
-    const float fps = 30.0f;
-    const float durationPerSegment = 10.0f; // Seconds to travel between each view
+    const float fps = 10.0f;
+    const float durationPerSegment = 1.0f; // Seconds to travel between each view
     const int framesPerSegment = static_cast<int>(fps * durationPerSegment);
-    const int video_samples = 100; // Samples per pixel for each video frame
+    const int video_samples = 10; // Samples per pixel for each video frame
     const int video_bounces = 5;   // Ray bounces for each video frame
 
     struct View {
