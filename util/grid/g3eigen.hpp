@@ -98,7 +98,7 @@ public:
 
     struct OBoundingBox : BoundingBox {
         PointMedium center;
-        PointMedium extents;
+        PointLow extents;
         Eigen::Quaternion<low> orientation;
 
         bool intersect(const Ray& r, float& tMin, float& tMax) const {
@@ -106,8 +106,8 @@ public:
             PointMedium localDir = orientation.conjugate().template cast<medium>() * r.dir;
             Ray localRay(localOrigin, localDir);
             BoundingBox localBounds;
-            localBounds.bounds[0] = -extents;
-            localBounds.bounds[1] = extents;
+            localBounds.bounds[0] = -extents.template cast<medium>();
+            localBounds.bounds[1] = extents.template cast<medium>();
             return localBounds.intersect(localRay, tMin, tMax);
         }
     };
@@ -209,21 +209,26 @@ public:
             inline void setSize(low s) {
                 size = s;
             }
+            
+            low getSize() const {
+                return size;
+            }
 
             PointLow getHalfSize() const {
-                return PointLow(size * 0.5f, size * 0.5f, size * 0.5f);
+                PointLow tempvar(static_cast<low>(size * 0.5), static_cast<low>(size * 0.5), static_cast<low>(size * 0.5));
+                return tempvar;
             }
             
             OBoundingBox getCubeBounds(const PointHigh& nodeCenter) const {
                 OBoundingBox obb;
                 obb.center = nodeCenter.template cast<medium>() + position.template cast<medium>();
-                obb.extents = getHalfSize().template cast<medium>();
+                obb.extents = getHalfSize();
                 obb.orientation = orientation;
                 return obb;
             }
 
-            PointMedium center(const PointHigh& nodeCenter) const {
-                return nodeCenter + position.template cast<medium>();
+            PointHigh center(const PointHigh& nodeCenter) const {
+                return nodeCenter + position.template cast<high>();
             }
 
             void serialize(std::ostream& os) const {
@@ -251,8 +256,11 @@ public:
 
     struct OctreeNode {
         PointHigh center;
+        BoundingBox bounds;
         private:
-            BoundingBox bounds;
+            uint8_t flags;
+            mutable std::mutex lodMutex;
+            mutable std::shared_ptr<NodeData> lodData;
 
             inline void setLodValid(bool val) { 
                 val ? (flags |= NODE_LOD_VALID_BIT) : (flags &= ~NODE_LOD_VALID_BIT);
@@ -268,15 +276,16 @@ public:
         public:
             std::vector<std::shared_ptr<NodeData>> points;
             std::array<std::unique_ptr<OctreeNode>, 8> children;
-            uint8_t flags;
-            
-            mutable std::shared_ptr<NodeData> lodData;
-            mutable std::mutex lodMutex; 
 
             OctreeNode(const PointHigh& min, const PointHigh& max) : flags(NODE_LEAF_BIT | NODE_LOADED_BIT), lodData(nullptr) {
                 bounds.bounds[0] = min.template cast<medium>();
                 bounds.bounds[1] = max.template cast<medium>();
                 center = (min + max) * 0.5;
+            }
+
+            std::shared_ptr<NodeData> getLodData() const {
+                std::lock_guard<std::mutex> lock(lodMutex);
+                return lodData;
             }
 
             inline bool isLeaf() const { 
@@ -484,13 +493,12 @@ public:
                 setLeaf(false);
             }
 
-            void insert(const std::shared_ptr<NodeData>& point, const PointHigh& ptAbsCenter, const PointHigh& ptHalfSize, 
+            void insert(const std::shared_ptr<NodeData>& point, const PointHigh& ptAbsCenter, const low& ptSize, 
                         size_t maxPoints, size_t maxDepth, size_t currentDepth) {
                 if (!point) return;
                 invalidateLod();
-
+                PointHigh phSize = PointLow(ptSize, ptSize, ptSize).template cast<high>();
                 high childSize = static_cast<high>((bounds.bounds[1] - bounds.bounds[0]).maxCoeff() * 0.5);
-                high ptSize = ptHalfSize.maxCoeff() * 2.0;
 
                 if (!isLeaf() && ptSize >= childSize) {
                     point->setPosition((ptAbsCenter - center).template cast<low>());
@@ -512,7 +520,7 @@ public:
                         for (const auto& p : currentPoints) {
                             PointHigh pCenter = p->center(this->center).template cast<high>();
                             PointHigh pHalf = p->getHalfSize().template cast<high>();
-                            high pSz = pHalf.maxCoeff() * 2.0;
+                            high pSz = p->getSize();
 
                             if (pSz >= childSize) {
                                 p->setPosition((pCenter - center).template cast<low>());
@@ -524,7 +532,7 @@ public:
 
                                 for (int i = 0; i < 8; ++i) {
                                     if (children[i]->intersectsBounds(pMin, pMax)) {
-                                        children[i]->insert(p, pCenter, pHalf, maxPoints, maxDepth, currentDepth + 1);
+                                        children[i]->insert(p, pCenter, p->getSize(), maxPoints, maxDepth, currentDepth + 1);
                                         inserted = true;
                                         break;
                                     }
@@ -538,13 +546,13 @@ public:
                         points = std::move(keptPoints);
                     }
                 } else {
-                    PointHigh pMin = ptAbsCenter - ptHalfSize;
-                    PointHigh pMax = ptAbsCenter + ptHalfSize;
+                    PointHigh pMin = ptAbsCenter - phSize;
+                    PointHigh pMax = ptAbsCenter + phSize;
                     bool inserted = false;
 
                     for (int i = 0; i < 8; ++i) {
                         if (children[i]->intersectsBounds(pMin, pMax)) {
-                            children[i]->insert(point, ptAbsCenter, ptHalfSize, maxPoints, maxDepth, currentDepth + 1);
+                            children[i]->insert(point, ptAbsCenter, ptSize, maxPoints, maxDepth, currentDepth + 1);
                             inserted = true;
                             break;
                         }
@@ -689,7 +697,7 @@ public:
             for (auto it = bodies.rbegin(); it != bodies.rend(); ++it) {
                 if (!it->second.baked) {
                     if (rotatedDir.dot(it->second.direction) >= it->second.cosAngularRadius) {
-                        return getFormattedColor(it->second.r, it->second.g, it->second.b, it->second.emittance);
+                        return {it->second.r, it->second.g, it->second.b, it->second.emittance};
                     }
                 }
             }
@@ -766,7 +774,7 @@ public:
 
             size_t w = skybox.getWidth();
             size_t h = skybox.getHeight();
-            std::vector<uint8_t> newColor = getFormattedColor(it->second.r, it->second.g, it->second.b, it->second.emittance);
+            std::vector<uint8_t> newColor = {it->second.r, it->second.g, it->second.b, it->second.emittance};
             
             it->second.backup.clear();
 
@@ -817,12 +825,12 @@ private:
     float invlodf;
     float lodMinDistance = 1000.0f;
     float maxDistance = lodMinDistance * 10;
-    const static PointHigh phzero = PointHigh::Zero();
+    inline static const PointHigh phzero = PointHigh::Zero();
     
     std::map<IndexSize, Eigen::Vector3f> colorMap;
-    std::shared_mutex colormutex;
+    mutable std::shared_mutex colormutex;
     std::map<IndexSize, Material> materialMap;
-    std::shared_mutex materialmutex;
+    mutable std::shared_mutex materialmutex;
     Material globalMat;
     Eigen::Vector3f globalColor;
     float globalIntensity;
@@ -976,7 +984,7 @@ private:
         return ρ * cos(θ);
     }
 
-    PointMedium randomInHemisphere(const PointMedium& normal, uint32_t& state) const {
+    PointMedium randomInHemisphere(uint32_t& state, const PointMedium& normal) const {
         float x = randomValueNormalDistribution(state);
         float y = randomValueNormalDistribution(state);
         float z = randomValueNormalDistribution(state);
@@ -989,8 +997,8 @@ private:
         return randomDir;
     }
 
-    bool rayCubeIntersect(const Ray& ray, const NodeData* pointData, const PointMedium& nodeCenter, float& tHit, PointMedium& normal) const {
-        OBoundingBox obb = pointData->getCubeBounds(nodeCenter.template cast<high>());
+    bool rayCubeIntersect(const Ray& ray, const NodeData* pointData, const PointHigh& nodeCenter, float& tHit, PointMedium& normal) const {
+        OBoundingBox obb = pointData->getCubeBounds(nodeCenter);
         float tMin, tMax;
         if (obb.intersect(ray, tMin, tMax)) {
             if (tMax < 0.0f) return false;
@@ -1001,7 +1009,7 @@ private:
             PointMedium localHit = obb.orientation.conjugate().template cast<medium>() * (hitPoint - obb.center);
             PointMedium absLocalHit = localHit.cwiseAbs();
             
-            PointMedium dist = obb.extents - absLocalHit;
+            PointMedium dist = obb.extents.template cast<medium>() - absLocalHit;
             PointMedium localNormal = PointMedium::Zero();
             
             // Assign Normal based on the smallest distance to the local oriented plane
@@ -1032,17 +1040,20 @@ private:
 
     void voxelTraverseRecursive(OctreeNode* node, float tMin, float tMax, float& maxDist, bool enableLod, const Ray& ray, std::shared_ptr<NodeData>& hit, PointMedium& hitNormal) const {
         if (enableLod && !node->isLeaf()) {
-            float dist = (node->center - ray.origin).norm();
+            float dist = (node->center.template cast<medium>() - ray.origin).norm();
             float ratio = dist / (node->bounds.bounds[1] - node->bounds.bounds[0]).maxCoeff();
-            if (node->lodData && dist > lodMinDistance && ratio > invlodf) {
-                float t;
-                PointMedium n;
-                if (rayCubeIntersect(ray, node->lodData.get(), t, n)) {
-                    if (t >= 0 && t <= maxDist) {
-                        hit = node->lodData;
-                        hitNormal = n;
-                        maxDist = t;
-                        return;
+            if (dist > lodMinDistance && ratio > invlodf) {
+                std::shared_ptr<NodeData> currentLod = node->getLodData();
+                if (currentLod) {
+                    float t;
+                    PointMedium n;
+                    if (rayCubeIntersect(ray, currentLod.get(), node->center, t, n)) {
+                        if (t >= 0 && t <= maxDist) {
+                            hit = currentLod;
+                            hitNormal = n;
+                            maxDist = t;
+                            return;
+                        }
                     }
                 }
             }
@@ -1053,7 +1064,7 @@ private:
 
             float t;
             PointMedium n;
-            if (rayCubeIntersect(ray, pointData.get(), t, n)) {
+            if (rayCubeIntersect(ray, pointData.get(), node->center, t, n)) {
                 maxDist = t;
                 hitNormal = n;
                 hit = pointData;
@@ -1061,7 +1072,7 @@ private:
             }
         }
 
-        PointMedium center = node->center;
+        PointMedium center = node->center.template cast<medium>();
         PointMedium ttt = (center - ray.origin).cwiseProduct(ray.invDir);
         int curridx = 0;
         curridx = ((tMin >= ttt.x()) ? 1 : 0 ) | ((tMin >= ttt.y()) ? 2 : 0) | ((tMin >= ttt.z()) ? 4 : 0);
@@ -1084,7 +1095,15 @@ private:
         }
     }
 public:
-    Eigen::Vector3f traceRayFast(const PointMedium& rayOrig, const PointMedium& rayDir, uint32_t& rngState, int maxBounces = 3, bool useLod = true) const {
+    Octree(high halfSize = static_cast<high>(1024.0)) {
+        root_ = std::make_unique<OctreeNode>(PointHigh::Constant(-halfSize), PointHigh::Constant(halfSize));
+    }
+
+    Octree(const PointHigh& minB, const PointHigh& maxB) {
+        root_ = std::make_unique<OctreeNode>(minB, maxB);
+    }
+
+    Eigen::Vector3f traceRayFast(PointMedium rayOrig, PointMedium rayDir, uint32_t& rngState, int maxBounces = 3, bool useLod = true) const {
         Eigen::Vector3f throughput(1.0f, 1.0f, 1.0f);
         Eigen::Vector3f radiance(0.0f, 0.0f, 0.0f);
         
@@ -1126,7 +1145,7 @@ public:
         return radiance;
     }
     
-    Eigen::Vector3f traceRay(const PointMedium& rayOrig, const PointMedium& rayDir, uint32_t& rngState,
+    Eigen::Vector3f traceRay(PointMedium rayOrig, PointMedium rayDir, uint32_t& rngState,
                     int maxBounces = 3, bool globalIllumination = true, bool useLod = true) const {
         Eigen::Vector3f throughput(1.0f, 1.0f, 1.0f);
         Eigen::Vector3f radiance(0.0f, 0.0f, 0.0f);
@@ -1185,7 +1204,7 @@ public:
                 PointMedium refractDir = η * rayDir + (η * cosθI - cosθT) * n;
                 
                 if (mat.roughness > 0.0f) {
-                    PointMedium scatterDir = randomDirection(rngState, refractDir);
+                    PointMedium scatterDir = randomInHemisphere(rngState, refractDir);
                     refractDir = (refractDir + scatterDir * mat.roughness).normalized();
                 }
                 
@@ -1194,7 +1213,7 @@ public:
                 throughput = throughput.cwiseProduct(matColor);
             } else {
                 PointMedium reflectDir = rayDir - 2.0f * rayDir.dot(n) * n;
-                PointMedium diffuseDir = randomDirection(rngState, n);
+                PointMedium diffuseDir = randomInHemisphere(rngState, n);
                 
                 rayDir = (reflectDir * (1.0f - mat.roughness) + diffuseDir * mat.roughness).normalized();
                 rayOrig = hitPoint + hitNormal * 0.001f;
@@ -1519,7 +1538,7 @@ public:
         }
     }
 
-    bool set(const PointHigh& pos, const T& data, float ptSize = 0.01f, 
+    bool set(const PointHigh& pos, const T& data, float psize = 0.01f, 
              const Eigen::Vector3f& color = Eigen::Vector3f(1,1,1), 
              const Material& mat = Material(), bool visible = true, 
              bool active = true, int objectId = -1, bool staticNode = false,
@@ -1527,13 +1546,12 @@ public:
         if (!root_) return false;
         IndexSize cIdx = getColorIndex(color);
         IndexSize mIdx = getMaterialIndex(mat);
+        low ptSize = static_cast<Eigen::half>(psize);
         
-        auto node = std::make_shared<NodeData>(
-            data, PointLow::Zero(), visible, cIdx, ptSize, active, objectId, mIdx, staticNode);
+        auto node = std::make_shared<NodeData>(data, PointLow::Zero(), visible, cIdx, ptSize, active, objectId, mIdx, staticNode);
         node->setOrientation(orientation);
         
-        PointHigh halfSize = PointHigh::Constant(ptSize * 0.5);
-        root_->insert(node, pos, halfSize, maxPointsPerNode, maxDepth, 0);
+        root_->insert(node, pos, ptSize, maxPointsPerNode, maxDepth, 0);
         this->size++;
         return true;
     }
@@ -1547,10 +1565,9 @@ public:
         return false;
     }
 
-    bool update(const PointHigh& pos, const T& newData, float ptSize, 
-                const Eigen::Vector3f& color, const Material& mat, 
-                bool visible, bool active, int objectId, bool staticNode,
-                const Eigen::Quaternion<low>& orientation) {
+    bool update(const PointHigh& pos, const T& newData, float ptSize, const Eigen::Vector3f& color,
+         const Material& mat, bool visible, bool active, int objectId, bool staticNode,
+         const Eigen::Quaternion<low>& orientation) {
         auto pt = find(pos);
         if (pt) {
             pt->setData(newData);
@@ -1562,11 +1579,10 @@ public:
             pt->setStatic(staticNode);
             pt->setOrientation(orientation);
             
-            if (std::abs(pt->getHalfSize().x() * 2.0f - ptSize) > 1e-5) {
+            if (std::abs(pt->getHalfSize().x() * 2.0f - ptSize) > EPSILON) {
                 pt->setSize(ptSize);
                 remove(pos);
-                PointHigh halfSize = PointHigh::Constant(ptSize * 0.5);
-                root_->insert(pt, pos, halfSize, maxPointsPerNode, maxDepth, 0);
+                root_->insert(pt, pos, ptSize, maxPointsPerNode, maxDepth, 0);
                 this->size++;
             }
             return true;
@@ -1615,8 +1631,7 @@ public:
         if (!root_) return false;
         auto pt = root_->remove(oldPos);
         if (pt) {
-            PointHigh halfSize = pt->getHalfSize().template cast<high>();
-            root_->insert(pt, newPos, halfSize, maxPointsPerNode, maxDepth, 0);
+            root_->insert(pt, newPos, pt->getSize(), maxPointsPerNode, maxDepth, 0);
             return true;
         }
         return false;
@@ -1655,8 +1670,7 @@ public:
         auto pt = root_->remove(pos);
         if (pt) {
             pt->setSize(newSize);
-            PointHigh halfSize = PointHigh::Constant(newSize * 0.5);
-            root_->insert(pt, pos, halfSize, maxPointsPerNode, maxDepth, 0);
+            root_->insert(pt, pos, newSize, maxPointsPerNode, maxDepth, 0);
             return true;
         }
         return false;
@@ -1701,8 +1715,7 @@ public:
         
         for (auto& pair : pts) {
             PointHigh newPos = pair.second + offset;
-            PointHigh halfSize = pair.first->getHalfSize().template cast<high>();
-            root_->insert(pair.first, newPos, halfSize, maxPointsPerNode, maxDepth, 0);
+            root_->insert(pair.first, newPos, pair.first->getSize(), maxPointsPerNode, maxDepth, 0);
         }
         return true;
     }

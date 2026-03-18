@@ -29,7 +29,7 @@ void createBox(Octree<int>& octree, const Eigen::Vector3f& center, const Eigen::
     for (float x = minB.x(); x <= maxB.x(); x += step) {
         for (float y = minB.y(); y <= maxB.y(); y += step) {
             for (float z = minB.z(); z <= maxB.z(); z += step) {
-                Eigen::Vector3f pos(x, y, z);
+                Eigen::Vector3d pos(x, y, z);
                 
                 // .set(data, pos, visible, albedo, size, active, objectId, subId, emission, roughness, metallic, transmission, ior)
                 // octree.set(1, pos, true, albedo, step, true, -1, 0, emission, roughness, metallic, transmission, ior);
@@ -54,7 +54,7 @@ void createCheckerBox(Octree<int>& octree, const Eigen::Vector3f& center, const 
     for (float x = minB.x(); x <= maxB.x(); x += step) {
         for (float y = minB.y(); y <= maxB.y(); y += step) {
             for (float z = minB.z(); z <= maxB.z(); z += step) {
-                Eigen::Vector3f pos(x, y, z);
+                Eigen::Vector3d pos(x, y, z);
                 
                 // Use floor to correctly handle negative coordinates for the repeating pattern
                 int cx = static_cast<int>(std::floor(x / checkerSize));
@@ -76,7 +76,9 @@ void createCheckerBox(Octree<int>& octree, const Eigen::Vector3f& center, const 
 int main() {
     std::cout << "Initializing Octree..." << std::endl;
 
-    Octree<int> octree;
+    Eigen::Vector3d minBound(-10.0f, -10.0f, -10.0f);
+    Eigen::Vector3d maxBound(10.0f, 10.0f, 10.0f);
+    Octree<int> octree(minBound,maxBound);
     
     // Set a dark background to emphasize the PBR light emission
     octree.setSkyboxBackground(0.02f, 0.02f, 0.02f, 1.0f);
@@ -140,7 +142,7 @@ int main() {
     const float fps = 10.0f;
     const float durationPerSegment = 1.0f; // Seconds to travel between each view
     const int framesPerSegment = static_cast<int>(fps * durationPerSegment);
-    const int video_samples = 10; // Samples per pixel for each video frame
+    const int video_samples = 100; // Samples per pixel for each video frame
     const int video_bounces = 5;   // Ray bounces for each video frame
 
     struct View {
@@ -152,10 +154,10 @@ int main() {
     // Define the keyframe camera views for the animation
     std::vector<View> views = {
         {"-Y", Eigen::Vector3f( 0.0f, -6.8f,  1.0f), Eigen::Vector3f(0.0f, 0.0f, 1.0f)},
-        {"+X", Eigen::Vector3f( 6.8f,  0.0f,  1.0f), Eigen::Vector3f(0.0f, 0.0f, 1.0f)},
-        {"+Y", Eigen::Vector3f( 0.0f,  6.8f,  1.0f), Eigen::Vector3f(0.0f, 0.0f, 1.0f)},
-        {"-X", Eigen::Vector3f(-6.8f,  0.0f,  1.0f), Eigen::Vector3f(0.0f, 0.0f, 1.0f)},
-        {"+Z", Eigen::Vector3f( 0.0f,  0.0f,  7.3f), Eigen::Vector3f(0.0f, 1.0f, 0.0f)} // Top-down view
+        // {"+X", Eigen::Vector3f( 6.8f,  0.0f,  1.0f), Eigen::Vector3f(0.0f, 0.0f, 1.0f)},
+        // {"+Y", Eigen::Vector3f( 0.0f,  6.8f,  1.0f), Eigen::Vector3f(0.0f, 0.0f, 1.0f)},
+        // {"-X", Eigen::Vector3f(-6.8f,  0.0f,  1.0f), Eigen::Vector3f(0.0f, 0.0f, 1.0f)},
+        // {"+Z", Eigen::Vector3f( 0.0f,  0.0f,  7.3f), Eigen::Vector3f(0.0f, 1.0f, 0.0f)} // Top-down view
     };
 
     Eigen::Vector3f target(0.0f, 0.0f, 0.5f); // The camera will always look at this point
