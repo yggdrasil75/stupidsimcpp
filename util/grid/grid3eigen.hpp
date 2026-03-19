@@ -16,6 +16,9 @@
 #include <iostream>
 #include <iomanip>
 #include <fstream>
+#include <sstream>
+#include <string>
+#include <filesystem>
 #include <mutex>
 #include <map>
 #include <unordered_set>
@@ -28,6 +31,8 @@
 #endif
 
 constexpr int Dim = 3;
+static constexpr uint8_t NODE_LOADED_BIT = 1 << 0;
+static constexpr uint8_t NODE_DIRTY_BIT = 1 << 1;
 
 template<typename T, typename IndexType = uint16_t>
 class Octree {
@@ -87,9 +92,36 @@ public:
             PointType halfSize = getHalfSize();
             return {position - halfSize, position + halfSize};
         }
+
+        void serialize(std::ostream& os) const {
+            os.write(reinterpret_cast<const char*>(&data), sizeof(T));
+            os.write(reinterpret_cast<const char*>(&position), sizeof(PointType));
+            os.write(reinterpret_cast<const char*>(&objectId), sizeof(int));
+            os.write(reinterpret_cast<const char*>(&subId), sizeof(int));
+            os.write(reinterpret_cast<const char*>(&size), sizeof(float));
+            os.write(reinterpret_cast<const char*>(&colorIdx), sizeof(IndexType));
+            os.write(reinterpret_cast<const char*>(&materialIdx), sizeof(IndexType));
+            os.write(reinterpret_cast<const char*>(&active), sizeof(bool));
+            os.write(reinterpret_cast<const char*>(&visible), sizeof(bool));
+        }
+
+        void deserialize(std::istream& is) {
+            is.read(reinterpret_cast<char*>(&data), sizeof(T));
+            is.read(reinterpret_cast<char*>(&position), sizeof(PointType));
+            is.read(reinterpret_cast<char*>(&objectId), sizeof(int));
+            is.read(reinterpret_cast<char*>(&subId), sizeof(int));
+            is.read(reinterpret_cast<char*>(&size), sizeof(float));
+            is.read(reinterpret_cast<char*>(&colorIdx), sizeof(IndexType));
+            is.read(reinterpret_cast<char*>(&materialIdx), sizeof(IndexType));
+            is.read(reinterpret_cast<char*>(&active), sizeof(bool));
+            is.read(reinterpret_cast<char*>(&visible), sizeof(bool));
+        }
     };
 
     struct OctreeNode {
+        private:
+            uint8_t flags;
+        public:
         BoundingBox bounds;
         std::vector<std::shared_ptr<NodeData>> points;
         std::array<std::unique_ptr<OctreeNode>, 8> children;
@@ -100,12 +132,26 @@ public:
         mutable std::shared_ptr<NodeData> lodData;
         mutable std::mutex lodMutex; 
 
-        OctreeNode(const PointType& min, const PointType& max) : bounds(min,max), isLeaf(true), lodData(nullptr) {
+        OctreeNode(const PointType& min, const PointType& max) 
+            : bounds(min,max), isLeaf(true), lodData(nullptr), flags(NODE_LOADED_BIT | NODE_DIRTY_BIT) {
             for (std::unique_ptr<OctreeNode>& child : children) {
                 child = nullptr;
             }
             center = (bounds.first + bounds.second) * 0.5;
             nodeSize = (bounds.second - bounds.first).norm();
+        }
+
+        inline bool isLoaded() const {
+            return flags & NODE_LOADED_BIT;
+        }
+        inline void setLoaded(bool val) {
+            val ? (flags |= NODE_LOADED_BIT) : (flags &= ~NODE_LOADED_BIT);
+        }
+        inline bool isDirty() const {
+            return flags & NODE_DIRTY_BIT;
+        }
+        inline void setDirty(bool val) {
+            val ? (flags |= NODE_DIRTY_BIT) : (flags &= ~NODE_DIRTY_BIT);
         }
 
         bool contains(const PointType& point) const {
@@ -114,8 +160,146 @@ public:
                     point[2] >= bounds.first[2] && point[2] <= bounds.second[2]);
         }
 
+        bool intersectsBounds(const PointType& bMin, const PointType& bMax) const {
+            return (bounds.first[0] <= bMax[0] && bounds.second[0] >= bMin[0]) &&
+                   (bounds.first[1] <= bMax[1] && bounds.second[1] >= bMin[1]) &&
+                   (bounds.first[2] <= bMax[2] && bounds.second[2] >= bMin[2]);
+        }
+
         bool isEmpty() const {
+            ///TODO: should also check children.
             return points.empty();
+        }
+
+        std::string getRegionName() const {
+            std::ostringstream oss;
+            oss << static_cast<long long>(std::floor(center.x())) << "_"
+                << static_cast<long long>(std::floor(center.y())) << "_"
+                << static_cast<long long>(std::floor(center.z()));
+            return oss.str();
+        }
+        
+        void saveStructure(std::ostream& os) const {
+            os.write(reinterpret_cast<const char*>(&bounds), sizeof(bounds));
+            os.write(reinterpret_cast<const char*>(&isLeaf), sizeof(isLeaf));
+
+            if (!isLeaf) {
+                uint8_t childMask = 0;
+                for (int i = 0; i < 8; ++i) {
+                    if (children[i]) childMask |= (1 << i);
+                }
+                os.write(reinterpret_cast<const char*>(&childMask), sizeof(childMask));
+                
+                for (int i = 0; i < 8; ++i) {
+                    if (children[i]) children[i]->saveStructure(os);
+                }
+            }
+        }
+
+        void loadStructure(std::istream& is) {
+            is.read(reinterpret_cast<char*>(&bounds), sizeof(bounds));
+            is.read(reinterpret_cast<char*>(&isLeaf), sizeof(isLeaf));
+
+            center = (bounds.first + bounds.second) * 0.5;
+            nodeSize = (bounds.second - bounds.first).norm();
+
+            setLoaded(false);
+            setDirty(false);
+
+            if (!isLeaf) {
+                uint8_t childMask = 0;
+                is.read(reinterpret_cast<char*>(&childMask), sizeof(childMask));
+                
+                for (int i = 0; i < 8; ++i) {
+                    if (childMask & (1 << i)) {
+                        children[i] = std::make_unique<OctreeNode>(PointType::Zero(), PointType::Zero());
+                        children[i]->loadStructure(is);
+                    }
+                }
+            }
+        }
+
+        void saveData(const std::filesystem::path& currentDir) {
+            if (!isLeaf() || !isLoaded() || !isDirty()) return;
+            
+            std::filesystem::create_directories(currentDir);
+            std::filesystem::path filePath = currentDir / (getRegionName() + ".leafdata");
+            std::ofstream os(filePath, std::ios::binary);
+            if (!os) return;
+            
+            size_t numPoints = points.size();
+            os.write(reinterpret_cast<const char*>(&numPoints), sizeof(numPoints));
+            for (const auto& pt : points) {
+                pt->serialize(os);
+            }
+            os.close();
+            setDirty(false);
+        }
+
+        void loadData(const std::filesystem::path& currentDir) {
+            if (!isLeaf() || isLoaded()) return;
+            
+            std::filesystem::path filePath = currentDir / (getRegionName() + ".leafdata");
+            if (!std::filesystem::exists(filePath)) return;
+            
+            std::ifstream is(filePath, std::ios::binary);
+            if (!is) return;
+
+            size_t numPoints = 0;
+            is.read(reinterpret_cast<char*>(&numPoints), sizeof(numPoints));
+            
+            points.clear();
+            points.reserve(numPoints);
+            for (size_t i = 0; i < numPoints; ++i) {
+                auto pt = std::make_shared<NodeData>();
+                pt->deserialize(is);
+                points.push_back(pt);
+            }
+            is.close();
+            setLoaded(true);
+            setDirty(false);
+        }
+
+        void offloadRegion(const std::filesystem::path& currentDir, const PointType& minB, const PointType& maxB) {
+            if (!intersectsBounds(minB, maxB)) return;
+            
+            if (isLeaf() && isLoaded()) {
+                if (isDirty()) {
+                    saveData(currentDir); 
+                }
+                points.clear();      
+                points.shrink_to_fit();
+                setLoaded(false);
+            } else if (!isLeaf()) {
+                std::filesystem::path subDir = currentDir / getRegionName();
+                for (auto& child : children) {
+                    if (child) child->offloadRegion(subDir, minB, maxB);
+                }
+            }
+        }
+
+        void loadRegion(const std::filesystem::path& currentDir, const PointType& minB, const PointType& maxB) {
+            if (!intersectsBounds(minB, maxB)) return;
+            
+            if (isLeaf() && !isLoaded()) {
+                loadData(currentDir);
+            } else if (!isLeaf()) {
+                std::filesystem::path subDir = currentDir / getRegionName();
+                for (auto& child : children) {
+                    if (child) child->loadRegion(subDir, minB, maxB);
+                }
+            }
+        }
+        
+        void saveAllData(const std::filesystem::path& currentDir) {
+            if (isLeaf() && isLoaded() && isDirty()) {
+                saveData(currentDir);
+            } else if (!isLeaf()) {
+                std::filesystem::path subDir = currentDir / getRegionName();
+                for (auto& child : children) {
+                    if (child) child->saveAllData(subDir);
+                }
+            }
         }
     };
 
@@ -135,10 +319,8 @@ private:
     
     std::vector<Material> materialMap_;
     std::map<Material, IndexType> materialToIndex_;
-
-    std::map<std::pair<int, int>, std::shared_ptr<Mesh>> meshCache_;
-    std::set<std::pair<int, int>> dirtyMeshes_;
     int nextSubIdGenerator_ = 1;
+    std::filesystem::path storageBasePath_;
     
 public:
     inline IndexType getColorIndex(const Eigen::Vector3f& color) {
@@ -214,6 +396,9 @@ private:
 
     void collectNodesBySubIdRecursive(OctreeNode* node, int objId, int subId, std::vector<std::shared_ptr<NodeData>>& results, std::unordered_set<std::shared_ptr<NodeData>>& seen) const {
         if (!node) return;
+        if (!node->isLoaded()) {
+            node->loadRegion(storageBasePath_, node->bounds.first, node->bounds.second);
+        }
         for (const auto& pt : node->points) {
             if (pt->active && pt->objectId == objId && pt->subId == subId) {
                 if (seen.insert(pt).second) {
@@ -234,8 +419,9 @@ private:
     }
 
     float lodFalloffRate_ = 0.1f; // Lower = better, higher = worse. 0-1
-    float lodMinDistance_ = 100.0f;
-    float maxDistance_ = size * size;
+    float invLodf;
+    float lodMinDistance_ = 1000.0f;
+    float maxDistance_ = lodMinDistance_ * lodMinDistance_;
     
     struct Ray {
         PointType origin;
@@ -282,16 +468,35 @@ private:
                 a.first[1] <= b.second[1] && a.second[1] >= b.first[1] &&
                 a.first[2] <= b.second[2] && a.second[2] >= b.first[2]);
     }
+    
+    void markDirtyRecursive(OctreeNode* node, const BoundingBox& bounds) {
+        if (!node || !boxIntersectsBox(node->bounds, bounds)) return;
+        
+        node->setDirty(true);
+        if (!node->isLeaf) {
+            for (auto& child : node->children) {
+                if (child) {
+                    markDirtyRecursive(child.get(), bounds);
+                }
+            }
+        }
+    }
 
     void splitNode(OctreeNode* node, int depth) {
         if (depth >= maxDepth) return;
+        if (!storageBasePath_.empty() && !node->isLoaded()) {
+             node->loadData(storageBasePath_);
+        }
         for (int i = 0; i < 8; ++i) {
             BoundingBox childBounds = createChildBounds(node, i);
             node->children[i] = std::make_unique<OctreeNode>(childBounds.first, childBounds.second);
         }
 
         std::vector<std::shared_ptr<NodeData>> keep;
-        for (const auto& pointData : node->points) {
+        auto pointsToMove = std::move(node->points);
+        node->points.clear();
+
+        for (const auto& pointData : pointsToMove) {
             // Keep massive objects in the parent
             if (pointData->size >= node->nodeSize) {
                 keep.emplace_back(pointData);
@@ -308,8 +513,10 @@ private:
 
         node->points = std::move(keep);
         node->isLeaf = false;
+        node->setDirty(true);
 
         for (int i = 0; i < 8; ++i) {
+            node->children[i]->setDirty(true);
             if (node->children[i]->points.size() > maxPointsPerNode) {
                 splitNode(node->children[i].get(), depth + 1);
             }
@@ -324,6 +531,12 @@ private:
 
         BoundingBox cubeBounds = pointData->getCubeBounds();
         if (!boxIntersectsBox(node->bounds, cubeBounds)) return false;
+        
+        if (!storageBasePath_.empty() && !node->isLoaded()) {
+            node->loadData(storageBasePath_);
+        }
+        node->setDirty(true);
+
 
         if (!node->isLeaf && pointData->size >= node->nodeSize) {
             node->points.emplace_back(pointData);
@@ -427,6 +640,10 @@ private:
         std::lock_guard<std::mutex> lock(node->lodMutex);
         if (node->lodData != nullptr) return;
 
+        if (!storageBasePath_.empty() && !node->isLoaded()) {
+            node->loadData(storageBasePath_);
+        }
+
         PointType avgPos = PointType::Zero();
         Eigen::Vector3f avgColor = Eigen::Vector3f::Zero();
         float avgEmittance = 0.0f;
@@ -490,6 +707,9 @@ private:
 
     std::shared_ptr<NodeData> findRecursive(OctreeNode* node, const PointType& pos, float tolerance) const {
         if (!node->contains(pos)) return nullptr;
+        if (!storageBasePath_.empty() && !node->isLoaded()) {
+            const_cast<OctreeNode*>(node)->loadData(storageBasePath_);
+        }
         
         for (const auto& pointData : node->points) {
             if (!pointData->active) continue;
@@ -510,12 +730,17 @@ private:
     }
 
     bool removeRecursive(OctreeNode* node, const BoundingBox& bounds, const std::shared_ptr<NodeData>& targetPt) {
+        if (!boxIntersectsBox(node->bounds, bounds)) return false;
+
+        if (!storageBasePath_.empty() && !node->isLoaded()) {
+            node->loadData(storageBasePath_);
+        }
+
         {
             std::lock_guard<std::mutex> lock(node->lodMutex);
             node->lodData = nullptr; 
         }
-
-        if (!boxIntersectsBox(node->bounds, bounds)) return false;
+        node->setDirty(true);
         
         bool foundAny = false;
         
@@ -551,6 +776,10 @@ private:
             return;
         }
         
+        if (!storageBasePath_.empty() && !node->isLoaded()) {
+            const_cast<OctreeNode*>(node)->loadData(storageBasePath_);
+        }
+        
         for (const auto& pointData : node->points) {
             if (!pointData->active) continue;
             
@@ -574,7 +803,7 @@ private:
     }
 
     void voxelTraverseRecursive(OctreeNode* node, float tMin, float tMax, float& maxDist, 
-                                bool enableLOD, const Ray& ray, std::shared_ptr<NodeData>& hit, float invLodf) const {
+                                bool enableLOD, const Ray& ray, std::shared_ptr<NodeData>& hit) const {
         if (enableLOD && !node->isLeaf) {
             float dist = (node->center - ray.origin).norm();
             float ratio = dist / node->nodeSize;
@@ -591,6 +820,10 @@ private:
                 }
                 return;
             }
+        }
+        
+        if (!storageBasePath_.empty() && !node->isLoaded()) {
+            const_cast<OctreeNode*>(node)->loadData(storageBasePath_);
         }
 
         for (const auto& pointData : node->points) {
@@ -626,7 +859,7 @@ private:
             int physIdx = currIdx ^ ray.signMask;
 
             if (node->children[physIdx]) {
-                voxelTraverseRecursive(node->children[physIdx].get(), tMin, tNext, maxDist, enableLOD, ray, hit, invLodf);
+                voxelTraverseRecursive(node->children[physIdx].get(), tMin, tNext, maxDist, enableLOD, ray, hit);
             }
 
             tMin = tNext;
@@ -1295,6 +1528,22 @@ public:
 
     Octree() : root_(nullptr), maxPointsPerNode(8), maxDepth(16), size(0), mapMutex_(std::make_unique<std::mutex>()) {}
 
+    void setStoragePath(const std::string& path) {
+        storageBasePath_ = path;
+    }
+
+    void offloadRegion(const PointType& minBounds, const PointType& maxBounds) {
+        if (root_ && !storageBasePath_.empty()) {
+            root_->offloadRegion(storageBasePath_, minBounds, maxBounds);
+        }
+    }
+
+    void loadRegion(const PointType& minBounds, const PointType& maxBounds) {
+        if (root_ && !storageBasePath_.empty()) {
+            root_->loadRegion(storageBasePath_, minBounds, maxBounds);
+        }
+    }
+
     void setSkylight(const Eigen::Vector3f& skylight) { 
         skylight_ = skylight; 
     }
@@ -1311,7 +1560,10 @@ public:
         return backgroundColor_; 
     }
 
-    void setLODFalloff(float rate) { lodFalloffRate_ = rate; }
+    void setLODFalloff(float rate) { 
+        lodFalloffRate_ = rate;
+        invLodf = 1 / rate;
+    }
     void setLODMinDistance(float dist) { lodMinDistance_ = dist; }
     void setMaxDistance(float dist) { maxDistance_ = dist; }
 
@@ -1339,104 +1591,102 @@ public:
         return false;
     }
 
-    bool save(const std::string& filename) const {
-        if (!root_) return false;
-        std::ofstream out(filename, std::ios::binary);
-        if (!out) return false;
-
-        uint32_t magic = 0x79676733;
-        writeVal(out, magic);
-        writeVal(out, maxDepth);
-        writeVal(out, maxPointsPerNode);
-        writeVal(out, size);
+    bool remove(const PointType& pos, float tolerance = EPSILON) {
+        auto pt = find(pos, tolerance);
+        if (!pt) return false;
         
-        writeVec3(out, skylight_);
-        writeVec3(out, backgroundColor_);
-
-        {
-            std::lock_guard<std::mutex> lock(*mapMutex_);
-            size_t cMapSize = colorMap_.size();
-            writeVal(out, cMapSize);
-            for (const auto& c : colorMap_) {
-                writeVec3(out, c);
-            }
-
-            size_t mMapSize = materialMap_.size();
-            writeVal(out, mMapSize);
-            for (const auto& m : materialMap_) {
-                writeVal(out, m.emittance);
-                writeVal(out, m.roughness);
-                writeVal(out, m.metallic);
-                writeVal(out, m.transmission);
-                writeVal(out, m.ior);
-            }
+        auto ptBounds = pt->getCubeBounds();
+        if (removeRecursive(root_.get(), ptBounds, pt)) {
+            size--;
+            return true;
         }
-        
-        writeVec3(out, root_->bounds.first);
-        writeVec3(out, root_->bounds.second);
+        return false;
+    }
+    
+    void saveMaps(const std::filesystem::path& path) const {
+        std::ofstream os(path, std::ios::binary);
+        if (!os) return;
 
-        serializeNode(out, root_.get());
+        std::lock_guard<std::mutex> lock(*mapMutex_);
+        size_t cSize = colorMap_.size();
+        os.write(reinterpret_cast<const char*>(&cSize), sizeof(cSize));
+        for (const auto& c : colorMap_) {
+            os.write(reinterpret_cast<const char*>(c.data()), sizeof(float) * 3);
+        }
+
+        size_t mSize = materialMap_.size();
+        os.write(reinterpret_cast<const char*>(&mSize), sizeof(mSize));
+        for (const auto& m : materialMap_) {
+            os.write(reinterpret_cast<const char*>(&m), sizeof(Material));
+        }
+        os.close();
+    }
+
+    void loadMaps(const std::filesystem::path& path) {
+        std::ifstream is(path, std::ios::binary);
+        if (!is) return;
         
-        out.close();
-        std::cout << "successfully saved grid to " << filename << std::endl;
+        std::lock_guard<std::mutex> lock(*mapMutex_);
+        colorMap_.clear();
+        colorToIndex_.clear();
+        materialMap_.clear();
+        materialToIndex_.clear();
+
+        size_t cSize = 0;
+        is.read(reinterpret_cast<char*>(&cSize), sizeof(cSize));
+        colorMap_.resize(cSize);
+        for(size_t i = 0; i < cSize; ++i) {
+            is.read(reinterpret_cast<char*>(colorMap_[i].data()), sizeof(float) * 3);
+            colorToIndex_[colorMap_[i]] = static_cast<IndexType>(i);
+        }
+
+        size_t mSize = 0;
+        is.read(reinterpret_cast<char*>(&mSize), sizeof(mSize));
+        materialMap_.resize(mSize);
+        for(size_t i = 0; i < mSize; ++i) {
+            is.read(reinterpret_cast<char*>(&materialMap_[i]), sizeof(Material));
+            materialToIndex_[materialMap_[i]] = static_cast<IndexType>(i);
+        }
+        is.close();
+    }
+
+
+    bool save(const std::string& path) {
+        setStoragePath(path);
+        if (storageBasePath_.empty() || !root_) return false;
+        std::filesystem::create_directories(storageBasePath_);
+        
+        saveMaps(storageBasePath_ / "maps.bin");
+        
+        std::ofstream os(storageBasePath_ / "tree.struct", std::ios::binary);
+        root_->saveStructure(os);
+        os.close();
+        
+        root_->saveAllData(storageBasePath_);
+        
+        std::cout << "Successfully saved octree to " << path << std::endl;
         return true;
     }
 
-    bool load(const std::string& filename) {
-        std::ifstream in(filename, std::ios::binary);
-        if (!in) return false;
+    bool load(const std::string& path, bool loadAllData = false) {
+        setStoragePath(path);
+        if (storageBasePath_.empty() || !std::filesystem::exists(storageBasePath_)) return false;
 
-        uint32_t magic;
-        readVal(in, magic);
-        if (magic != 0x79676733) {
-            std::cerr << "Invalid Octree file format" << std::endl;
+        loadMaps(storageBasePath_ / "maps.bin");
+        
+        std::ifstream is(storageBasePath_ / "tree.struct", std::ios::binary);
+        if (is) {
+            root_ = std::make_unique<OctreeNode>(PointType::Zero(), PointType::Zero());
+            root_->loadStructure(is);
+            is.close();
+            if (loadAllData) {
+                root_->loadRegion(storageBasePath_, root_->bounds.first, root_->bounds.second);
+            }
+        } else {
             return false;
         }
-
-        readVal(in, maxDepth);
-        readVal(in, maxPointsPerNode);
-        readVal(in, size);
         
-        readVec3(in, skylight_);
-        readVec3(in, backgroundColor_);
-
-        {
-            std::lock_guard<std::mutex> lock(*mapMutex_);
-            colorMap_.clear();
-            colorToIndex_.clear();
-            materialMap_.clear();
-            materialToIndex_.clear();
-
-            size_t cMapSize;
-            readVal(in, cMapSize);
-            colorMap_.resize(cMapSize);
-            for (size_t i = 0; i < cMapSize; ++i) {
-                readVec3(in, colorMap_[i]);
-                colorToIndex_[colorMap_[i]] = static_cast<IndexType>(i);
-            }
-
-            size_t mMapSize;
-            readVal(in, mMapSize);
-            materialMap_.resize(mMapSize);
-            for (size_t i = 0; i < mMapSize; ++i) {
-                readVal(in, materialMap_[i].emittance);
-                readVal(in, materialMap_[i].roughness);
-                readVal(in, materialMap_[i].metallic);
-                readVal(in, materialMap_[i].transmission);
-                readVal(in, materialMap_[i].ior);
-                materialToIndex_[materialMap_[i]] = static_cast<IndexType>(i);
-            }
-        }
-
-        PointType minBound, maxBound;
-        readVec3(in, minBound);
-        readVec3(in, maxBound);
-
-        root_ = std::make_unique<OctreeNode>(minBound, maxBound);
-        deserializeNode(in, root_.get());
-
-        in.close();
-        std::cout << "successfully loaded grid from " << filename << std::endl;
+        std::cout << "Successfully loaded octree from " << path << std::endl;
         return true;
     }
 
@@ -1652,7 +1902,7 @@ public:
         if (rayBoxIntersect(oray, root_->bounds, tMin, tMax)) {
             tMax = std::min(tMax, maxDist);
             float currentMaxDist = maxDist;
-            voxelTraverseRecursive(root_.get(), tMin, tMax, currentMaxDist, enableLOD, oray, hit, invLodf);
+            voxelTraverseRecursive(root_.get(), tMin, tMax, currentMaxDist, enableLOD, oray, hit);
         }
         return hit;
     }
@@ -1724,7 +1974,7 @@ public:
 
     frame fastRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB) {
         //TIME_FUNCTION;
-        generateLODs();
+        // generateLODs();
         PointType origin = cam.origin;
         PointType dir = cam.direction.normalized();
         PointType up = cam.up.normalized();
@@ -1799,7 +2049,7 @@ public:
                            double maxTimeSeconds = 0.16, int maxBounces = 4, bool globalIllumination = false, bool useLod = true) {
         auto startTime = std::chrono::high_resolution_clock::now();
         
-        generateLODs();
+        // generateLODs();
         PointType origin = cam.origin;
         PointType dir = cam.direction.normalized();
         PointType up = cam.up.normalized();
@@ -2201,6 +2451,7 @@ public:
         if (root_) {
             optimizeRecursive(root_.get());
         }
+        generateLODs();
     }
 
     void printStats(std::ostream& os = std::cout) const {
