@@ -1012,7 +1012,6 @@ private:
             PointMedium dist = obb.extents.template cast<medium>() - absLocalHit;
             PointMedium localNormal = PointMedium::Zero();
             
-            // Assign Normal based on the smallest distance to the local oriented plane
             if (dist.x() <= dist.y() && dist.x() <= dist.z()) {
                 localNormal.x() = localHit.x() > 0 ? 1 : -1;
             } else if (dist.y() <= dist.x() && dist.y() <= dist.z()) {
@@ -1274,6 +1273,54 @@ public:
                 }
                 
                 pixelColor /= static_cast<float>(spp);
+                
+                size_t idx = (static_cast<size_t>(py) * width + px) * 3;
+                rgbData[idx]     = pixelColor.x();
+                rgbData[idx + 1] = pixelColor.y();
+                rgbData[idx + 2] = pixelColor.z();
+            }
+        }
+
+        result.setData(rgbData, frame::colormap::RGB);
+        
+        return result;
+    }
+
+    frame renderFramefast(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB, bool globalIllumination = false, bool useLod = true) const {
+        
+        frame result(width, height, colorformat);
+        
+        std::vector<float> rgbData(width * height * 3, 0.0f);
+
+        float aspectRatio = static_cast<float>(width) / static_cast<float>(height);
+        float fovRad = cam.fovRad();
+        float halfHeight = std::tan(fovRad / 2.0f);
+        float halfWidth = aspectRatio * halfHeight;
+
+        Eigen::Vector3f camOrigin = cam.origin;
+        Eigen::Vector3f camForward = cam.forward();
+        Eigen::Vector3f camRight = cam.right();
+        Eigen::Vector3f camUp = cam.up;
+
+        #pragma omp parallel for schedule(dynamic)
+        for (int py = 0; py < height; ++py) {
+            uint32_t rngState = (py * 1973) ^ 0x9e3779b9; 
+            
+            for (int px = 0; px < width; ++px) {
+                Eigen::Vector3f pixelColor = Eigen::Vector3f::Zero();
+                
+                float ndcX = px / static_cast<float>(width);
+                float ndcY = py / static_cast<float>(height);
+                
+                float screenX = (2.0f * ndcX - 1.0f) * halfWidth;
+                float screenY = (1.0f - 2.0f * ndcY) * halfHeight; 
+                
+                Eigen::Vector3f rayDir = (camForward + screenX * camRight + screenY * camUp).normalized();
+                
+                PointMedium rOrig = camOrigin.cast<medium>();
+                PointMedium rDir = rayDir.cast<medium>();
+                
+                pixelColor += traceRayFast(rOrig, rDir, rngState, 0, useLod);
                 
                 size_t idx = (static_cast<size_t>(py) * width + px) * 3;
                 rgbData[idx]     = pixelColor.x();

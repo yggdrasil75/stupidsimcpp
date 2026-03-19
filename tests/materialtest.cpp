@@ -126,19 +126,15 @@ int main() {
     createBox(octree, Eigen::Vector3f(  0,  sp, 0.0f), size, cBlue,   0.0f, 0.01f, 0.0f, 1.0f, 1.5f);
     createBox(octree, Eigen::Vector3f( sp,  sp, 0.0f), size, cPurple, 0.0f, 0.01f, 0.0f, 1.0f, 1.5f);
 
-    // White Light Box (Above)
-    // Placed near the ceiling (Z=7.4), made large (8x8) to cast soft shadows evenly over the whole 3x3 grid
     createBox(octree, Eigen::Vector3f(0.0f, 0.0f, 7.4f), Eigen::Vector3f(8.0f, 8.0f, 0.2f), Eigen::Vector3f(1.0f, 1.0f, 1.0f), 15.0f);
 
     std::cout << "Optimizing dictionaries and Structure maps..." << std::endl;
     octree.optimize();
     octree.printStats();
 
-    // 3. Setup video rendering
     int width = 512;
     int height = 512;
     
-    // --- Video Animation Parameters ---
     const float fps = 10.0f;
     const float durationPerSegment = 1.0f; // Seconds to travel between each view
     const int framesPerSegment = static_cast<int>(fps * durationPerSegment);
@@ -151,18 +147,16 @@ int main() {
         Eigen::Vector3f up;
     };
 
-    // Define the keyframe camera views for the animation
     std::vector<View> views = {
         {"-Y", Eigen::Vector3f( 0.0f, -6.8f,  1.0f), Eigen::Vector3f(0.0f, 0.0f, 1.0f)},
         // {"+X", Eigen::Vector3f( 6.8f,  0.0f,  1.0f), Eigen::Vector3f(0.0f, 0.0f, 1.0f)},
         // {"+Y", Eigen::Vector3f( 0.0f,  6.8f,  1.0f), Eigen::Vector3f(0.0f, 0.0f, 1.0f)},
         // {"-X", Eigen::Vector3f(-6.8f,  0.0f,  1.0f), Eigen::Vector3f(0.0f, 0.0f, 1.0f)},
-        // {"+Z", Eigen::Vector3f( 0.0f,  0.0f,  7.3f), Eigen::Vector3f(0.0f, 1.0f, 0.0f)} // Top-down view
+        {"+Z", Eigen::Vector3f( 0.0f,  0.0f,  7.3f), Eigen::Vector3f(0.0f, 1.0f, 0.0f)} // Top-down view
     };
 
     Eigen::Vector3f target(0.0f, 0.0f, 0.5f); // The camera will always look at this point
 
-    // --- Main Animation and Rendering Loop ---
     std::vector<frame> videoFrames;
     const int totalFrames = framesPerSegment * views.size();
     videoFrames.reserve(totalFrames);
@@ -181,10 +175,8 @@ int main() {
             frameCounter++;
             float t = static_cast<float>(j) / static_cast<float>(framesPerSegment);
 
-            // Interpolate camera position (origin) linearly
             Eigen::Vector3f currentOrigin = startView.origin * (1.0f - t) + endView.origin * t;
             
-            // Interpolate camera orientation (up vector) and normalize
             Eigen::Vector3f currentUp = (startView.up * (1.0f - t) + endView.up * t).normalized();
             
             Camera cam;
@@ -194,13 +186,13 @@ int main() {
             
             std::cout << "Rendering video frame " << frameCounter << "/" << totalFrames << "..." << std::endl;
             
-            frame out = octree.renderFrame(cam, height, width, frame::colormap::RGB, video_samples, video_bounces, false, true);
+            // frame out = octree.renderFrame(cam, height, width, frame::colormap::RGB, video_samples, video_bounces, false, true);
+            frame out = octree.renderFramefast(cam, height, width, frame::colormap::RGB, false, true);
             
-            videoFrames.push_back(std::move(out)); // Use std::move for efficiency
+            videoFrames.push_back(std::move(out));
         }
     }
 
-    // --- Save the final video ---
     std::cout << "\nAll frames rendered. Saving video file..." << std::endl;
     std::string videoFilename = "output/material_test_video.avi";
     
