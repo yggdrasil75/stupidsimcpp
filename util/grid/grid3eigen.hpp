@@ -5,7 +5,6 @@
 #include "../timing_decorator.hpp"
 #include "../output/frame.hpp"
 #include "camera.hpp"
-#include "mesh.hpp"
 #include <vector>
 #include <array>
 #include <memory>
@@ -31,8 +30,15 @@
 #endif
 
 constexpr int Dim = 3;
+// Flags for NodeData
+static constexpr uint8_t ACTIVE_BIT = 1 << 0;
+static constexpr uint8_t VISIBLE_BIT = 1 << 1;
+
+// Flags for OctreeNode
 static constexpr uint8_t NODE_LOADED_BIT = 1 << 0;
 static constexpr uint8_t NODE_DIRTY_BIT = 1 << 1;
+static constexpr uint8_t NODE_LEAF_BIT = 1 << 2;
+static constexpr uint8_t NODE_LOD_VALID_BIT = 1 << 3;
 
 template<typename T, typename IndexType = uint16_t>
 class Octree {
@@ -69,20 +75,33 @@ public:
         T data;
         PointType position;
         int objectId;
-        int subId;
         float size;
         IndexType colorIdx;
         IndexType materialIdx;
-        bool active;
-        bool visible;
+        uint8_t flags;
 
         NodeData(const T& data, const PointType& pos, bool visible, IndexType colorIdx, float size = 0.01f,
-                 bool active = true, int objectId = -1, int subId = 0, IndexType materialIdx = 0) 
-                : data(data), position(pos), objectId(objectId), subId(subId), size(size), 
-                  colorIdx(colorIdx), materialIdx(materialIdx), active(active), visible(visible) {}
+                 bool active = true, int objectId = -1, IndexType materialIdx = 0) 
+                : data(data), position(pos), objectId(objectId), size(size), 
+                  colorIdx(colorIdx), materialIdx(materialIdx), flags(0) {
+                    setActive(active);
+                    setVisible(visible);
+                  }
         
-        NodeData() : objectId(-1), subId(0), size(0.0f), colorIdx(0), materialIdx(0), 
-                     active(false), visible(false) {}
+        NodeData() : objectId(-1), size(0.0f), colorIdx(0), materialIdx(0), flags(0) {}
+        
+        bool isActive() const {
+            return flags & ACTIVE_BIT;
+        }
+        bool isVisible() const {
+            return flags & VISIBLE_BIT;
+        }
+        void setActive(bool val) {
+            val ? (flags |= ACTIVE_BIT) : (flags &= ~ACTIVE_BIT);
+        }
+        void setVisible(bool val) {
+            val ? (flags |= VISIBLE_BIT) : (flags &= ~VISIBLE_BIT);
+        }
         
         PointType getHalfSize() const {
             return PointType(size * 0.5f, size * 0.5f, size * 0.5f);
@@ -97,24 +116,20 @@ public:
             os.write(reinterpret_cast<const char*>(&data), sizeof(T));
             os.write(reinterpret_cast<const char*>(&position), sizeof(PointType));
             os.write(reinterpret_cast<const char*>(&objectId), sizeof(int));
-            os.write(reinterpret_cast<const char*>(&subId), sizeof(int));
             os.write(reinterpret_cast<const char*>(&size), sizeof(float));
             os.write(reinterpret_cast<const char*>(&colorIdx), sizeof(IndexType));
             os.write(reinterpret_cast<const char*>(&materialIdx), sizeof(IndexType));
-            os.write(reinterpret_cast<const char*>(&active), sizeof(bool));
-            os.write(reinterpret_cast<const char*>(&visible), sizeof(bool));
+            os.write(reinterpret_cast<const char*>(&flags), sizeof(uint8_t));
         }
 
         void deserialize(std::istream& is) {
             is.read(reinterpret_cast<char*>(&data), sizeof(T));
             is.read(reinterpret_cast<char*>(&position), sizeof(PointType));
             is.read(reinterpret_cast<char*>(&objectId), sizeof(int));
-            is.read(reinterpret_cast<char*>(&subId), sizeof(int));
             is.read(reinterpret_cast<char*>(&size), sizeof(float));
             is.read(reinterpret_cast<char*>(&colorIdx), sizeof(IndexType));
             is.read(reinterpret_cast<char*>(&materialIdx), sizeof(IndexType));
-            is.read(reinterpret_cast<char*>(&active), sizeof(bool));
-            is.read(reinterpret_cast<char*>(&visible), sizeof(bool));
+            is.read(reinterpret_cast<char*>(&flags), sizeof(uint8_t));
         }
     };
 
@@ -127,13 +142,12 @@ public:
         std::array<std::unique_ptr<OctreeNode>, 8> children;
         PointType center;
         float nodeSize;
-        bool isLeaf;
         
         mutable std::shared_ptr<NodeData> lodData;
         mutable std::mutex lodMutex; 
 
         OctreeNode(const PointType& min, const PointType& max) 
-            : bounds(min,max), isLeaf(true), lodData(nullptr), flags(NODE_LOADED_BIT | NODE_DIRTY_BIT) {
+            : bounds(min,max), lodData(nullptr), flags(NODE_LEAF_BIT | NODE_LOADED_BIT | NODE_DIRTY_BIT) {
             for (std::unique_ptr<OctreeNode>& child : children) {
                 child = nullptr;
             }
@@ -141,17 +155,32 @@ public:
             nodeSize = (bounds.second - bounds.first).norm();
         }
 
-        inline bool isLoaded() const {
+        bool isLeaf() const {
+            return flags & NODE_LEAF_BIT;
+        }
+        void setLeaf(bool val) {
+            val ? (flags |= NODE_LEAF_BIT) : (flags &= ~NODE_LEAF_BIT);
+        }
+        bool isLoaded() const {
             return flags & NODE_LOADED_BIT;
         }
-        inline void setLoaded(bool val) {
+        void setLoaded(bool val) {
             val ? (flags |= NODE_LOADED_BIT) : (flags &= ~NODE_LOADED_BIT);
         }
-        inline bool isDirty() const {
+        bool isDirty() const {
             return flags & NODE_DIRTY_BIT;
         }
-        inline void setDirty(bool val) {
+        void setDirty(bool val) {
             val ? (flags |= NODE_DIRTY_BIT) : (flags &= ~NODE_DIRTY_BIT);
+        }
+        bool isLodValid() const {
+            return flags & NODE_LOD_VALID_BIT;
+        }
+        void setLodValid(bool val) {
+            val ? (flags |= NODE_LOD_VALID_BIT) : (flags &= ~NODE_LOD_VALID_BIT);
+        }
+        void invalidateLod() {
+            setLodValid(false);
         }
 
         bool contains(const PointType& point) const {
@@ -166,9 +195,20 @@ public:
                    (bounds.first[2] <= bMax[2] && bounds.second[2] >= bMin[2]);
         }
 
+        bool intersectsBounds(const BoundingBox& other) const {
+            return (bounds.first[0] <= other.second[0] && bounds.second[0] >= other.first[0]) &&
+                   (bounds.first[1] <= other.second[1] && bounds.second[1] >= other.first[1]) &&
+                   (bounds.first[2] <= other.second[2] && bounds.second[2] >= other.first[2]);
+        }
+
         bool isEmpty() const {
-            ///TODO: should also check children.
-            return points.empty();
+            if (!points.empty()) return false;
+            if (!isLeaf()) {
+                for (int i = 0; i < 8; ++i) {
+                    if (children[i] && !children[i]->isEmpty()) return false;
+                }
+            }
+            return true;
         }
 
         std::string getRegionName() const {
@@ -181,9 +221,9 @@ public:
         
         void saveStructure(std::ostream& os) const {
             os.write(reinterpret_cast<const char*>(&bounds), sizeof(bounds));
-            os.write(reinterpret_cast<const char*>(&isLeaf), sizeof(isLeaf));
+            os.write(reinterpret_cast<const char*>(&flags), sizeof(flags));
 
-            if (!isLeaf) {
+            if (!isLeaf()) {
                 uint8_t childMask = 0;
                 for (int i = 0; i < 8; ++i) {
                     if (children[i]) childMask |= (1 << i);
@@ -198,7 +238,7 @@ public:
 
         void loadStructure(std::istream& is) {
             is.read(reinterpret_cast<char*>(&bounds), sizeof(bounds));
-            is.read(reinterpret_cast<char*>(&isLeaf), sizeof(isLeaf));
+            is.read(reinterpret_cast<char*>(&flags), sizeof(flags));
 
             center = (bounds.first + bounds.second) * 0.5;
             nodeSize = (bounds.second - bounds.first).norm();
@@ -206,7 +246,7 @@ public:
             setLoaded(false);
             setDirty(false);
 
-            if (!isLeaf) {
+            if (!isLeaf()) {
                 uint8_t childMask = 0;
                 is.read(reinterpret_cast<char*>(&childMask), sizeof(childMask));
                 
@@ -220,44 +260,52 @@ public:
         }
 
         void saveData(const std::filesystem::path& currentDir) {
-            if (!isLeaf() || !isLoaded() || !isDirty()) return;
-            
-            std::filesystem::create_directories(currentDir);
-            std::filesystem::path filePath = currentDir / (getRegionName() + ".leafdata");
-            std::ofstream os(filePath, std::ios::binary);
-            if (!os) return;
-            
-            size_t numPoints = points.size();
-            os.write(reinterpret_cast<const char*>(&numPoints), sizeof(numPoints));
-            for (const auto& pt : points) {
-                pt->serialize(os);
+            if (isLeaf() && isLoaded() && isDirty()) {
+                std::filesystem::create_directories(currentDir);
+                std::filesystem::path filePath = currentDir / (getRegionName() + ".leafdata");
+                std::ofstream os(filePath, std::ios::binary);
+                if (!os) return;
+                
+                size_t numPoints = points.size();
+                os.write(reinterpret_cast<const char*>(&numPoints), sizeof(numPoints));
+                for (const auto& pt : points) {
+                    pt->serialize(os);
+                }
+                os.close();
+                setDirty(false);
+            } else if (!isLeaf()) {
+                for (auto& child : children) {
+                    if (child) child->saveData(currentDir / getRegionName());
+                }
             }
-            os.close();
-            setDirty(false);
         }
 
         void loadData(const std::filesystem::path& currentDir) {
-            if (!isLeaf() || isLoaded()) return;
-            
-            std::filesystem::path filePath = currentDir / (getRegionName() + ".leafdata");
-            if (!std::filesystem::exists(filePath)) return;
-            
-            std::ifstream is(filePath, std::ios::binary);
-            if (!is) return;
+            if (isLeaf() && !isLoaded()) {
+                std::filesystem::path filePath = currentDir / (getRegionName() + ".leafdata");
+                if (!std::filesystem::exists(filePath)) return;
+                
+                std::ifstream is(filePath, std::ios::binary);
+                if (!is) return;
 
-            size_t numPoints = 0;
-            is.read(reinterpret_cast<char*>(&numPoints), sizeof(numPoints));
-            
-            points.clear();
-            points.reserve(numPoints);
-            for (size_t i = 0; i < numPoints; ++i) {
-                auto pt = std::make_shared<NodeData>();
-                pt->deserialize(is);
-                points.push_back(pt);
+                size_t numPoints = 0;
+                is.read(reinterpret_cast<char*>(&numPoints), sizeof(numPoints));
+                
+                points.clear();
+                points.reserve(numPoints);
+                for (size_t i = 0; i < numPoints; ++i) {
+                    auto pt = std::make_shared<NodeData>();
+                    pt->deserialize(is);
+                    points.push_back(pt);
+                }
+                is.close();
+                setLoaded(true);
+                setDirty(false);
+            } else if (!isLeaf()) {
+                for (auto& child : children) {
+                    if (child) child->loadData(currentDir / getRegionName());
+                }
             }
-            is.close();
-            setLoaded(true);
-            setDirty(false);
         }
 
         void offloadRegion(const std::filesystem::path& currentDir, const PointType& minB, const PointType& maxB) {
@@ -303,6 +351,168 @@ public:
         }
     };
 
+    struct CelestialBody {
+        PointType direction;
+        float angularRadius;
+        float cosAngularRadius;
+        uint8_t r, g, b, emittance;
+        bool baked;
+        struct PixelBackup {
+            size_t x, y;
+            std::vector<uint8_t> data;
+        };
+        std::vector<PixelBackup> backup;
+
+        CelestialBody() : angularRadius(0), cosAngularRadius(1), r(255), g(255), b(255), emittance(255), baked(false) {}
+    };
+
+    struct Skybox {
+        frame skybox;
+        std::map<int, CelestialBody> bodies;
+        Eigen::Quaternion<float> skyRotation;
+
+        Skybox(size_t w = 1024, size_t h = 1024) : skybox(w, h, frame::colormap::RGBA), skyRotation(Eigen::Quaternion<float>::Identity()) { }
+
+        void dirToUV(const PointType& dir, float& u, float& v) const {
+            PointType d = dir.normalized();
+            u = 0.5f + (std::atan2(d.z(), d.x()) / (2.0f * M_PI));
+            v = 0.5f - (std::asin(d.y()) / M_PI);
+        }
+
+        PointType uvToDir(float u, float v) const {
+            float theta = (u - 0.5f) * 2.0f * M_PI;
+            float phi = (0.5f - v) * M_PI;
+            float y = std::sin(phi);
+            float cosphi = std::cos(phi);
+            float x = std::cos(theta) * cosphi;
+            float z = std::sin(theta) * cosphi;
+            return PointType(x, y, z);
+        }
+        
+        std::vector<uint8_t> sample(const PointType& dir) {
+            PointType rotatedDir = skyRotation * dir;
+            for (auto it = bodies.rbegin(); it != bodies.rend(); ++it) {
+                if (!it->second.baked) {
+                    if (rotatedDir.dot(it->second.direction) >= it->second.cosAngularRadius) {
+                        return {it->second.r, it->second.g, it->second.b, it->second.emittance};
+                    }
+                }
+            }
+
+            float u, v;
+            dirToUV(rotatedDir, u, v);
+
+            u = std::clamp(u, 0.0f, 0.9999f);
+            v = std::clamp(v, 0.0f, 0.9999f);
+            size_t x = static_cast<size_t>(u * skybox.getWidth());
+            size_t y = static_cast<size_t>(v * skybox.getHeight());
+
+            return skybox.getPixel(x, y);
+        }
+
+        void setBackground(float r, float g, float b, float e) {
+            size_t w = skybox.getWidth();
+            size_t h = skybox.getHeight();
+            std::vector<float> data(w * h * 4);
+
+            for (size_t i = 0; i < data.size(); i += 4) {
+                data[i] = r;
+                data[i + 1] = g;
+                data[i + 2] = b;
+                data[i + 3] = e;
+            }
+            skybox.setData(data);
+        }
+        
+        void addBody(int id, const PointType& dir, float angularRadius, uint8_t r, uint8_t g, uint8_t b, uint8_t emittance) {
+            removeBody(id);
+            CelestialBody body;
+            body.direction = dir.normalized();
+            body.angularRadius = angularRadius;
+            body.cosAngularRadius = std::cos(angularRadius);
+            body.r = r;
+            body.g = g;
+            body.b = b;
+            body.emittance = emittance;
+            body.baked = false;
+            bodies[id] = std::move(body);
+        }
+
+        void removeBody(int id) {
+            auto it = bodies.find(id);
+            if (it != bodies.end()) {
+                if (it->second.baked) {
+                    resetBody(id);
+                }
+                bodies.erase(it);
+            }
+        }
+
+        void moveBody(int id, const PointType& newDir) {
+            auto it = bodies.find(id);
+            if (it != bodies.end()) {
+                bool wasBaked = it->second.baked;
+                if (wasBaked) resetBody(id);
+                
+                it = bodies.find(id);
+                it->second.direction = newDir.normalized();
+                
+                if (wasBaked) bakeBody(id);
+            }
+        }
+
+        void bakeBody(int id) {
+            auto it = bodies.find(id);
+            if (it == bodies.end() || it->second.baked) return;
+
+            if (skybox.getCompressionType() != frame::compresstype::RAW) {
+                skybox.decompress();
+            }
+
+            size_t w = skybox.getWidth();
+            size_t h = skybox.getHeight();
+            std::vector<uint8_t> newColor = {it->second.r, it->second.g, it->second.b, it->second.emittance};
+            
+            it->second.backup.clear();
+
+            for (size_t y = 0; y < h; ++y) {
+                float v = (static_cast<float>(y) + 0.5f) / h; 
+                for (size_t x = 0; x < w; ++x) {
+                    float u = (static_cast<float>(x) + 0.5f) / w;
+                    PointType pixelDir = uvToDir(u, v);
+                    
+                    if (pixelDir.dot(it->second.direction) >= it->second.cosAngularRadius) {
+                        typename CelestialBody::PixelBackup backup;
+                        backup.x = x;
+                        backup.y = y;
+                        backup.data = skybox.getPixel(x, y);
+                        it->second.backup.push_back(std::move(backup));
+                        
+                        skybox.setPixel(x, y, newColor);
+                    }
+                }
+            }
+            it->second.baked = true;
+        }
+
+        void resetBody(int id) {
+            auto it = bodies.find(id);
+            if (it == bodies.end() || !it->second.baked) return;
+
+            if (skybox.getCompressionType() != frame::compresstype::RAW) {
+                skybox.decompress();
+            }
+
+            for (const auto& backup : it->second.backup) {
+                skybox.setPixel(backup.x, backup.y, backup.data);
+            }
+            
+            it->second.backup.clear();
+            it->second.backup.shrink_to_fit();
+            it->second.baked = false;
+        }
+    };
+
 private:
     std::unique_ptr<OctreeNode> root_;
     size_t maxDepth;
@@ -311,6 +521,7 @@ private:
     
     Eigen::Vector3f skylight_ = {0.1f, 0.1f, 0.1f};
     Eigen::Vector3f backgroundColor_ = {0.53f, 0.81f, 0.92f};
+    Skybox skybox;
     
     // Addressable Maps
     std::unique_ptr<std::mutex> mapMutex_;
@@ -319,7 +530,6 @@ private:
     
     std::vector<Material> materialMap_;
     std::map<Material, IndexType> materialToIndex_;
-    int nextSubIdGenerator_ = 1;
     std::filesystem::path storageBasePath_;
     
 public:
@@ -389,35 +599,6 @@ public:
     }
 
 private:
-    void invalidateMesh(int objectId, int subId) {
-        if (objectId < 0) return;
-        dirtyMeshes_.insert({objectId, subId});
-    }
-
-    void collectNodesBySubIdRecursive(OctreeNode* node, int objId, int subId, std::vector<std::shared_ptr<NodeData>>& results, std::unordered_set<std::shared_ptr<NodeData>>& seen) const {
-        if (!node) return;
-        if (!node->isLoaded()) {
-            node->loadRegion(storageBasePath_, node->bounds.first, node->bounds.second);
-        }
-        for (const auto& pt : node->points) {
-            if (pt->active && pt->objectId == objId && pt->subId == subId) {
-                if (seen.insert(pt).second) {
-                    results.push_back(pt);
-                }
-            }
-        }
-        if (!node->isLeaf) {
-            for (const auto& child : node->children) {
-                if (child) collectNodesBySubIdRecursive(child.get(), objId, subId, results, seen);
-            }
-        }
-    }
-    
-    void collectNodesBySubId(OctreeNode* node, int objId, int subId, std::vector<std::shared_ptr<NodeData>>& results) const {
-        std::unordered_set<std::shared_ptr<NodeData>> seen;
-        collectNodesBySubIdRecursive(node, objId, subId, results, seen);
-    }
-
     float lodFalloffRate_ = 0.1f; // Lower = better, higher = worse. 0-1
     float invLodf;
     float lodMinDistance_ = 1000.0f;
@@ -440,11 +621,6 @@ private:
 
     uint8_t getOctant(const PointType& point, const PointType& center) const {
         return (point[0] >= center[0]) | ((point[1] >= center[1]) << 1) | ((point[2] >= center[2]) << 2);
-        // uint8_t octant = 0;
-        // if (point[0] >= center[0]) octant |= 1;
-        // if (point[1] >= center[1]) octant |= 2;
-        // if (point[2] >= center[2]) octant |= 4;
-        // return octant;
     }
 
     BoundingBox createChildBounds(const OctreeNode* node, uint8_t octant) const {
@@ -468,25 +644,13 @@ private:
                 a.first[1] <= b.second[1] && a.second[1] >= b.first[1] &&
                 a.first[2] <= b.second[2] && a.second[2] >= b.first[2]);
     }
-    
-    void markDirtyRecursive(OctreeNode* node, const BoundingBox& bounds) {
-        if (!node || !boxIntersectsBox(node->bounds, bounds)) return;
-        
-        node->setDirty(true);
-        if (!node->isLeaf) {
-            for (auto& child : node->children) {
-                if (child) {
-                    markDirtyRecursive(child.get(), bounds);
-                }
-            }
-        }
-    }
 
     void splitNode(OctreeNode* node, int depth) {
         if (depth >= maxDepth) return;
         if (!storageBasePath_.empty() && !node->isLoaded()) {
              node->loadData(storageBasePath_);
         }
+        node->setLeaf(false);
         for (int i = 0; i < 8; ++i) {
             BoundingBox childBounds = createChildBounds(node, i);
             node->children[i] = std::make_unique<OctreeNode>(childBounds.first, childBounds.second);
@@ -512,7 +676,6 @@ private:
         }
 
         node->points = std::move(keep);
-        node->isLeaf = false;
         node->setDirty(true);
 
         for (int i = 0; i < 8; ++i) {
@@ -524,10 +687,7 @@ private:
     }
 
     bool insertRecursive(OctreeNode* node, const std::shared_ptr<NodeData>& pointData, int depth) {
-        {
-            std::lock_guard<std::mutex> lock(node->lodMutex);
-            node->lodData = nullptr;
-        }
+        node->invalidateLod();
 
         BoundingBox cubeBounds = pointData->getCubeBounds();
         if (!boxIntersectsBox(node->bounds, cubeBounds)) return false;
@@ -538,12 +698,12 @@ private:
         node->setDirty(true);
 
 
-        if (!node->isLeaf && pointData->size >= node->nodeSize) {
+        if (!node->isLeaf() && pointData->size >= node->nodeSize) {
             node->points.emplace_back(pointData);
             return true;
         }
 
-        if (node->isLeaf) {
+        if (node->isLeaf()) {
             node->points.emplace_back(pointData);
             if (node->points.size() > maxPointsPerNode && depth < maxDepth) {
                 splitNode(node, depth);
@@ -566,11 +726,8 @@ private:
 
     bool invalidateNodeLODRecursive(OctreeNode* node, const BoundingBox& bounds) {
         if (!boxIntersectsBox(node->bounds, bounds)) return false;
-        {
-            std::lock_guard<std::mutex> lock(node->lodMutex);
-            node->lodData = nullptr;
-        }
-        if (!node->isLeaf) {
+        node->invalidateLod();
+        if (!node->isLeaf()) {
             for (int i = 0; i < 8; ++i) {
                 if (node->children[i]) {
                     invalidateNodeLODRecursive(node->children[i].get(), bounds);
@@ -622,7 +779,7 @@ private:
             if (expandZ < 0) newMin.z() -= size.z(); else newMax.z() += size.z();
             
             auto newRoot = std::make_unique<OctreeNode>(newMin, newMax);
-            newRoot->isLeaf = false;
+            newRoot->setLeaf(false);
             
             uint8_t oldOctant = 0;
             if (expandX < 0) oldOctant |= 1;
@@ -638,7 +795,7 @@ private:
 
     void ensureLOD(OctreeNode* node) {
         std::lock_guard<std::mutex> lock(node->lodMutex);
-        if (node->lodData != nullptr) return;
+        if (node->isLodValid()) return;
 
         if (!storageBasePath_.empty() && !node->isLoaded()) {
             node->loadData(storageBasePath_);
@@ -653,15 +810,17 @@ private:
         float avgIor = 0.0f;
         int count = 0;
         
-        if (node->isLeaf && node->points.size() == 1) {
+        if (node->isLeaf() && node->points.size() == 1) {
             node->lodData = node->points[0];
+            node->setLodValid(true);
             return;
-        } else if (node->isLeaf && node->points.empty()) {
+        } else if (node->isLeaf() && node->points.empty()) {
+             node->setLodValid(true);
             return;
         }
 
         auto accumulate = [&](const std::shared_ptr<NodeData>& item) {
-            if (!item || !item->active || !item->visible) return;
+            if (!item || !item->isActive() || !item->isVisible()) return;
             avgColor += getColor(item->colorIdx);
             Material mat = getMaterial(item->materialIdx);
             avgEmittance += mat.emittance;
@@ -697,12 +856,13 @@ private:
                             avgMetallic * invCount, avgTransmission * invCount, avgIor * invCount);
             lod->materialIdx = getMaterialIndex(avgMat);
             
-            lod->active = true;
-            lod->visible = true;
+            lod->setActive(true);
+            lod->setVisible(true);
             lod->objectId = -1; 
 
             node->lodData = lod;
         }
+        node->setLodValid(true);
     }
 
     std::shared_ptr<NodeData> findRecursive(OctreeNode* node, const PointType& pos, float tolerance) const {
@@ -712,7 +872,7 @@ private:
         }
         
         for (const auto& pointData : node->points) {
-            if (!pointData->active) continue;
+            if (!pointData->isActive()) continue;
             
             float distSq = (pointData->position - pos).squaredNorm();
             if (distSq <= tolerance * tolerance) {
@@ -720,7 +880,7 @@ private:
             }
         }
 
-        if (!node->isLeaf) {
+        if (!node->isLeaf()) {
             int octant = getOctant(pos, node->center);
             if (node->children[octant]) {
                 return findRecursive(node->children[octant].get(), pos, tolerance);
@@ -736,10 +896,7 @@ private:
             node->loadData(storageBasePath_);
         }
 
-        {
-            std::lock_guard<std::mutex> lock(node->lodMutex);
-            node->lodData = nullptr; 
-        }
+        node->invalidateLod();
         node->setDirty(true);
         
         bool foundAny = false;
@@ -754,7 +911,7 @@ private:
             foundAny = true;
         }
 
-        if (!node->isLeaf) {
+        if (!node->isLeaf()) {
             for (int i = 0; i < 8; ++i) {
                 if (node->children[i]) {
                     foundAny |= removeRecursive(node->children[i].get(), bounds, targetPt);
@@ -781,7 +938,7 @@ private:
         }
         
         for (const auto& pointData : node->points) {
-            if (!pointData->active) continue;
+            if (!pointData->isActive()) continue;
             
             float pointDistSq = (pointData->position - center).squaredNorm();
             if (pointDistSq <= radiusSq && (pointData->objectId == objectid || objectid == -1)) {
@@ -789,7 +946,7 @@ private:
             }
         }
         
-        if (!node->isLeaf) {
+        if (!node->isLeaf()) {
             for (const auto& child : node->children) {
                 if (child) searchNodeRecursive(child.get(), center, radiusSq, objectid, results, seen);
             }
@@ -804,18 +961,22 @@ private:
 
     void voxelTraverseRecursive(OctreeNode* node, float tMin, float tMax, float& maxDist, 
                                 bool enableLOD, const Ray& ray, std::shared_ptr<NodeData>& hit) const {
-        if (enableLOD && !node->isLeaf) {
+        if (enableLOD && !node->isLeaf()) {
             float dist = (node->center - ray.origin).norm();
             float ratio = dist / node->nodeSize;
             
-            if (dist > lodMinDistance_ && ratio > invLodf && node->lodData) {
-                float t;
-                PointType n;
-                PointType h;
-                if (rayCubeIntersect(ray, node->lodData.get(), t, n, h)) {
-                    if (t >= 0 && t <= maxDist) {
-                        hit = node->lodData;
-                        maxDist = t;
+            if (dist > lodMinDistance_ && ratio > invLodf) {
+                 if (!node->isLodValid()) {
+                    const_cast<Octree*>(this)->ensureLOD(node);
+                }
+                if(node->lodData) {
+                    float t;
+                    PointType n, h;
+                    if (rayCubeIntersect(ray, node->lodData.get(), t, n, h)) {
+                        if (t >= 0 && t <= maxDist) {
+                            hit = node->lodData;
+                            maxDist = t;
+                        }
                     }
                 }
                 return;
@@ -827,11 +988,11 @@ private:
         }
 
         for (const auto& pointData : node->points) {
-            if (!pointData->active) continue;
+            if (!pointData->isActive() || !pointData->isVisible()) continue;
             
             float t;
             PointType normal, hitPoint;
-            if (rayCubeIntersect(ray, pointData.get(), t, normal, hitPoint) && pointData->visible) {
+            if (rayCubeIntersect(ray, pointData.get(), t, normal, hitPoint)) {
                 if (t >= 0 && t <= maxDist && t <= tMax + 0.001f) {
                     maxDist = t;
                     hit = pointData;
@@ -908,12 +1069,14 @@ private:
 
     Eigen::Vector3f traceRay(const PointType& rayOrig, const PointType& rayDir, int bounces, uint32_t& rngState,
                              int maxBounces, bool globalIllumination, bool useLod) {
-        if (bounces > maxBounces) return globalIllumination ? skylight_ : Eigen::Vector3f::Zero();
+        if (bounces > maxBounces) return Eigen::Vector3f::Zero();
 
         auto hit = voxelTraverse(rayOrig, rayDir, std::numeric_limits<float>::max(), useLod);
         if (!hit) {
-            if (bounces == 0) return backgroundColor_;
-            return globalIllumination ? skylight_ : Eigen::Vector3f::Zero();
+            std::vector<uint8_t> skyColor = skybox.sample(rayDir);
+            Eigen::Vector3f skyEmittance(skyColor[0] / 255.0f, skyColor[1] / 255.0f, skyColor[2] / 255.0f);
+            float emitPower = (skyColor.size() == 4) ? (skyColor[3] / 25.5f) : 1.0f;
+            return skyEmittance * emitPower;
         }
 
         auto obj = hit;
@@ -1045,7 +1208,7 @@ private:
             }
         }
         
-        node->isLeaf = true;
+        node->setLeaf(true);
     }
 
     void printStatsRecursive(const OctreeNode* node, size_t depth, size_t& totalNodes, size_t& leafNodes, size_t& actualPoints, 
@@ -1055,12 +1218,12 @@ private:
         totalNodes++;
         maxTreeDepth = std::max(maxTreeDepth, depth);
 
-        if (node->lodData) lodGeneratedNodes++;
+        if (node->isLodValid() && node->lodData) lodGeneratedNodes++;
         
         size_t pts = node->points.size();
         actualPoints += pts;
 
-        if (node->isLeaf) {
+        if (node->isLeaf()) {
             leafNodes++;
             maxPointsInLeaf = std::max(maxPointsInLeaf, pts);
             minPointsInLeaf = std::min(minPointsInLeaf, pts);
@@ -1073,17 +1236,13 @@ private:
     }
 
     void optimizeRecursive(OctreeNode* node) {
-        if (!node) return;
-
-        if (node->isLeaf) {
-            return;
-        }
+        if (!node || node->isLeaf()) return;
 
         bool childrenAreLeaves = true;
         for (int i = 0; i < 8; ++i) {
             if (node->children[i]) {
                 optimizeRecursive(node->children[i].get());
-                if (!node->children[i]->isLeaf) {
+                if (!node->children[i]->isLeaf()) {
                     childrenAreLeaves = false;
                 }
             }
@@ -1109,7 +1268,7 @@ private:
                 for (int i = 0; i < 8; ++i) {
                     node->children[i].reset(nullptr);
                 }
-                node->isLeaf = true;
+                node->setLeaf(true);
                 
                 {
                     std::lock_guard<std::mutex> lock(node->lodMutex);
@@ -1139,90 +1298,6 @@ private:
         float x, y, z;
         readVal(in, x); readVal(in, y); readVal(in, z);
         vec = Eigen::Vector3f(x, y, z);
-    }
-
-    void serializeNode(std::ofstream& out, const OctreeNode* node) const {
-        writeVal(out, node->isLeaf);
-
-        // ALWAYS serialize points, unconditionally
-        size_t pointCount = node->points.size();
-        writeVal(out, pointCount);
-        for (const auto& pt : node->points) {
-            writeVal(out, pt->data);
-            writeVec3(out, pt->position);
-            writeVal(out, pt->objectId);
-            writeVal(out, pt->active);
-            writeVal(out, pt->visible);
-            writeVal(out, pt->size);
-            writeVal(out, pt->colorIdx);
-            writeVal(out, pt->materialIdx);
-        }
-
-        if (!node->isLeaf) {
-            // Write bitmask of active children
-            uint8_t childMask = 0;
-            for (int i = 0; i < 8; ++i) {
-                if (node->children[i] != nullptr) {
-                    childMask |= (1 << i);
-                }
-            }
-            writeVal(out, childMask);
-
-            // Recursively write only existing children
-            for (int i = 0; i < 8; ++i) {
-                if (node->children[i]) {
-                    serializeNode(out, node->children[i].get());
-                }
-            }
-        }
-    }
-
-    void deserializeNode(std::ifstream& in, OctreeNode* node) {
-        bool isLeaf;
-        readVal(in, isLeaf);
-        node->isLeaf = isLeaf;
-        node->lodData = nullptr;
-
-        size_t pointCount;
-        readVal(in, pointCount);
-        node->points.reserve(pointCount);
-        
-        for (size_t i = 0; i < pointCount; ++i) {
-            auto pt = std::make_shared<NodeData>();
-            readVal(in, pt->data);
-            readVec3(in, pt->position);
-            readVal(in, pt->objectId);
-            readVal(in, pt->active);
-            readVal(in, pt->visible);
-            readVal(in, pt->size);
-            readVal(in, pt->colorIdx);
-            readVal(in, pt->materialIdx);
-            node->points.push_back(pt);
-        }
-
-        if (!isLeaf) {
-            uint8_t childMask;
-            readVal(in, childMask);
-            
-            PointType center = node->center;
-
-            for (int i = 0; i < 8; ++i) {
-                if ((childMask >> i) & 1) {
-                    // Reconstruct bounds for child
-                    PointType childMin, childMax;
-                    for (int d = 0; d < Dim; ++d) {
-                        bool high = (i >> d) & 1;
-                        childMin[d] = high ? center[d] : node->bounds.first[d];
-                        childMax[d] = high ? node->bounds.second[d] : center[d];
-                    }
-                    
-                    node->children[i] = std::make_unique<OctreeNode>(childMin, childMax);
-                    deserializeNode(in, node->children[i].get());
-                } else {
-                    node->children[i] = nullptr;
-                }
-            }
-        }
     }
 
     void bitonic_sort_8(std::array<std::pair<int, float>, 8>& arr) const noexcept {
@@ -1369,13 +1444,13 @@ private:
         if (!node) return;
         
         for (const auto& pt : node->points) {
-            if (pt->active && (id == -1 || pt->objectId == id)) {
+            if (pt->isActive() && (id == -1 || pt->objectId == id)) {
                 if (seen.insert(pt).second) {
                     results.push_back(pt);
                 }
             }
         }
-        if (!node->isLeaf) {
+        if (!node->isLeaf()) {
             for (const auto& child : node->children) {
                 if (child) {
                     collectNodesByObjectIdRecursive(child.get(), id, results, seen);
@@ -1387,138 +1462,6 @@ private:
     void collectNodesByObjectId(OctreeNode* node, int id, std::vector<std::shared_ptr<NodeData>>& results) const {
         std::unordered_set<std::shared_ptr<NodeData>> seen;
         collectNodesByObjectIdRecursive(node, id, results, seen);
-    }
-
-    struct GridCell {
-        std::array<PointType, 8> p;
-        std::array<float, 8> val;
-        std::array<PointType, 8> color;
-    };
-
-    std::pair<PointType, PointType> vertexInterpolate(float isolevel, const PointType& p1, const PointType& p2, float val1, float val2, const PointType& c1, const PointType& c2) {
-        if (std::abs(isolevel - val1) < EPSILON) return {p1, c1};
-        if (std::abs(isolevel - val2) < EPSILON) return {p2, c2};
-        if (std::abs(val1 - val2) < EPSILON) return {p1, c1};
-        float mu = (isolevel - val1) / (val2 - val1);
-        PointType pos = p1 + mu * (p2 - p1);
-        PointType color = c1 + mu * (c2 - c1);
-        return {pos, color};
-    }
-
-    void polygonise(GridCell& grid, float isolevel, std::vector<PointType>& vertices, std::vector<Eigen::Vector3f>& colors, std::vector<Eigen::Vector3i>& triangles) {
-        int cubeindex = 0;
-        if (grid.val[0] < isolevel) cubeindex |= 1;
-        if (grid.val[1] < isolevel) cubeindex |= 2;
-        if (grid.val[2] < isolevel) cubeindex |= 4;
-        if (grid.val[3] < isolevel) cubeindex |= 8;
-        if (grid.val[4] < isolevel) cubeindex |= 16;
-        if (grid.val[5] < isolevel) cubeindex |= 32;
-        if (grid.val[6] < isolevel) cubeindex |= 64;
-        if (grid.val[7] < isolevel) cubeindex |= 128;
-
-        if (edgeTable[cubeindex] == 0) return;
-
-        std::array<PointType, 12> vertlist_pos;
-        std::array<PointType, 12> vertlist_color;
-
-        auto interpolate = [&](int edge_idx, int p_idx1, int p_idx2) {
-            auto [pos, col] = vertexInterpolate(isolevel, grid.p[p_idx1], grid.p[p_idx2], grid.val[p_idx1], grid.val[p_idx2], grid.color[p_idx1], grid.color[p_idx2]);
-            vertlist_pos[edge_idx] = pos;
-            vertlist_color[edge_idx] = col;
-        };
-
-        if (edgeTable[cubeindex] & 1)    interpolate(0, 0, 1);
-        if (edgeTable[cubeindex] & 2)    interpolate(1, 1, 2);
-        if (edgeTable[cubeindex] & 4)    interpolate(2, 2, 3);
-        if (edgeTable[cubeindex] & 8)    interpolate(3, 3, 0);
-        if (edgeTable[cubeindex] & 16)   interpolate(4, 4, 5);
-        if (edgeTable[cubeindex] & 32)   interpolate(5, 5, 6);
-        if (edgeTable[cubeindex] & 64)   interpolate(6, 6, 7);
-        if (edgeTable[cubeindex] & 128)  interpolate(7, 7, 4);
-        if (edgeTable[cubeindex] & 256)  interpolate(8, 0, 4);
-        if (edgeTable[cubeindex] & 512)  interpolate(9, 1, 5);
-        if (edgeTable[cubeindex] & 1024) interpolate(10, 2, 6);
-        if (edgeTable[cubeindex] & 2048) interpolate(11, 3, 7);
-
-        int currentVertCount = vertices.size();
-        
-        for (int i = 0; triTable[cubeindex][i] != -1; i += 3) {
-            Eigen::Vector3i tri;
-            for(int j=0; j<3; ++j) {
-                int table_idx = triTable[cubeindex][i+j];
-                tri[j] = currentVertCount + j; 
-                vertices.push_back(vertlist_pos[table_idx]);
-                colors.push_back(vertlist_color[table_idx]);
-            }
-            triangles.push_back(tri);
-            currentVertCount += 3;
-        }
-    }
-
-    std::pair<float, PointType> getScalarFieldValue(const PointType& pos, int objectId, float radius) {
-        auto neighbors = findInRadius(pos, radius, objectId);
-        float density = 0.0f;
-        PointType accumulatedColor = PointType::Zero();
-        float totalWeight = 0.0f;
-
-        if (neighbors.empty()) {
-            return {0.0f, {0.0f, 0.0f, 0.0f}};
-        }
-
-        for (auto& neighbor : neighbors) {
-            float distSq = (neighbor->position - pos).squaredNorm();
-            float rSq = radius * radius;
-            if (distSq < rSq) {
-                float x = distSq / rSq;
-                float w = (1.0f - x) * (1.0f - x);
-                density += w;
-                accumulatedColor += getColor(neighbor->colorIdx) * w;
-                totalWeight += w;
-            }
-        }
-
-        if (totalWeight > 1e-6) {
-            return {density, accumulatedColor / totalWeight};
-        }
-        
-        return {0.0f, {0.0f, 0.0f, 0.0f}};
-    }
-
-    std::unique_ptr<Mesh> mergeMeshes(std::vector<Mesh*>& meshes, int objectId) {
-        if (meshes.empty()) return nullptr;
-
-        std::vector<Eigen::Vector3f> mergedVertices;
-        std::vector<std::vector<int>> mergedPolys;
-        std::map<Eigen::Vector3f, int, Vector3fCompare> vertexMap;
-        
-        for (auto& mesh_ptr : meshes) {
-            if (!mesh_ptr) continue;
-            Mesh& mesh = *mesh_ptr;
-
-            auto mesh_verts = mesh.vertices();
-            auto mesh_tris = mesh.polys();
-            std::vector<int> index_map(mesh_verts.size());
-
-            for (size_t i = 0; i < mesh_verts.size(); ++i) {
-                auto it = vertexMap.find(mesh_verts[i]);
-                if (it == vertexMap.end()) {
-                    int new_idx = mergedVertices.size();
-                    vertexMap[mesh_verts[i]] = new_idx;
-                    mergedVertices.push_back(mesh_verts[i]);
-                    index_map[i] = new_idx;
-                } else {
-                    index_map[i] = it->second;
-                }
-            }
-
-            for (auto& poly : mesh_tris) {
-                mergedPolys.push_back({index_map[poly[0]], index_map[poly[1]], index_map[poly[2]]});
-            }
-        }
-        
-        if (mergedVertices.empty()) return nullptr;
-        
-        return std::make_unique<Mesh>(objectId, mergedVertices, mergedPolys, std::vector<Eigen::Vector3f>{ {1.f, 1.f, 1.f} });
     }
 
 public:
@@ -1573,14 +1516,14 @@ public:
     }
 
     bool set(const T& data, const PointType& pos, bool visible, Eigen::Vector3f color, float size = 0.01f, bool active = true,
-             int objectId = -1, int subId = 0, float emittance = 0.0f, float roughness = 1.0f, 
+             int objectId = -1, float emittance = 0.0f, float roughness = 1.0f, 
              float metallic = 0.0f, float transmission = 0.0f, float ior = 1.45f) {
         
         IndexType cIdx = getColorIndex(color);
         Material mat(emittance, roughness, metallic, transmission, ior);
         IndexType mIdx = getMaterialIndex(mat);
         
-        auto pointData = std::make_shared<NodeData>(data, pos, visible, cIdx, size, active, objectId, subId, mIdx);
+        auto pointData = std::make_shared<NodeData>(data, pos, visible, cIdx, size, active, objectId, mIdx);
         
         ensureBounds(pointData->getCubeBounds());
         
@@ -1664,6 +1607,8 @@ public:
         
         root_->saveAllData(storageBasePath_);
         
+        saveSkybox();
+        
         std::cout << "Successfully saved octree to " << path << std::endl;
         return true;
     }
@@ -1685,6 +1630,8 @@ public:
         } else {
             return false;
         }
+
+        loadSkybox();
         
         std::cout << "Successfully loaded octree from " << path << std::endl;
         return true;
@@ -1696,16 +1643,6 @@ public:
 
     bool inGrid(PointType pos) {
         return root_->contains(pos);
-    }
-
-    bool remove(const PointType& pos, float tolerance = EPSILON) {
-        auto pt = find(pos, tolerance);
-        if (!pt) return false;
-        if (removeRecursive(root_.get(), pt->getCubeBounds(), pt)) {
-            size--;
-            return true;
-        }
-        return false;
     }
 
     std::vector<std::shared_ptr<NodeData>> findInRadius(const PointType& center, float radius, int objectid = -1) const {
@@ -1733,33 +1670,20 @@ public:
         auto pointData = find(oldPos, tolerance);
         if (!pointData) return false;
 
-        int oldSubId = pointData->subId;
         int targetObjId = (newObjectId != -2) ? newObjectId : pointData->objectId;
-        int finalSubId = oldSubId;
         
-        if (oldSubId == 0 && targetObjId == pointData->objectId) {
-            finalSubId = nextSubIdGenerator_++; 
-            auto neighbors = findInRadius(oldPos, newSize * 3.0f, targetObjId);
-            for(auto& n : neighbors) {
-                if(n->subId == 0) {
-                    n->subId = finalSubId;
-                    invalidateMesh(targetObjId, 0);
-                }
-            }
-        }
         
         removeRecursive(root_.get(), pointData->getCubeBounds(), pointData);
         
         pointData->data = newData;
         pointData->position = newPos;
-        pointData->visible = newVisible;
+        pointData->setVisible(newVisible);
         
         if (newColor != Eigen::Vector3f(1.0f, 1.0f, 1.0f)) pointData->colorIdx = getColorIndex(newColor);
         if (newSize > 0) pointData->size = newSize;
-        pointData->active = newActive;
+        pointData->setActive(newActive);
         pointData->objectId = targetObjId;
-        pointData->subId = finalSubId;
-        
+
         Material mat = getMaterial(pointData->materialIdx);
         bool matChanged = false;
         if (newEmittance >= 0) {
@@ -1787,10 +1711,7 @@ public:
         ensureBounds(pointData->getCubeBounds());
         bool res = insertRecursive(root_.get(), pointData, 0);
         
-        if(res) {
-            invalidateMesh(targetObjId, finalSubId);
-            if(finalSubId != oldSubId) invalidateMesh(targetObjId, oldSubId);
-        } else {
+        if(!res) {
             size--;
         }
 
@@ -1831,7 +1752,7 @@ public:
     bool setActive(const PointType& pos, bool active, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
-        pointData->active = active;
+        pointData->setActive(active);
         invalidateLODForPoint(pointData);
         return true;
     }
@@ -1839,7 +1760,7 @@ public:
     bool setVisible(const PointType& pos, bool visible, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
-        pointData->visible = visible;
+        pointData->setVisible(visible);
         invalidateLODForPoint(pointData);
         return true;
     }
@@ -1962,12 +1883,11 @@ public:
     std::shared_ptr<NodeData> fastVoxelTraverse(const Ray& ray, float maxDist, bool enableLOD = false) const {
         std::shared_ptr<NodeData> hit;
         if (empty()) return hit;
-        float lodRatio = 1.0f / lodFalloffRate_;
         float tMin, tMax;
         if (rayBoxIntersect(ray, root_->bounds, tMin, tMax)) {
             tMax = std::min(tMax, maxDist);
             float currentMaxDist = maxDist;
-            voxelTraverseRecursive(root_.get(), tMin, tMax, currentMaxDist, enableLOD, ray, hit, lodRatio);
+            voxelTraverseRecursive(root_.get(), tMin, tMax, currentMaxDist, enableLOD, ray, hit);
         }
         return hit;
     }
@@ -2229,196 +2149,6 @@ public:
         return surfaceNodes;
     }
 
-    std::shared_ptr<Mesh> generateMesh(int objectId, float isolevel = 0.5f, int resolution = 32) {
-        TIME_FUNCTION;
-        if (!root_) return nullptr;
-
-        std::vector<std::shared_ptr<NodeData>> nodes;
-        collectNodesByObjectId(root_.get(), objectId, nodes);
-        if(nodes.empty()) return nullptr;
-
-        PointType minB = nodes[0]->position;
-        PointType maxB = nodes[0]->position;
-        float maxRadius = 0.0f;
-
-        for(auto& n : nodes) {
-            minB = minB.cwiseMin(n->position);
-            maxB = maxB.cwiseMax(n->position);
-            maxRadius = std::max(maxRadius, n->size);
-        }
-        
-        float padding = maxRadius * 2.0f; 
-        minB -= PointType::Constant(padding);
-        maxB += PointType::Constant(padding);
-
-        PointType size = maxB - minB;
-        PointType step = size / static_cast<float>(resolution);
-
-        std::vector<PointType> vertices;
-        std::vector<Eigen::Vector3f> vertexColors;
-        std::vector<Eigen::Vector3i> triangles;
-
-        for(int z = 0; z < resolution; ++z) {
-            for(int y = 0; y < resolution; ++y) {
-                for(int x = 0; x < resolution; ++x) {
-                    
-                    PointType currPos(
-                        minB.x() + x * step.x(),
-                        minB.y() + y * step.y(),
-                        minB.z() + z * step.z()
-                    );
-
-                    GridCell cell;
-                    
-                    PointType offsets[8] = {
-                        {0,0,0}, {step.x(),0,0}, {step.x(),step.y(),0}, {0,step.y(),0},
-                        {0,0,step.z()}, {step.x(),0,step.z()}, {step.x(),step.y(),step.z()}, {0,step.y(),step.z()}
-                    };
-
-                    bool hasInside = false;
-                    bool hasOutside = false;
-                    bool activeCell = false;
-                    for(int i=0; i<8; ++i) {
-                        cell.p[i] = currPos + offsets[i];
-                        auto [density, color] = getScalarFieldValue(cell.p[i], objectId, maxRadius * 2.0f);
-                        cell.val[i] = density;
-                        cell.color[i] = color;
-                        if(cell.val[i] >= isolevel) hasInside = true;
-                        else hasOutside = true;
-                    }
-
-                    if(hasInside && hasOutside) {
-                        polygonise(cell, isolevel, vertices, vertexColors, triangles);
-                    }
-                }
-            }
-        }
-
-        if(vertices.empty()) return nullptr;
-
-        std::vector<std::vector<int>> polys;
-        for(auto& t : triangles) {
-            polys.push_back({t[0], t[1], t[2]});
-        }
-        
-        return std::make_shared<Mesh>(objectId, vertices, polys, vertexColors);
-    }
-
-    std::shared_ptr<Mesh> generateSubMesh(int objectId, int subId, float isolevel = 0.5f, int resolution = 32) {
-        if (subId == -999) return nullptr;
-
-        std::vector<std::shared_ptr<NodeData>> nodes;
-        collectNodesBySubId(root_.get(), objectId, subId, nodes);
-        if (nodes.empty()) return nullptr;
-
-        PointType minB = nodes[0]->position;
-        PointType maxB = nodes[0]->position;
-        float maxRadius = 0.0f;
-
-        for(auto& n : nodes) {
-            minB = minB.cwiseMin(n->position);
-            maxB = maxB.cwiseMax(n->position);
-            maxRadius = std::max(maxRadius, n->size);
-        }
-        
-        float padding = maxRadius * 2.5f; 
-        minB -= PointType::Constant(padding);
-        maxB += PointType::Constant(padding);
-
-        PointType size = maxB - minB;
-        PointType step = size / static_cast<float>(resolution);
-
-        std::vector<PointType> vertices;
-        std::vector<Eigen::Vector3f> vertexColors;
-        std::vector<Eigen::Vector3i> triangles;
-
-        for(int z = 0; z < resolution; ++z) {
-            for(int y = 0; y < resolution; ++y) {
-                for(int x = 0; x < resolution; ++x) {
-                    PointType currPos(minB.x() + x * step.x(), minB.y() + y * step.y(), minB.z() + z * step.z());
-
-                    GridCell cell;
-                    PointType offsets[8] = {{0,0,0}, {step.x(),0,0}, {step.x(),step.y(),0}, {0,step.y(),0},
-                                          {0,0,step.z()}, {step.x(),0,step.z()}, {step.x(),step.y(),step.z()}, {0,step.y(),step.z()}};
-
-                    bool activeCell = false;
-                    for(int i=0; i<8; ++i) {
-                        cell.p[i] = currPos + offsets[i];
-                        auto [density, color] = getScalarFieldValue(cell.p[i], objectId, maxRadius * 2.0f);
-                        cell.val[i] = density;
-                        cell.color[i] = color;
-                        if(cell.val[i] >= isolevel) activeCell = true;
-                    }
-
-                    if(activeCell) {
-                        auto owner = find(currPos + step*0.5f, maxRadius * 2.0f);
-                        if (owner && owner->objectId == objectId && owner->subId == subId) {
-                            polygonise(cell, isolevel, vertices, vertexColors, triangles);
-                        }
-                    }
-                }
-            }
-        }
-
-        if(vertices.empty()) return nullptr;
-
-        std::vector<std::vector<int>> polys;
-        for(auto& t : triangles) polys.push_back({t[0], t[1], t[2]});
-        
-        return std::make_shared<Mesh>(objectId, vertices, polys, vertexColors, subId);
-    }
-
-    std::vector<std::shared_ptr<Mesh>> getMeshes(int objectId) {
-        std::vector<std::shared_ptr<Mesh>> result;
-        
-        std::set<int> relevantSubIds;
-        for(auto const& [key, val] : meshCache_) if(key.first == objectId) relevantSubIds.insert(key.second);
-        for(auto const& key : dirtyMeshes_) if(key.first == objectId) relevantSubIds.insert(key.second);
-
-        for(int subId : relevantSubIds) {
-            if(dirtyMeshes_.count({objectId, subId})) {
-                auto newMesh = generateSubMesh(objectId, subId);
-                if(newMesh) meshCache_[{objectId, subId}] = newMesh;
-                else meshCache_.erase({objectId, subId});
-                dirtyMeshes_.erase({objectId, subId});
-            }
-        }
-
-        for(auto const& [key, mesh] : meshCache_) {
-            if(key.first == objectId && mesh) result.push_back(mesh);
-        }
-        return result;
-    }
-
-    void isolateInternalNodes(int objectId) {
-        std::vector<std::shared_ptr<NodeData>> nodes;
-        collectNodesByObjectId(root_.get(), objectId, nodes); 
-
-        if(nodes.empty()) return;
-        float checkRad = nodes[0]->size * 1.5f;
-
-        for(auto& node : nodes) {
-            int hiddenSides = 0;
-            PointType dirs[6] = {{1,0,0}, {-1,0,0}, {0,1,0}, {0,-1,0}, {0,0,1}, {0,0,-1}};
-            for(int i=0; i<6; ++i) {
-                auto neighbor = find(node->position + dirs[i] * node->size, checkRad);
-                if(neighbor && neighbor->objectId == objectId && neighbor->active) {
-                    Material nMat = getMaterial(neighbor->materialIdx);
-                    if (nMat.transmission < 0.01f) {
-                        hiddenSides++;
-                    }
-                }
-            }
-
-            if(hiddenSides == 6) {
-                if(node->subId != -999) {
-                    invalidateMesh(objectId, node->subId);
-                    node->subId = -999; 
-                }
-            }
-        }
-    }
-
     bool moveObject(int objectId, const PointType& offset) {
         if (!root_) return false;
         
@@ -2427,24 +2157,85 @@ public:
         if(nodes.empty()) return false;
 
         for(auto& n : nodes) {
-            if (removeRecursive(root_.get(), n->getCubeBounds(), n)) {
-                size--;
-            }
+            removeRecursive(root_.get(), n->getCubeBounds(), n);
         }
         for(auto& n : nodes) {
             n->position += offset;
             ensureBounds(n->getCubeBounds());
-            if (insertRecursive(root_.get(), n, 0)) {
-                size++;
-            }
+            insertRecursive(root_.get(), n, 0);
         }
 
-        for (auto& [key, mesh] : meshCache_) {
-            if (key.first == objectId && mesh) {
-                mesh->translate(offset); 
-            }
-        }
         return true;
+    }
+    
+    bool saveSkybox() {
+        if (storageBasePath_.empty()) return false;
+        std::filesystem::path p = storageBasePath_ / "skybox.bin";
+        std::ofstream os(p, std::ios::binary);
+        if (!os) return false;
+
+        size_t numBodies = skybox.bodies.size();
+        os.write(reinterpret_cast<const char*>(&numBodies), sizeof(numBodies));
+        for (const auto& kv : skybox.bodies) {
+            os.write(reinterpret_cast<const char*>(&kv.first), sizeof(kv.first));
+            os.write(reinterpret_cast<const char*>(&kv.second.direction), sizeof(PointType));
+            os.write(reinterpret_cast<const char*>(&kv.second.angularRadius), sizeof(float));
+            os.write(reinterpret_cast<const char*>(&kv.second.r), sizeof(uint8_t));
+            os.write(reinterpret_cast<const char*>(&kv.second.g), sizeof(uint8_t));
+            os.write(reinterpret_cast<const char*>(&kv.second.b), sizeof(uint8_t));
+            os.write(reinterpret_cast<const char*>(&kv.second.emittance), sizeof(uint8_t));
+        }
+        os.write(reinterpret_cast<const char*>(&skybox.skyRotation), sizeof(skybox.skyRotation));
+        return true;
+    }
+
+    bool loadSkybox() {
+        if (storageBasePath_.empty()) return false;
+        std::filesystem::path p = storageBasePath_ / "skybox.bin";
+        if (!std::filesystem::exists(p)) return false;
+        
+        std::ifstream is(p, std::ios::binary);
+        if (!is) return false;
+
+        size_t numBodies = 0;
+        is.read(reinterpret_cast<char*>(&numBodies), sizeof(numBodies));
+        skybox.bodies.clear();
+        for (size_t i = 0; i < numBodies; i++) {
+            int id;
+            PointType dir;
+            float angRad;
+            uint8_t r, g, b, e;
+            is.read(reinterpret_cast<char*>(&id), sizeof(id));
+            is.read(reinterpret_cast<char*>(&dir), sizeof(PointType));
+            is.read(reinterpret_cast<char*>(&angRad), sizeof(float));
+            is.read(reinterpret_cast<char*>(&r), sizeof(uint8_t));
+            is.read(reinterpret_cast<char*>(&g), sizeof(uint8_t));
+            is.read(reinterpret_cast<char*>(&b), sizeof(uint8_t));
+            is.read(reinterpret_cast<char*>(&e), sizeof(uint8_t));
+            skybox.addBody(id, dir, angRad, r, g, b, e);
+        }
+        is.read(reinterpret_cast<char*>(&skybox.skyRotation), sizeof(skybox.skyRotation));
+        return true;
+    }
+
+    void addSkyboxBody(int id, const PointType& dir, float angularRadius, uint8_t r, uint8_t g, uint8_t b, uint8_t emittance) {
+        skybox.addBody(id, dir, angularRadius, r, g, b, emittance);
+    }
+    
+    void removeSkyboxBody(int id) {
+        skybox.removeBody(id);
+    }
+    
+    void moveSkyboxBody(int id, const PointType& newDir) {
+        skybox.moveBody(id, newDir);
+    }
+    
+    void bakeSkyboxBody(int id) {
+        skybox.bakeBody(id);
+    }
+    
+    void setSkyboxBackground(float r, float g, float b, float e) {
+        skybox.setBackground(r, g, b, e);
     }
 
     void optimize() {

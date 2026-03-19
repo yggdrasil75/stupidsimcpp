@@ -60,6 +60,7 @@ public:
         v3 bg = v3(0.511f, 0.625f, 0.868f);
         sim.grid.setBackgroundColor(bg);
         sim.grid.setSkylight(bg);
+        sim.grid.setSkyboxBackground(bg.x(), bg.y(), bg.z(), 0.1f);
     }
 
     ~PlantSimUI() {

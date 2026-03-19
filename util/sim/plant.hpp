@@ -17,7 +17,6 @@ using v3 = Eigen::Vector3f;
 
 enum class ParticleType {
     AIR,
-    SUN,
     DIRT,
     PLANT,
     WATER,
@@ -49,10 +48,6 @@ struct AirParticle : public PlantsimParticle {
 
     AirParticle(float c = 400.0f, float t = 20.0f) 
         : PlantsimParticle(ParticleType::AIR, 0.0f), co2(c), temperature(t) {}
-};
-
-struct SunParticle : public PlantsimParticle {
-    SunParticle() : PlantsimParticle(ParticleType::SUN, 1000.0f) {}
 };
 
 struct DirtParticle : public PlantsimParticle {
@@ -122,9 +117,16 @@ public:
     PlantConfig config;
     Octree<std::shared_ptr<PlantsimParticle>> grid;
     std::mt19937 rng;
+    
     v3 currentSunPos = v3(0, 0, 0);
+    v3 lastBg = v3(-1.0f, -1.0f, -1.0f);
+    
+    v3 lastSunColor = v3(-1.0f, -1.0f, -1.0f);
+    float lastSunIntensity = -1.0f;
+    float lastSunSize = -1.0f;
+    bool sunInitialized = false;
+
     bool worldInitialized = false;
-    bool sunExists = false;
     
     float precipAccumulator = 0.0f;
     float currentTemperature = 20.0f;
@@ -149,6 +151,7 @@ public:
         // Default Sky settings for the octree renderer
         grid.setSkylight(v3(0.05f, 0.05f, 0.1f)); 
         grid.setBackgroundColor(v3(0.02f, 0.02f, 0.05f)); 
+        grid.setSkyboxBackground(0.02f, 0.02f, 0.05f, 0.1f);
     }
 
     void buildDirtPalette() {
@@ -169,13 +172,14 @@ public:
 
     void initWorld() {
         grid.clear();
-        sunExists = false;
         precipAccumulator = 0.0f;
         weatherTimer = 0.0f;
         currentWeather = WeatherState::CLEAR;
         atmosphericMoisture = 0.0f;
         extendedHeatTimer = 0.0f;
         hourlyTimer = 0.0f;
+        lastBg = v3(-1.0f, -1.0f, -1.0f);
+        sunInitialized = false;
 
         buildDirtPalette();
 
@@ -192,7 +196,7 @@ public:
                     auto dirt = std::make_shared<DirtParticle>();
                     dirt->hydration = 10.0f;
                     v3 pos(x * vSize, -(y + 0.5f) * vSize, z * vSize);
-                    grid.set(dirt, pos, true, dirtColor, vSize, true, 0, 0, 0.0f, 1.0f);
+                    grid.set(dirt, pos, true, dirtColor, vSize, true, 0, 0.0f, 1.0f);
                 }
                 
                 // Air Layers (y >= 0)
@@ -208,7 +212,7 @@ public:
                     }
 
                     auto air = std::make_shared<AirParticle>(400.0f, 20.0f);
-                    grid.set(air, pos, false, v3(0,0,0), vSize, true, 5, 0);
+                    grid.set(air, pos, false, v3(0,0,0), vSize, true, 5);
                 }
             }
         }
@@ -218,7 +222,7 @@ public:
         seed->water = 25.0f;
         v3 plantColor(0.8f, 0.7f, 0.2f);
         
-        grid.set(seed, seedPos, true, plantColor, config.voxelSize * 0.5f, true, 1, 0, 0.0f, 0.6f);
+        grid.set(seed, seedPos, true, plantColor, config.voxelSize * 0.5f, true, 1, 0.0f, 0.6f);
 
         worldInitialized = true;
         
@@ -237,13 +241,13 @@ public:
             rain->velocity = v3(0, -2.0f, 0); 
             float rainSize = config.voxelSize * 0.2f;
             v3 rainColor(0.3f, 0.5f, 0.9f); 
-            grid.set(rain, pos, true, rainColor, rainSize, true, 3, 0, 0.0f, 0.6f); 
+            grid.set(rain, pos, true, rainColor, rainSize, true, 3, 0.0f, 0.6f); 
         } else if (currentWeather == WeatherState::SNOW) {
             auto snow = std::make_shared<SnowParticle>();
             snow->velocity = v3(0, -0.5f, 0); 
             float snowSize = config.voxelSize * 0.3f;
             v3 snowColor(0.9f, 0.95f, 1.0f); 
-            grid.set(snow, pos, true, snowColor, snowSize, true, 4, 0, 0.0f, 0.9f); 
+            grid.set(snow, pos, true, snowColor, snowSize, true, 4, 0.0f, 0.9f); 
         }
     }
 
@@ -534,7 +538,7 @@ public:
             plantCell->energy = np.initE;
             v3 initColor = (np.part == PlantPart::LEAF) ? v3(0.1f, 0.8f, 0.1f) : v3(0.6f, 0.5f, 0.4f);
             // Spawn at half size and grow into the space
-            grid.set(plantCell, np.pos, true, initColor, config.voxelSize * 0.5f, true, 1, 0, 0.0f, 0.8f);
+            grid.set(plantCell, np.pos, true, initColor, config.voxelSize * 0.5f, true, 1, 0.0f, 0.8f);
         }
     }
 
@@ -961,6 +965,10 @@ public:
 
         grid.setBackgroundColor(currentBg);
         grid.setSkylight(currentLight);
+        if ((currentBg - lastBg).norm() > 0.05f) {
+            grid.setSkyboxBackground(currentBg.x(), currentBg.y(), currentBg.z(), 0.1f);
+            lastBg = currentBg;
+        }
     }
 
     void updateSunPosition(bool forceRebuild) {
@@ -972,46 +980,39 @@ public:
         float y = std::sin(phi) * std::sin(delta) + std::cos(phi) * std::cos(delta) * std::cos(H);
         float z = std::sin(phi) * std::cos(delta) * std::cos(H) - std::cos(phi) * std::sin(delta);
 
-        v3 newSunPos = v3(x, y, z).normalized() * config.sunDistance;
+        v3 newSunDir = v3(x, y, z).normalized();
 
-        if (!forceRebuild && (newSunPos - currentSunPos).norm() < (config.sunSize * 0.1f)) {
+
+        if (!forceRebuild && sunInitialized && (newSunDir - currentSunPos).norm() < 0.01f) {
             return; 
         }
 
-        v3 deltaMove = newSunPos - currentSunPos;
-        currentSunPos = newSunPos;
+        currentSunPos = newSunDir;
 
-        if (sunExists && !forceRebuild) {
-            if (grid.moveObject(2, deltaMove)) {
-                return;
-            } else {
-                sunExists = false; 
-            }
-        }
-        
-        if (!sunExists || forceRebuild) {
-            int count = 25; 
-            float step = config.sunSize / count;
-            float offset = config.sunSize / 2.0f;
+        float t = config.timeOfDay;
+        v3 sunColor(1.0f, 0.95f, 0.8f);
+        if (t > 0.7f || t < 0.3f) sunColor = v3(1.0f, 0.4f, 0.1f);
+        float angularRadius = config.sunSize / config.sunDistance;
 
-            v3 forward = -currentSunPos.normalized();
-            v3 right = v3(0,1,0).cross(forward).normalized();
-            v3 up = forward.cross(right).normalized();
 
-            float t = config.timeOfDay;
-            v3 sunColor(1.0f, 0.95f, 0.8f);
-            if (t > 0.7f || t < 0.3f) sunColor = v3(1.0f, 0.4f, 0.1f);
+        bool propsChanged = (sunColor != lastSunColor) || 
+                            (config.sunIntensity != lastSunIntensity) || 
+                            (config.sunSize != lastSunSize);
 
-            for(int i=0; i<count; ++i) {
-                for(int j=0; j<count; ++j) {
-                    float u = (i * step) - offset;
-                    float v = (j * step) - offset;
-                    v3 pos = currentSunPos + (right * u) + (up * v);
-                    
-                    grid.set(std::make_shared<SunParticle>(), pos, true, sunColor, step, true, 2, 0, config.sunIntensity, 0.0f, 0.0f, 1.0f, 1.0f);
-                }
-            }
-            sunExists = true;
+        if (!sunInitialized || forceRebuild || propsChanged) {
+            uint8_t r = static_cast<uint8_t>(sunColor.x() * 255.0f);
+            uint8_t g = static_cast<uint8_t>(sunColor.y() * 255.0f);
+            uint8_t b = static_cast<uint8_t>(sunColor.z() * 255.0f);
+            
+            uint8_t e = static_cast<uint8_t>(std::clamp(config.sunIntensity * 2.55f, 0.0f, 255.0f));
+
+            grid.addSkyboxBody(1, newSunDir, angularRadius, r, g, b, e);
+            lastSunColor = sunColor;
+            lastSunIntensity = config.sunIntensity;
+            lastSunSize = config.sunSize;
+            sunInitialized = true;
+        } else {
+            grid.moveSkyboxBody(1, newSunDir);
         }
     }
 
