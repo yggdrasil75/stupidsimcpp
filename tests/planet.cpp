@@ -22,7 +22,7 @@ private:
     int outHeight = 1024;
     float fps = 60;
     int rayCount = 3;
-    int reflectCount = 4;
+    int reflectCount = 2;
     bool slowRender = false;
     float lodDist = 1024.0f;
     float lodDropoff = 0.001f;
@@ -166,9 +166,22 @@ public:
         }
 
         if (ImGui::CollapsingHeader("Celestial Bodies")) {
-            ///TODO: add controls for moon, star.
             if (ImGui::Button("Add Star", ImVec2(-1, 40))) {
                 sim.addStar();
+            }
+            if (ImGui::Button("Add Moon", ImVec2(-1, 40))) {
+                sim.addMoon();
+            }
+            
+            static float timeOfDay = 0.0f;
+            if (ImGui::SliderFloat("Time of Day", &timeOfDay, 0.0f, 2.0f * M_PI)) {
+                // Update Skybox Sun Direction
+                v3 sunDir(cos(timeOfDay), sin(timeOfDay), 0.0f);
+                sim.grid.moveSkyboxBody(0, sunDir);
+                
+                // Keep moon positioned opposite the sun
+                v3 moonDir(-cos(timeOfDay), -sin(timeOfDay), 0.2f);
+                sim.grid.moveSkyboxBody(1, moonDir.normalized());
             }
         }
 
@@ -516,7 +529,8 @@ public:
         float invFrameRate = 1 / framerate;
         
         if (slowRender) {
-            currentPreviewFrame = sim.grid.renderFrameTimed(cam, outHeight, outWidth, frame::colormap::RGB, invFrameRate, reflectCount, globalIllumination, useLod);
+            // currentPreviewFrame = sim.grid.renderFrameTimed(cam, outHeight, outWidth, frame::colormap::RGB, invFrameRate, reflectCount, globalIllumination, useLod);
+            currentPreviewFrame = sim.grid.renderFrame(cam, outHeight, outWidth, frame::colormap::RGB, 6, reflectCount, globalIllumination, useLod);
         } else {
             currentPreviewFrame = sim.grid.fastRenderFrame(cam, outHeight, outWidth, frame::colormap::RGB);
         }

@@ -182,6 +182,7 @@ public:
     std::vector<PlateConfig> plates;
     std::mt19937 rng = std::mt19937(42);
     bool starAdded = false;
+    bool moonAdded = false;
 
     planetsim() {
         config = planetConfig();
@@ -255,8 +256,8 @@ public:
             grid.set(pt, pt.currentPos, true, pt.originColor.cast<float>(), config.voxelSize, true, 1, false, 0.0f, 0.0f, 0.0f);
         }
         config.currentStep = 1;
-        std::cout << "Step 1 done. base sphere generated" << std::endl;
         grid.save("output/fibSphere.yggs");
+        std::cout << "Step 1 done. base sphere generated" << std::endl;
     }
 
     inline void _applyNoise(std::function<float(const Eigen::Vector3f&)> noiseFunc) {
@@ -784,59 +785,29 @@ public:
         if (starAdded) return;
         TIME_FUNCTION;
 
-        const float realEarthRadiusKm = 6371.0f;
-        const float realSunRadiusKm = 696340.0f;
-        const float realAuKm = 149597870.0f;
-        float simScale = config.radius / realEarthRadiusKm;
+        float angularRadius = 0.015f; 
+        v3 starDir = v3(1.0f, 0.5f, 0.0f).normalized();
 
-        float starRadius = realSunRadiusKm * simScale;
-        float orbitDistance = realAuKm * simScale;
-
-        std::cout << "--- STAR GENERATION ---" << std::endl;
-        std::cout << "Sim Scale: " << simScale << " units/km" << std::endl;
-        std::cout << "Star Radius: " << starRadius << " units" << std::endl;
-        std::cout << "Orbit Distance: " << orbitDistance << " units" << std::endl;
-
-        v3 starCenter = config.center + v3(orbitDistance, 0.0f, 0.0f);
-        v3 starColor = v3(1.0f, 0.95f, 0.8f);
-
-        int starPoints = config.surfacePoints * 10; 
-
-        for (int i = 0; i < starPoints; i++) {
-            float y = 1.0f - (i * 2.0f) / (starPoints - 1);
-            float radiusY = std::sqrt(1.0f - y * y);
-            float Θ = Φ * i;
-            float x = std::cos(Θ) * radiusY;
-            float z = std::sin(Θ) * radiusY;
-
-            v3 dir(x, y, z);
-            v3 pos = starCenter + dir * starRadius;
-            Particle pt;
-            
-            pt.altPos = std::make_unique<AltPositions>();
-            pt.altPos->originalPos = pos.cast<Eigen::half>();
-            pt.altPos->noisePos = pos.cast<Eigen::half>();
-            pt.altPos->tectonicPos = pos.cast<Eigen::half>();
-            
-            pt.currentPos = pos;
-            pt.originColor = starColor.cast<Eigen::half>();
-            pt.noiseDisplacement = 0.0f;
-            pt.surface = true;
-            pt.plateID = -2;
-            
-            config.surfaceNodes.emplace_back(pt);
-            
-            grid.set(pt, pt.currentPos, true, pt.originColor.cast<float>(), config.voxelSize, true, 2, 1.0, 0.0f, 0.0f, 1.0f);
-        }
+        grid.addSkyboxBody(0, starDir, angularRadius, 255, 250, 230, 255);
         
-        grid.optimize();
-        config.currentStep = 1;
-        std::cout << "Star generation complete. Placed " << starPoints << " nodes." << std::endl;
+        grid.setSkylight(v3(1.0f, 0.95f, 0.9f) * 0.5f);
+
+        std::cout << "Star added to skybox." << std::endl;
         starAdded = true;
     }
 
     void addMoon() {
-        ///TODO: using planetConfig, add moon(s).
+        if (moonAdded) return;
+        TIME_FUNCTION;
+
+        float angularRadius = 0.0015f; 
+        
+        v3 moonDir = v3(-1.0f, 0.2f, 0.5f).normalized(); 
+
+        grid.addSkyboxBody(1, moonDir, angularRadius, 200, 210, 220, 25);
+
+        std::cout << "Moon added to skybox." << std::endl;
+        moonAdded = true;
     }
     
     void stretchPlanet() {
@@ -924,7 +895,6 @@ public:
                     Particle newPt;
                     newPt.surface = true;
                     newPt.currentPos = smoothPos;
-                    // Note: originalPos, noisePos, tectonicPos remain null for these lightweight models!
                     
                     if (w1 > w2 && w1 > w3) {
                         newPt.plateID = p1.plateID;
@@ -975,7 +945,6 @@ public:
                             ip.surface = false;
                             ip.plateID = -1;
                             ip.currentPos = pos;
-                            // Alternate memory-heavy positions stay natively cleanly null!
 
                             float depthRatio = dist / safeRadius;
                             Eigen::Vector3f coreColor(1.0f, 0.9f, 0.4f);

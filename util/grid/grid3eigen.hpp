@@ -19,6 +19,8 @@
 #include <string>
 #include <filesystem>
 #include <mutex>
+#include <shared_mutex>
+#include <atomic>
 #include <map>
 #include <unordered_set>
 #include <random>
@@ -78,29 +80,67 @@ public:
         float size;
         IndexType colorIdx;
         IndexType materialIdx;
-        uint8_t flags;
+        std::atomic<uint8_t> flags;
 
         NodeData(const T& data, const PointType& pos, bool visible, IndexType colorIdx, float size = 0.01f,
                  bool active = true, int objectId = -1, IndexType materialIdx = 0) 
                 : data(data), position(pos), objectId(objectId), size(size), 
                   colorIdx(colorIdx), materialIdx(materialIdx), flags(0) {
-                    setActive(active);
-                    setVisible(visible);
+                    uint8_t f = 0;
+                    if (active) f |= ACTIVE_BIT;
+                    if (visible) f |= VISIBLE_BIT;
+                    flags.store(f, std::memory_order_release);
                   }
         
         NodeData() : objectId(-1), size(0.0f), colorIdx(0), materialIdx(0), flags(0) {}
+
+        NodeData(const NodeData& other) : data(other.data), position(other.position),
+                objectId(other.objectId), size(other.size), colorIdx(other.colorIdx),
+                materialIdx(other.materialIdx), flags(other.flags.load(std::memory_order_acquire)) {}
+
+        NodeData& operator=(const NodeData& other) {
+            if (this != &other) {
+                data = other.data;
+                position = other.position;
+                objectId = other.objectId;
+                size = other.size;
+                colorIdx = other.colorIdx;
+                materialIdx = other.materialIdx;
+                flags.store(other.flags.load(std::memory_order_acquire), std::memory_order_release);
+            }
+            return *this;
+        }
+
+        NodeData(NodeData&& other) noexcept : data(std::move(other.data)), position(std::move(other.position)),
+                objectId(other.objectId), size(other.size), colorIdx(other.colorIdx),
+                materialIdx(other.materialIdx), flags(other.flags.load(std::memory_order_acquire)) {}
+
+        NodeData& operator=(NodeData&& other) noexcept {
+            if (this != &other) {
+                data = std::move(other.data);
+                position = std::move(other.position);
+                objectId = other.objectId;
+                size = other.size;
+                colorIdx = other.colorIdx;
+                materialIdx = other.materialIdx;
+                flags.store(other.flags.load(std::memory_order_acquire), std::memory_order_release);
+            }
+            return *this;
+        }
         
         bool isActive() const {
-            return flags & ACTIVE_BIT;
+            return flags.load(std::memory_order_acquire) & ACTIVE_BIT;
         }
         bool isVisible() const {
-            return flags & VISIBLE_BIT;
+            return flags.load(std::memory_order_acquire) & VISIBLE_BIT;
         }
         void setActive(bool val) {
-            val ? (flags |= ACTIVE_BIT) : (flags &= ~ACTIVE_BIT);
+            if (val) flags.fetch_or(ACTIVE_BIT, std::memory_order_release);
+            else flags.fetch_and(~ACTIVE_BIT, std::memory_order_release);
         }
         void setVisible(bool val) {
-            val ? (flags |= VISIBLE_BIT) : (flags &= ~VISIBLE_BIT);
+            if (val) flags.fetch_or(VISIBLE_BIT, std::memory_order_release);
+            else flags.fetch_and(~VISIBLE_BIT, std::memory_order_release);
         }
         
         PointType getHalfSize() const {
@@ -119,7 +159,8 @@ public:
             os.write(reinterpret_cast<const char*>(&size), sizeof(float));
             os.write(reinterpret_cast<const char*>(&colorIdx), sizeof(IndexType));
             os.write(reinterpret_cast<const char*>(&materialIdx), sizeof(IndexType));
-            os.write(reinterpret_cast<const char*>(&flags), sizeof(uint8_t));
+            uint8_t f = flags.load(std::memory_order_acquire);
+            os.write(reinterpret_cast<const char*>(&f), sizeof(uint8_t));
         }
 
         void deserialize(std::istream& is) {
@@ -129,58 +170,260 @@ public:
             is.read(reinterpret_cast<char*>(&size), sizeof(float));
             is.read(reinterpret_cast<char*>(&colorIdx), sizeof(IndexType));
             is.read(reinterpret_cast<char*>(&materialIdx), sizeof(IndexType));
-            is.read(reinterpret_cast<char*>(&flags), sizeof(uint8_t));
+            uint8_t f = 0;
+            is.read(reinterpret_cast<char*>(&f), sizeof(uint8_t));
+            flags.store(f, std::memory_order_release);
+        }
+    };
+
+    struct Frustum {
+        struct Plane {
+            PointType normal;
+            float d;
+            bool intersects(const BoundingBox& box) const {
+                PointType p = box.first;
+                if (normal.x() >= 0) p.x() = box.second.x();
+                if (normal.y() >= 0) p.y() = box.second.y();
+                if (normal.z() >= 0) p.z() = box.second.z();
+                return normal.dot(p) + d >= 0;
+            }
+        };
+
+        Plane planes[6];
+
+        Frustum(const Camera& cam, int width, int height, float maxDist) {
+            float aspect = static_cast<float>(width) / height;
+            float fovRad = cam.fovRad();
+            float tanfovy = std::tan(fovRad * 0.5f);
+            float tanfovx = tanfovy * aspect;
+
+            PointType dir = cam.direction.normalized();
+            PointType right = cam.right().normalized();
+            PointType up = cam.up.normalized();
+
+            planes[0] = {dir, -dir.dot(cam.origin)}; // Near
+            planes[1] = {-dir, -(-dir).dot(cam.origin + dir * maxDist)}; // Far
+
+            PointType n_left = up.cross(dir - right * tanfovx).normalized();
+            planes[2] = {n_left, -n_left.dot(cam.origin)};
+
+            PointType n_right = (dir + right * tanfovx).cross(up).normalized();
+            planes[3] = {n_right, -n_right.dot(cam.origin)};
+
+            PointType n_bottom = (dir - up * tanfovy).cross(right).normalized();
+            planes[4] = {n_bottom, -n_bottom.dot(cam.origin)};
+
+            PointType n_top = right.cross(dir + up * tanfovy).normalized();
+            planes[5] = {n_top, -n_top.dot(cam.origin)};
+        }
+
+        bool intersects(const BoundingBox& box) const {
+            for (int i = 0; i < 6; ++i) {
+                if (!planes[i].intersects(box)) return false;
+            }
+            return true;
+        }
+
+        float distanceToAABB(const BoundingBox& box, const PointType& point) const {
+            float distSq = 0.0f;
+            for (int i = 0; i < Dim; ++i) {
+                if (point[i] < box.first[i]) {
+                    distSq += (box.first[i] - point[i]) * (box.first[i] - point[i]);
+                } else if (point[i] > box.second[i]) {
+                    distSq += (point[i] - box.second[i]) * (point[i] - box.second[i]);
+                }
+            }
+            return std::sqrt(distSq);
         }
     };
 
     struct OctreeNode {
         private:
-            uint8_t flags;
+            std::atomic<uint8_t> flags;
         public:
         BoundingBox bounds;
         std::vector<std::shared_ptr<NodeData>> points;
-        std::array<std::unique_ptr<OctreeNode>, 8> children;
+        std::array<std::shared_ptr<OctreeNode>, 8> children;
         PointType center;
         float nodeSize;
         
         mutable std::shared_ptr<NodeData> lodData;
-        mutable std::mutex lodMutex; 
+        mutable std::shared_mutex nodeMutex; 
 
         OctreeNode(const PointType& min, const PointType& max) 
-            : bounds(min,max), lodData(nullptr), flags(NODE_LEAF_BIT | NODE_LOADED_BIT | NODE_DIRTY_BIT) {
-            for (std::unique_ptr<OctreeNode>& child : children) {
+            : bounds(min,max), lodData(nullptr) {
+            flags.store(NODE_LEAF_BIT | NODE_LOADED_BIT | NODE_DIRTY_BIT, std::memory_order_release);
+            for (std::shared_ptr<OctreeNode>& child : children) {
                 child = nullptr;
             }
             center = (bounds.first + bounds.second) * 0.5;
             nodeSize = (bounds.second - bounds.first).norm();
         }
 
+        OctreeNode(const OctreeNode& other) : bounds(other.bounds), points(other.points),
+                  children(other.children), center(other.center), nodeSize(other.nodeSize),
+                  lodData(other.lodData), flags(other.flags.load(std::memory_order_acquire)) {}
+
+        OctreeNode& operator=(const OctreeNode& other) {
+            if (this != &other) {
+                std::unique_lock<std::shared_mutex> lockSelf(nodeMutex, std::defer_lock);
+                std::shared_lock<std::shared_mutex> lockOther(other.nodeMutex, std::defer_lock);
+                std::lock(lockSelf, lockOther);
+
+                bounds = other.bounds;
+                points = other.points;
+                children = other.children;
+                center = other.center;
+                nodeSize = other.nodeSize;
+                lodData = other.lodData;
+                flags.store(other.flags.load(std::memory_order_acquire), std::memory_order_release);
+            }
+            return *this;
+        }
+
+        OctreeNode(OctreeNode&& other) noexcept : bounds(std::move(other.bounds)),
+                   points(std::move(other.points)), children(std::move(other.children)),
+                   center(std::move(other.center)), nodeSize(other.nodeSize),
+                   lodData(std::move(other.lodData)), flags(other.flags.load(std::memory_order_acquire)) {}
+
+        OctreeNode& operator=(OctreeNode&& other) noexcept {
+            if (this != &other) {
+                std::unique_lock<std::shared_mutex> lockSelf(nodeMutex, std::defer_lock);
+                std::unique_lock<std::shared_mutex> lockOther(other.nodeMutex, std::defer_lock);
+                std::lock(lockSelf, lockOther);
+
+                bounds = std::move(other.bounds);
+                points = std::move(other.points);
+                children = std::move(other.children);
+                center = std::move(other.center);
+                nodeSize = other.nodeSize;
+                lodData = std::move(other.lodData);
+                flags.store(other.flags.load(std::memory_order_acquire), std::memory_order_release);
+            }
+            return *this;
+        }
+
         bool isLeaf() const {
-            return flags & NODE_LEAF_BIT;
+            return flags.load(std::memory_order_acquire) & NODE_LEAF_BIT;
         }
         void setLeaf(bool val) {
-            val ? (flags |= NODE_LEAF_BIT) : (flags &= ~NODE_LEAF_BIT);
+            if (val) flags.fetch_or(NODE_LEAF_BIT, std::memory_order_release);
+            else flags.fetch_and(~NODE_LEAF_BIT, std::memory_order_release);
         }
+
         bool isLoaded() const {
-            return flags & NODE_LOADED_BIT;
+            return flags.load(std::memory_order_acquire) & NODE_LOADED_BIT;
         }
+        
         void setLoaded(bool val) {
-            val ? (flags |= NODE_LOADED_BIT) : (flags &= ~NODE_LOADED_BIT);
+            if (val) flags.fetch_or(NODE_LOADED_BIT, std::memory_order_release);
+            else flags.fetch_and(~NODE_LOADED_BIT, std::memory_order_release);
         }
+
         bool isDirty() const {
-            return flags & NODE_DIRTY_BIT;
+            return flags.load(std::memory_order_acquire) & NODE_DIRTY_BIT;
         }
+        
         void setDirty(bool val) {
-            val ? (flags |= NODE_DIRTY_BIT) : (flags &= ~NODE_DIRTY_BIT);
+            if (val) flags.fetch_or(NODE_DIRTY_BIT, std::memory_order_release);
+            else flags.fetch_and(~NODE_DIRTY_BIT, std::memory_order_release);
         }
+
         bool isLodValid() const {
-            return flags & NODE_LOD_VALID_BIT;
+            return flags.load(std::memory_order_acquire) & NODE_LOD_VALID_BIT;
         }
+        
         void setLodValid(bool val) {
-            val ? (flags |= NODE_LOD_VALID_BIT) : (flags &= ~NODE_LOD_VALID_BIT);
+            if (val) flags.fetch_or(NODE_LOD_VALID_BIT, std::memory_order_release);
+            else flags.fetch_and(~NODE_LOD_VALID_BIT, std::memory_order_release);
         }
+        
         void invalidateLod() {
             setLodValid(false);
+        }
+
+        bool isDirtyRecursive(bool lockSelf = true) const {
+            if (isDirty()) return true;
+            std::shared_lock<std::shared_mutex> lock;
+            if (lockSelf) lock = std::shared_lock<std::shared_mutex>(nodeMutex);
+            if (!isLeaf()) {
+                std::vector<std::shared_ptr<OctreeNode>> validChildren;
+                for (const auto& child : children) {
+                    if (child) validChildren.push_back(child);
+                }
+                if (lockSelf) lock.unlock();
+                for (const auto& child : validChildren) {
+                    if (child->isDirtyRecursive(true)) return true;
+                }
+            }
+            return false;
+        }
+
+        void clearDirtyRecursive(bool lockSelf = true) {
+            setDirty(false);
+            std::shared_lock<std::shared_mutex> lock;
+            if (lockSelf) lock = std::shared_lock<std::shared_mutex>(nodeMutex);
+            if (!isLeaf()) {
+                std::vector<std::shared_ptr<OctreeNode>> validChildren;
+                for (auto& child : children) {
+                    if (child) validChildren.push_back(child);
+                }
+                if (lockSelf) lock.unlock();
+                for (auto& child : validChildren) {
+                    child->clearDirtyRecursive(true);
+                }
+            }
+        }
+        
+        void setLoadedRecursive(bool val, bool lockSelf = true) {
+            setLoaded(val);
+            std::shared_lock<std::shared_mutex> lock;
+            if (lockSelf) lock = std::shared_lock<std::shared_mutex>(nodeMutex);
+            if (!isLeaf()) {
+                std::vector<std::shared_ptr<OctreeNode>> validChildren;
+                for (auto& child : children) {
+                    if (child) validChildren.push_back(child);
+                }
+                if (lockSelf) lock.unlock();
+                for (auto& child : validChildren) {
+                    child->setLoadedRecursive(val, true);
+                }
+            }
+        }
+
+        void collectAllPoints(std::vector<std::shared_ptr<NodeData>>& allPoints, bool lockSelf = true) const {
+            std::shared_lock<std::shared_mutex> lock;
+            if (lockSelf) lock = std::shared_lock<std::shared_mutex>(nodeMutex);
+            for (const auto& pt : points) {
+                allPoints.push_back(pt);
+            }
+            if (!isLeaf()) {
+                std::vector<std::shared_ptr<OctreeNode>> validChildren;
+                for (const auto& child : children) {
+                    if (child) validChildren.push_back(child);
+                }
+                if (lockSelf) lock.unlock();
+                for (const auto& child : validChildren) {
+                    child->collectAllPoints(allPoints, true);
+                }
+            }
+        }
+
+        bool isFullyUnloaded(bool lockSelf = true) const {
+            if (isLoaded()) return false;
+            std::shared_lock<std::shared_mutex> lock;
+            if (lockSelf) lock = std::shared_lock<std::shared_mutex>(nodeMutex);
+            if (!isLeaf()) {
+                std::vector<std::shared_ptr<OctreeNode>> validChildren;
+                for (const auto& child : children) {
+                    if (child) validChildren.push_back(child);
+                }
+                if (lockSelf) lock.unlock();
+                for (const auto& child : validChildren) {
+                    if (!child->isFullyUnloaded(true)) return false;
+                }
+            }
+            return true;
         }
 
         bool contains(const PointType& point) const {
@@ -202,6 +445,7 @@ public:
         }
 
         bool isEmpty() const {
+            std::shared_lock<std::shared_mutex> lock(nodeMutex);
             if (!points.empty()) return false;
             if (!isLeaf()) {
                 for (int i = 0; i < 8; ++i) {
@@ -221,7 +465,8 @@ public:
         
         void saveStructure(std::ostream& os) const {
             os.write(reinterpret_cast<const char*>(&bounds), sizeof(bounds));
-            os.write(reinterpret_cast<const char*>(&flags), sizeof(flags));
+            uint8_t f = flags.load(std::memory_order_acquire);
+            os.write(reinterpret_cast<const char*>(&f), sizeof(uint8_t));
 
             if (!isLeaf()) {
                 uint8_t childMask = 0;
@@ -238,7 +483,9 @@ public:
 
         void loadStructure(std::istream& is) {
             is.read(reinterpret_cast<char*>(&bounds), sizeof(bounds));
-            is.read(reinterpret_cast<char*>(&flags), sizeof(flags));
+            uint8_t f = 0;
+            is.read(reinterpret_cast<char*>(&f), sizeof(uint8_t));
+            flags.store(f, std::memory_order_release);
 
             center = (bounds.first + bounds.second) * 0.5;
             nodeSize = (bounds.second - bounds.first).norm();
@@ -252,101 +499,236 @@ public:
                 
                 for (int i = 0; i < 8; ++i) {
                     if (childMask & (1 << i)) {
-                        children[i] = std::make_unique<OctreeNode>(PointType::Zero(), PointType::Zero());
+                        children[i] = std::make_shared<OctreeNode>(PointType::Zero(), PointType::Zero());
                         children[i]->loadStructure(is);
                     }
                 }
             }
         }
 
-        void saveData(const std::filesystem::path& currentDir) {
-            if (isLeaf() && isLoaded() && isDirty()) {
+        void saveData(int currentDepth, int chunkDepth, const std::filesystem::path& currentDir, bool lockSelf = true) {
+            std::unique_lock<std::shared_mutex> lock;
+            if (lockSelf) lock = std::unique_lock<std::shared_mutex>(nodeMutex);
+            
+            if (currentDepth >= chunkDepth || isLeaf()) {
+                if (isLoaded() && isDirtyRecursive(false)) {
                 std::filesystem::create_directories(currentDir);
-                std::filesystem::path filePath = currentDir / (getRegionName() + ".leafdata");
+                    std::filesystem::path filePath = currentDir / (getRegionName() + ".chunkdata");
+                    
+                    std::vector<std::shared_ptr<NodeData>> allPoints;
+                    collectAllPoints(allPoints, false);
+                    
+                    std::sort(allPoints.begin(), allPoints.end(), [](const std::shared_ptr<NodeData>& a, const std::shared_ptr<NodeData>& b) {
+                        return a.get() < b.get();
+                    });
+                    allPoints.erase(std::unique(allPoints.begin(), allPoints.end(), [](const std::shared_ptr<NodeData>& a, const std::shared_ptr<NodeData>& b) {
+                        return a.get() == b.get();
+                    }), allPoints.end());
+                    
                 std::ofstream os(filePath, std::ios::binary);
-                if (!os) return;
-                
-                size_t numPoints = points.size();
-                os.write(reinterpret_cast<const char*>(&numPoints), sizeof(numPoints));
-                for (const auto& pt : points) {
-                    pt->serialize(os);
+                    if (os) {
+                        size_t numPoints = allPoints.size();
+                        os.write(reinterpret_cast<const char*>(&numPoints), sizeof(numPoints));
+                        for (const auto& pt : allPoints) {
+                            pt->serialize(os);
+                        }
+                    }
+                    clearDirtyRecursive(false);
                 }
-                os.close();
-                setDirty(false);
-            } else if (!isLeaf()) {
+            } else {
+                if (isLoaded() && isDirty()) {
+                    if (!points.empty()) {
+                        std::filesystem::create_directories(currentDir);
+                        std::filesystem::path filePath = currentDir / (getRegionName() + ".nodedata");
+                        
+                        std::vector<std::shared_ptr<NodeData>> allPoints = points;
+                        std::sort(allPoints.begin(), allPoints.end(), [](const std::shared_ptr<NodeData>& a, const std::shared_ptr<NodeData>& b) {
+                            return a.get() < b.get();
+                        });
+                        allPoints.erase(std::unique(allPoints.begin(), allPoints.end(), [](const std::shared_ptr<NodeData>& a, const std::shared_ptr<NodeData>& b) {
+                            return a.get() == b.get();
+                        }), allPoints.end());
+                        
+                        std::ofstream os(filePath, std::ios::binary);
+                        if (os) {
+                            size_t numPoints = allPoints.size();
+                            os.write(reinterpret_cast<const char*>(&numPoints), sizeof(numPoints));
+                            for (const auto& pt : allPoints) {
+                                pt->serialize(os);
+                            }
+                        }
+                    }
+                    setDirty(false);
+                }
+                std::vector<std::shared_ptr<OctreeNode>> validChildren;
                 for (auto& child : children) {
-                    if (child) child->saveData(currentDir / getRegionName());
+                    if (child) validChildren.push_back(child);
+                }
+                if (lockSelf) lock.unlock();
+                std::filesystem::path subDir = currentDir / getRegionName();
+                for (auto& child : validChildren) {
+                    child->saveData(currentDepth + 1, chunkDepth, subDir, true);
                 }
             }
         }
 
-        void loadData(const std::filesystem::path& currentDir) {
-            if (isLeaf() && !isLoaded()) {
-                std::filesystem::path filePath = currentDir / (getRegionName() + ".leafdata");
-                if (!std::filesystem::exists(filePath)) return;
-                
-                std::ifstream is(filePath, std::ios::binary);
-                if (!is) return;
+        void loadData(int currentDepth, int chunkDepth, const std::filesystem::path& currentDir, void* treePtr) {
+            std::unique_lock<std::shared_mutex> lock(nodeMutex);
+            if (isLoaded()) return;
+            
+            Octree* tree = static_cast<Octree*>(treePtr);
 
-                size_t numPoints = 0;
-                is.read(reinterpret_cast<char*>(&numPoints), sizeof(numPoints));
+            if (currentDepth >= chunkDepth || isLeaf()) {
+                std::filesystem::path filePath = currentDir / (getRegionName() + ".chunkdata");
                 
+                for (auto& child : children) child.reset();
+                setLeaf(true);
                 points.clear();
-                points.reserve(numPoints);
-                for (size_t i = 0; i < numPoints; ++i) {
-                    auto pt = std::make_shared<NodeData>();
-                    pt->deserialize(is);
-                    points.push_back(pt);
+                
+                // setLoaded(true);
+                
+                if (std::filesystem::exists(filePath)) {
+                    std::ifstream is(filePath, std::ios::binary);
+                    if (is) {
+                        size_t numPoints = 0;
+                        is.read(reinterpret_cast<char*>(&numPoints), sizeof(numPoints));
+                        for (size_t i = 0; i < numPoints; ++i) {
+                            auto pt = std::make_shared<NodeData>();
+                            pt->deserialize(is);
+                            tree->insertRecursive(this, currentDepth, pt, currentDir, true, false);
+                        }
+                    }
+                } else {
+                    std::filesystem::path oldFilePath = currentDir / (getRegionName() + ".leafdata");
+                    if (std::filesystem::exists(oldFilePath)) {
+                        std::ifstream is(oldFilePath, std::ios::binary);
+                        if (is) {
+                            size_t numPoints = 0;
+                            is.read(reinterpret_cast<char*>(&numPoints), sizeof(numPoints));
+                            for (size_t i = 0; i < numPoints; ++i) {
+                                auto pt = std::make_shared<NodeData>();
+                                pt->deserialize(is);
+                                tree->insertRecursive(this, currentDepth, pt, currentDir, true, false);
+                            }
+                        }
+                    }
                 }
-                is.close();
+                setLoadedRecursive(true, false);
+                clearDirtyRecursive(false);
+            } else {
+                std::filesystem::path filePath = currentDir / (getRegionName() + ".nodedata");
+                points.clear();
+                if (std::filesystem::exists(filePath)) {
+                    std::ifstream is(filePath, std::ios::binary);
+                    if (is) {
+                        size_t numPoints = 0;
+                        is.read(reinterpret_cast<char*>(&numPoints), sizeof(numPoints));
+                        for (size_t i = 0; i < numPoints; ++i) {
+                            auto pt = std::make_shared<NodeData>();
+                            pt->deserialize(is);
+                            points.push_back(pt);
+                        }
+                    }
+                }
                 setLoaded(true);
                 setDirty(false);
-            } else if (!isLeaf()) {
+                
+                std::filesystem::path subDir = currentDir / getRegionName();
                 for (auto& child : children) {
-                    if (child) child->loadData(currentDir / getRegionName());
+                    if (child) child->loadData(currentDepth + 1, chunkDepth, subDir, tree);
                 }
             }
         }
 
-        void offloadRegion(const std::filesystem::path& currentDir, const PointType& minB, const PointType& maxB) {
+        void offloadRegion(int currentDepth, int chunkDepth, const std::filesystem::path& currentDir, const PointType& minB, const PointType& maxB) {
             if (!intersectsBounds(minB, maxB)) return;
             
-            if (isLeaf() && isLoaded()) {
-                if (isDirty()) {
-                    saveData(currentDir); 
+            std::unique_lock<std::shared_mutex> lock(nodeMutex);
+            if (currentDepth >= chunkDepth || isLeaf()) {
+                if (isLoaded()) {
+                    if (isDirtyRecursive(false)) {
+                        saveData(currentDepth, chunkDepth, currentDir, false); 
+                    }
+                    for (auto& child : children) child.reset();
+                    setLeaf(true);
+                    points.clear();      
+                    points.shrink_to_fit();
+                    setLoaded(false);
                 }
-                points.clear();      
-                points.shrink_to_fit();
-                setLoaded(false);
-            } else if (!isLeaf()) {
+            } else {
+                std::vector<std::shared_ptr<OctreeNode>> validChildren;
                 std::filesystem::path subDir = currentDir / getRegionName();
                 for (auto& child : children) {
-                    if (child) child->offloadRegion(subDir, minB, maxB);
+                    if (child) validChildren.push_back(child);
+                }
+                lock.unlock();
+                
+                for (auto& child : validChildren) {
+                        child->offloadRegion(currentDepth + 1, chunkDepth, subDir, minB, maxB);
+                    }
+                
+                lock.lock();
+                if (isFullyUnloaded(false)) {
+                    if (isLoaded() && isDirty()) {
+                        saveData(currentDepth, chunkDepth, currentDir, false);
+                    }
+                    points.clear();
+                    points.shrink_to_fit();
+                    setLoaded(false);
                 }
             }
         }
 
-        void loadRegion(const std::filesystem::path& currentDir, const PointType& minB, const PointType& maxB) {
+        void loadRegion(int currentDepth, int chunkDepth, const std::filesystem::path& currentDir, const PointType& minB, const PointType& maxB, Octree* tree) {
             if (!intersectsBounds(minB, maxB)) return;
             
-            if (isLeaf() && !isLoaded()) {
-                loadData(currentDir);
-            } else if (!isLeaf()) {
-                std::filesystem::path subDir = currentDir / getRegionName();
+            if (currentDepth >= chunkDepth || isLeaf()) {
+                if (!isLoaded()) {
+                    loadData(currentDepth, chunkDepth, currentDir, tree);
+                }
+            } else {
+                if (!isLoaded()) {
+                    loadData(currentDepth, chunkDepth, currentDir, tree);
+                }
+                std::shared_lock<std::shared_mutex> lock(nodeMutex);
+                std::vector<std::shared_ptr<OctreeNode>> validChildren;
                 for (auto& child : children) {
-                    if (child) child->loadRegion(subDir, minB, maxB);
+                    if (child) validChildren.push_back(child);
+                }
+                lock.unlock();
+                
+                std::filesystem::path subDir = currentDir / getRegionName();
+                for (auto& child : validChildren) {
+                    child->loadRegion(currentDepth + 1, chunkDepth, subDir, minB, maxB, tree);
                 }
             }
         }
         
-        void saveAllData(const std::filesystem::path& currentDir) {
-            if (isLeaf() && isLoaded() && isDirty()) {
-                saveData(currentDir);
-            } else if (!isLeaf()) {
+        void saveAllData(int currentDepth, int chunkDepth, const std::filesystem::path& currentDir, bool lockSelf = true) {
+            std::shared_lock<std::shared_mutex> lock;
+            if (lockSelf) lock = std::shared_lock<std::shared_mutex>(nodeMutex);
+            if (currentDepth >= chunkDepth || isLeaf()) {
+                if (isLoaded() && isDirtyRecursive(false)) {
+                    if (lockSelf) lock.unlock();
+                    saveData(currentDepth, chunkDepth, currentDir, true);
+                    if (lockSelf) lock.lock();
+                }
+            } else {
+                if (isLoaded() && isDirty()) {
+                    if (lockSelf) lock.unlock();
+                    saveData(currentDepth, chunkDepth, currentDir, true);
+                    if (lockSelf) lock.lock();
+                }
+                std::vector<std::shared_ptr<OctreeNode>> validChildren;
                 std::filesystem::path subDir = currentDir / getRegionName();
                 for (auto& child : children) {
-                    if (child) child->saveAllData(subDir);
+                    if (child) validChildren.push_back(child);
                 }
+                if (lockSelf) lock.unlock();
+                for (auto& child : validChildren) {
+                    child->saveAllData(currentDepth + 1, chunkDepth, subDir, true);
+                }
+                if (lockSelf) lock.lock();
             }
         }
     };
@@ -514,10 +896,12 @@ public:
     };
 
 private:
-    std::unique_ptr<OctreeNode> root_;
+    std::shared_ptr<OctreeNode> root_;
+    mutable std::shared_mutex rootMutex_;
     size_t maxDepth;
-    size_t size;
+    std::atomic<size_t> size; 
     size_t maxPointsPerNode;
+    size_t chunkDepth_ = 4;
     
     Eigen::Vector3f skylight_ = {0.1f, 0.1f, 0.1f};
     Eigen::Vector3f backgroundColor_ = {0.53f, 0.81f, 0.92f};
@@ -531,6 +915,10 @@ private:
     std::vector<Material> materialMap_;
     std::map<Material, IndexType> materialToIndex_;
     std::filesystem::path storageBasePath_;
+
+    int getChunkDepth() const {
+        return static_cast<int>(chunkDepth_);
+    }
     
 public:
     inline IndexType getColorIndex(const Eigen::Vector3f& color) {
@@ -645,15 +1033,15 @@ private:
                 a.first[2] <= b.second[2] && a.second[2] >= b.first[2]);
     }
 
-    void splitNode(OctreeNode* node, int depth) {
-        if (depth >= maxDepth) return;
-        if (!storageBasePath_.empty() && !node->isLoaded()) {
-             node->loadData(storageBasePath_);
-        }
+    void splitNode(OctreeNode* node, int currentDepth, const std::filesystem::path& currentDir, bool isLoading = false) {
+        if (currentDepth >= maxDepth) return;
+        // if (!isLoading && !storageBasePath_.empty() && !node->isLoaded()) {
+        //     node->loadData(currentDepth, getChunkDepth(), currentDir, this);
+        // }
         node->setLeaf(false);
         for (int i = 0; i < 8; ++i) {
             BoundingBox childBounds = createChildBounds(node, i);
-            node->children[i] = std::make_unique<OctreeNode>(childBounds.first, childBounds.second);
+            node->children[i] = std::make_shared<OctreeNode>(childBounds.first, childBounds.second);
         }
 
         std::vector<std::shared_ptr<NodeData>> keep;
@@ -678,25 +1066,30 @@ private:
         node->points = std::move(keep);
         node->setDirty(true);
 
+        std::filesystem::path subDir = currentDir / node->getRegionName();
         for (int i = 0; i < 8; ++i) {
             node->children[i]->setDirty(true);
             if (node->children[i]->points.size() > maxPointsPerNode) {
-                splitNode(node->children[i].get(), depth + 1);
+                splitNode(node->children[i].get(), currentDepth + 1, subDir, isLoading);
             }
         }
     }
 
-    bool insertRecursive(OctreeNode* node, const std::shared_ptr<NodeData>& pointData, int depth) {
+    bool insertRecursive(OctreeNode* node, int currentDepth, const std::shared_ptr<NodeData>& pointData, const std::filesystem::path& currentDir, bool isLoading = false, bool lockNode = true) {
+        std::unique_lock<std::shared_mutex> lock;
+        if (lockNode) lock = std::unique_lock<std::shared_mutex>(node->nodeMutex);
+
         node->invalidateLod();
 
         BoundingBox cubeBounds = pointData->getCubeBounds();
         if (!boxIntersectsBox(node->bounds, cubeBounds)) return false;
         
-        if (!storageBasePath_.empty() && !node->isLoaded()) {
-            node->loadData(storageBasePath_);
+        if (!isLoading && !storageBasePath_.empty() && !node->isLoaded()) {
+            if (lockNode) lock.unlock();
+            const_cast<OctreeNode*>(node)->loadData(currentDepth, getChunkDepth(), currentDir, this);
+            if (lockNode) lock.lock();
         }
         node->setDirty(true);
-
 
         if (!node->isLeaf() && pointData->size >= node->nodeSize) {
             node->points.emplace_back(pointData);
@@ -705,20 +1098,27 @@ private:
 
         if (node->isLeaf()) {
             node->points.emplace_back(pointData);
-            if (node->points.size() > maxPointsPerNode && depth < maxDepth) {
-                splitNode(node, depth);
+            if (node->points.size() > maxPointsPerNode && currentDepth < maxDepth) {
+                splitNode(node, currentDepth, currentDir, isLoading);
             }
             return true;
         } else {
-            bool inserted = false;
+            std::vector<std::shared_ptr<OctreeNode>> childrenToVisit;
             for (int i = 0; i < 8; ++i) {
                 BoundingBox childBounds = createChildBounds(node, i);
                 if (boxIntersectsBox(childBounds, cubeBounds)) {
                     if (!node->children[i]) {
-                        node->children[i] = std::make_unique<OctreeNode>(childBounds.first, childBounds.second);
+                        node->children[i] = std::make_shared<OctreeNode>(childBounds.first, childBounds.second);
                     }
-                    inserted |= insertRecursive(node->children[i].get(), pointData, depth + 1);
+                    childrenToVisit.push_back(node->children[i]);
                 }
+            }
+            
+            if (lockNode) lock.unlock();
+            bool inserted = false;
+            std::filesystem::path subDir = currentDir / node->getRegionName();
+            for (auto child : childrenToVisit) {
+                inserted |= insertRecursive(child.get(), currentDepth + 1, pointData, subDir, isLoading, true);
             }
             return inserted;
         }
@@ -726,31 +1126,41 @@ private:
 
     bool invalidateNodeLODRecursive(OctreeNode* node, const BoundingBox& bounds) {
         if (!boxIntersectsBox(node->bounds, bounds)) return false;
+        
+        std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
         node->invalidateLod();
+        
+        std::vector<std::shared_ptr<OctreeNode>> validChildren;
         if (!node->isLeaf()) {
             for (int i = 0; i < 8; ++i) {
-                if (node->children[i]) {
-                    invalidateNodeLODRecursive(node->children[i].get(), bounds);
+                if (node->children[i]) validChildren.push_back(node->children[i]);
                 }
             }
+        lock.unlock();
+        
+        for (auto child : validChildren) {
+            invalidateNodeLODRecursive(child.get(), bounds);
         }
         return true;
     }
 
     void invalidateLODForPoint(const std::shared_ptr<NodeData>& pointData) {
-        if (root_ && pointData) {
-            invalidateNodeLODRecursive(root_.get(), pointData->getCubeBounds());
+        std::shared_lock<std::shared_mutex> lock(rootMutex_);
+        std::shared_ptr<OctreeNode> rootCopy = root_;
+        if (rootCopy && pointData) {
+            invalidateNodeLODRecursive(rootCopy.get(), pointData->getCubeBounds());
         }
     }
     
     void ensureBounds(const BoundingBox& targetBounds) {
+        std::unique_lock<std::shared_mutex> lock(rootMutex_);
         if (!root_) {
             PointType center = (targetBounds.first + targetBounds.second) * 0.5f;
             PointType size = targetBounds.second - targetBounds.first;
             float maxDim = size.maxCoeff();
             if (maxDim <= 0.0f) maxDim = 1.0f;
             PointType halfSize = PointType::Constant(maxDim * 0.5f);
-            root_ = std::make_unique<OctreeNode>(center - halfSize, center + halfSize);
+            root_ = std::make_shared<OctreeNode>(center - halfSize, center + halfSize);
             return;
         }
 
@@ -778,7 +1188,7 @@ private:
             if (expandY < 0) newMin.y() -= size.y(); else newMax.y() += size.y();
             if (expandZ < 0) newMin.z() -= size.z(); else newMax.z() += size.z();
             
-            auto newRoot = std::make_unique<OctreeNode>(newMin, newMax);
+            auto newRoot = std::make_shared<OctreeNode>(newMin, newMax);
             newRoot->setLeaf(false);
             
             uint8_t oldOctant = 0;
@@ -793,12 +1203,15 @@ private:
         }
     }
 
-    void ensureLOD(OctreeNode* node) {
-        std::lock_guard<std::mutex> lock(node->lodMutex);
+    void ensureLOD(OctreeNode* node, int currentDepth, const std::filesystem::path& currentDir) {
+        std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
         if (node->isLodValid()) return;
 
         if (!storageBasePath_.empty() && !node->isLoaded()) {
-            node->loadData(storageBasePath_);
+            lock.unlock();
+            node->loadData(currentDepth, getChunkDepth(), currentDir, this);
+            lock.lock();
+            if (node->isLodValid()) return;
         }
 
         PointType avgPos = PointType::Zero();
@@ -833,12 +1246,22 @@ private:
 
         for(const auto& pt : node->points) accumulate(pt);
 
+        std::vector<std::shared_ptr<OctreeNode>> validChildren;
         for (const auto& child : node->children) {
-            if (child) {
-                ensureLOD(child.get());
-                if (child->lodData) {
-                    accumulate(child->lodData);
-                }
+            if (child) validChildren.push_back(child);
+        }
+        
+        lock.unlock();
+        std::filesystem::path subDir = currentDir / node->getRegionName();
+        for (auto child : validChildren) {
+            ensureLOD(child.get(), currentDepth + 1, subDir);
+        }
+        lock.lock();
+
+        for (auto child : validChildren) {
+            std::shared_lock<std::shared_mutex> childLock(child->nodeMutex);
+            if (child->lodData) {
+                accumulate(child->lodData);
             }
         }
 
@@ -865,10 +1288,14 @@ private:
         node->setLodValid(true);
     }
 
-    std::shared_ptr<NodeData> findRecursive(OctreeNode* node, const PointType& pos, float tolerance) const {
+    std::shared_ptr<NodeData> findRecursive(OctreeNode* node, int currentDepth, const PointType& pos, float tolerance, const std::filesystem::path& currentDir) const {
         if (!node->contains(pos)) return nullptr;
+        
+        std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
         if (!storageBasePath_.empty() && !node->isLoaded()) {
-            const_cast<OctreeNode*>(node)->loadData(storageBasePath_);
+            lock.unlock();
+            const_cast<OctreeNode*>(node)->loadData(currentDepth, getChunkDepth(), currentDir, const_cast<Octree*>(this));
+            lock.lock();
         }
         
         for (const auto& pointData : node->points) {
@@ -880,20 +1307,29 @@ private:
             }
         }
 
+        std::shared_ptr<OctreeNode> child;
         if (!node->isLeaf()) {
             int octant = getOctant(pos, node->center);
             if (node->children[octant]) {
-                return findRecursive(node->children[octant].get(), pos, tolerance);
+                child = node->children[octant];
             }
+        }
+        lock.unlock();
+        
+        if (child) {
+            return findRecursive(child.get(), currentDepth + 1, pos, tolerance, currentDir / node->getRegionName());
         }
         return nullptr;
     }
 
-    bool removeRecursive(OctreeNode* node, const BoundingBox& bounds, const std::shared_ptr<NodeData>& targetPt) {
+    bool removeRecursive(OctreeNode* node, int currentDepth, const BoundingBox& bounds, const std::shared_ptr<NodeData>& targetPt, const std::filesystem::path& currentDir) {
         if (!boxIntersectsBox(node->bounds, bounds)) return false;
 
+        std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
         if (!storageBasePath_.empty() && !node->isLoaded()) {
-            node->loadData(storageBasePath_);
+            lock.unlock();
+            node->loadData(currentDepth, getChunkDepth(), currentDir, this);
+            lock.lock();
         }
 
         node->invalidateLod();
@@ -911,18 +1347,24 @@ private:
             foundAny = true;
         }
 
+        std::vector<std::shared_ptr<OctreeNode>> validChildren;
         if (!node->isLeaf()) {
             for (int i = 0; i < 8; ++i) {
-                if (node->children[i]) {
-                    foundAny |= removeRecursive(node->children[i].get(), bounds, targetPt);
+                if (node->children[i]) validChildren.push_back(node->children[i]);
                 }
             }
+        lock.unlock();
+
+        std::filesystem::path subDir = currentDir / node->getRegionName();
+        for (auto child : validChildren) {
+            foundAny |= removeRecursive(child.get(), currentDepth + 1, bounds, targetPt, subDir);
         }
+        
         return foundAny;
     }
 
-    void searchNodeRecursive(OctreeNode* node, const PointType& center, float radiusSq, int objectid, 
-                               std::vector<std::shared_ptr<NodeData>>& results, std::unordered_set<std::shared_ptr<NodeData>>& seen) const {
+    void searchNodeRecursive(OctreeNode* node, int currentDepth, const PointType& center, float radiusSq, int objectid, 
+                               std::vector<std::shared_ptr<NodeData>>& results, std::unordered_set<std::shared_ptr<NodeData>>& seen, const std::filesystem::path& currentDir) const {
         PointType closestPoint;
         for (int i = 0; i < Dim; ++i) {
             closestPoint[i] = std::max(node->bounds.first[i], std::min(center[i], node->bounds.second[i]));
@@ -933,8 +1375,11 @@ private:
             return;
         }
         
+        std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
         if (!storageBasePath_.empty() && !node->isLoaded()) {
-            const_cast<OctreeNode*>(node)->loadData(storageBasePath_);
+            lock.unlock();
+            const_cast<OctreeNode*>(node)->loadData(currentDepth, getChunkDepth(), currentDir, const_cast<Octree*>(this));
+            lock.lock();
         }
         
         for (const auto& pointData : node->points) {
@@ -946,28 +1391,40 @@ private:
             }
         }
         
+        std::vector<std::shared_ptr<OctreeNode>> validChildren;
         if (!node->isLeaf()) {
             for (const auto& child : node->children) {
-                if (child) searchNodeRecursive(child.get(), center, radiusSq, objectid, results, seen);
+                if (child) validChildren.push_back(child);
             }
+        }
+        lock.unlock();
+        
+        std::filesystem::path subDir = currentDir / node->getRegionName();
+        for (auto child : validChildren) {
+            searchNodeRecursive(child.get(), currentDepth + 1, center, radiusSq, objectid, results, seen, subDir);
         }
     }
 
-    void searchNode(OctreeNode* node, const PointType& center, float radiusSq, int objectid, 
-                               std::vector<std::shared_ptr<NodeData>>& results) const {
+    void searchNode(OctreeNode* node, int currentDepth, const PointType& center, float radiusSq, int objectid, 
+                               std::vector<std::shared_ptr<NodeData>>& results, const std::filesystem::path& currentDir) const {
         std::unordered_set<std::shared_ptr<NodeData>> seen;
-        searchNodeRecursive(node, center, radiusSq, objectid, results, seen);
+        searchNodeRecursive(node, currentDepth, center, radiusSq, objectid, results, seen, currentDir);
     }
 
-    void voxelTraverseRecursive(OctreeNode* node, float tMin, float tMax, float& maxDist, 
-                                bool enableLOD, const Ray& ray, std::shared_ptr<NodeData>& hit) const {
+    void voxelTraverseRecursive(OctreeNode* node, int currentDepth, float tMin, float tMax, float& maxDist, 
+                                bool enableLOD, const Ray& ray, std::shared_ptr<NodeData>& hit, const std::filesystem::path& currentDir) const {
+        
+        std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
+        
         if (enableLOD && !node->isLeaf()) {
             float dist = (node->center - ray.origin).norm();
             float ratio = dist / node->nodeSize;
             
             if (dist > lodMinDistance_ && ratio > invLodf) {
                  if (!node->isLodValid()) {
-                    const_cast<Octree*>(this)->ensureLOD(node);
+                    lock.unlock();
+                    const_cast<Octree*>(this)->ensureLOD(const_cast<OctreeNode*>(node), currentDepth, currentDir);
+                    lock.lock();
                 }
                 if(node->lodData) {
                     float t;
@@ -984,7 +1441,9 @@ private:
         }
         
         if (!storageBasePath_.empty() && !node->isLoaded()) {
-            const_cast<OctreeNode*>(node)->loadData(storageBasePath_);
+            lock.unlock();
+            const_cast<OctreeNode*>(node)->loadData(currentDepth, getChunkDepth(), currentDir, const_cast<Octree*>(this));
+            lock.lock();
         }
 
         for (const auto& pointData : node->points) {
@@ -1008,6 +1467,7 @@ private:
         currIdx = ((tMin >= ttt.x()) ? 1 : 0) | ((tMin >= ttt.y()) ? 2 : 0) | ((tMin >= ttt.z()) ? 4 : 0);
         
         float tNext;
+        std::filesystem::path subDir = currentDir / node->getRegionName();
 
         while(tMin < tMax && tMin <= maxDist) {
             Eigen::Vector3f next_t;
@@ -1019,13 +1479,77 @@ private:
 
             int physIdx = currIdx ^ ray.signMask;
 
+            std::shared_ptr<OctreeNode> child;
             if (node->children[physIdx]) {
-                voxelTraverseRecursive(node->children[physIdx].get(), tMin, tNext, maxDist, enableLOD, ray, hit);
+                child = node->children[physIdx];
+            }
+            if (child) {
+                voxelTraverseRecursive(child.get(), currentDepth + 1, tMin, tNext, maxDist, enableLOD, ray, hit, subDir);
             }
 
             tMin = tNext;
             currIdx |= ((next_t[0] <= tNext) ? 1 : 0) | ((next_t[1] <= tNext) ? 2 : 0) | ((next_t[2] <= tNext) ? 4 : 0);
         }
+    }
+
+    void updateNodeVisibility(OctreeNode* node, int currentDepth, const std::filesystem::path& currentDir, const Frustum& f, const PointType& camPos) {
+        float dist = f.distanceToAABB(node->bounds, camPos);
+        bool visible = f.intersects(node->bounds);
+
+        if (!visible || dist > maxDistance_) {
+            node->offloadRegion(currentDepth, getChunkDepth(), currentDir, node->bounds.first, node->bounds.second);
+            return;
+        }
+
+        std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
+
+        if (dist > lodMinDistance_) {
+            if (!node->isLodValid()) {
+                lock.unlock();
+                ensureLOD(node, currentDepth, currentDir);
+                lock.lock();
+            }
+            
+            std::vector<std::shared_ptr<OctreeNode>> validChildren;
+            if (!node->isLeaf()) {
+                for (auto& child : node->children) {
+                    if (child) validChildren.push_back(child);
+                }
+            }
+            lock.unlock();
+            
+            std::filesystem::path subDir = currentDir / node->getRegionName();
+            for (auto& child : validChildren) {
+                child->offloadRegion(currentDepth + 1, getChunkDepth(), subDir, child->bounds.first, child->bounds.second);
+            }
+        } else {
+            if (!node->isLoaded()) {
+                lock.unlock();
+                node->loadData(currentDepth, getChunkDepth(), currentDir, this);
+                lock.lock();
+            }
+            
+            std::vector<std::shared_ptr<OctreeNode>> validChildren;
+            if (!node->isLeaf()) {
+                for (auto& child : node->children) {
+                    if (child) validChildren.push_back(child);
+                    }
+                }
+            lock.unlock();
+            
+            std::filesystem::path subDir = currentDir / node->getRegionName();
+            for (auto& child : validChildren) {
+                updateNodeVisibility(child.get(), currentDepth + 1, subDir, f, camPos);
+            }
+        }
+    }
+
+    void updateCameraVisibility(const Camera& cam, int width, int height) {
+        std::shared_lock<std::shared_mutex> lock(rootMutex_);
+        std::shared_ptr<OctreeNode> rootCopy = root_;
+        if (!rootCopy || storageBasePath_.empty()) return;
+        Frustum f(cam, width, height, maxDistance_);
+        updateNodeVisibility(rootCopy.get(), 0, storageBasePath_, f, cam.origin);
     }
 
     PointType sampleGGX(const PointType& n, float roughness, uint32_t& state) const {
@@ -1197,23 +1721,31 @@ private:
     void clearNode(OctreeNode* node) {
         if (!node) return;
         
+        std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
         node->points.clear();
         node->points.shrink_to_fit();
         node->lodData = nullptr;
         
+        std::vector<std::shared_ptr<OctreeNode>> validChildren;
         for (int i = 0; i < 8; ++i) {
             if (node->children[i]) {
-                clearNode(node->children[i].get());
-                node->children[i].reset(nullptr);
+                validChildren.push_back(node->children[i]);
+                node->children[i].reset();
             }
         }
-        
         node->setLeaf(true);
+        lock.unlock();
+        
+        for (auto child : validChildren) {
+            clearNode(child.get());
+        }
     }
 
     void printStatsRecursive(const OctreeNode* node, size_t depth, size_t& totalNodes, size_t& leafNodes, size_t& actualPoints, 
                             size_t& maxTreeDepth, size_t& maxPointsInLeaf, size_t& minPointsInLeaf, size_t& lodGeneratedNodes) const {
         if (!node) return;
+        
+        std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
         
         totalNodes++;
         maxTreeDepth = std::max(maxTreeDepth, depth);
@@ -1227,26 +1759,44 @@ private:
             leafNodes++;
             maxPointsInLeaf = std::max(maxPointsInLeaf, pts);
             minPointsInLeaf = std::min(minPointsInLeaf, pts);
-        } else {
+        }
+        
+        std::vector<std::shared_ptr<OctreeNode>> validChildren;
+        if (!node->isLeaf()) {
             for (const auto& child : node->children) {
+                if (child) validChildren.push_back(child);
+            }
+        }
+        lock.unlock();
+        
+        for (auto child : validChildren) {
                 printStatsRecursive(child.get(), depth + 1, totalNodes, leafNodes, actualPoints, 
                                     maxTreeDepth, maxPointsInLeaf, minPointsInLeaf, lodGeneratedNodes);
-            }
         }
     }
 
     void optimizeRecursive(OctreeNode* node) {
-        if (!node || node->isLeaf()) return;
+        if (!node) return;
+        
+        std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
+        if (node->isLeaf()) return;
 
         bool childrenAreLeaves = true;
+        std::vector<std::shared_ptr<OctreeNode>> validChildren;
         for (int i = 0; i < 8; ++i) {
             if (node->children[i]) {
-                optimizeRecursive(node->children[i].get());
-                if (!node->children[i]->isLeaf()) {
-                    childrenAreLeaves = false;
-                }
+                validChildren.push_back(node->children[i]);
             }
         }
+        
+        lock.unlock();
+        for (auto child : validChildren) {
+            optimizeRecursive(child.get());
+            if (!child->isLeaf()) {
+                childrenAreLeaves = false;
+            }
+        }
+        lock.lock();
 
         if (childrenAreLeaves) {
             std::vector<std::shared_ptr<NodeData>> allPoints = node->points;
@@ -1266,14 +1816,10 @@ private:
             if (allPoints.size() <= maxPointsPerNode) {
                 node->points = std::move(allPoints);
                 for (int i = 0; i < 8; ++i) {
-                    node->children[i].reset(nullptr);
+                    node->children[i].reset();
                 }
                 node->setLeaf(true);
-                
-                {
-                    std::lock_guard<std::mutex> lock(node->lodMutex);
-                    node->lodData = nullptr;
-                }
+                node->lodData = nullptr;
             }
         }
     }
@@ -1443,6 +1989,8 @@ private:
     void collectNodesByObjectIdRecursive(OctreeNode* node, int id, std::vector<std::shared_ptr<NodeData>>& results, std::unordered_set<std::shared_ptr<NodeData>>& seen) const {
         if (!node) return;
         
+        std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
+        
         for (const auto& pt : node->points) {
             if (pt->isActive() && (id == -1 || pt->objectId == id)) {
                 if (seen.insert(pt).second) {
@@ -1450,12 +1998,17 @@ private:
                 }
             }
         }
+        
+        std::vector<std::shared_ptr<OctreeNode>> validChildren;
         if (!node->isLeaf()) {
             for (const auto& child : node->children) {
-                if (child) {
-                    collectNodesByObjectIdRecursive(child.get(), id, results, seen);
+                if (child) validChildren.push_back(child);
                 }
             }
+        lock.unlock();
+        
+        for (auto child : validChildren) {
+            collectNodesByObjectIdRecursive(child.get(), id, results, seen);
         }
     }
 
@@ -1466,24 +2019,120 @@ private:
 
 public:
     Octree(const PointType& minBound, const PointType& maxBound, size_t maxPointsPerNode=8, size_t maxDepth = 16) :
-    root_(std::make_unique<OctreeNode>(minBound, maxBound)), maxPointsPerNode(maxPointsPerNode),
-    maxDepth(maxDepth), size(0), mapMutex_(std::make_unique<std::mutex>()) {}
+     root_(std::make_shared<OctreeNode>(minBound, maxBound)), maxDepth(maxDepth), size(0), maxPointsPerNode(maxPointsPerNode), mapMutex_(std::make_unique<std::mutex>()) {}
 
     Octree() : root_(nullptr), maxPointsPerNode(8), maxDepth(16), size(0), mapMutex_(std::make_unique<std::mutex>()) {}
+
+    Octree(const Octree& other)
+        : root_(other.root_), maxDepth(other.maxDepth), maxPointsPerNode(other.maxPointsPerNode),
+          chunkDepth_(other.chunkDepth_), skylight_(other.skylight_), backgroundColor_(other.backgroundColor_),
+          skybox(other.skybox), colorMap_(other.colorMap_), colorToIndex_(other.colorToIndex_),
+          materialMap_(other.materialMap_), materialToIndex_(other.materialToIndex_),
+          storageBasePath_(other.storageBasePath_), lodFalloffRate_(other.lodFalloffRate_),
+          invLodf(other.invLodf), lodMinDistance_(other.lodMinDistance_), maxDistance_(other.maxDistance_),
+          mapMutex_(std::make_unique<std::mutex>()) {
+        size.store(other.size.load(std::memory_order_acquire), std::memory_order_release);
+    }
+
+    Octree& operator=(const Octree& other) {
+        if (this != &other) {
+            std::unique_lock<std::shared_mutex> lockSelf(rootMutex_, std::defer_lock);
+            std::shared_lock<std::shared_mutex> lockOther(other.rootMutex_, std::defer_lock);
+            std::lock(lockSelf, lockOther);
+
+            std::unique_lock<std::mutex> mapLockSelf(*mapMutex_, std::defer_lock);
+            std::unique_lock<std::mutex> mapLockOther(*other.mapMutex_, std::defer_lock);
+            std::lock(mapLockSelf, mapLockOther);
+
+            root_ = other.root_;
+            maxDepth = other.maxDepth;
+            maxPointsPerNode = other.maxPointsPerNode;
+            chunkDepth_ = other.chunkDepth_;
+            skylight_ = other.skylight_;
+            backgroundColor_ = other.backgroundColor_;
+            skybox = other.skybox;
+            colorMap_ = other.colorMap_;
+            colorToIndex_ = other.colorToIndex_;
+            materialMap_ = other.materialMap_;
+            materialToIndex_ = other.materialToIndex_;
+            storageBasePath_ = other.storageBasePath_;
+            lodFalloffRate_ = other.lodFalloffRate_;
+            invLodf = other.invLodf;
+            lodMinDistance_ = other.lodMinDistance_;
+            maxDistance_ = other.maxDistance_;
+            size.store(other.size.load(std::memory_order_acquire), std::memory_order_release);
+        }
+        return *this;
+    }
+
+    Octree(Octree&& other) noexcept
+        : root_(std::move(other.root_)), maxDepth(other.maxDepth),
+          maxPointsPerNode(other.maxPointsPerNode), chunkDepth_(other.chunkDepth_),
+          skylight_(std::move(other.skylight_)), backgroundColor_(std::move(other.backgroundColor_)),
+          skybox(std::move(other.skybox)), mapMutex_(std::make_unique<std::mutex>()),
+          colorMap_(std::move(other.colorMap_)), colorToIndex_(std::move(other.colorToIndex_)),
+          materialMap_(std::move(other.materialMap_)), materialToIndex_(std::move(other.materialToIndex_)),
+          storageBasePath_(std::move(other.storageBasePath_)), lodFalloffRate_(other.lodFalloffRate_),
+          invLodf(other.invLodf), lodMinDistance_(other.lodMinDistance_), maxDistance_(other.maxDistance_) {
+        size.store(other.size.load(std::memory_order_acquire), std::memory_order_release);
+    }
+
+    Octree& operator=(Octree&& other) noexcept {
+        if (this != &other) {
+            std::unique_lock<std::shared_mutex> lockSelf(rootMutex_, std::defer_lock);
+            std::unique_lock<std::shared_mutex> lockOther(other.rootMutex_, std::defer_lock);
+            std::lock(lockSelf, lockOther);
+
+            std::unique_lock<std::mutex> mapLockSelf(*mapMutex_, std::defer_lock);
+            std::unique_lock<std::mutex> mapLockOther(*other.mapMutex_, std::defer_lock);
+            std::lock(mapLockSelf, mapLockOther);
+
+            root_ = std::move(other.root_);
+            maxDepth = other.maxDepth;
+            maxPointsPerNode = other.maxPointsPerNode;
+            chunkDepth_ = other.chunkDepth_;
+            skylight_ = std::move(other.skylight_);
+            backgroundColor_ = std::move(other.backgroundColor_);
+            skybox = std::move(other.skybox);
+            colorMap_ = std::move(other.colorMap_);
+            colorToIndex_ = std::move(other.colorToIndex_);
+            materialMap_ = std::move(other.materialMap_);
+            materialToIndex_ = std::move(other.materialToIndex_);
+            storageBasePath_ = std::move(other.storageBasePath_);
+            lodFalloffRate_ = other.lodFalloffRate_;
+            invLodf = other.invLodf;
+            lodMinDistance_ = other.lodMinDistance_;
+            maxDistance_ = other.maxDistance_;
+            
+            size.store(other.size.load(std::memory_order_acquire), std::memory_order_release);
+        }
+        return *this;
+    }
 
     void setStoragePath(const std::string& path) {
         storageBasePath_ = path;
     }
 
+    void setChunkDepth(size_t h) {
+        chunkDepth_ = h;
+    }
+    size_t getChunkDepthConfig() const {
+        return chunkDepth_;
+    }
+
     void offloadRegion(const PointType& minBounds, const PointType& maxBounds) {
-        if (root_ && !storageBasePath_.empty()) {
-            root_->offloadRegion(storageBasePath_, minBounds, maxBounds);
+        std::shared_lock<std::shared_mutex> lock(rootMutex_);
+        std::shared_ptr<OctreeNode> rootCopy = root_;
+        if (rootCopy && !storageBasePath_.empty()) {
+            rootCopy->offloadRegion(0, getChunkDepth(), storageBasePath_, minBounds, maxBounds);
         }
     }
 
     void loadRegion(const PointType& minBounds, const PointType& maxBounds) {
-        if (root_ && !storageBasePath_.empty()) {
-            root_->loadRegion(storageBasePath_, minBounds, maxBounds);
+        std::shared_lock<std::shared_mutex> lock(rootMutex_);
+        std::shared_ptr<OctreeNode> rootCopy = root_;
+        if (rootCopy && !storageBasePath_.empty()) {
+            rootCopy->loadRegion(0, getChunkDepth(), storageBasePath_, minBounds, maxBounds, this);
         }
     }
 
@@ -1511,8 +2160,10 @@ public:
     void setMaxDistance(float dist) { maxDistance_ = dist; }
 
     void generateLODs() {
-        if (!root_) return;
-        ensureLOD(root_.get());
+        std::shared_lock<std::shared_mutex> lock(rootMutex_);
+        std::shared_ptr<OctreeNode> rootCopy = root_;
+        if (!rootCopy) return;
+        ensureLOD(rootCopy.get(), 0, storageBasePath_);
     }
 
     bool set(const T& data, const PointType& pos, bool visible, Eigen::Vector3f color, float size = 0.01f, bool active = true,
@@ -1527,8 +2178,9 @@ public:
         
         ensureBounds(pointData->getCubeBounds());
         
-        if (insertRecursive(root_.get(), pointData, 0)) {
-            this->size++;
+        std::shared_lock<std::shared_mutex> lock(rootMutex_);
+        if (insertRecursive(root_.get(), 0, pointData, storageBasePath_, false, true)) {
+            this->size.fetch_add(1);
             return true;
         }
         return false;
@@ -1539,8 +2191,10 @@ public:
         if (!pt) return false;
         
         auto ptBounds = pt->getCubeBounds();
-        if (removeRecursive(root_.get(), ptBounds, pt)) {
-            size--;
+        std::shared_lock<std::shared_mutex> lock(rootMutex_);
+        std::shared_ptr<OctreeNode> rootCopy = root_;
+        if (rootCopy && removeRecursive(rootCopy.get(), 0, ptBounds, pt, storageBasePath_)) {
+            size.fetch_sub(1);
             return true;
         }
         return false;
@@ -1593,19 +2247,20 @@ public:
         is.close();
     }
 
-
     bool save(const std::string& path) {
         setStoragePath(path);
-        if (storageBasePath_.empty() || !root_) return false;
+        std::shared_lock<std::shared_mutex> lock(rootMutex_);
+        std::shared_ptr<OctreeNode> rootCopy = root_;
+        if (storageBasePath_.empty() || !rootCopy) return false;
         std::filesystem::create_directories(storageBasePath_);
         
         saveMaps(storageBasePath_ / "maps.bin");
         
         std::ofstream os(storageBasePath_ / "tree.struct", std::ios::binary);
-        root_->saveStructure(os);
+        rootCopy->saveStructure(os);
         os.close();
         
-        root_->saveAllData(storageBasePath_);
+        rootCopy->saveAllData(0, getChunkDepth(), storageBasePath_);
         
         saveSkybox();
         
@@ -1619,13 +2274,14 @@ public:
 
         loadMaps(storageBasePath_ / "maps.bin");
         
+        std::unique_lock<std::shared_mutex> lock(rootMutex_);
         std::ifstream is(storageBasePath_ / "tree.struct", std::ios::binary);
         if (is) {
-            root_ = std::make_unique<OctreeNode>(PointType::Zero(), PointType::Zero());
+            root_ = std::make_shared<OctreeNode>(PointType::Zero(), PointType::Zero());
             root_->loadStructure(is);
             is.close();
             if (loadAllData) {
-                root_->loadRegion(storageBasePath_, root_->bounds.first, root_->bounds.second);
+                root_->loadRegion(0, getChunkDepth(), storageBasePath_, root_->bounds.first, root_->bounds.second, this);
             }
         } else {
             return false;
@@ -1638,19 +2294,26 @@ public:
     }
 
     std::shared_ptr<NodeData> find(const PointType& pos, float tolerance = EPSILON) {
-        return findRecursive(root_.get(), pos, tolerance);
+        std::shared_lock<std::shared_mutex> lock(rootMutex_);
+        std::shared_ptr<OctreeNode> rootCopy = root_;
+        if (rootCopy) return findRecursive(rootCopy.get(), 0, pos, tolerance, storageBasePath_);
+        return nullptr;
     }
 
     bool inGrid(PointType pos) {
-        return root_->contains(pos);
+        std::shared_lock<std::shared_mutex> lock(rootMutex_);
+        std::shared_ptr<OctreeNode> rootCopy = root_;
+        return rootCopy && rootCopy->contains(pos);
     }
 
     std::vector<std::shared_ptr<NodeData>> findInRadius(const PointType& center, float radius, int objectid = -1) const {
         std::vector<std::shared_ptr<NodeData>> results;
-        if (!root_) return results;
+        std::shared_lock<std::shared_mutex> lock(rootMutex_);
+        std::shared_ptr<OctreeNode> rootCopy = root_;
+        if (!rootCopy) return results;
         
         float radiusSq = radius * radius;
-        searchNode(root_.get(), center, radiusSq, objectid, results);
+        searchNode(rootCopy.get(), 0, center, radiusSq, objectid, results, storageBasePath_);
         
         return results;
     }
@@ -1672,8 +2335,9 @@ public:
 
         int targetObjId = (newObjectId != -2) ? newObjectId : pointData->objectId;
         
-        
-        removeRecursive(root_.get(), pointData->getCubeBounds(), pointData);
+        std::shared_lock<std::shared_mutex> lock(rootMutex_);
+        std::shared_ptr<OctreeNode> rootCopy = root_;
+        if (rootCopy) removeRecursive(rootCopy.get(), 0, pointData->getCubeBounds(), pointData, storageBasePath_);
         
         pointData->data = newData;
         pointData->position = newPos;
@@ -1708,11 +2372,16 @@ public:
         }
         if (matChanged) pointData->materialIdx = getMaterialIndex(mat);
         
+        lock.unlock();
         ensureBounds(pointData->getCubeBounds());
-        bool res = insertRecursive(root_.get(), pointData, 0);
+        
+        lock.lock();
+        bool res = false;
+        rootCopy = root_;
+        if (rootCopy) res = insertRecursive(rootCopy.get(), 0, pointData, storageBasePath_, false, true);
         
         if(!res) {
-            size--;
+            size.fetch_sub(1);
         }
 
         return res;
@@ -1722,14 +2391,20 @@ public:
         auto pointData = find(pos);
         if (!pointData) return false;
 
-        removeRecursive(root_.get(), pointData->getCubeBounds(), pointData);
+        std::shared_lock<std::shared_mutex> lock(rootMutex_);
+        std::shared_ptr<OctreeNode> rootCopy = root_;
+        if (rootCopy) removeRecursive(rootCopy.get(), 0, pointData->getCubeBounds(), pointData, storageBasePath_);
         pointData->position = newPos;
+        lock.unlock();
+        
         ensureBounds(pointData->getCubeBounds());
 
-        if (insertRecursive(root_.get(), pointData, 0)) {
+        lock.lock();
+        rootCopy = root_;
+        if (rootCopy && insertRecursive(rootCopy.get(), 0, pointData, storageBasePath_, false, true)) {
             return true;
         }
-        size--;
+        size.fetch_sub(1);
         return false;
     }
 
@@ -1816,21 +2491,26 @@ public:
     std::shared_ptr<NodeData> voxelTraverse(const PointType& origin, const PointType& direction,
                                         float maxDist, bool enableLOD = false) const {
         std::shared_ptr<NodeData> hit;
+        std::shared_lock<std::shared_mutex> lock(rootMutex_);
+        std::shared_ptr<OctreeNode> rootCopy = root_;
+        if (!rootCopy) return hit;
+
         float invLodf = 1.0f / lodFalloffRate_;
         Ray oray(origin, direction);
         
         float tMin, tMax;
-        if (rayBoxIntersect(oray, root_->bounds, tMin, tMax)) {
+        if (rayBoxIntersect(oray, rootCopy->bounds, tMin, tMax)) {
             tMax = std::min(tMax, maxDist);
             float currentMaxDist = maxDist;
-            voxelTraverseRecursive(root_.get(), tMin, tMax, currentMaxDist, enableLOD, oray, hit);
+            voxelTraverseRecursive(rootCopy.get(), 0, tMin, tMax, currentMaxDist, enableLOD, oray, hit, storageBasePath_);
         }
         return hit;
     }
 
     frame renderFrame(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB, int samplesPerPixel = 2,
                     int maxBounces = 4, bool globalIllumination = false, bool useLod = true) {
-        generateLODs();
+        updateCameraVisibility(cam, width, height);
+        
         PointType origin = cam.origin;
         PointType dir = cam.direction.normalized();
         PointType up = cam.up.normalized();
@@ -1882,12 +2562,14 @@ public:
 
     std::shared_ptr<NodeData> fastVoxelTraverse(const Ray& ray, float maxDist, bool enableLOD = false) const {
         std::shared_ptr<NodeData> hit;
-        if (empty()) return hit;
+        std::shared_lock<std::shared_mutex> lock(rootMutex_);
+        std::shared_ptr<OctreeNode> rootCopy = root_;
+        if (!rootCopy) return hit;
         float tMin, tMax;
-        if (rayBoxIntersect(ray, root_->bounds, tMin, tMax)) {
+        if (rayBoxIntersect(ray, rootCopy->bounds, tMin, tMax)) {
             tMax = std::min(tMax, maxDist);
             float currentMaxDist = maxDist;
-            voxelTraverseRecursive(root_.get(), tMin, tMax, currentMaxDist, enableLOD, ray, hit);
+            voxelTraverseRecursive(rootCopy.get(), 0, tMin, tMax, currentMaxDist, enableLOD, ray, hit, storageBasePath_);
         }
         return hit;
     }
@@ -1895,6 +2577,8 @@ public:
     frame fastRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB) {
         //TIME_FUNCTION;
         // generateLODs();
+        updateCameraVisibility(cam, width, height);
+
         PointType origin = cam.origin;
         PointType dir = cam.direction.normalized();
         PointType up = cam.up.normalized();
@@ -1968,8 +2652,9 @@ public:
     frame renderFrameTimed(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB, 
                            double maxTimeSeconds = 0.16, int maxBounces = 4, bool globalIllumination = false, bool useLod = true) {
         auto startTime = std::chrono::high_resolution_clock::now();
-        
         // generateLODs();
+        updateCameraVisibility(cam, width, height);
+
         PointType origin = cam.origin;
         PointType dir = cam.direction.normalized();
         PointType up = cam.up.normalized();
@@ -2116,7 +2801,9 @@ public:
         std::vector<std::shared_ptr<NodeData>> candidates;
         std::vector<std::shared_ptr<NodeData>> surfaceNodes;
         
-        collectNodesByObjectId(root_.get(), targetObjectId, candidates);
+        std::shared_lock<std::shared_mutex> lock(rootMutex_);
+        std::shared_ptr<OctreeNode> rootCopy = root_;
+        if (rootCopy) collectNodesByObjectId(rootCopy.get(), targetObjectId, candidates);
 
         if (candidates.empty()) return surfaceNodes;
 
@@ -2150,19 +2837,26 @@ public:
     }
 
     bool moveObject(int objectId, const PointType& offset) {
-        if (!root_) return false;
+        std::shared_lock<std::shared_mutex> lock(rootMutex_);
+        std::shared_ptr<OctreeNode> rootCopy = root_;
+        if (!rootCopy) return false;
         
         std::vector<std::shared_ptr<NodeData>> nodes;
-        collectNodesByObjectId(root_.get(), objectId, nodes);
+        collectNodesByObjectId(rootCopy.get(), objectId, nodes);
         if(nodes.empty()) return false;
 
         for(auto& n : nodes) {
-            removeRecursive(root_.get(), n->getCubeBounds(), n);
+            removeRecursive(rootCopy.get(), 0, n->getCubeBounds(), n, storageBasePath_);
         }
+        lock.unlock();
+
         for(auto& n : nodes) {
             n->position += offset;
             ensureBounds(n->getCubeBounds());
-            insertRecursive(root_.get(), n, 0);
+            lock.lock();
+            rootCopy = root_; // get updated root if bounds altered
+            insertRecursive(rootCopy.get(), 0, n, storageBasePath_, false, true);
+            lock.unlock();
         }
 
         return true;
@@ -2239,14 +2933,19 @@ public:
     }
 
     void optimize() {
-        if (root_) {
-            optimizeRecursive(root_.get());
+        std::shared_lock<std::shared_mutex> lock(rootMutex_);
+        std::shared_ptr<OctreeNode> rootCopy = root_;
+        if (rootCopy) {
+            lock.unlock();
+            optimizeRecursive(rootCopy.get());
         }
         generateLODs();
     }
 
     void printStats(std::ostream& os = std::cout) const {
-        if (!root_) {
+        std::shared_lock<std::shared_mutex> lock(rootMutex_);
+        std::shared_ptr<OctreeNode> rootCopy = root_;
+        if (!rootCopy) {
             os << "[Octree Stats] Tree is null/empty." << std::endl;
             return;
         }
@@ -2259,7 +2958,7 @@ public:
         size_t minPointsInLeaf = std::numeric_limits<size_t>::max();
         size_t lodGeneratedNodes = 0;
 
-        printStatsRecursive(root_.get(), 0, totalNodes, leafNodes, actualPoints, 
+        printStatsRecursive(rootCopy.get(), 0, totalNodes, leafNodes, actualPoints, 
                             maxTreeDepth, maxPointsInLeaf, minPointsInLeaf, lodGeneratedNodes);
 
         if (leafNodes == 0) minPointsInLeaf = 0;
@@ -2293,8 +2992,8 @@ public:
         os << "  Unique Colors     : " << colorMap_.size() << "/" << maxSize << "\n";
         os << "  Unique Materials  : " << materialMap_.size() << "/" << maxSize << "\n";
         os << "Bounds:\n";
-        os << "  Min               : [" << root_->bounds.first.transpose() << "]\n";
-        os << "  Max               : [" << root_->bounds.second.transpose() << "]\n";
+        os << "  Min               : [" << rootCopy->bounds.first.transpose() << "]\n";
+        os << "  Max               : [" << rootCopy->bounds.second.transpose() << "]\n";
         os << "Memory (Approx):\n";
         os << "  Node Structure    : " << (nodeMem / 1024.0) << " KB\n";
         os << "  Point Data        : " << (dataMem / 1024.0) << " KB\n";
@@ -2308,9 +3007,9 @@ public:
         if (root_) {   
             clearNode(root_.get());
         }
-        PointType minBound = root_->bounds.first;
-        PointType maxBound = root_->bounds.second;
-        root_ = std::make_unique<OctreeNode>(minBound, maxBound);
+        PointType minBound = root_ ? root_->bounds.first : PointType::Zero();
+        PointType maxBound = root_ ? root_->bounds.second : PointType::Zero();
+        root_ = std::make_shared<OctreeNode>(minBound, maxBound);
         
         {
             std::lock_guard<std::mutex> lock(*mapMutex_);
