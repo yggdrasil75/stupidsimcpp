@@ -5,7 +5,6 @@
 #include "../timing_decorator.hpp"
 #include "../output/frame.hpp"
 #include "camera.hpp"
-#include "mesh.hpp"
 #include <vector>
 #include <array>
 #include <memory>
@@ -22,12 +21,26 @@
 #include <random>
 #include <chrono>
 #include <cstdint>
+#include <queue>
+#include <thread>
+#include <condition_variable>
+#include <atomic>
 
 #ifdef SSE
 #include <immintrin.h>
 #endif
 
 constexpr int Dim = 3;
+
+static constexpr uint8_t ACTIVE_BIT = 1 << 0;
+static constexpr uint8_t VISIBLE_BIT = 1 << 1;
+static constexpr uint8_t STATIC_BIT = 1 << 7;
+
+static constexpr uint8_t LEAF_BIT = 1 << 0;
+static constexpr uint8_t LOADED_BIT = 1 << 1;
+static constexpr uint8_t DIRTY_BIT = 1 << 2;
+static constexpr uint8_t LOADQUEUED = 1 << 3;
+static constexpr uint8_t SAVEDQUEUED = 1 << 4;
 
 template<typename T, typename IndexType = uint16_t>
 class Octree {
@@ -64,20 +77,44 @@ public:
         T data;
         PointType position;
         int objectId;
-        int subId;
         float size;
         IndexType colorIdx;
         IndexType materialIdx;
-        bool active;
-        bool visible;
+        uint8_t flags;
 
         NodeData(const T& data, const PointType& pos, bool visible, IndexType colorIdx, float size = 0.01f,
-                 bool active = true, int objectId = -1, int subId = 0, IndexType materialIdx = 0) 
-                : data(data), position(pos), objectId(objectId), subId(subId), size(size), 
-                  colorIdx(colorIdx), materialIdx(materialIdx), active(active), visible(visible) {}
+                 bool active = true, int objectId = -1, IndexType materialIdx = 0, bool staticbit = 0) 
+                : data(data), position(pos), objectId(objectId), size(size), 
+                  colorIdx(colorIdx), materialIdx(materialIdx), flags(0) {
+            setActive(active);
+            setVisible(visible);
+            setStatic(staticbit);
+        }
         
-        NodeData() : objectId(-1), subId(0), size(0.0f), colorIdx(0), materialIdx(0), 
-                     active(false), visible(false) {}
+        NodeData() : objectId(-1), size(0.0f), colorIdx(0), materialIdx(0), flags(0) {}
+
+        bool isActive() const {
+            return flags & ACTIVE_BIT;
+        }
+        bool isVisible() const {
+            return flags & VISIBLE_BIT;
+        }
+        bool isStatic() const {
+            return flags & STATIC_BIT;
+        }
+
+        void setActive(bool v) {
+            if (v) flags |= ACTIVE_BIT;
+            else flags &= ~ACTIVE_BIT;
+        }
+        void setVisible(bool v) {
+            if (v) flags |= VISIBLE_BIT;
+            else flags &= ~VISIBLE_BIT;
+        }
+        void setStatic(bool v) {
+            if (v) flags |= STATIC_BIT;
+            else flags &= ~STATIC_BIT;
+        }
         
         PointType getHalfSize() const {
             return PointType(size * 0.5f, size * 0.5f, size * 0.5f);
@@ -95,17 +132,51 @@ public:
         std::array<std::unique_ptr<OctreeNode>, 8> children;
         PointType center;
         float nodeSize;
-        bool isLeaf;
+        uint8_t flags;
         
         mutable std::shared_ptr<NodeData> lodData;
         mutable std::mutex lodMutex; 
 
-        OctreeNode(const PointType& min, const PointType& max) : bounds(min,max), isLeaf(true), lodData(nullptr) {
+        OctreeNode(const PointType& min, const PointType& max) : bounds(min,max), flags(0), lodData(nullptr) {
+            setLeaf(true);
+            setLoaded(true);
+            setDirty(true);
+            setQueued(false);
             for (std::unique_ptr<OctreeNode>& child : children) {
                 child = nullptr;
             }
             center = (bounds.first + bounds.second) * 0.5;
             nodeSize = (bounds.second - bounds.first).norm();
+        }
+
+        bool isLeaf() const {
+            return flags & LEAF_BIT;
+        }
+        bool isLoaded() const {
+            return flags & LOADED_BIT;
+        }
+        bool isDirty() const {
+            return flags & DIRTY_BIT;
+        }
+        bool isQueued() const {
+            return flags & LOADQUEUED;
+        }
+
+        void setLeaf(bool v) {
+            if (v) flags |= LEAF_BIT;
+            else flags &= ~LEAF_BIT;
+        }
+        void setLoaded(bool v) {
+            if (v) flags |= LOADED_BIT;
+            else flags &= ~LOADED_BIT;
+        }
+        void setDirty(bool v) {
+            if (v) flags |= DIRTY_BIT;
+            else flags &= ~DIRTY_BIT;
+        }
+        void setQueued(bool v) {
+            if (v) flags |= LOADQUEUED;
+            else flags &= ~LOADQUEUED;
         }
 
         bool contains(const PointType& point) const {
@@ -136,9 +207,197 @@ private:
     std::vector<Material> materialMap_;
     std::map<Material, IndexType> materialToIndex_;
 
-    std::map<std::pair<int, int>, std::shared_ptr<Mesh>> meshCache_;
-    std::set<std::pair<int, int>> dirtyMeshes_;
-    int nextSubIdGenerator_ = 1;
+    // Task Queuing & Background Execution
+    std::queue<std::function<void()>> taskQueue_;
+    std::mutex taskMutex_;
+    std::condition_variable taskCV_;
+    std::thread workerThread_;
+    std::atomic<bool> stopWorker_{false};
+    std::atomic<bool> autoOptimize_{true};
+
+    void startWorkerThread() {
+        stopWorker_.store(false);
+        workerThread_ = std::thread([this]() {
+            auto lastOptimize = std::chrono::steady_clock::now();
+            while (true) {
+                std::function<void()> task;
+                {
+                    std::unique_lock<std::mutex> lock(taskMutex_);
+                    auto nextOptimize = lastOptimize + std::chrono::seconds(60);
+                    
+                    bool timedOut = !taskCV_.wait_until(lock, nextOptimize, [this] { 
+                        return stopWorker_ || !taskQueue_.empty(); 
+                    });
+                    
+                    if (stopWorker_ && taskQueue_.empty()) return;
+                    
+                    if (!taskQueue_.empty()) {
+                        task = std::move(taskQueue_.front());
+                        taskQueue_.pop();
+                    } else if (timedOut && autoOptimize_) {
+                        task = [this]() { this->optimize(); };
+                        lastOptimize = std::chrono::steady_clock::now();
+                    }
+                }
+                if (task) {
+                    task();
+                    lastOptimize = std::chrono::steady_clock::now();
+                }
+            }
+        });
+    }
+
+    void stopWorkerThread() {
+        stopWorker_.store(true);
+        taskCV_.notify_all();
+        if (workerThread_.joinable()) {
+            workerThread_.join();
+        }
+    }
+
+    uint32_t expandBits10(uint32_t v) const noexcept {
+        v = (v | (v << 16)) & 0x030000FF;
+        v = (v | (v <<  8)) & 0x0300F00F;
+        v = (v | (v <<  4)) & 0x030C30C3;
+        v = (v | (v <<  2)) & 0x09249249;
+        return v;
+    }
+
+    uint32_t morton3D_10(float x, float y, float z) const noexcept {
+        x = std::max(0.0f, std::min(1.0f, x));
+        y = std::max(0.0f, std::min(1.0f, y));
+        z = std::max(0.0f, std::min(1.0f, z));
+        uint32_t xx = static_cast<uint32_t>(x * 1023.0f);
+        uint32_t yy = static_cast<uint32_t>(y * 1023.0f);
+        uint32_t zz = static_cast<uint32_t>(z * 1023.0f);
+        return (expandBits10(xx) << 2) | (expandBits10(yy) << 1) | expandBits10(zz);
+    }
+
+    void reorderMapsZCurve() {
+        if (!root_) return;
+        std::lock_guard<std::mutex> lock(*mapMutex_);
+        
+        size_t numColors = colorMap_.size();
+        size_t numMats = materialMap_.size();
+        if (numColors == 0 && numMats == 0) return;
+
+        std::vector<PointType> colorSum(numColors, PointType::Zero());
+        std::vector<size_t> colorCount(numColors, 0);
+        std::vector<PointType> matSum(numMats, PointType::Zero());
+        std::vector<size_t> matCount(numMats, 0);
+        std::unordered_set<NodeData*> visited;
+        std::vector<OctreeNode*> stack;
+        stack.push_back(root_.get());
+        while (!stack.empty()) {
+            OctreeNode* curr = stack.back();
+            stack.pop_back();
+            
+            for (auto& pt : curr->points) {
+                if (visited.insert(pt.get()).second) {
+                    if (pt->colorIdx < numColors) {
+                        colorSum[pt->colorIdx] += pt->position;
+                        colorCount[pt->colorIdx]++;
+                    }
+                    if (pt->materialIdx < numMats) {
+                        matSum[pt->materialIdx] += pt->position;
+                        matCount[pt->materialIdx]++;
+                    }
+                }
+            }
+            if (!curr->isLeaf()) {
+                for (int i = 0; i < 8; ++i) {
+                    if (curr->children[i]) stack.push_back(curr->children[i].get());
+                }
+            }
+        }
+
+        PointType rootMin = root_->bounds.first;
+        PointType rootSize = root_->bounds.second - root_->bounds.first;
+        PointType invSize(
+            rootSize.x() > 0 ? 1.0f / rootSize.x() : 1.0f,
+            rootSize.y() > 0 ? 1.0f / rootSize.y() : 1.0f,
+            rootSize.z() > 0 ? 1.0f / rootSize.z() : 1.0f
+        );
+
+        struct SIdx {
+            IndexType oldIdx;
+            uint32_t morton;
+            bool operator<(const SIdx& o) const { return morton < o.morton; }
+        };
+
+        std::vector<SIdx> sortedColors;
+        sortedColors.reserve(numColors);
+        for (size_t i = 0; i < numColors; ++i) {
+            if (colorCount[i] > 0) {
+                PointType avg = colorSum[i] / static_cast<float>(colorCount[i]);
+                PointType norm = (avg - rootMin).cwiseProduct(invSize);
+                sortedColors.push_back({static_cast<IndexType>(i), morton3D_10(norm.x(), norm.y(), norm.z())});
+            } else {
+                sortedColors.push_back({static_cast<IndexType>(i), 0}); 
+            }
+        }
+        std::sort(sortedColors.begin(), sortedColors.end());
+
+        std::vector<IndexType> colorRemap(numColors);
+        std::vector<Eigen::Vector3f> newColorMap(numColors);
+        colorToIndex_.clear();
+        for (size_t newIdx = 0; newIdx < numColors; ++newIdx) {
+            IndexType oldIdx = sortedColors[newIdx].oldIdx;
+            colorRemap[oldIdx] = static_cast<IndexType>(newIdx);
+            newColorMap[newIdx] = colorMap_[oldIdx];
+            colorToIndex_[newColorMap[newIdx]] = static_cast<IndexType>(newIdx);
+        }
+        colorMap_ = std::move(newColorMap);
+
+        std::vector<SIdx> sortedMats;
+        sortedMats.reserve(numMats);
+        for (size_t i = 0; i < numMats; ++i) {
+            if (matCount[i] > 0) {
+                PointType avg = matSum[i] / static_cast<float>(matCount[i]);
+                PointType norm = (avg - rootMin).cwiseProduct(invSize);
+                sortedMats.push_back({static_cast<IndexType>(i), morton3D_10(norm.x(), norm.y(), norm.z())});
+            } else {
+                sortedMats.push_back({static_cast<IndexType>(i), 0});
+            }
+        }
+        std::sort(sortedMats.begin(), sortedMats.end());
+
+        std::vector<IndexType> matRemap(numMats);
+        std::vector<Material> newMatMap(numMats);
+        materialToIndex_.clear();
+        for (size_t newIdx = 0; newIdx < numMats; ++newIdx) {
+            IndexType oldIdx = sortedMats[newIdx].oldIdx;
+            matRemap[oldIdx] = static_cast<IndexType>(newIdx);
+            newMatMap[newIdx] = materialMap_[oldIdx];
+            materialToIndex_[newMatMap[newIdx]] = static_cast<IndexType>(newIdx);
+        }
+        materialMap_ = std::move(newMatMap);
+
+        visited.clear();
+        stack.push_back(root_.get());
+        while (!stack.empty()) {
+            OctreeNode* curr = stack.back();
+            stack.pop_back();
+            
+            for (auto& pt : curr->points) {
+                if (visited.insert(pt.get()).second) {
+                    if (pt->colorIdx < numColors) pt->colorIdx = colorRemap[pt->colorIdx];
+                    if (pt->materialIdx < numMats) pt->materialIdx = matRemap[pt->materialIdx];
+                }
+            }
+            
+            {
+                std::lock_guard<std::mutex> lodLock(curr->lodMutex);
+                curr->lodData = nullptr;
+            }
+            
+            if (!curr->isLeaf()) {
+                for (int i = 0; i < 8; ++i) {
+                    if (curr->children[i]) stack.push_back(curr->children[i].get());
+                }
+            }
+        }
+    }
     
 public:
     inline IndexType getColorIndex(const Eigen::Vector3f& color) {
@@ -207,31 +466,6 @@ public:
     }
 
 private:
-    void invalidateMesh(int objectId, int subId) {
-        if (objectId < 0) return;
-        dirtyMeshes_.insert({objectId, subId});
-    }
-
-    void collectNodesBySubIdRecursive(OctreeNode* node, int objId, int subId, std::vector<std::shared_ptr<NodeData>>& results, std::unordered_set<std::shared_ptr<NodeData>>& seen) const {
-        if (!node) return;
-        for (const auto& pt : node->points) {
-            if (pt->active && pt->objectId == objId && pt->subId == subId) {
-                if (seen.insert(pt).second) {
-                    results.push_back(pt);
-                }
-            }
-        }
-        if (!node->isLeaf) {
-            for (const auto& child : node->children) {
-                if (child) collectNodesBySubIdRecursive(child.get(), objId, subId, results, seen);
-            }
-        }
-    }
-    
-    void collectNodesBySubId(OctreeNode* node, int objId, int subId, std::vector<std::shared_ptr<NodeData>>& results) const {
-        std::unordered_set<std::shared_ptr<NodeData>> seen;
-        collectNodesBySubIdRecursive(node, objId, subId, results, seen);
-    }
 
     float lodFalloffRate_ = 0.1f; // Lower = better, higher = worse. 0-1
     float lodMinDistance_ = 100.0f;
@@ -307,7 +541,7 @@ private:
         }
 
         node->points = std::move(keep);
-        node->isLeaf = false;
+        node->setLeaf(false);
 
         for (int i = 0; i < 8; ++i) {
             if (node->children[i]->points.size() > maxPointsPerNode) {
@@ -325,12 +559,12 @@ private:
         BoundingBox cubeBounds = pointData->getCubeBounds();
         if (!boxIntersectsBox(node->bounds, cubeBounds)) return false;
 
-        if (!node->isLeaf && pointData->size >= node->nodeSize) {
+        if (!node->isLeaf() && pointData->size >= node->nodeSize) {
             node->points.emplace_back(pointData);
             return true;
         }
 
-        if (node->isLeaf) {
+        if (node->isLeaf()) {
             node->points.emplace_back(pointData);
             if (node->points.size() > maxPointsPerNode && depth < maxDepth) {
                 splitNode(node, depth);
@@ -357,7 +591,7 @@ private:
             std::lock_guard<std::mutex> lock(node->lodMutex);
             node->lodData = nullptr;
         }
-        if (!node->isLeaf) {
+        if (!node->isLeaf()) {
             for (int i = 0; i < 8; ++i) {
                 if (node->children[i]) {
                     invalidateNodeLODRecursive(node->children[i].get(), bounds);
@@ -409,7 +643,7 @@ private:
             if (expandZ < 0) newMin.z() -= size.z(); else newMax.z() += size.z();
             
             auto newRoot = std::make_unique<OctreeNode>(newMin, newMax);
-            newRoot->isLeaf = false;
+            newRoot->setLeaf(false);
             
             uint8_t oldOctant = 0;
             if (expandX < 0) oldOctant |= 1;
@@ -436,15 +670,15 @@ private:
         float avgIor = 0.0f;
         int count = 0;
         
-        if (node->isLeaf && node->points.size() == 1) {
+        if (node->isLeaf() && node->points.size() == 1) {
             node->lodData = node->points[0];
             return;
-        } else if (node->isLeaf && node->points.empty()) {
+        } else if (node->isLeaf() && node->points.empty()) {
             return;
         }
 
         auto accumulate = [&](const std::shared_ptr<NodeData>& item) {
-            if (!item || !item->active || !item->visible) return;
+            if (!item || !item->isActive() || !item->isVisible()) return;
             avgColor += getColor(item->colorIdx);
             Material mat = getMaterial(item->materialIdx);
             avgEmittance += mat.emittance;
@@ -480,8 +714,8 @@ private:
                             avgMetallic * invCount, avgTransmission * invCount, avgIor * invCount);
             lod->materialIdx = getMaterialIndex(avgMat);
             
-            lod->active = true;
-            lod->visible = true;
+            lod->setActive(true);
+            lod->setVisible(true);
             lod->objectId = -1; 
 
             node->lodData = lod;
@@ -492,7 +726,7 @@ private:
         if (!node->contains(pos)) return nullptr;
         
         for (const auto& pointData : node->points) {
-            if (!pointData->active) continue;
+            if (!pointData->isActive()) continue;
             
             float distSq = (pointData->position - pos).squaredNorm();
             if (distSq <= tolerance * tolerance) {
@@ -500,7 +734,7 @@ private:
             }
         }
 
-        if (!node->isLeaf) {
+        if (!node->isLeaf()) {
             int octant = getOctant(pos, node->center);
             if (node->children[octant]) {
                 return findRecursive(node->children[octant].get(), pos, tolerance);
@@ -529,7 +763,7 @@ private:
             foundAny = true;
         }
 
-        if (!node->isLeaf) {
+        if (!node->isLeaf()) {
             for (int i = 0; i < 8; ++i) {
                 if (node->children[i]) {
                     foundAny |= removeRecursive(node->children[i].get(), bounds, targetPt);
@@ -552,7 +786,7 @@ private:
         }
         
         for (const auto& pointData : node->points) {
-            if (!pointData->active) continue;
+            if (!pointData->isActive()) continue;
             
             float pointDistSq = (pointData->position - center).squaredNorm();
             if (pointDistSq <= radiusSq && (pointData->objectId == objectid || objectid == -1)) {
@@ -560,7 +794,7 @@ private:
             }
         }
         
-        if (!node->isLeaf) {
+        if (!node->isLeaf()) {
             for (const auto& child : node->children) {
                 if (child) searchNodeRecursive(child.get(), center, radiusSq, objectid, results, seen);
             }
@@ -575,7 +809,7 @@ private:
 
     void voxelTraverseRecursive(OctreeNode* node, float tMin, float tMax, float& maxDist, 
                                 bool enableLOD, const Ray& ray, std::shared_ptr<NodeData>& hit, float invLodf) const {
-        if (enableLOD && !node->isLeaf) {
+        if (enableLOD && !node->isLeaf()) {
             float dist = (node->center - ray.origin).norm();
             float ratio = dist / node->nodeSize;
             
@@ -594,11 +828,11 @@ private:
         }
 
         for (const auto& pointData : node->points) {
-            if (!pointData->active) continue;
+            if (!pointData->isActive()) continue;
             
             float t;
             PointType normal, hitPoint;
-            if (rayCubeIntersect(ray, pointData.get(), t, normal, hitPoint) && pointData->visible) {
+            if (rayCubeIntersect(ray, pointData.get(), t, normal, hitPoint) && pointData->isVisible()) {
                 if (t >= 0 && t <= maxDist && t <= tMax + 0.001f) {
                     maxDist = t;
                     hit = pointData;
@@ -812,7 +1046,7 @@ private:
             }
         }
         
-        node->isLeaf = true;
+        node->setLeaf(true);
     }
 
     void printStatsRecursive(const OctreeNode* node, size_t depth, size_t& totalNodes, size_t& leafNodes, size_t& actualPoints, 
@@ -827,7 +1061,7 @@ private:
         size_t pts = node->points.size();
         actualPoints += pts;
 
-        if (node->isLeaf) {
+        if (node->isLeaf()) {
             leafNodes++;
             maxPointsInLeaf = std::max(maxPointsInLeaf, pts);
             minPointsInLeaf = std::min(minPointsInLeaf, pts);
@@ -842,7 +1076,7 @@ private:
     void optimizeRecursive(OctreeNode* node) {
         if (!node) return;
 
-        if (node->isLeaf) {
+        if (node->isLeaf()) {
             return;
         }
 
@@ -850,7 +1084,7 @@ private:
         for (int i = 0; i < 8; ++i) {
             if (node->children[i]) {
                 optimizeRecursive(node->children[i].get());
-                if (!node->children[i]->isLeaf) {
+                if (!node->children[i]->isLeaf()) {
                     childrenAreLeaves = false;
                 }
             }
@@ -876,7 +1110,7 @@ private:
                 for (int i = 0; i < 8; ++i) {
                     node->children[i].reset(nullptr);
                 }
-                node->isLeaf = true;
+                node->setLeaf(true);
                 
                 {
                     std::lock_guard<std::mutex> lock(node->lodMutex);
@@ -909,7 +1143,7 @@ private:
     }
 
     void serializeNode(std::ofstream& out, const OctreeNode* node) const {
-        writeVal(out, node->isLeaf);
+        writeVal(out, node->isLeaf());
 
         // ALWAYS serialize points, unconditionally
         size_t pointCount = node->points.size();
@@ -918,14 +1152,14 @@ private:
             writeVal(out, pt->data);
             writeVec3(out, pt->position);
             writeVal(out, pt->objectId);
-            writeVal(out, pt->active);
-            writeVal(out, pt->visible);
+            writeVal(out, pt->isActive());
+            writeVal(out, pt->isVisible());
             writeVal(out, pt->size);
             writeVal(out, pt->colorIdx);
             writeVal(out, pt->materialIdx);
         }
 
-        if (!node->isLeaf) {
+        if (!node->isLeaf()) {
             // Write bitmask of active children
             uint8_t childMask = 0;
             for (int i = 0; i < 8; ++i) {
@@ -947,7 +1181,7 @@ private:
     void deserializeNode(std::ifstream& in, OctreeNode* node) {
         bool isLeaf;
         readVal(in, isLeaf);
-        node->isLeaf = isLeaf;
+        node->isLeaf() = isLeaf;
         node->lodData = nullptr;
 
         size_t pointCount;
@@ -959,8 +1193,8 @@ private:
             readVal(in, pt->data);
             readVec3(in, pt->position);
             readVal(in, pt->objectId);
-            readVal(in, pt->active);
-            readVal(in, pt->visible);
+            readVal(in, pt->isActive());
+            readVal(in, pt->isVisible());
             readVal(in, pt->size);
             readVal(in, pt->colorIdx);
             readVal(in, pt->materialIdx);
@@ -1136,13 +1370,13 @@ private:
         if (!node) return;
         
         for (const auto& pt : node->points) {
-            if (pt->active && (id == -1 || pt->objectId == id)) {
+            if (pt->isActive() && (id == -1 || pt->objectId == id)) {
                 if (seen.insert(pt).second) {
                     results.push_back(pt);
                 }
             }
         }
-        if (!node->isLeaf) {
+        if (!node->isLeaf()) {
             for (const auto& child : node->children) {
                 if (child) {
                     collectNodesByObjectIdRecursive(child.get(), id, results, seen);
@@ -1251,49 +1485,131 @@ private:
         return {0.0f, {0.0f, 0.0f, 0.0f}};
     }
 
-    std::unique_ptr<Mesh> mergeMeshes(std::vector<Mesh*>& meshes, int objectId) {
-        if (meshes.empty()) return nullptr;
-
-        std::vector<Eigen::Vector3f> mergedVertices;
-        std::vector<std::vector<int>> mergedPolys;
-        std::map<Eigen::Vector3f, int, Vector3fCompare> vertexMap;
-        
-        for (auto& mesh_ptr : meshes) {
-            if (!mesh_ptr) continue;
-            Mesh& mesh = *mesh_ptr;
-
-            auto mesh_verts = mesh.vertices();
-            auto mesh_tris = mesh.polys();
-            std::vector<int> index_map(mesh_verts.size());
-
-            for (size_t i = 0; i < mesh_verts.size(); ++i) {
-                auto it = vertexMap.find(mesh_verts[i]);
-                if (it == vertexMap.end()) {
-                    int new_idx = mergedVertices.size();
-                    vertexMap[mesh_verts[i]] = new_idx;
-                    mergedVertices.push_back(mesh_verts[i]);
-                    index_map[i] = new_idx;
-                } else {
-                    index_map[i] = it->second;
-                }
-            }
-
-            for (auto& poly : mesh_tris) {
-                mergedPolys.push_back({index_map[poly[0]], index_map[poly[1]], index_map[poly[2]]});
-            }
-        }
-        
-        if (mergedVertices.empty()) return nullptr;
-        
-        return std::make_unique<Mesh>(objectId, mergedVertices, mergedPolys, std::vector<Eigen::Vector3f>{ {1.f, 1.f, 1.f} });
-    }
-
 public:
     Octree(const PointType& minBound, const PointType& maxBound, size_t maxPointsPerNode=8, size_t maxDepth = 16) :
     root_(std::make_unique<OctreeNode>(minBound, maxBound)), maxPointsPerNode(maxPointsPerNode),
-    maxDepth(maxDepth), size(0), mapMutex_(std::make_unique<std::mutex>()) {}
+    maxDepth(maxDepth), size(0), mapMutex_(std::make_unique<std::mutex>()) {
+        startWorkerThread();
+    }
 
-    Octree() : root_(nullptr), maxPointsPerNode(8), maxDepth(16), size(0), mapMutex_(std::make_unique<std::mutex>()) {}
+    Octree() : root_(nullptr), maxPointsPerNode(8), maxDepth(16), size(0), mapMutex_(std::make_unique<std::mutex>()) {
+        startWorkerThread();
+    }
+
+    ~Octree() {
+        stopWorkerThread();
+    }
+    
+    Octree(const Octree& other) :
+        maxDepth(other.maxDepth), size(other.size), maxPointsPerNode(other.maxPointsPerNode),
+        skylight_(other.skylight_), backgroundColor_(other.backgroundColor_),
+        mapMutex_(std::make_unique<std::mutex>()), 
+        autoOptimize_(other.autoOptimize_.load())
+    {
+        {
+            std::lock_guard<std::mutex> lock(*other.mapMutex_);
+            colorMap_ = other.colorMap_;
+            colorToIndex_ = other.colorToIndex_;
+            materialMap_ = other.materialMap_;
+            materialToIndex_ = other.materialToIndex_;
+        }
+        if (other.root_) root_ = deepCopyNode(other.root_.get());
+        startWorkerThread();
+    }
+
+    Octree(Octree&& other) noexcept :
+        maxDepth(other.maxDepth), size(other.size), maxPointsPerNode(other.maxPointsPerNode),
+        skylight_(std::move(other.skylight_)), backgroundColor_(std::move(other.backgroundColor_)),
+        mapMutex_(std::move(other.mapMutex_)),
+        colorMap_(std::move(other.colorMap_)), colorToIndex_(std::move(other.colorToIndex_)),
+        materialMap_(std::move(other.materialMap_)), materialToIndex_(std::move(other.materialToIndex_)),
+        autoOptimize_(other.autoOptimize_.load())
+    {
+        other.stopWorkerThread();
+        root_ = std::move(other.root_);
+        
+        {
+            std::lock_guard<std::mutex> lock(other.taskMutex_);
+            taskQueue_ = std::move(other.taskQueue_);
+        }
+        
+        other.size = 0;
+        startWorkerThread();
+    }
+
+    Octree& operator=(const Octree& other) {
+        if (this == &other) return *this;
+        
+        stopWorkerThread();
+        clear();
+        
+        maxDepth = other.maxDepth;
+        size = other.size;
+        maxPointsPerNode = other.maxPointsPerNode;
+        skylight_ = other.skylight_;
+        backgroundColor_ = other.backgroundColor_;
+        autoOptimize_.store(other.autoOptimize_.load());
+        
+        {
+            // Lock safely to avoid deadlock if they theoretically reference each other
+            std::lock(*mapMutex_, *other.mapMutex_);
+            std::lock_guard<std::mutex> l1(*mapMutex_, std::adopt_lock);
+            std::lock_guard<std::mutex> l2(*other.mapMutex_, std::adopt_lock);
+            
+            colorMap_ = other.colorMap_;
+            colorToIndex_ = other.colorToIndex_;
+            materialMap_ = other.materialMap_;
+            materialToIndex_ = other.materialToIndex_;
+        }
+
+        if (other.root_) root_ = deepCopyNode(other.root_.get());
+        
+        startWorkerThread();
+        return *this;
+    }
+
+    Octree& operator=(Octree&& other) noexcept {
+        if (this == &other) return *this;
+
+        stopWorkerThread();
+        other.stopWorkerThread();
+
+        maxDepth = other.maxDepth;
+        size = other.size;
+        maxPointsPerNode = other.maxPointsPerNode;
+        skylight_ = std::move(other.skylight_);
+        backgroundColor_ = std::move(other.backgroundColor_);
+        autoOptimize_.store(other.autoOptimize_.load());
+        
+        mapMutex_ = std::move(other.mapMutex_);
+        colorMap_ = std::move(other.colorMap_);
+        colorToIndex_ = std::move(other.colorToIndex_);
+        materialMap_ = std::move(other.materialMap_);
+        materialToIndex_ = std::move(other.materialToIndex_);
+        
+        root_ = std::move(other.root_);
+        
+        {
+            std::lock_guard<std::mutex> lock(other.taskMutex_);
+            taskQueue_ = std::move(other.taskQueue_);
+        }
+        
+        other.size = 0;
+        startWorkerThread();
+        return *this;
+    }
+
+    void enqueueTask(std::function<void()> task) {
+        {
+            std::lock_guard<std::mutex> lock(taskMutex_);
+            taskQueue_.push(std::move(task));
+        }
+        taskCV_.notify_one();
+    }
+
+    void setAutoOptimize(bool v) { 
+        autoOptimize_.store(v); 
+    }
 
     void setSkylight(const Eigen::Vector3f& skylight) { 
         skylight_ = skylight; 
@@ -1321,14 +1637,14 @@ public:
     }
 
     bool set(const T& data, const PointType& pos, bool visible, Eigen::Vector3f color, float size = 0.01f, bool active = true,
-             int objectId = -1, int subId = 0, float emittance = 0.0f, float roughness = 1.0f, 
+             int objectId = -1, float emittance = 0.0f, float roughness = 1.0f, 
              float metallic = 0.0f, float transmission = 0.0f, float ior = 1.45f) {
         
         IndexType cIdx = getColorIndex(color);
         Material mat(emittance, roughness, metallic, transmission, ior);
         IndexType mIdx = getMaterialIndex(mat);
         
-        auto pointData = std::make_shared<NodeData>(data, pos, visible, cIdx, size, active, objectId, subId, mIdx);
+        auto pointData = std::make_shared<NodeData>(data, pos, visible, cIdx, size, active, objectId, mIdx);
         
         ensureBounds(pointData->getCubeBounds());
         
@@ -1483,32 +1799,22 @@ public:
         auto pointData = find(oldPos, tolerance);
         if (!pointData) return false;
 
-        int oldSubId = pointData->subId;
         int targetObjId = (newObjectId != -2) ? newObjectId : pointData->objectId;
-        int finalSubId = oldSubId;
         
-        if (oldSubId == 0 && targetObjId == pointData->objectId) {
-            finalSubId = nextSubIdGenerator_++; 
+        if (targetObjId == pointData->objectId) {
             auto neighbors = findInRadius(oldPos, newSize * 3.0f, targetObjId);
-            for(auto& n : neighbors) {
-                if(n->subId == 0) {
-                    n->subId = finalSubId;
-                    invalidateMesh(targetObjId, 0);
-                }
-            }
         }
         
         removeRecursive(root_.get(), pointData->getCubeBounds(), pointData);
         
         pointData->data = newData;
         pointData->position = newPos;
-        pointData->visible = newVisible;
+        pointData->setVisible(newVisible);
         
         if (newColor != Eigen::Vector3f(1.0f, 1.0f, 1.0f)) pointData->colorIdx = getColorIndex(newColor);
         if (newSize > 0) pointData->size = newSize;
-        pointData->active = newActive;
+        pointData->setActive(newActive);
         pointData->objectId = targetObjId;
-        pointData->subId = finalSubId;
         
         Material mat = getMaterial(pointData->materialIdx);
         bool matChanged = false;
@@ -1537,10 +1843,7 @@ public:
         ensureBounds(pointData->getCubeBounds());
         bool res = insertRecursive(root_.get(), pointData, 0);
         
-        if(res) {
-            invalidateMesh(targetObjId, finalSubId);
-            if(finalSubId != oldSubId) invalidateMesh(targetObjId, oldSubId);
-        } else {
+        if(!res) {
             size--;
         }
 
@@ -1581,7 +1884,7 @@ public:
     bool setActive(const PointType& pos, bool active, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
-        pointData->active = active;
+        pointData->setActive(active);
         invalidateLODForPoint(pointData);
         return true;
     }
@@ -1659,7 +1962,7 @@ public:
 
     frame renderFrame(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB, int samplesPerPixel = 2,
                     int maxBounces = 4, bool globalIllumination = false, bool useLod = true) {
-        generateLODs();
+        optimize();
         PointType origin = cam.origin;
         PointType dir = cam.direction.normalized();
         PointType up = cam.up.normalized();
@@ -1723,8 +2026,6 @@ public:
     }
 
     frame fastRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB) {
-        //TIME_FUNCTION;
-        generateLODs();
         PointType origin = cam.origin;
         PointType dir = cam.direction.normalized();
         PointType up = cam.up.normalized();
@@ -1798,8 +2099,6 @@ public:
     frame renderFrameTimed(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB, 
                            double maxTimeSeconds = 0.16, int maxBounces = 4, bool globalIllumination = false, bool useLod = true) {
         auto startTime = std::chrono::high_resolution_clock::now();
-        
-        generateLODs();
         PointType origin = cam.origin;
         PointType dir = cam.direction.normalized();
         PointType up = cam.up.normalized();
@@ -1964,7 +2263,7 @@ public:
                 PointType probePos = node->position + (dir * step);
                 auto neighbor = find(probePos, step * 0.25f);
 
-                if (neighbor == nullptr || !neighbor->active || neighbor->objectId != node->objectId) {
+                if (neighbor == nullptr || !neighbor->isActive() || neighbor->objectId != node->objectId) {
                     isExposed = true;
                     break;
                 }
@@ -1979,167 +2278,6 @@ public:
         return surfaceNodes;
     }
 
-    std::shared_ptr<Mesh> generateMesh(int objectId, float isolevel = 0.5f, int resolution = 32) {
-        TIME_FUNCTION;
-        if (!root_) return nullptr;
-
-        std::vector<std::shared_ptr<NodeData>> nodes;
-        collectNodesByObjectId(root_.get(), objectId, nodes);
-        if(nodes.empty()) return nullptr;
-
-        PointType minB = nodes[0]->position;
-        PointType maxB = nodes[0]->position;
-        float maxRadius = 0.0f;
-
-        for(auto& n : nodes) {
-            minB = minB.cwiseMin(n->position);
-            maxB = maxB.cwiseMax(n->position);
-            maxRadius = std::max(maxRadius, n->size);
-        }
-        
-        float padding = maxRadius * 2.0f; 
-        minB -= PointType::Constant(padding);
-        maxB += PointType::Constant(padding);
-
-        PointType size = maxB - minB;
-        PointType step = size / static_cast<float>(resolution);
-
-        std::vector<PointType> vertices;
-        std::vector<Eigen::Vector3f> vertexColors;
-        std::vector<Eigen::Vector3i> triangles;
-
-        for(int z = 0; z < resolution; ++z) {
-            for(int y = 0; y < resolution; ++y) {
-                for(int x = 0; x < resolution; ++x) {
-                    
-                    PointType currPos(
-                        minB.x() + x * step.x(),
-                        minB.y() + y * step.y(),
-                        minB.z() + z * step.z()
-                    );
-
-                    GridCell cell;
-                    
-                    PointType offsets[8] = {
-                        {0,0,0}, {step.x(),0,0}, {step.x(),step.y(),0}, {0,step.y(),0},
-                        {0,0,step.z()}, {step.x(),0,step.z()}, {step.x(),step.y(),step.z()}, {0,step.y(),step.z()}
-                    };
-
-                    bool hasInside = false;
-                    bool hasOutside = false;
-                    bool activeCell = false;
-                    for(int i=0; i<8; ++i) {
-                        cell.p[i] = currPos + offsets[i];
-                        auto [density, color] = getScalarFieldValue(cell.p[i], objectId, maxRadius * 2.0f);
-                        cell.val[i] = density;
-                        cell.color[i] = color;
-                        if(cell.val[i] >= isolevel) hasInside = true;
-                        else hasOutside = true;
-                    }
-
-                    if(hasInside && hasOutside) {
-                        polygonise(cell, isolevel, vertices, vertexColors, triangles);
-                    }
-                }
-            }
-        }
-
-        if(vertices.empty()) return nullptr;
-
-        std::vector<std::vector<int>> polys;
-        for(auto& t : triangles) {
-            polys.push_back({t[0], t[1], t[2]});
-        }
-        
-        return std::make_shared<Mesh>(objectId, vertices, polys, vertexColors);
-    }
-
-    std::shared_ptr<Mesh> generateSubMesh(int objectId, int subId, float isolevel = 0.5f, int resolution = 32) {
-        if (subId == -999) return nullptr;
-
-        std::vector<std::shared_ptr<NodeData>> nodes;
-        collectNodesBySubId(root_.get(), objectId, subId, nodes);
-        if (nodes.empty()) return nullptr;
-
-        PointType minB = nodes[0]->position;
-        PointType maxB = nodes[0]->position;
-        float maxRadius = 0.0f;
-
-        for(auto& n : nodes) {
-            minB = minB.cwiseMin(n->position);
-            maxB = maxB.cwiseMax(n->position);
-            maxRadius = std::max(maxRadius, n->size);
-        }
-        
-        float padding = maxRadius * 2.5f; 
-        minB -= PointType::Constant(padding);
-        maxB += PointType::Constant(padding);
-
-        PointType size = maxB - minB;
-        PointType step = size / static_cast<float>(resolution);
-
-        std::vector<PointType> vertices;
-        std::vector<Eigen::Vector3f> vertexColors;
-        std::vector<Eigen::Vector3i> triangles;
-
-        for(int z = 0; z < resolution; ++z) {
-            for(int y = 0; y < resolution; ++y) {
-                for(int x = 0; x < resolution; ++x) {
-                    PointType currPos(minB.x() + x * step.x(), minB.y() + y * step.y(), minB.z() + z * step.z());
-
-                    GridCell cell;
-                    PointType offsets[8] = {{0,0,0}, {step.x(),0,0}, {step.x(),step.y(),0}, {0,step.y(),0},
-                                          {0,0,step.z()}, {step.x(),0,step.z()}, {step.x(),step.y(),step.z()}, {0,step.y(),step.z()}};
-
-                    bool activeCell = false;
-                    for(int i=0; i<8; ++i) {
-                        cell.p[i] = currPos + offsets[i];
-                        auto [density, color] = getScalarFieldValue(cell.p[i], objectId, maxRadius * 2.0f);
-                        cell.val[i] = density;
-                        cell.color[i] = color;
-                        if(cell.val[i] >= isolevel) activeCell = true;
-                    }
-
-                    if(activeCell) {
-                        auto owner = find(currPos + step*0.5f, maxRadius * 2.0f);
-                        if (owner && owner->objectId == objectId && owner->subId == subId) {
-                            polygonise(cell, isolevel, vertices, vertexColors, triangles);
-                        }
-                    }
-                }
-            }
-        }
-
-        if(vertices.empty()) return nullptr;
-
-        std::vector<std::vector<int>> polys;
-        for(auto& t : triangles) polys.push_back({t[0], t[1], t[2]});
-        
-        return std::make_shared<Mesh>(objectId, vertices, polys, vertexColors, subId);
-    }
-
-    std::vector<std::shared_ptr<Mesh>> getMeshes(int objectId) {
-        std::vector<std::shared_ptr<Mesh>> result;
-        
-        std::set<int> relevantSubIds;
-        for(auto const& [key, val] : meshCache_) if(key.first == objectId) relevantSubIds.insert(key.second);
-        for(auto const& key : dirtyMeshes_) if(key.first == objectId) relevantSubIds.insert(key.second);
-
-        for(int subId : relevantSubIds) {
-            if(dirtyMeshes_.count({objectId, subId})) {
-                auto newMesh = generateSubMesh(objectId, subId);
-                if(newMesh) meshCache_[{objectId, subId}] = newMesh;
-                else meshCache_.erase({objectId, subId});
-                dirtyMeshes_.erase({objectId, subId});
-            }
-        }
-
-        for(auto const& [key, mesh] : meshCache_) {
-            if(key.first == objectId && mesh) result.push_back(mesh);
-        }
-        return result;
-    }
-
     void isolateInternalNodes(int objectId) {
         std::vector<std::shared_ptr<NodeData>> nodes;
         collectNodesByObjectId(root_.get(), objectId, nodes); 
@@ -2152,18 +2290,11 @@ public:
             PointType dirs[6] = {{1,0,0}, {-1,0,0}, {0,1,0}, {0,-1,0}, {0,0,1}, {0,0,-1}};
             for(int i=0; i<6; ++i) {
                 auto neighbor = find(node->position + dirs[i] * node->size, checkRad);
-                if(neighbor && neighbor->objectId == objectId && neighbor->active) {
+                if(neighbor && neighbor->objectId == objectId && neighbor->isActive()) {
                     Material nMat = getMaterial(neighbor->materialIdx);
                     if (nMat.transmission < 0.01f) {
                         hiddenSides++;
                     }
-                }
-            }
-
-            if(hiddenSides == 6) {
-                if(node->subId != -999) {
-                    invalidateMesh(objectId, node->subId);
-                    node->subId = -999; 
                 }
             }
         }
@@ -2188,18 +2319,14 @@ public:
                 size++;
             }
         }
-
-        for (auto& [key, mesh] : meshCache_) {
-            if (key.first == objectId && mesh) {
-                mesh->translate(offset); 
-            }
-        }
         return true;
     }
 
     void optimize() {
         if (root_) {
             optimizeRecursive(root_.get());
+            reorderMapsZCurve();
+            generateLODs();
         }
     }
 

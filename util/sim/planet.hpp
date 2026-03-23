@@ -252,7 +252,7 @@ public:
             pt.noiseDisplacement = 0.0f;
             pt.surface = true;
             config.surfaceNodes.emplace_back(pt);
-            grid.set(pt, pt.currentPos, true, pt.originColor.cast<float>(), config.voxelSize, true, 1, 0, false, 0.0f, 0.0f, 0.0f);
+            grid.set(pt, pt.currentPos, true, pt.originColor.cast<float>(), config.voxelSize, true, 1, false, 0.0f, 0.0f, 0.0f);
         }
         config.currentStep = 1;
         std::cout << "Step 1 done. base sphere generated" << std::endl;
@@ -826,7 +826,7 @@ public:
             
             config.surfaceNodes.emplace_back(pt);
             
-            grid.set(pt, pt.currentPos, true, pt.originColor.cast<float>(), config.voxelSize, true, 2, 0, 1.0, 0.0f, 0.0f, 1.0f);
+            grid.set(pt, pt.currentPos, true, pt.originColor.cast<float>(), config.voxelSize, true, 2, 1.0, 0.0f, 0.0f, 1.0f);
         }
         
         grid.optimize();
@@ -937,7 +937,7 @@ public:
                         newPt.originColor = p3.originColor;
                     }
 
-                    grid.set(newPt, newPt.currentPos, true, newPt.originColor.cast<float>(), config.voxelSize, true, 1, 2, false, 0.0f, 0.0f, 0.0f);
+                    grid.set(newPt, newPt.currentPos, true, newPt.originColor.cast<float>(), config.voxelSize, true, 1, false, 0.0f, 0.0f, 0.0f);
                     
                     config.interpolatedNodes.push_back(newPt);
 
@@ -989,7 +989,7 @@ public:
 
                             ip.originColor = finalColor.cast<Eigen::half>();
 
-                            grid.set(ip, pos, true, finalColor, config.voxelSize, true, 1, 3, false, 0.0f, 0.0f, 0.0f);
+                            grid.set(ip, pos, true, finalColor, config.voxelSize, true, 1, false, 0.0f, 0.0f, 0.0f);
                             fillCount++;
                         }
                     }

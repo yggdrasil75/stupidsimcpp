@@ -192,7 +192,7 @@ public:
                     auto dirt = std::make_shared<DirtParticle>();
                     dirt->hydration = 10.0f;
                     v3 pos(x * vSize, -(y + 0.5f) * vSize, z * vSize);
-                    grid.set(dirt, pos, true, dirtColor, vSize, true, 0, 0, 0.0f, 1.0f);
+                    grid.set(dirt, pos, true, dirtColor, vSize, true, 0, 0.0f, 1.0f);
                 }
                 
                 // Air Layers (y >= 0)
@@ -208,7 +208,7 @@ public:
                     }
 
                     auto air = std::make_shared<AirParticle>(400.0f, 20.0f);
-                    grid.set(air, pos, false, v3(0,0,0), vSize, true, 5, 0);
+                    grid.set(air, pos, false, v3(0,0,0), vSize, true, 5);
                 }
             }
         }
@@ -218,7 +218,7 @@ public:
         seed->water = 25.0f;
         v3 plantColor(0.8f, 0.7f, 0.2f);
         
-        grid.set(seed, seedPos, true, plantColor, config.voxelSize * 0.5f, true, 1, 0, 0.0f, 0.6f);
+        grid.set(seed, seedPos, true, plantColor, config.voxelSize * 0.5f, true, 1, 0.0f, 0.6f);
 
         worldInitialized = true;
         
@@ -237,13 +237,13 @@ public:
             rain->velocity = v3(0, -2.0f, 0); 
             float rainSize = config.voxelSize * 0.2f;
             v3 rainColor(0.3f, 0.5f, 0.9f); 
-            grid.set(rain, pos, true, rainColor, rainSize, true, 3, 0, 0.0f, 0.6f); 
+            grid.set(rain, pos, true, rainColor, rainSize, true, 3, 0.0f, 0.6f); 
         } else if (currentWeather == WeatherState::SNOW) {
             auto snow = std::make_shared<SnowParticle>();
             snow->velocity = v3(0, -0.5f, 0); 
             float snowSize = config.voxelSize * 0.3f;
             v3 snowColor(0.9f, 0.95f, 1.0f); 
-            grid.set(snow, pos, true, snowColor, snowSize, true, 4, 0, 0.0f, 0.9f); 
+            grid.set(snow, pos, true, snowColor, snowSize, true, 4, 0.0f, 0.9f); 
         }
     }
 
@@ -534,7 +534,7 @@ public:
             plantCell->energy = np.initE;
             v3 initColor = (np.part == PlantPart::LEAF) ? v3(0.1f, 0.8f, 0.1f) : v3(0.6f, 0.5f, 0.4f);
             // Spawn at half size and grow into the space
-            grid.set(plantCell, np.pos, true, initColor, config.voxelSize * 0.5f, true, 1, 0, 0.0f, 0.8f);
+            grid.set(plantCell, np.pos, true, initColor, config.voxelSize * 0.5f, true, 1, 0.0f, 0.8f);
         }
     }
 
@@ -1008,7 +1008,7 @@ public:
                     float v = (j * step) - offset;
                     v3 pos = currentSunPos + (right * u) + (up * v);
                     
-                    grid.set(std::make_shared<SunParticle>(), pos, true, sunColor, step, true, 2, 0, config.sunIntensity, 0.0f, 0.0f, 1.0f, 1.0f);
+                    grid.set(std::make_shared<SunParticle>(), pos, true, sunColor, step, true, 2, config.sunIntensity, 0.0f, 0.0f, 1.0f, 1.0f);
                 }
             }
             sunExists = true;
