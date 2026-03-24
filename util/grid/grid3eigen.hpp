@@ -47,6 +47,9 @@ static constexpr uint8_t DIRTY_BIT = 1 << 2;
 static constexpr uint8_t LOADQUEUED = 1 << 3;
 static constexpr uint8_t SAVEDQUEUED = 1 << 4;
 
+template<typename> struct is_shared_ptr : std::false_type {};
+template<typename T> struct is_shared_ptr<std::shared_ptr<T>> : std::true_type {};
+
 template<typename T, typename IndexType = uint16_t>
 class Octree {
 public:
@@ -1431,6 +1434,62 @@ private:
             currIdx |= ((next_t[0] <= tNext) ? 1 : 0) | ((next_t[1] <= tNext) ? 2 : 0) | ((next_t[2] <= tNext) ? 4 : 0);
         }
     }
+    void fastVoxelTraverseRecursive(OctreeNode* node, float tMin, float tMax, float& maxDist,
+          const Ray& ray, std::shared_ptr<NodeData>& hit) const {
+        if (!node->isLoaded()) {
+            ensureLoaded(node, true);
+            if (!node->isLoaded()) {
+                if (node->lodData) {
+                    float t; PointType n, h;
+                    if (rayCubeIntersect(ray, node->lodData.get(), t, n, h)) {
+                        if (t >= 0 && t <= maxDist) { hit = node->lodData; maxDist = t; }
+                    }
+                }
+                return;
+            }
+        }
+
+        if (!node->isLeaf() && node->lodData) {
+            float dist = (node->center - ray.origin).norm();
+            if (dist > lodMinDistance_ && (dist / node->nodeSize) > invLodf) {
+                float t; PointType n, h;
+                if (rayCubeIntersect(ray, node->lodData.get(), t, n, h)) {
+                    if (t >= 0 && t <= maxDist) { hit = node->lodData; maxDist = t; }
+                }
+                return;
+            }
+        }
+
+        for (const auto& pt : node->points) {
+            if ((pt->flags & (ACTIVE_BIT | VISIBLE_BIT)) != (ACTIVE_BIT | VISIBLE_BIT)) continue;
+            float t; PointType n, h;
+            if (rayCubeIntersect(ray, pt.get(), t, n, h)) {
+                if (t >= 0 && t <= maxDist && t <= tMax + 0.001f) {
+                    maxDist = t; hit = pt;
+                }
+            }
+        }
+
+        if (node->isLeaf()) return;
+
+        Eigen::Vector3f ttt = (node->center - ray.origin).cwiseProduct(ray.invDir);
+        int currIdx = ((tMin >= ttt.x()) ? 1 : 0) | ((tMin >= ttt.y()) ? 2 : 0) | ((tMin >= ttt.z()) ? 4 : 0);
+        
+        while(tMin < tMax && tMin <= maxDist) {
+            float tNextX = (currIdx & 1) ? tMax : ttt.x();
+            float tNextY = (currIdx & 2) ? tMax : ttt.y();
+            float tNextZ = (currIdx & 4) ? tMax : ttt.z();
+            float tNext = std::min({tNextX, tNextY, tNextZ});
+            
+            int physIdx = currIdx ^ ray.signMask;
+            if (node->children[physIdx]) {
+                fastVoxelTraverseRecursive(node->children[physIdx].get(), tMin, tNext, maxDist, ray, hit);
+            }
+            
+            tMin = tNext;
+            currIdx |= ((tNextX <= tNext) ? 1 : 0) | ((tNextY <= tNext) ? 2 : 0) | ((tNextZ <= tNext) ? 4 : 0);
+        }
+    }
 
     PointType sampleGGX(const PointType& n, float roughness, uint32_t& state) const {
         float alpha = std::max(EPSILON, roughness * roughness);
@@ -2493,7 +2552,7 @@ public:
                 Eigen::Vector3f accumulatedColor(0.0f, 0.0f, 0.0f);
                 
                 for(int s = 0; s < samplesPerPixel; ++s) {
-                    accumulatedColor += traceRay(origin, rayDir, 0, seed, maxBounces, globalIllumination, useLod, false, false);
+                    accumulatedColor += traceRay(origin, rayDir, 0, seed, maxBounces, globalIllumination, useLod, false);
                 }
                 
                 Eigen::Vector3f color = accumulatedColor / static_cast<float>(samplesPerPixel);
@@ -2510,14 +2569,14 @@ public:
         return outFrame;
     }
 
-    std::shared_ptr<NodeData> fastVoxelTraverse(const Ray& ray, float maxDist, bool enableLOD = false, bool asyncLoad = false) const {
+    std::shared_ptr<NodeData> fastVoxelTraverse(const Ray& ray, float maxDist) const {
         std::shared_ptr<NodeData> hit;
         if (empty()) return hit;
         float tMin, tMax;
         if (rayBoxIntersect(ray, root_->bounds, tMin, tMax)) {
             tMax = std::min(tMax, maxDist);
             float currentMaxDist = maxDist;
-            voxelTraverseRecursive(root_.get(), tMin, tMax, currentMaxDist, enableLOD, ray, hit, asyncLoad);
+            fastVoxelTraverseRecursive(root_.get(), tMin, tMax, currentMaxDist, ray, hit);
         }
         return hit;
     }
@@ -2556,7 +2615,7 @@ public:
 
                 Eigen::Vector3f color = skybox_.sampleVector(rayDir);
                 Ray ray(origin, rayDir);
-                auto hit = fastVoxelTraverse(ray, maxDistance_, true, true);
+                auto hit = fastVoxelTraverse(ray, maxDistance_);
                 if (hit != nullptr) {
                     auto obj = hit;
                     
@@ -2629,7 +2688,7 @@ public:
 
                 Eigen::Vector3f color = skybox_.sampleVector(rayDir);
                 Ray ray(origin, rayDir);
-                auto hit = fastVoxelTraverse(ray, maxDistance_, true, true);
+                auto hit = fastVoxelTraverse(ray, maxDistance_);
                 if (hit != nullptr) {
                     auto obj = hit;
                     
@@ -2708,7 +2767,7 @@ public:
                         uint32_t pass = currentOffset / totalPixels;
                         uint32_t seed = pidx * 1973 + pass * 12345 + localSeed;
 
-                        Eigen::Vector3f pbrColor = traceRay(origin, rayDir, 0, seed, maxBounces, globalIllumination, useLod, true, false);
+                        Eigen::Vector3f pbrColor = traceRay(origin, rayDir, 0, seed, maxBounces, globalIllumination, useLod, true);
                         
                         accumColor[pidx] += pbrColor;
                         sampleCount[pidx] += 1;
