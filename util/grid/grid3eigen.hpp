@@ -27,6 +27,7 @@
 #include <condition_variable>
 #include <atomic>
 #include <filesystem>
+#include <type_traits>
 
 #ifdef SSE
 #include <immintrin.h>
@@ -240,11 +241,49 @@ public:
             vec = Eigen::Vector3f(x, y, z);
         }
 
+        static void serializeData(std::ofstream& out, const T& data) {
+            if constexpr (is_shared_ptr<T>::value) {
+                bool hasData = (data != nullptr);
+                writeVal(out, hasData);
+                if (hasData) data->serialize(out);
+            } else if constexpr (std::is_pointer_v<T>) {
+                bool hasData = (data != nullptr);
+                writeVal(out, hasData);
+                if (hasData) data->serialize(out);
+            } else {
+                writeVal(out, data);
+            }
+        }
+
+        static void deserializeData(std::ifstream& in, T& data) {
+            if constexpr (is_shared_ptr<T>::value) {
+                bool hasData;
+                readVal(in, hasData);
+                if (hasData) {
+                    using ElemType = typename T::element_type;
+                    data = ElemType::deserialize(in);
+                } else {
+                    data = nullptr;
+                }
+            } else if constexpr (std::is_pointer_v<T>) {
+                bool hasData;
+                readVal(in, hasData);
+                if (hasData) {
+                    using ElemType = std::remove_pointer_t<T>;
+                    data = ElemType::deserialize(in);
+                } else {
+                    data = nullptr;
+                }
+            } else {
+                readVal(in, data);
+            }
+        }
+
         void serializeSubtree(std::ofstream& out) const {
             writeVal(out, isLeaf());
             writeVal(out, points.size());
             for (const auto& pt : points) {
-                writeVal(out, pt->data);
+                serializeData(out, pt->data);
                 writeVec3(out, pt->position);
                 writeVal(out, pt->objectId);
                 writeVal(out, pt->flags);
@@ -271,7 +310,7 @@ public:
             points.reserve(pointCount);
             for (size_t i = 0; i < pointCount; ++i) {
                 auto pt = std::make_shared<NodeData>();
-                readVal(in, pt->data);
+                deserializeData(in, pt->data);
                 readVec3(in, pt->position);
                 readVal(in, pt->objectId);
                 readVal(in, pt->flags);
@@ -345,7 +384,7 @@ public:
             writeVal(out, isLeaf());
             writeVal(out, points.size());
             for (const auto& pt : points) {
-                writeVal(out, pt->data);
+                serializeData(out, pt->data);
                 writeVec3(out, pt->position);
                 writeVal(out, pt->objectId);
                 writeVal(out, pt->flags);
@@ -379,7 +418,7 @@ public:
             points.reserve(pointCount);
             for (size_t i = 0; i < pointCount; ++i) {
                 auto pt = std::make_shared<NodeData>();
-                readVal(in, pt->data);
+                deserializeData(in, pt->data);
                 readVec3(in, pt->position);
                 readVal(in, pt->objectId);
                 readVal(in, pt->flags);
@@ -586,7 +625,6 @@ private:
     Eigen::Vector3f skylight_ = {0.1f, 0.1f, 0.1f};
     Eigen::Vector3f backgroundColor_ = {0.53f, 0.81f, 0.92f};
     
-    // Addressable Maps
     std::unique_ptr<std::mutex> mapMutex_;
     std::vector<Eigen::Vector3f> colorMap_;
     std::map<Eigen::Vector3f, IndexType, Vector3fCompare> colorToIndex_;
@@ -594,7 +632,6 @@ private:
     std::vector<Material> materialMap_;
     std::map<Material, IndexType> materialToIndex_;
 
-    // Task Queuing & Background Execution
     mutable std::queue<std::function<void()>> taskQueue_;
     mutable std::mutex taskMutex_;
     mutable std::condition_variable taskCV_;
@@ -921,6 +958,7 @@ public:
 private:
 
     float lodFalloffRate_ = 0.1f; // Lower = better, higher = worse. 0-1
+    float invLodf = 1 / lodFalloffRate_;
     float lodMinDistance_ = 100.0f;
     float maxDistance_ = size * size;
     
@@ -1187,7 +1225,6 @@ private:
 
         if (depth == 4) {
             float dist = (node->center - camPos).norm();
-            float invLodf = 1.0f / lodFalloffRate_;
 
             if (dist > maxDistance_) {
                 if (node->isLoaded()) {
@@ -1315,7 +1352,7 @@ private:
     }
 
     void voxelTraverseRecursive(OctreeNode* node, float tMin, float tMax, float& maxDist, bool enableLOD,
-          const Ray& ray, std::shared_ptr<NodeData>& hit, float invLodf, bool asyncLoad = false) const {
+          const Ray& ray, std::shared_ptr<NodeData>& hit, bool asyncLoad = false) const {
         if (!node->isLoaded()) {
             ensureLoaded(node, asyncLoad);
             if (!node->isLoaded()) {
@@ -1387,7 +1424,7 @@ private:
             int physIdx = currIdx ^ ray.signMask;
 
             if (node->children[physIdx]) {
-                voxelTraverseRecursive(node->children[physIdx].get(), tMin, tNext, maxDist, enableLOD, ray, hit, invLodf, asyncLoad);
+                voxelTraverseRecursive(node->children[physIdx].get(), tMin, tNext, maxDist, enableLOD, ray, hit, asyncLoad);
             }
 
             tMin = tNext;
@@ -1555,8 +1592,8 @@ private:
             } else {
                 Eigen::Vector3f sample = traceRay(secondOrigin, secondDir, bounces + 1, rngState, maxBounces, globalIllumination, useLod, asyncLoad);
                 return finalColor + (W_second / std::max(EPSILON, 1.0f - pSpec)).cwiseProduct(sample);
+                }
             }
-        }
     }
     
     void clearNode(OctreeNode* node) {
@@ -2077,7 +2114,10 @@ public:
         return backgroundColor_; 
     }
 
-    void setLODFalloff(float rate) { lodFalloffRate_ = rate; }
+    void setLODFalloff(float rate) {
+        lodFalloffRate_ = rate;
+        invLodf = 1 / rate;
+    }
     void setLODMinDistance(float dist) { lodMinDistance_ = dist; }
     void setMaxDistance(float dist) { maxDistance_ = dist; }
 
@@ -2407,14 +2447,13 @@ public:
     std::shared_ptr<NodeData> voxelTraverse(const PointType& origin, const PointType& direction,
                                         float maxDist, bool enableLOD = false, bool asyncLoad = false) const {
         std::shared_ptr<NodeData> hit;
-        float invLodf = 1.0f / lodFalloffRate_;
         Ray oray(origin, direction);
         
         float tMin, tMax;
         if (rayBoxIntersect(oray, root_->bounds, tMin, tMax)) {
             tMax = std::min(tMax, maxDist);
             float currentMaxDist = maxDist;
-            voxelTraverseRecursive(root_.get(), tMin, tMax, currentMaxDist, enableLOD, oray, hit, invLodf, asyncLoad);
+            voxelTraverseRecursive(root_.get(), tMin, tMax, currentMaxDist, enableLOD, oray, hit, asyncLoad);
         }
         return hit;
     }
@@ -2454,7 +2493,7 @@ public:
                 Eigen::Vector3f accumulatedColor(0.0f, 0.0f, 0.0f);
                 
                 for(int s = 0; s < samplesPerPixel; ++s) {
-                    accumulatedColor += traceRay(origin, rayDir, 0, seed, maxBounces, globalIllumination, useLod, false);
+                    accumulatedColor += traceRay(origin, rayDir, 0, seed, maxBounces, globalIllumination, useLod, false, false);
                 }
                 
                 Eigen::Vector3f color = accumulatedColor / static_cast<float>(samplesPerPixel);
@@ -2474,12 +2513,11 @@ public:
     std::shared_ptr<NodeData> fastVoxelTraverse(const Ray& ray, float maxDist, bool enableLOD = false, bool asyncLoad = false) const {
         std::shared_ptr<NodeData> hit;
         if (empty()) return hit;
-        float lodRatio = 1.0f / lodFalloffRate_;
         float tMin, tMax;
         if (rayBoxIntersect(ray, root_->bounds, tMin, tMax)) {
             tMax = std::min(tMax, maxDist);
             float currentMaxDist = maxDist;
-            voxelTraverseRecursive(root_.get(), tMin, tMax, currentMaxDist, enableLOD, ray, hit, lodRatio, asyncLoad);
+            voxelTraverseRecursive(root_.get(), tMin, tMax, currentMaxDist, enableLOD, ray, hit, asyncLoad);
         }
         return hit;
     }
@@ -2670,7 +2708,7 @@ public:
                         uint32_t pass = currentOffset / totalPixels;
                         uint32_t seed = pidx * 1973 + pass * 12345 + localSeed;
 
-                        Eigen::Vector3f pbrColor = traceRay(origin, rayDir, 0, seed, maxBounces, globalIllumination, useLod, true);
+                        Eigen::Vector3f pbrColor = traceRay(origin, rayDir, 0, seed, maxBounces, globalIllumination, useLod, true, false);
                         
                         accumColor[pidx] += pbrColor;
                         sampleCount[pidx] += 1;

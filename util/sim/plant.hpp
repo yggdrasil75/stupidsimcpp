@@ -11,6 +11,7 @@
 #include <omp.h>
 #include <algorithm>
 #include <chrono>
+#include <fstream>
 #include "../grid/grid3eigen.hpp"
 
 using v3 = Eigen::Vector3f;
@@ -41,6 +42,41 @@ struct PlantsimParticle {
     PlantsimParticle() : pt(ParticleType::AIR), energy(0.0) {}
     PlantsimParticle(ParticleType t, float e) : pt(t), energy(e) {}
     virtual ~PlantsimParticle() = default;
+    
+    virtual void serialize(std::ofstream& out) const {
+        out.write(reinterpret_cast<const char*>(&pt), sizeof(pt));
+        out.write(reinterpret_cast<const char*>(&energy), sizeof(energy));
+        
+        float vx = velocity.x(), vy = velocity.y(), vz = velocity.z();
+        out.write(reinterpret_cast<const char*>(&vx), sizeof(vx));
+        out.write(reinterpret_cast<const char*>(&vy), sizeof(vy));
+        out.write(reinterpret_cast<const char*>(&vz), sizeof(vz));
+        
+        out.write(reinterpret_cast<const char*>(&timeOutOfBounds), sizeof(timeOutOfBounds));
+        out.write(reinterpret_cast<const char*>(&anchored), sizeof(anchored));
+        out.write(reinterpret_cast<const char*>(&strength), sizeof(strength));
+
+        serializeDerived(out);
+    }
+
+    virtual void serializeDerived(std::ofstream& out) const {}
+    virtual void deserializeDerived(std::ifstream& in) {}
+
+    void deserializeBase(std::ifstream& in) {
+        in.read(reinterpret_cast<char*>(&energy), sizeof(energy));
+        
+        float vx, vy, vz;
+        in.read(reinterpret_cast<char*>(&vx), sizeof(vx));
+        in.read(reinterpret_cast<char*>(&vy), sizeof(vy));
+        in.read(reinterpret_cast<char*>(&vz), sizeof(vz));
+        velocity = v3(vx, vy, vz);
+        
+        in.read(reinterpret_cast<char*>(&timeOutOfBounds), sizeof(timeOutOfBounds));
+        in.read(reinterpret_cast<char*>(&anchored), sizeof(anchored));
+        in.read(reinterpret_cast<char*>(&strength), sizeof(strength));
+    }
+
+    static std::shared_ptr<PlantsimParticle> deserialize(std::ifstream& in);
 };
 
 struct AirParticle : public PlantsimParticle {
@@ -49,6 +85,15 @@ struct AirParticle : public PlantsimParticle {
 
     AirParticle(float c = 400.0f, float t = 20.0f) 
         : PlantsimParticle(ParticleType::AIR, 0.0f), co2(c), temperature(t) {}
+        
+    void serializeDerived(std::ofstream& out) const override {
+        out.write(reinterpret_cast<const char*>(&co2), sizeof(co2));
+        out.write(reinterpret_cast<const char*>(&temperature), sizeof(temperature));
+    }
+    void deserializeDerived(std::ifstream& in) override {
+        in.read(reinterpret_cast<char*>(&co2), sizeof(co2));
+        in.read(reinterpret_cast<char*>(&temperature), sizeof(temperature));
+    }
 };
 
 struct DirtParticle : public PlantsimParticle {
@@ -64,6 +109,25 @@ struct DirtParticle : public PlantsimParticle {
     DirtParticle(float n = 100.0f, float p = 100.0f, float k = 100.0f, float c = 100.0f, float mg = 100.0f) 
         : PlantsimParticle(ParticleType::DIRT, 0.0f), nitrogen(n), phosphorus(p), potassium(k), carbon(c), magnesium(mg),
           hydration(0.0f), temperature(20.0f) {}
+
+    void serializeDerived(std::ofstream& out) const override {
+        out.write(reinterpret_cast<const char*>(&nitrogen), sizeof(nitrogen));
+        out.write(reinterpret_cast<const char*>(&phosphorus), sizeof(phosphorus));
+        out.write(reinterpret_cast<const char*>(&potassium), sizeof(potassium));
+        out.write(reinterpret_cast<const char*>(&carbon), sizeof(carbon));
+        out.write(reinterpret_cast<const char*>(&magnesium), sizeof(magnesium));
+        out.write(reinterpret_cast<const char*>(&hydration), sizeof(hydration));
+        out.write(reinterpret_cast<const char*>(&temperature), sizeof(temperature));
+    }
+    void deserializeDerived(std::ifstream& in) override {
+        in.read(reinterpret_cast<char*>(&nitrogen), sizeof(nitrogen));
+        in.read(reinterpret_cast<char*>(&phosphorus), sizeof(phosphorus));
+        in.read(reinterpret_cast<char*>(&potassium), sizeof(potassium));
+        in.read(reinterpret_cast<char*>(&carbon), sizeof(carbon));
+        in.read(reinterpret_cast<char*>(&magnesium), sizeof(magnesium));
+        in.read(reinterpret_cast<char*>(&hydration), sizeof(hydration));
+        in.read(reinterpret_cast<char*>(&temperature), sizeof(temperature));
+    }
 };
 
 struct PlantParticle : public PlantsimParticle {
@@ -79,6 +143,27 @@ struct PlantParticle : public PlantsimParticle {
 
     PlantParticle(PlantPart p = PlantPart::SEED) : PlantsimParticle(ParticleType::PLANT, 10.0f), part(p), age(0.0f),
                   water(10.0f), nitrogen(0.0f), phosphorus(0.0f), potassium(0.0f), carbon(0.0f), magnesium(0.0f) {}
+
+    void serializeDerived(std::ofstream& out) const override {
+        out.write(reinterpret_cast<const char*>(&part), sizeof(part));
+        out.write(reinterpret_cast<const char*>(&age), sizeof(age));
+        out.write(reinterpret_cast<const char*>(&water), sizeof(water));
+        out.write(reinterpret_cast<const char*>(&nitrogen), sizeof(nitrogen));
+        out.write(reinterpret_cast<const char*>(&phosphorus), sizeof(phosphorus));
+        out.write(reinterpret_cast<const char*>(&potassium), sizeof(potassium));
+        out.write(reinterpret_cast<const char*>(&carbon), sizeof(carbon));
+        out.write(reinterpret_cast<const char*>(&magnesium), sizeof(magnesium));
+    }
+    void deserializeDerived(std::ifstream& in) override {
+        in.read(reinterpret_cast<char*>(&part), sizeof(part));
+        in.read(reinterpret_cast<char*>(&age), sizeof(age));
+        in.read(reinterpret_cast<char*>(&water), sizeof(water));
+        in.read(reinterpret_cast<char*>(&nitrogen), sizeof(nitrogen));
+        in.read(reinterpret_cast<char*>(&phosphorus), sizeof(phosphorus));
+        in.read(reinterpret_cast<char*>(&potassium), sizeof(potassium));
+        in.read(reinterpret_cast<char*>(&carbon), sizeof(carbon));
+        in.read(reinterpret_cast<char*>(&magnesium), sizeof(magnesium));
+    }
 };
 
 struct WaterParticle : public PlantsimParticle {
@@ -88,7 +173,46 @@ struct WaterParticle : public PlantsimParticle {
 struct SnowParticle : public PlantsimParticle {
     float meltProgress = 0.0f;
     SnowParticle() : PlantsimParticle(ParticleType::SNOW, 2.0f) {}
+
+    void serializeDerived(std::ofstream& out) const override {
+        out.write(reinterpret_cast<const char*>(&meltProgress), sizeof(meltProgress));
+    }
+    void deserializeDerived(std::ifstream& in) override {
+        in.read(reinterpret_cast<char*>(&meltProgress), sizeof(meltProgress));
+    }
 };
+
+inline std::shared_ptr<PlantsimParticle> PlantsimParticle::deserialize(std::ifstream& in) {
+    ParticleType type;
+    in.read(reinterpret_cast<char*>(&type), sizeof(type));
+
+    std::shared_ptr<PlantsimParticle> particle;
+    switch (type) {
+        case ParticleType::AIR:
+            particle = std::make_shared<AirParticle>();
+            break;
+        case ParticleType::DIRT:
+            particle = std::make_shared<DirtParticle>();
+            break;
+        case ParticleType::PLANT:
+            particle = std::make_shared<PlantParticle>();
+            break;
+        case ParticleType::WATER:
+            particle = std::make_shared<WaterParticle>();
+            break;
+        case ParticleType::SNOW:
+            particle = std::make_shared<SnowParticle>();
+            break;
+        default:
+            particle = std::make_shared<PlantsimParticle>();
+            break;
+    }
+
+    particle->pt = type;
+    particle->deserializeBase(in);
+    particle->deserializeDerived(in);
+    return particle;
+}
 
 struct PlantConfig {
     // World Settings
