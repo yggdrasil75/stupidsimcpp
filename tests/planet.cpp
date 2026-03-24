@@ -170,6 +170,9 @@ public:
             if (ImGui::Button("Add Star", ImVec2(-1, 40))) {
                 sim.addStar();
             }
+            if (ImGui::Button("Add Moon", ImVec2(-1, 40))) {
+                sim.addMoon();
+            }
         }
 
         if (ImGui::CollapsingHeader("Fillings")) {
@@ -519,8 +522,8 @@ public:
             // currentPreviewFrame = sim.grid.renderFrameTimed(cam, outHeight, outWidth, frame::colormap::RGB, invFrameRate, reflectCount, globalIllumination, useLod);
             currentPreviewFrame = sim.grid.renderFrame(cam, outHeight, outWidth, frame::colormap::RGB, 3, reflectCount, globalIllumination, useLod);
         } else {
-            currentPreviewFrame = sim.grid.renderFrameTimed(cam, outHeight, outWidth, frame::colormap::RGB, invFrameRate, reflectCount, globalIllumination, useLod);
-            // currentPreviewFrame = sim.grid.fastRenderFrame(cam, outHeight, outWidth, frame::colormap::RGB);
+            // currentPreviewFrame = sim.grid.renderFrameTimed(cam, outHeight, outWidth, frame::colormap::RGB, invFrameRate, reflectCount, globalIllumination, useLod);
+            currentPreviewFrame = sim.grid.fastRenderFrame(cam, outHeight, outWidth, frame::colormap::RGB);
         }
         
         if (textu == 0) {
