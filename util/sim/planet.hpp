@@ -777,7 +777,6 @@ public:
         }
         grid.optimize();
         std::cout << "Finalize apply results completed." << std::endl;
-        grid.save("output/plateworld.yggs");
     }
 
     void addStar() {
@@ -796,47 +795,41 @@ public:
         std::cout << "Sim Scale: " << simScale << " units/km" << std::endl;
         std::cout << "Star Radius: " << starRadius << " units" << std::endl;
         std::cout << "Orbit Distance: " << orbitDistance << " units" << std::endl;
+        std::cout << "Registering Star directly to Octree Skybox..." << std::endl;
 
-        v3 starCenter = config.center + v3(orbitDistance, 0.0f, 0.0f);
-        v3 starColor = v3(1.0f, 0.95f, 0.8f);
+        v3 starDir = v3(1.0f, 0.0f, 0.0f); 
+        float angularRadius = std::asin(starRadius / orbitDistance);
 
-        int starPoints = config.surfacePoints * 10; 
-
-        for (int i = 0; i < starPoints; i++) {
-            float y = 1.0f - (i * 2.0f) / (starPoints - 1);
-            float radiusY = std::sqrt(1.0f - y * y);
-            float Θ = Φ * i;
-            float x = std::cos(Θ) * radiusY;
-            float z = std::sin(Θ) * radiusY;
-
-            v3 dir(x, y, z);
-            v3 pos = starCenter + dir * starRadius;
-            Particle pt;
-            
-            pt.altPos = std::make_unique<AltPositions>();
-            pt.altPos->originalPos = pos.cast<Eigen::half>();
-            pt.altPos->noisePos = pos.cast<Eigen::half>();
-            pt.altPos->tectonicPos = pos.cast<Eigen::half>();
-            
-            pt.currentPos = pos;
-            pt.originColor = starColor.cast<Eigen::half>();
-            pt.noiseDisplacement = 0.0f;
-            pt.surface = true;
-            pt.plateID = -2;
-            
-            config.surfaceNodes.emplace_back(pt);
-            
-            grid.set(pt, pt.currentPos, true, pt.originColor.cast<float>(), config.voxelSize, true, 2, 1.0, 0.0f, 0.0f, 1.0f);
-        }
+        // Body 0 for the Star (Sun)
+        grid.addSkyBody(0, starDir, angularRadius, 255, 242, 204, 255);
         
-        grid.optimize();
         config.currentStep = 1;
-        std::cout << "Star generation complete. Placed " << starPoints << " nodes." << std::endl;
+        std::cout << "Star generation complete via Skybox." << std::endl;
         starAdded = true;
     }
 
     void addMoon() {
-        ///TODO: using planetConfig, add moon(s).
+        TIME_FUNCTION;
+        
+        const float realMoonRadiusKm = 1737.0f;
+        const float realMoonDistKm = 384400.0f;
+        float simScale = config.radius / 6371.0f;
+        
+        float moonRadius = realMoonRadiusKm * simScale;
+        float orbitDistance = realMoonDistKm * simScale;
+        
+        std::cout << "--- MOON GENERATION ---" << std::endl;
+        std::cout << "Moon Radius: " << moonRadius << " units" << std::endl;
+        std::cout << "Orbit Distance: " << orbitDistance << " units" << std::endl;
+        std::cout << "Registering Moon directly to Octree Skybox..." << std::endl;
+
+        v3 moonDir = v3(-1.0f, 0.5f, 0.0f).normalized();
+        float angularRadius = std::asin(moonRadius / orbitDistance);
+        
+        // Body 1 for the Moon
+        grid.addSkyBody(1, moonDir, angularRadius, 200, 200, 200, 100);
+        
+        std::cout << "Moon added successfully." << std::endl;
     }
     
     void stretchPlanet() {

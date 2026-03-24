@@ -51,10 +51,6 @@ struct AirParticle : public PlantsimParticle {
         : PlantsimParticle(ParticleType::AIR, 0.0f), co2(c), temperature(t) {}
 };
 
-struct SunParticle : public PlantsimParticle {
-    SunParticle() : PlantsimParticle(ParticleType::SUN, 1000.0f) {}
-};
-
 struct DirtParticle : public PlantsimParticle {
     float nitrogen;
     float phosphorus;
@@ -972,47 +968,38 @@ public:
         float y = std::sin(phi) * std::sin(delta) + std::cos(phi) * std::cos(delta) * std::cos(H);
         float z = std::sin(phi) * std::cos(delta) * std::cos(H) - std::cos(phi) * std::sin(delta);
 
-        v3 newSunPos = v3(x, y, z).normalized() * config.sunDistance;
+        v3 newSunDir = v3(x, y, z).normalized();
+        v3 newSunPos = newSunDir * config.sunDistance; 
 
         if (!forceRebuild && (newSunPos - currentSunPos).norm() < (config.sunSize * 0.1f)) {
             return; 
         }
 
-        v3 deltaMove = newSunPos - currentSunPos;
         currentSunPos = newSunPos;
 
-        if (sunExists && !forceRebuild) {
-            if (grid.moveObject(2, deltaMove)) {
-                return;
-            } else {
-                sunExists = false; 
-            }
-        }
+        v3 sunColor(1.0f, 0.95f, 0.8f);
+        float t = config.timeOfDay;
+        if (t > 0.7f || t < 0.3f) sunColor = v3(1.0f, 0.4f, 0.1f);
         
-        if (!sunExists || forceRebuild) {
-            int count = 25; 
-            float step = config.sunSize / count;
-            float offset = config.sunSize / 2.0f;
+        uint8_t r = static_cast<uint8_t>(sunColor.x() * 255);
+        uint8_t g = static_cast<uint8_t>(sunColor.y() * 255);
+        uint8_t b = static_cast<uint8_t>(sunColor.z() * 255);
 
-            v3 forward = -currentSunPos.normalized();
-            v3 right = v3(0,1,0).cross(forward).normalized();
-            v3 up = forward.cross(right).normalized();
+        float sunAngularRadius = std::atan((config.sunSize / 2.0f) / config.sunDistance);
 
-            float t = config.timeOfDay;
-            v3 sunColor(1.0f, 0.95f, 0.8f);
-            if (t > 0.7f || t < 0.3f) sunColor = v3(1.0f, 0.4f, 0.1f);
+        grid.addSkyBody(0, newSunDir, sunAngularRadius, r, g, b, 255);
 
-            for(int i=0; i<count; ++i) {
-                for(int j=0; j<count; ++j) {
-                    float u = (i * step) - offset;
-                    float v = (j * step) - offset;
-                    v3 pos = currentSunPos + (right * u) + (up * v);
+        float moonH = H - M_PI; 
+        float moonX = -std::cos(delta * 0.8f) * std::sin(moonH);
+        float moonY = std::sin(phi) * std::sin(delta * 0.8f) + std::cos(phi) * std::cos(delta * 0.8f) * std::cos(moonH);
+        float moonZ = std::sin(phi) * std::cos(delta * 0.8f) * std::cos(moonH) - std::cos(phi) * std::sin(delta * 0.8f);
+        
+        v3 moonDir = v3(moonX, moonY, moonZ).normalized();
+        float moonAngularRadius = sunAngularRadius * 0.95f; 
                     
-                    grid.set(std::make_shared<SunParticle>(), pos, true, sunColor, step, true, 2, config.sunIntensity, 0.0f, 0.0f, 1.0f, 1.0f);
-                }
-            }
-            sunExists = true;
-        }
+        grid.addSkyBody(1, moonDir, moonAngularRadius, 200, 200, 220, 50);
+
+        sunExists = true;
     }
 
     void grow() {
