@@ -61,23 +61,23 @@ struct Particle {
     bool surface = false;
 
     //gravity factors:
-    // Eigen::Matrix<float, 3, 1> velocity;
-    // Eigen::Matrix<float, 3, 1> acceleration;
-    // Eigen::Matrix<float, 3, 1> forceAccumulator;
-    // float density = 0.0f;
-    // float pressure = 0.0f;
-    // Eigen::Matrix<float, 3, 1> pressureForce;
-    // float viscosity = 0.5f;
-    // Eigen::Matrix<float, 3, 1> viscosityForce;
-    // float restitution = 5.0f;
-    // float mass;
-    // bool isStatic = false;
-    // float soundSpeed = 100.0f;
-    // float sandcontent = 0.0f;
-    // float siltcontent = 0.0f;
-    // float claycontent = 0.0f;
-    // float rockcontent = 0.0f;
-    // float metalcontent = 0.0f;
+    Eigen::Matrix<float, 3, 1> velocity = Eigen::Matrix<float, 3, 1>::Zero();
+    Eigen::Matrix<float, 3, 1> acceleration = Eigen::Matrix<float, 3, 1>::Zero();
+    Eigen::Matrix<float, 3, 1> forceAccumulator = Eigen::Matrix<float, 3, 1>::Zero();
+    float density = 0.0f;
+    float pressure = 0.0f;
+    Eigen::Matrix<float, 3, 1> pressureForce = Eigen::Matrix<float, 3, 1>::Zero();
+    float viscosity = 0.5f;
+    Eigen::Matrix<float, 3, 1> viscosityForce = Eigen::Matrix<float, 3, 1>::Zero();
+    float restitution = 5.0f;
+    float mass = 1.0f;
+    bool isStatic = false;
+    float soundSpeed = 100.0f;
+    float sandcontent = 0.0f;
+    float siltcontent = 0.0f;
+    float claycontent = 0.0f;
+    float rockcontent = 1.0f;
+    float metalcontent = 0.0f;
 
     NeighborData nearNeighbors[8];
 
@@ -90,6 +90,24 @@ struct Particle {
         plateDisplacement = other.plateDisplacement;
         originColor = other.originColor;
         surface = other.surface;
+        
+        velocity = other.velocity;
+        acceleration = other.acceleration;
+        forceAccumulator = other.forceAccumulator;
+        density = other.density;
+        pressure = other.pressure;
+        pressureForce = other.pressureForce;
+        viscosity = other.viscosity;
+        viscosityForce = other.viscosityForce;
+        restitution = other.restitution;
+        mass = other.mass;
+        isStatic = other.isStatic;
+        soundSpeed = other.soundSpeed;
+        sandcontent = other.sandcontent;
+        siltcontent = other.siltcontent;
+        claycontent = other.claycontent;
+        rockcontent = other.rockcontent;
+        metalcontent = other.metalcontent;
         
         for(int i = 0; i < 8; ++i) {
             nearNeighbors[i] = other.nearNeighbors[i];
@@ -108,6 +126,24 @@ struct Particle {
             plateDisplacement = other.plateDisplacement;
             originColor = other.originColor;
             surface = other.surface;
+            
+            velocity = other.velocity;
+            acceleration = other.acceleration;
+            forceAccumulator = other.forceAccumulator;
+            density = other.density;
+            pressure = other.pressure;
+            pressureForce = other.pressureForce;
+            viscosity = other.viscosity;
+            viscosityForce = other.viscosityForce;
+            restitution = other.restitution;
+            mass = other.mass;
+            isStatic = other.isStatic;
+            soundSpeed = other.soundSpeed;
+            sandcontent = other.sandcontent;
+            siltcontent = other.siltcontent;
+            claycontent = other.claycontent;
+            rockcontent = other.rockcontent;
+            metalcontent = other.metalcontent;
             
             for(int i = 0; i < 8; ++i) {
                 nearNeighbors[i] = other.nearNeighbors[i];
@@ -175,6 +211,22 @@ struct PlateConfig {
     std::vector<int> assignedNodes;
 };
 
+struct Asteroid {
+    int id;
+    v3 position;
+    v3 velocity;
+    float radius;
+    float mass;
+    std::vector<v3> nodePositions; 
+    bool active = true;
+    float timeAlive = 0.0f;
+};
+
+struct ImpactEvent {
+    v3 position;
+    float radius;
+};
+
 class planetsim {
 public:
     planetConfig config;
@@ -182,10 +234,16 @@ public:
     std::vector<PlateConfig> plates;
     std::mt19937 rng = std::mt19937(42);
     bool starAdded = false;
+    bool coreFilled = false;
+
+    std::vector<Asteroid> activeAsteroids;
+    std::vector<ImpactEvent> impactHistory;
+    int nextAsteroidId = 0;
+    int dynMoonId = 10;
 
     planetsim() {
         config = planetConfig();
-        grid = Octree<Particle>(v3(-config.gridSizeCubeMin,-config.gridSizeCubeMin,-config.gridSizeCubeMin),v3(config.gridSizeCubeMin,config.gridSizeCubeMin,config.gridSizeCubeMin), 16, 32);
+        grid = Octree<Particle>(v3(-config.gridSizeCube,-config.gridSizeCube,-config.gridSizeCube),v3(config.gridSizeCube,config.gridSizeCube,config.gridSizeCube), 16, 32);
     }
 
     float evaluate2DStack(const Eigen::Vector2f& point, const NoisePreviewState& state, PNoise2& gen) {
@@ -767,6 +825,7 @@ public:
 
     void finalizeApplyResults() {
         TIME_FUNCTION;
+        ///TODO: fix this not being used.
         float maxAllowedDisp = config.radius * config.maxElevationRatio;
 
         for (auto& p : config.surfaceNodes) {
@@ -800,7 +859,6 @@ public:
         v3 starDir = v3(1.0f, 0.0f, 0.0f); 
         float angularRadius = std::asin(starRadius / orbitDistance);
 
-        // Body 0 for the Star (Sun)
         grid.addSkyBody(0, starDir, angularRadius, 255, 242, 204, 255);
         
         config.currentStep = 1;
@@ -826,7 +884,6 @@ public:
         v3 moonDir = v3(-1.0f, 0.5f, 0.0f).normalized();
         float angularRadius = std::asin(moonRadius / orbitDistance);
         
-        // Body 1 for the Moon
         grid.addSkyBody(1, moonDir, angularRadius, 200, 200, 200, 100);
         
         std::cout << "Moon added successfully." << std::endl;
@@ -917,7 +974,6 @@ public:
                     Particle newPt;
                     newPt.surface = true;
                     newPt.currentPos = smoothPos;
-                    // Note: originalPos, noisePos, tectonicPos remain null for these lightweight models!
                     
                     if (w1 > w2 && w1 > w3) {
                         newPt.plateID = p1.plateID;
@@ -968,7 +1024,6 @@ public:
                             ip.surface = false;
                             ip.plateID = -1;
                             ip.currentPos = pos;
-                            // Alternate memory-heavy positions stay natively cleanly null!
 
                             float depthRatio = dist / safeRadius;
                             Eigen::Vector3f coreColor(1.0f, 0.9f, 0.4f);
@@ -981,6 +1036,7 @@ public:
                             }
 
                             ip.originColor = finalColor.cast<Eigen::half>();
+                            ip.mass = 100.0f;
 
                             grid.set(ip, pos, true, finalColor, config.voxelSize, true, 1, false, 0.0f, 0.0f, 0.0f);
                             fillCount++;
@@ -990,17 +1046,255 @@ public:
             }
         }
 
+        coreFilled = true;
         grid.optimize();
         std::cout << "Volume Fill Complete. Inserted " << fillCount << " interior nodes directly into the grid." << std::endl;
     }
 
-    void simulateImpacts() {
+    void spawnAsteroid() {
+        if (!coreFilled) {
+            std::cout << "ERROR: Core must be filled before spawning asteroids!" << std::endl;
+            return;
+        }
+        Asteroid ast;
+        ast.id = nextAsteroidId++;
+        
+        ast.radius = config.radius * (0.05f + 0.1f * (static_cast<float>(rng()) / RAND_MAX)); 
+        ast.mass = std::pow(ast.radius, 3) * 0.1f; 
+        
+        v3 dir;
+        dir << (static_cast<float>(rng()) / RAND_MAX) - 0.5f, 
+               (static_cast<float>(rng()) / RAND_MAX) - 0.5f, 
+               (static_cast<float>(rng()) / RAND_MAX) - 0.5f;
+        dir.normalize();
+        ast.position = config.center + dir * config.radius * 4.0f;
+        
+        float totalPlanetMass = 0.0f;
+        auto planetNodes = grid.findInRadius(config.center, config.radius * 1.5f);
+        for (auto& n : planetNodes) {
+            if (n->isActive() && n->objectId != 2) totalPlanetMass += n->data.mass;
+        }
+        if (totalPlanetMass < 1.0f) totalPlanetMass = 50000.0f; 
+        
+        v3 toPlanet = (config.center - ast.position).normalized();
+        v3 tangent = toPlanet.cross(v3(0, 1, 0));
+        if (tangent.norm() < 0.1f) tangent = toPlanet.cross(v3(1, 0, 0));
+        tangent.normalize();
+        
+        float baseSpeed = std::sqrt(config.G_ATTRACTION * totalPlanetMass / (config.radius * 4.0f)); 
+        ast.velocity = toPlanet * baseSpeed * (0.5f + 0.5f * (static_cast<float>(rng()) / RAND_MAX)) 
+                     + tangent * baseSpeed * (0.5f + 1.5f * (static_cast<float>(rng()) / RAND_MAX));
+        
+        int steps = std::max(1, static_cast<int>(ast.radius / config.voxelSize));
+        for (int x = -steps; x <= steps; x++) {
+            for (int y = -steps; y <= steps; y++) {
+                for (int z = -steps; z <= steps; z++) {
+                    v3 offset = v3(x, y, z) * config.voxelSize;
+                    if (offset.norm() <= ast.radius) {
+                        v3 pPos = ast.position + offset;
+                        ast.nodePositions.push_back(pPos);
+                        
+                        Particle p;
+                        p.currentPos = pPos;
+                        p.originColor = v3(0.5f, 0.45f, 0.45f).cast<Eigen::half>(); 
+                        p.mass = 1.0f;
+                        p.velocity = ast.velocity;
+                        
+                        grid.set(p, p.currentPos, true, p.originColor.cast<float>(), config.voxelSize, true, 2, false, 0.0f, 0.0f, 0.0f);
+                    }
+                }
+            }
+        }
+        
+        ast.mass = ast.nodePositions.size() * 1.0f;
+        activeAsteroids.push_back(ast);
+        std::cout << "Asteroid " << ast.id << " Spawned! Radius: " << ast.radius << std::endl;
+    }
+    
+    void updateImpacts(float dt) {
+        if (!coreFilled) return;
+        if (activeAsteroids.size() < 3 && (static_cast<float>(rng()) / RAND_MAX) < (0.01f * dt * 60.0f)) {
+            spawnAsteroid();
+        }
+        
+        std::vector<std::shared_ptr<Octree<Particle>::NodeData>> allPlanetNodes;
+        if (!activeAsteroids.empty()) {
+            auto localSearch = grid.findInRadius(config.center, config.radius * 1.5f);
+            for (auto& n : localSearch) {
+                if (n->isActive() && n->objectId != 2) {
+                    allPlanetNodes.push_back(n);
+                }
+            }
+        }
+        
+        for (auto& ast : activeAsteroids) {
+            if (!ast.active) continue;
+            ast.timeAlive += dt;
+            
+            v3 totalAccel = v3::Zero();
+            for (const auto& pn : allPlanetNodes) {
+                v3 diff = pn->position - ast.position;
+                float distSq = diff.squaredNorm();
+                if (distSq > config.voxelSize * config.voxelSize) {
+                    float force = (config.G_ATTRACTION * pn->data.mass) / distSq;
+                    totalAccel += diff.normalized() * force;
+                }
+            }
+            
+            ast.velocity += totalAccel * dt;
+            
+            v3 delta = ast.velocity * dt;
+            ast.position += delta;
+            
+            std::vector<v3> newPositions;
+            newPositions.reserve(ast.nodePositions.size());
+            
+            for (auto& pPos : ast.nodePositions) {
+                v3 nPos = pPos + delta;
+                grid.move(pPos, nPos);
+                auto node = grid.find(nPos);
+                if (node) {
+                    node->data.currentPos = nPos;
+                    node->data.velocity = ast.velocity;
+                }
+                newPositions.push_back(nPos);
+            }
+            ast.nodePositions = std::move(newPositions);
+            
+            // Collision Detection
+            bool hit = false;
+            // Radius check for nearby planet surface nodes
+            auto neighbors = grid.findInRadius(ast.position, ast.radius + config.voxelSize * 1.5f);
+            for (auto& n : neighbors) {
+                if (n->objectId != 2 && n->isActive()) { 
+                    hit = true; 
+                    break; 
+                }
+            }
+            
+            float distToCenter = (config.center - ast.position).norm();
+            if (hit) {
+                handleImpact(ast);
+            } else if (distToCenter > config.radius * 5.0f && ast.timeAlive > 15.0f) {
+                // If it flies away and stays away, turn it into a permanent orbiting skybody moon
+                ast.active = false;
+                makeMoonFromAsteroid(ast);
+            }
+        }
+        
+        // Clean up inactive asteroids
+        activeAsteroids.erase(std::remove_if(activeAsteroids.begin(), activeAsteroids.end(), 
+            [](const Asteroid& a){ return !a.active; }), activeAsteroids.end());
+    }
+
+    void handleImpact(Asteroid& ast) {
+        std::cout << "Asteroid " << ast.id << " IMPACTED planet surface!" << std::endl;
+        ast.active = false;
+        
+        // Crater parameters
+        float craterRadius = ast.radius * 2.5f;
+        impactHistory.push_back({ast.position, craterRadius});
+        
+        // Cleanup asteroid chunks from the grid
+        for (auto& pPos : ast.nodePositions) {
+            grid.remove(pPos, config.voxelSize);
+        }
+        
+        auto affected = grid.findInRadius(ast.position, craterRadius);
+        
+        struct MoveData { v3 oldP; v3 newP; };
+        std::vector<MoveData> movements;
+        std::vector<v3> removals;
+        
+        for (auto& node : affected) {
+            if (node->objectId == 2) continue; // Skip other asteroid parts
+            if (!node->isActive()) continue;
+            
+            float d = (node->position - ast.position).norm();
+            
+            if (d < ast.radius * 0.9f) {
+                // Ground Zero: Vaporize / dig cavern
+                removals.push_back(node->position);
+                node->setActive(false);
+            } else {
+                // Impact rim: push material outward and up
+                v3 pushDir = (node->position - ast.position).normalized();
+                float pushStrength = std::pow((craterRadius - d) / craterRadius, 2.0f); 
+                v3 up = (node->position - config.center).normalized();
+                
+                v3 newPos = node->position + pushDir * (pushStrength * ast.radius) + up * (pushStrength * ast.radius * 0.4f);
+                movements.push_back({node->position, newPos});
+                
+                node->data.currentPos = newPos;
+                node->data.originColor = v3(0.25f, 0.2f, 0.2f).cast<Eigen::half>(); // Burnt rock look
+            }
+        }
+        
+        for (auto& r : removals) {
+            grid.remove(r, config.voxelSize);
+        }
+        
+        for (auto& m : movements) {
+            grid.move(m.oldP, m.newP);
+            grid.setColor(m.newP, v3(0.25f, 0.2f, 0.2f));
+            grid.updateData(m.newP, grid.find(m.newP)->data); // Sync underlying Particle data
+        }
+        
+        grid.optimize();
+    }
+    
+    void makeMoonFromAsteroid(Asteroid& ast) {
+        std::cout << "Asteroid " << ast.id << " settled into orbit. Converting to Skybox Moon." << std::endl;
+        float dist = (ast.position - config.center).norm();
+        float angularRadius = std::asin(ast.radius / dist);
+        v3 dir = (ast.position - config.center).normalized();
+        
+        // Register dynamically as a small moon
+        grid.addSkyBody(dynMoonId++, dir, angularRadius, 180, 180, 180, 50);
+        
+        for (auto& pPos : ast.nodePositions) {
+            grid.remove(pPos, config.voxelSize);
+        }
+    }
+
+    void quickSmoothSurface() {
         TIME_FUNCTION;
-        ///TODO: this needs to be run on a separate thread to allow visuals to continue.
-        // apply data required for gravity to all nodes, including the ability to "clump" to prevent explosions or implosions of the planet upon reaching this step (perhaps include static core)
-        // randomly spawn large clumps of nodes to simulate "asteroids" and create stuff like impact craters on the surface
-        // they should be spawned going in random directions that are roughly towards the planet.
-        //the gravity portion should be turned off when this is done.
+        // Simple smoothing pass: averages the position of exposed surface nodes with their neighbors.
+        // Quick & dirty "erosion" over the entire planet.
+        auto allNodes = grid.findInRadius(config.center, config.radius * 1.5f);
+        
+        std::vector<std::pair<std::shared_ptr<Octree<Particle>::NodeData>, v3>> smoothMoves;
+        
+        for (auto& n : allNodes) {
+            if (!n->isActive() || n->objectId == 2) continue; // Skip inactive and asteroid nodes
+            
+            // Check if it's an exposed surface node by looking for free space
+            auto neighbors = grid.findInRadius(n->position, config.voxelSize * 1.5f);
+            if (neighbors.size() > 20) continue; // It's packed tightly, ignore
+            
+            v3 avgPos = v3::Zero();
+            int count = 0;
+            for (auto& neighbor : neighbors) {
+                if (neighbor->isActive() && neighbor->objectId != 2) {
+                    avgPos += neighbor->position;
+                    count++;
+                }
+            }
+            if (count > 0) {
+                avgPos /= static_cast<float>(count);
+                // Shift halfway to the localized average to smooth out peaks and pits
+                v3 newP = n->position * 0.5f + avgPos * 0.5f;
+                smoothMoves.push_back({n, newP});
+            }
+        }
+        
+        for (auto& m : smoothMoves) {
+            v3 oldP = m.first->position;
+            m.first->data.currentPos = m.second;
+            grid.move(oldP, m.second);
+        }
+        grid.optimize();
+        std::cout << "Applied Quick Smoothing to " << smoothMoves.size() << " surface nodes." << std::endl;
     }
 
     void erosion() {

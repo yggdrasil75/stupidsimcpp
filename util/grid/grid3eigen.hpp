@@ -28,6 +28,7 @@
 #include <atomic>
 #include <filesystem>
 #include <type_traits>
+#include <future>
 
 #ifdef SSE
 #include <immintrin.h>
@@ -150,6 +151,7 @@ public:
             setLoaded(true);
             setDirty(true);
             setQueued(false);
+            setSaveQueued(false);
             for (std::unique_ptr<OctreeNode>& child : children) {
                 child = nullptr;
             }
@@ -169,6 +171,9 @@ public:
         bool isQueued() const {
             return flags & LOADQUEUED;
         }
+        bool isSaveQueued() const {
+            return flags & SAVEDQUEUED;
+        }
 
         void setLeaf(bool v) {
             if (v) flags |= LEAF_BIT;
@@ -185,6 +190,10 @@ public:
         void setQueued(bool v) {
             if (v) flags |= LOADQUEUED;
             else flags &= ~LOADQUEUED;
+        }
+        void setSaveQueued(bool v) {
+            if (v) flags |= SAVEDQUEUED;
+            else flags &= ~SAVEDQUEUED;
         }
 
         bool contains(const PointType& point) const {
@@ -388,8 +397,9 @@ public:
             setLoaded(false);
         }
 
-        void serialize(std::ofstream& out, int depth, const std::string& basePath) const {
-            if (depth == 4) {
+        void serialize(std::ofstream& out, float regionTargetSize, const std::string& basePath) const {
+            float sideLength = bounds.second.x() - bounds.first.x();
+            if (sideLength <= regionTargetSize + 1e-4f) {
                 if (isDirty() && isLoaded()) saveRegion(basePath);
                 return;
             }
@@ -411,13 +421,14 @@ public:
                 for (int i = 0; i < 8; ++i) if (children[i]) childMask |= (1 << i);
                 writeVal(out, childMask);
                 for (int i = 0; i < 8; ++i) {
-                    if (children[i]) children[i]->serialize(out, depth + 1, basePath);
+                    if (children[i]) children[i]->serialize(out, regionTargetSize, basePath);
                 }
             }
         }
 
-        void deserialize(std::ifstream& in, int depth, const std::string& basePath) {
-            if (depth == 4) {
+        void deserialize(std::ifstream& in, float regionTargetSize, const std::string& basePath) {
+            float sideLength = bounds.second.x() - bounds.first.x();
+            if (sideLength <= regionTargetSize + 1e-4f) {
                 setLoaded(false);
                 setDirty(false);
                 setLeaf(false);
@@ -452,7 +463,7 @@ public:
                             childMax[d] = high ? bounds.second[d] : center[d];
                         }
                         children[i] = std::make_unique<OctreeNode>(childMin, childMax);
-                        children[i]->deserialize(in, depth + 1, basePath);
+                        children[i]->deserialize(in, regionTargetSize, basePath);
                     } else {
                         children[i] = nullptr;
                     }
@@ -651,13 +662,35 @@ private:
     std::thread workerThread_;
     std::atomic<bool> stopWorker_{false};
     std::atomic<bool> autoOptimize_{true};
+    std::atomic<bool> streamingQueued_{false};
 
     std::string basePath_ = ".";
+    float regionTargetSize_ = 256;
 
     static std::string extractBasePath(const std::string& filename) {
         fs::path p(filename);
         p.replace_extension("");
         return p.string();
+    }
+
+    void lazilyOffload(const OctreeNode* cnode) const {
+        if (!cnode->isLoaded()) return;
+        OctreeNode* node = const_cast<OctreeNode*>(cnode);
+        std::unique_lock<std::mutex> lock(node->nodeMutex);
+        if (!node->isLoaded() || node->isSaveQueued()) return;
+
+        node->setSaveQueued(true);
+        lock.unlock();
+
+        auto self = const_cast<Octree*>(this);
+        self->enqueueTask([self, node]() {
+            std::lock_guard<std::mutex> nlock(node->nodeMutex);
+            if (node->isLoaded()) {
+                if (node->isDirty()) node->saveRegion(self->basePath_);
+                node->offload();
+            }
+            node->setSaveQueued(false);
+        });
     }
 
     void ensureLoaded(const OctreeNode* cnode, bool asyncLoad = false) const {
@@ -1233,18 +1266,15 @@ private:
         }
     }
 
-    void updateStreamingRecursive(OctreeNode* node, const PointType& camPos, int depth) {
+    void updateStreamingRecursive(OctreeNode* node, const PointType& camPos) {
         if (!node) return;
 
-        if (depth == 4) {
+        float sideLength = node->bounds.second.x() - node->bounds.first.x();
+        if (sideLength <= regionTargetSize_ + 1e-4f) {
             float dist = (node->center - camPos).norm();
 
             if (dist > maxDistance_) {
-                if (node->isLoaded()) {
-                    std::lock_guard<std::mutex> lock(node->nodeMutex);
-                    if (node->isDirty()) node->saveRegion(basePath_);
-                    node->offload();
-                }
+                lazilyOffload(node);
                 return;
             }
 
@@ -1253,16 +1283,14 @@ private:
                 if (ratio > invLodf) {
                     if (node->isLoaded()) {
                         ensureLOD(node);
-                        std::lock_guard<std::mutex> lock(node->nodeMutex);
-                        if (node->isDirty()) node->saveRegion(basePath_);
-                        node->offload();
+                        lazilyOffload(node);
                     }
                     return;
                 }
             }
 
             if (!node->isLoaded()) {
-                ensureLoaded(node, false);
+                ensureLoaded(node, true);
             }
             return;
         }
@@ -1270,7 +1298,7 @@ private:
         if (!node->isLeaf()) {
             for (int i = 0; i < 8; ++i) {
                 if (node->children[i]) {
-                    updateStreamingRecursive(node->children[i].get(), camPos, depth + 1);
+                    updateStreamingRecursive(node->children[i].get(), camPos);
                 }
             }
         }
@@ -1444,6 +1472,7 @@ private:
             currIdx |= ((next_t[0] <= tNext) ? 1 : 0) | ((next_t[1] <= tNext) ? 2 : 0) | ((next_t[2] <= tNext) ? 4 : 0);
         }
     }
+    
     void fastVoxelTraverseRecursive(OctreeNode* node, float tMin, float tMax, float& maxDist,
           const Ray& ray, std::shared_ptr<NodeData>& hit) const {
         if (!node->isLoaded()) {
@@ -1683,14 +1712,14 @@ private:
     }
 
     void printStatsRecursive(const OctreeNode* node, size_t depth, size_t& totalNodes, size_t& leafNodes, size_t& actualPoints, 
-                            size_t& maxTreeDepth, size_t& maxPointsInLeaf, size_t& minPointsInLeaf, size_t& lodGeneratedNodes) const {
+                            size_t& maxTreeDepth, size_t& maxPointsInLeaf, size_t& minPointsInLeaf, size_t& lodGeneratedNodes, size_t& unloaded) const {
         if (!node) return;
         
         totalNodes++;
         maxTreeDepth = std::max(maxTreeDepth, depth);
 
         if (!node->isLoaded()) {
-            leafNodes++;
+            unloaded++;
             return;
         }
 
@@ -1706,7 +1735,7 @@ private:
         } else {
             for (const auto& child : node->children) {
                 printStatsRecursive(child.get(), depth + 1, totalNodes, leafNodes, actualPoints, 
-                                    maxTreeDepth, maxPointsInLeaf, minPointsInLeaf, lodGeneratedNodes);
+                                    maxTreeDepth, maxPointsInLeaf, minPointsInLeaf, lodGeneratedNodes, unloaded);
             }
         }
     }
@@ -1760,9 +1789,11 @@ private:
         }
     }
 
-    void offloadRecursive(OctreeNode* node, int depth) {
+    void offloadRecursive(OctreeNode* node) {
         if (!node) return;
-        if (depth == 4) {
+        
+        float sideLength = node->bounds.second.x() - node->bounds.first.x();
+        if (sideLength <= regionTargetSize_ + 1e-4f) {
             if (node->isLoaded()) {
                 if (node->isDirty()) node->saveRegion(basePath_);
                 node->offload();
@@ -1770,7 +1801,7 @@ private:
             return;
         }
         for (int i = 0; i < 8; ++i) {
-            if (node->children[i]) offloadRecursive(node->children[i].get(), depth + 1);
+            if (node->children[i]) offloadRecursive(node->children[i].get());
         }
     }
 
@@ -2037,12 +2068,13 @@ private:
 public:
     Octree(const PointType& minBound, const PointType& maxBound, size_t maxPointsPerNode=8, size_t maxDepth = 16) :
     root_(std::make_unique<OctreeNode>(minBound, maxBound)), maxPointsPerNode(maxPointsPerNode),
-    maxDepth(maxDepth), size(0), mapMutex_(std::make_unique<std::mutex>()), skybox_(1024, 1024) {
+    maxDepth(maxDepth), size(0), mapMutex_(std::make_unique<std::mutex>()), skybox_(1024, 1024),
+    streamingQueued_(false) {
         skybox_.setBackground(backgroundColor_.x(), backgroundColor_.y(), backgroundColor_.z(), 1.0f);
         startWorkerThread();
     }
 
-    Octree() : root_(nullptr), maxPointsPerNode(8), maxDepth(16), size(0), mapMutex_(std::make_unique<std::mutex>()), skybox_(1024, 1024) {
+    Octree() : root_(nullptr), maxPointsPerNode(8), maxDepth(16), size(0), mapMutex_(std::make_unique<std::mutex>()), skybox_(1024, 1024), streamingQueued_(false) {
         skybox_.setBackground(backgroundColor_.x(), backgroundColor_.y(), backgroundColor_.z(), 1.0f);
         startWorkerThread();
     }
@@ -2054,7 +2086,8 @@ public:
     Octree(const Octree& other) : maxDepth(other.maxDepth), size(other.size), maxPointsPerNode(other.maxPointsPerNode),
             skylight_(other.skylight_), backgroundColor_(other.backgroundColor_),
             mapMutex_(std::make_unique<std::mutex>()), autoOptimize_(other.autoOptimize_.load()),
-            basePath_(other.basePath_), skybox_(other.skybox_) {
+            streamingQueued_(false),
+            basePath_(other.basePath_), skybox_(other.skybox_), regionTargetSize_(other.regionTargetSize_) {
         {
             std::lock_guard<std::mutex> lock(*other.mapMutex_);
             colorMap_ = other.colorMap_;
@@ -2071,7 +2104,8 @@ public:
             mapMutex_(std::move(other.mapMutex_)), colorMap_(std::move(other.colorMap_)),
             colorToIndex_(std::move(other.colorToIndex_)), materialMap_(std::move(other.materialMap_)),
             materialToIndex_(std::move(other.materialToIndex_)), autoOptimize_(other.autoOptimize_.load()),
-            basePath_(std::move(other.basePath_)) {
+            streamingQueued_(false),
+            basePath_(std::move(other.basePath_)), regionTargetSize_(other.regionTargetSize_) {
         other.stopWorkerThread();
         root_ = std::move(other.root_);
         
@@ -2096,11 +2130,12 @@ public:
         skylight_ = other.skylight_;
         backgroundColor_ = other.backgroundColor_;
         autoOptimize_.store(other.autoOptimize_.load());
+        streamingQueued_.store(false);
         basePath_ = other.basePath_;
         skybox_ = other.skybox_;
+        regionTargetSize_ = other.regionTargetSize_;
         
         {
-            // Lock safely to avoid deadlock if they theoretically reference each other
             std::lock(*mapMutex_, *other.mapMutex_);
             std::lock_guard<std::mutex> l1(*mapMutex_, std::adopt_lock);
             std::lock_guard<std::mutex> l2(*other.mapMutex_, std::adopt_lock);
@@ -2129,8 +2164,10 @@ public:
         skylight_ = std::move(other.skylight_);
         backgroundColor_ = std::move(other.backgroundColor_);
         autoOptimize_.store(other.autoOptimize_.load());
+        streamingQueued_.store(false);
         basePath_ = std::move(other.basePath_);
         skybox_ = std::move(other.skybox_);
+        regionTargetSize_ = std::move(other.regionTargetSize_);
         
         mapMutex_ = std::move(other.mapMutex_);
         colorMap_ = std::move(other.colorMap_);
@@ -2159,7 +2196,7 @@ public:
     }
 
     void offloadRegions() {
-        if (root_) offloadRecursive(root_.get(), 0);
+        if (root_) offloadRecursive(root_.get());
     }
 
     void setAutoOptimize(bool v) { 
@@ -2189,6 +2226,8 @@ public:
     }
     void setLODMinDistance(float dist) { lodMinDistance_ = dist; }
     void setMaxDistance(float dist) { maxDistance_ = dist; }
+    void setRegionTargetSize(float size) { regionTargetSize_ = size; }
+    float getRegionTargetSize() const { return regionTargetSize_; }
 
     void generateLODs() {
         if (!root_) return;
@@ -2215,11 +2254,13 @@ public:
     }
 
     void updateStreaming(const Camera& cam) {
+        if (streamingQueued_.exchange(true, std::memory_order_acquire)) return;
         PointType camPos = cam.origin;
         enqueueTask([this, camPos]() {
             if (root_) {
-                updateStreamingRecursive(root_.get(), camPos, 0);
+                updateStreamingRecursive(root_.get(), camPos);
             }
+            streamingQueued_.store(false, std::memory_order_release);
         });
     }
 
@@ -2235,6 +2276,7 @@ public:
         OctreeNode::writeVal(out, maxDepth);
         OctreeNode::writeVal(out, maxPointsPerNode);
         OctreeNode::writeVal(out, size);
+        OctreeNode::writeVal(out, regionTargetSize_);
         
         OctreeNode::writeVec3(out, skylight_);
         OctreeNode::writeVec3(out, backgroundColor_);
@@ -2261,7 +2303,7 @@ public:
         OctreeNode::writeVec3(out, root_->bounds.first);
         OctreeNode::writeVec3(out, root_->bounds.second);
 
-        root_->serialize(out, 0, basePath_);
+        root_->serialize(out, regionTargetSize_, basePath_);
         
         out.close();
         std::cout << "successfully saved grid to " << filename << std::endl;
@@ -2283,6 +2325,7 @@ public:
         OctreeNode::readVal(in, maxDepth);
         OctreeNode::readVal(in, maxPointsPerNode);
         OctreeNode::readVal(in, size);
+        OctreeNode::readVal(in, regionTargetSize_);
         
         OctreeNode::readVec3(in, skylight_);
         OctreeNode::readVec3(in, backgroundColor_);
@@ -2320,7 +2363,7 @@ public:
         OctreeNode::readVec3(in, maxBound);
 
         root_ = std::make_unique<OctreeNode>(minBound, maxBound);
-        root_->deserialize(in, 0, basePath_);
+        root_->deserialize(in, regionTargetSize_, basePath_);
 
         in.close();
         std::cout << "successfully loaded grid from " << filename << std::endl;
@@ -2529,6 +2572,7 @@ public:
 
     frame renderFrame(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB, int samplesPerPixel = 2,
                     int maxBounces = 4, bool globalIllumination = false, bool useLod = true) {
+        updateStreaming(cam);
         optimize();
         PointType origin = cam.origin;
         PointType dir = cam.direction.normalized();
@@ -2592,6 +2636,7 @@ public:
     }
 
     frame fastRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB) {
+        updateStreaming(cam);
         PointType origin = cam.origin;
         PointType dir = cam.direction.normalized();
         PointType up = cam.up.normalized();
@@ -2664,6 +2709,7 @@ public:
 
     frame renderFrameTimed(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB, 
                            double maxTimeSeconds = 0.16, int maxBounces = 4, bool globalIllumination = false, bool useLod = true) {
+        updateStreaming(cam);
         auto startTime = std::chrono::high_resolution_clock::now();
         PointType origin = cam.origin;
         PointType dir = cam.direction.normalized();
@@ -2909,9 +2955,10 @@ public:
         size_t maxPointsInLeaf = 0;
         size_t minPointsInLeaf = std::numeric_limits<size_t>::max();
         size_t lodGeneratedNodes = 0;
+        size_t unloaded = 0;
 
         printStatsRecursive(root_.get(), 0, totalNodes, leafNodes, actualPoints, 
-                            maxTreeDepth, maxPointsInLeaf, minPointsInLeaf, lodGeneratedNodes);
+                            maxTreeDepth, maxPointsInLeaf, minPointsInLeaf, lodGeneratedNodes, unloaded);
 
         if (leafNodes == 0) minPointsInLeaf = 0;
         double avgPointsPerLeaf = leafNodes > 0 ? (double)actualPoints / leafNodes : 0.0;
@@ -2935,6 +2982,7 @@ public:
         os << "  Non-Leaf Nodes    : " << (totalNodes - leafNodes) << "\n";
         os << "  LODs Generated    : " << lodGeneratedNodes << "\n";
         os << "  Tree Height       : " << maxTreeDepth << "\n";
+        os << "  Unloaded Nodes    : " << unloaded << "\n";
         os << "Data:\n";
         os << "  Total Points      : " << size << " (Tracked) / " << actualPoints << " (Counted)\n";
         os << "  Points/Leaf (Avg) : " << std::fixed << std::setprecision(2) << avgPointsPerLeaf << "\n";

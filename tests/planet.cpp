@@ -32,6 +32,7 @@ private:
     std::map<int, bool> keyStates;
     float deltaTime = 0.16f;
     bool orbitEquator = false;
+    bool followAsteroid = false;
     float rotationRadius = 2500;
     float angle = 0.0f;
     const float ω = (std::pow(M_PI, 2) / 30) / 10;
@@ -42,12 +43,13 @@ private:
     std::string cachedStats;
     bool statsNeedUpdate = true;
     float framerate = 60.0;
+    bool simulateImpactsRealtime = false;
 
     enum class DebugColorMode {
         BASE,
         PLATES,
         NOISE,
-        RESERVED
+        IMPACTS
     };
     DebugColorMode currentColorMode = DebugColorMode::BASE;
 
@@ -84,6 +86,9 @@ public:
 
     void renderUI(GLFWwindow* window) {
         handleCameraControls(window);
+        if (simulateImpactsRealtime) {
+            sim.updateImpacts(deltaTime);
+        }
         ImGui::Begin("Planet Simulation");
         if (ImGui::BeginTable("MainLayout", 2, ImGuiTableFlags_Resizable | ImGuiTableFlags_BordersOuter)) {
             ImGui::TableSetupColumn("Controls", ImGuiTableColumnFlags_WidthStretch, 0.3f);
@@ -108,6 +113,21 @@ public:
             v3 target(sim.config.center);
             cam.direction = (target - cam.origin).normalized();
         }
+        
+        if (followAsteroid && !sim.activeAsteroids.empty()) {
+            const auto& ast = sim.activeAsteroids.front();
+            v3 astVel = ast.velocity;
+            
+            if (astVel.norm() < 0.001f) {
+                astVel = (sim.config.center - ast.position).normalized();
+            } else {
+                astVel.normalize();
+            }
+            
+            cam.origin = ast.position - astVel * (ast.radius * 8.0f) + v3(0, ast.radius * 1.5f, 0);
+            cam.direction = (ast.position - cam.origin).normalized();
+        }
+
         glfwPollEvents();
         for (int i = GLFW_KEY_SPACE; i <= GLFW_KEY_LAST; i++) {
             keyStates[i] = (glfwGetKey(window, i) == GLFW_PRESS);
@@ -160,18 +180,33 @@ public:
             ImGui::Checkbox("Fix Boundaries", &doFixPlates);
             ImGui::Checkbox("use Cellular", &platesUseCellular);
 
-            if (ImGui::Button("2. Simulate Tectonics", ImVec2(-1, 40))) {
+            if (ImGui::Button("2. Simulate Tectonics", ImVec2(-1, 20))) {
                 simulateTectonics();
             }
         }
 
         if (ImGui::CollapsingHeader("Celestial Bodies")) {
-            ///TODO: add controls for moon, star.
-            if (ImGui::Button("Add Star", ImVec2(-1, 40))) {
+            if (ImGui::Button("Add Star", ImVec2(-1, 20))) {
                 sim.addStar();
             }
-            if (ImGui::Button("Add Moon", ImVec2(-1, 40))) {
+            if (ImGui::Button("Add Moon", ImVec2(-1, 20))) {
                 sim.addMoon();
+            }
+            ImGui::Separator();
+
+            if (!sim.coreFilled) ImGui::BeginDisabled();
+            ImGui::Checkbox("Simulate Asteroid Impacts (Real-time)", &simulateImpactsRealtime);
+            
+            if (!sim.coreFilled) {
+                ImGui::EndDisabled();
+                if (ImGui::Button("Spawn Single Asteroid", ImVec2(-1, 30))) {
+                    sim.spawnAsteroid();
+                }
+                if (ImGui::Button("Quick Smooth Surface", ImVec2(-1, 20))) {
+                    sim.quickSmoothSurface();
+                    applyDebugColorMode(); 
+                }
+                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Requires 'Fill Planet' to be executed first.");
             }
         }
 
@@ -202,8 +237,8 @@ public:
                 colorChanged = true;
             }
             ImGui::SameLine();
-            if (ImGui::RadioButton("Reserved", currentColorMode == DebugColorMode::RESERVED)) { 
-                currentColorMode = DebugColorMode::RESERVED; 
+            if (ImGui::RadioButton("Impacts", currentColorMode == DebugColorMode::IMPACTS)) { 
+                currentColorMode = DebugColorMode::IMPACTS; 
                 colorChanged = true; 
             }
 
@@ -282,6 +317,7 @@ public:
             }
 
             if (ImGui::Button(orbitEquator ? "Stop Equator" : "Orbit Equator")) orbitEquator = !orbitEquator;
+            ImGui::Checkbox("Follow First Asteroid", &followAsteroid);
         }
 
         updateStatsCache();
@@ -335,6 +371,18 @@ public:
                     color = v3(t, t, t);
                     break;
                 }
+                case DebugColorMode::IMPACTS: {
+                    float maxHeat = 0.0f;
+                    for (const auto& impact : sim.impactHistory) {
+                        float dist = (p.currentPos - impact.position).norm();
+                        if (dist < impact.radius) {
+                            float heat = 1.0f - (dist / impact.radius);
+                            if (heat > maxHeat) maxHeat = heat;
+                        }
+                    }
+                    color = v3(0.5f + maxHeat * 0.5f, 0.5f - maxHeat * 0.5f, 0.5f - maxHeat * 0.5f);
+                    break;
+                }
                 case DebugColorMode::BASE:
                 default:
                     color = p.originColor.cast<float>();
@@ -361,6 +409,18 @@ public:
                     float t = 0.5f;
                     if (maxNoise > minNoise) t = (p.noiseDisplacement - minNoise) / (maxNoise - minNoise);
                     color = v3(t, t, t);
+                    break;
+                }
+                case DebugColorMode::IMPACTS: {
+                    float maxHeat = 0.0f;
+                    for (const auto& impact : sim.impactHistory) {
+                        float dist = (p.currentPos - impact.position).norm();
+                        if (dist < impact.radius) {
+                            float heat = 1.0f - (dist / impact.radius);
+                            if (heat > maxHeat) maxHeat = heat;
+                        }
+                    }
+                    color = v3(0.5f + maxHeat * 0.5f, 0.5f - maxHeat * 0.5f, 0.5f - maxHeat * 0.5f);
                     break;
                 }
                 case DebugColorMode::BASE:
