@@ -194,7 +194,17 @@ public:
         }
 
         bool isEmpty() const {
-            return points.empty();
+            if (!points.empty()) return false;
+            if (!isLeaf()) {
+                std::vector<std::shared_ptr<OctreeNode>> validChildren;
+                for (int i = 0; i < 8; ++i) {
+                    if (children[i]) validChildren.push_back(children[i]);
+                }
+                for (auto& child : validChildren) {
+                    if (!child->isEmpty()) return false;
+                }
+            }
+            return true;
         }
 
         std::string getRegionName() const {
