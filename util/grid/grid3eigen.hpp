@@ -678,51 +678,64 @@ private:
     }
 
     void lazilyOffload(OctreeNode* node) {
-        std::unique_lock<std::mutex> lock(node->nodeMutex);
-        if (!node->isLoaded() || node->isSaveQueued()) return;
+        {
+            std::unique_lock<std::mutex> lock(node->nodeMutex);
+            if (!node->isLoaded() || node->isSaveQueued()) return;
 
-        node->setSaveQueued(true);
-        lock.unlock();
+            node->setSaveQueued(true);
+            lock.unlock();
+        }
 
         enqueueTask([this, node]() {
-            // std::lock_guard<std::mutex> nlock(node->nodeMutex);
-            if (node->isLoaded() && node->isSaveQueued()) {
-                if (node->isDirty()) {
-                    std::lock_guard<std::mutex> nlock(node->nodeMutex);
-                    node->saveRegion(basePath_);
+            {
+                std::lock_guard<std::mutex> nlock(node->nodeMutex);
+                if (node->isLoaded() && node->isSaveQueued()) {
+                    if (node->isDirty()) {
+                        node->saveRegion(basePath_);
+                    }
                 }
-                node->offload();
             }
-            node->setSaveQueued(false);
+            node->offload();
+            {
+                std::lock_guard<std::mutex> nlock(node->nodeMutex);
+                node->setSaveQueued(false);
+            }
         });
     }
 
     void ensureLoaded(OctreeNode* node, bool asyncLoad = false) {
-        std::unique_lock<std::mutex> lock(node->nodeMutex);
-        if (node->isLoaded() || node->isQueued()) return;
+        
+        {
+            std::unique_lock<std::mutex> lock(node->nodeMutex);
+            if (node->isLoaded() || node->isQueued()) return; 
+            else {
+                node->setLoadQueued(true);    
+            }
+        }
 
         if (asyncLoad) {
-            node->setLoadQueued(true);
-            lock.unlock();
-            
             enqueueTask([this, node]() {
                 bool justLoaded = false;
-                std::lock_guard<std::mutex> nlock(node->nodeMutex);
-                if (!node->isLoaded()) {
-                    node->loadRegion(basePath_);
-                    justLoaded = node->isLoaded();
+                {
+                    std::lock_guard<std::mutex> nlock(node->nodeMutex);
+                    if (!node->isLoaded()) {
+                        node->loadRegion(basePath_);
+                        justLoaded = node->isLoaded();
+                    }
+                    node->setLoadQueued(false);
                 }
                 if (justLoaded) {
                     ensureLOD(node);
                 }
-                node->setLoadQueued(false);
+                
             });
         } else {
-            std::lock_guard<std::mutex> nlock(node->nodeMutex);
-            node->loadRegion(basePath_);
-            bool loaded = node->isLoaded();
-            lock.unlock();
-            if (loaded) {
+            {
+                std::lock_guard<std::mutex> nlock(node->nodeMutex);
+                node->loadRegion(basePath_);
+                node->setLoadQueued(false);
+            }
+            if (node->isLoaded()) {
                 ensureLOD(node);
             }
         }
@@ -1269,8 +1282,11 @@ private:
             float distSq = 0.0f;
             for(int i = 0; i < Dim; ++i) {
                 float v = camPos[i];
-                if(v < node->bounds.first[i]) distSq += (node->bounds.first[i] - v) * (node->bounds.first[i] - v);
-                else if(v > node->bounds.second[i]) distSq += (v - node->bounds.second[i]) * (v - node->bounds.second[i]);
+                if(v < node->bounds.first[i]) {
+                    distSq += (node->bounds.first[i] - v) * (node->bounds.first[i] - v);
+                } else if(v > node->bounds.second[i]) {
+                    distSq += (v - node->bounds.second[i]) * (v - node->bounds.second[i]);
+                }
             }
             float dist = std::sqrt(distSq);
 
@@ -1290,17 +1306,21 @@ private:
                 }
             } else if (!node->isLoaded()) {
                 ensureLoaded(node, true);
-                for (int i = 0; i < 8; ++i) {
-                    if (node->children[i]) {
-                        updateStreamingRecursive(node->children[i].get(), camPos);
+                if (!node->isLeaf()){
+                    for (int i = 0; i < 8; ++i) {
+                        if (node->children[i]) {
+                            updateStreamingRecursive(node->children[i].get(), camPos);
+                        }
                     }
                 }
             }
             return;
         }
-        for (int i = 0; i < 8; ++i) {
-            if (node->children[i]) {
-                updateStreamingRecursive(node->children[i].get(), camPos);
+        if (!node->isLeaf()){
+            for (int i = 0; i < 8; ++i) {
+                if (node->children[i]) {
+                    updateStreamingRecursive(node->children[i].get(), camPos);
+                }
             }
         }
     }
@@ -1775,6 +1795,7 @@ private:
             }), allPoints.end());
 
             if (allPoints.size() <= maxPointsPerNode) {
+                std::lock_guard<std::mutex> lock(node->nodeMutex);
                 node->points = std::move(allPoints);
                 for (int i = 0; i < 8; ++i) {
                     node->children[i].reset(nullptr);
@@ -1782,16 +1803,13 @@ private:
                 node->setLeaf(true);
                 node->setDirty(true);
                 
-                {
-                    std::lock_guard<std::mutex> lock(node->nodeMutex);
-                    node->lodData = nullptr;
-                }
+                node->lodData = nullptr;
             }
         }
     }
 
     void offloadRecursive(OctreeNode* node) {
-        std::unique_lock<std::mutex> lock(node->nodeMutex);
+        // std::unique_lock<std::mutex> lock(node->nodeMutex);
         float sideLength = node->bounds.second.x() - node->bounds.first.x();
         if (sideLength <= regionTargetSize_ + 1e-4f) {
             if (node->isLoaded()) {
