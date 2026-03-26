@@ -17,6 +17,7 @@
 #include <fstream>
 #include <sstream>
 #include <mutex>
+#include <shared_mutex>
 #include <map>
 #include <unordered_set>
 #include <random>
@@ -98,6 +99,8 @@ public:
             setActive(active);
             setVisible(visible);
             setStatic(staticbit);
+            // setSaveQueued(true);
+
         }
         
         NodeData() : objectId(-1), size(0.0f), colorIdx(0), materialIdx(0), flags(0) {}
@@ -150,7 +153,7 @@ public:
             setLeaf(true);
             setLoaded(true);
             setDirty(true);
-            setQueued(false);
+            setLoadQueued(false);
             setSaveQueued(false);
             for (std::unique_ptr<OctreeNode>& child : children) {
                 child = nullptr;
@@ -187,7 +190,7 @@ public:
             if (v) flags |= DIRTY_BIT;
             else flags &= ~DIRTY_BIT;
         }
-        void setQueued(bool v) {
+        void setLoadQueued(bool v) {
             if (v) flags |= LOADQUEUED;
             else flags &= ~LOADQUEUED;
         }
@@ -205,12 +208,8 @@ public:
         bool isEmpty() const {
             if (!points.empty()) return false;
             if (!isLeaf()) {
-                std::vector<std::shared_ptr<OctreeNode>> validChildren;
                 for (int i = 0; i < 8; ++i) {
-                    if (children[i]) validChildren.push_back(children[i]);
-                }
-                for (auto& child : validChildren) {
-                    if (!child->isEmpty()) return false;
+                    if (children[i] && !children[i]->isEmpty()) return false;
                 }
             }
             return true;
@@ -370,12 +369,12 @@ public:
             }
         }
 
-        bool saveRegion(const std::string& basePath) const {
+        bool saveRegion(const std::string& basePath) {
             std::string path = getRegionPath(basePath);
             std::ofstream out(path, std::ios::binary);
             if (!out) return false;
             serializeSubtree(out);
-            const_cast<OctreeNode*>(this)->clearDirtySubtree();
+            clearDirtySubtree();
             return true;
         }
 
@@ -391,13 +390,13 @@ public:
         }
 
         void offload() {
+            setLoaded(false);
             points.clear();
             points.shrink_to_fit();
             for (int i = 0; i < 8; ++i) children[i].reset();
-            setLoaded(false);
         }
 
-        void serialize(std::ofstream& out, float regionTargetSize, const std::string& basePath) const {
+        void serialize(std::ofstream& out, float regionTargetSize, const std::string& basePath) {
             float sideLength = bounds.second.x() - bounds.first.x();
             if (sideLength <= regionTargetSize + 1e-4f) {
                 if (isDirty() && isLoaded()) saveRegion(basePath);
@@ -673,60 +672,54 @@ private:
         return p.string();
     }
 
-    void lazilyOffload(const OctreeNode* cnode) const {
-        if (!cnode->isLoaded()) return;
-        OctreeNode* node = const_cast<OctreeNode*>(cnode);
+    void lazilyOffload(OctreeNode* node) {
+        if (!node->isLoaded()) return;
         std::unique_lock<std::mutex> lock(node->nodeMutex);
         if (!node->isLoaded() || node->isSaveQueued()) return;
 
         node->setSaveQueued(true);
         lock.unlock();
 
-        auto self = const_cast<Octree*>(this);
-        self->enqueueTask([self, node]() {
+        enqueueTask([this, node]() {
             std::lock_guard<std::mutex> nlock(node->nodeMutex);
             if (node->isLoaded()) {
-                if (node->isDirty()) node->saveRegion(self->basePath_);
+                if (node->isDirty()) node->saveRegion(basePath_);
                 node->offload();
             }
             node->setSaveQueued(false);
         });
     }
 
-    void ensureLoaded(const OctreeNode* cnode, bool asyncLoad = false) const {
-        if (!cnode->isLoaded()) {
-            OctreeNode* node = const_cast<OctreeNode*>(cnode);
+    void ensureLoaded(OctreeNode* node, bool asyncLoad = false) {
+        if (!node->isLoaded()) {
             std::unique_lock<std::mutex> lock(node->nodeMutex);
             if (node->isLoaded() || node->isQueued()) return;
 
             if (asyncLoad) {
-                node->setQueued(true);
+                node->setLoadQueued(true);
                 lock.unlock();
                 
-                auto self = const_cast<Octree*>(this);
-                self->enqueueTask([self, node]() {
+                enqueueTask([this, node]() {
                     bool justLoaded = false;
-                    {
-                        std::lock_guard<std::mutex> nlock(node->nodeMutex);
-                        if (!node->isLoaded()) {
-                            node->loadRegion(self->basePath_);
-                            justLoaded = node->isLoaded();
-                        }
+                    std::lock_guard<std::mutex> nlock(node->nodeMutex);
+                    if (!node->isLoaded()) {
+                        node->loadRegion(basePath_);
+                        justLoaded = node->isLoaded();
                     }
                     if (justLoaded) {
-                        self->ensureLOD(node);
+                        ensureLOD(node);
                     }
                     {
-                        std::lock_guard<std::mutex> nlock(node->nodeMutex);
-                        node->setQueued(false);
+                        node->setLoadQueued(false);
                     }
                 });
             } else {
+                std::lock_guard<std::mutex> nlock(node->nodeMutex);
                 node->loadRegion(basePath_);
                 bool loaded = node->isLoaded();
                 lock.unlock();
                 if (loaded) {
-                    const_cast<Octree*>(this)->ensureLOD(node);
+                    ensureLOD(node);
                 }
             }
         }
@@ -1117,7 +1110,7 @@ private:
                 if (boxIntersectsBox(childBounds, cubeBounds)) {
                     if (!node->children[i]) {
                         node->children[i] = std::make_unique<OctreeNode>(childBounds.first, childBounds.second);
-                    }
+                }
                     inserted |= insertRecursive(node->children[i].get(), pointData, depth + 1);
                 }
             }
@@ -1269,9 +1262,11 @@ private:
     void updateStreamingRecursive(OctreeNode* node, const PointType& camPos) {
         if (!node) return;
 
-        float sideLength = node->bounds.second.x() - node->bounds.first.x();
-        if (sideLength <= regionTargetSize_ + 1e-4f) {
-            float dist = (node->center - camPos).norm();
+        if (!node->contains(camPos)) {
+            float dist1 = (node->bounds.second - camPos).norm();
+            float dist2 = (node->bounds.first - camPos).norm();
+            float dist = std::min(dist1, dist2);
+            // float dist = (node->center - camPos).norm();
 
             if (dist > maxDistance_) {
                 lazilyOffload(node);
@@ -1279,32 +1274,23 @@ private:
             }
 
             if (dist > lodMinDistance_) {
-                float ratio = dist / node->nodeSize;
-                if (ratio > invLodf) {
-                    if (node->isLoaded()) {
-                        ensureLOD(node);
-                        lazilyOffload(node);
+                ensureLOD(node);
+                if (!node->isLeaf()) {
+                    for (int i = 0; i < 8; ++i) {
+                        if (node->children[i]) {
+                            updateStreamingRecursive(node->children[i].get(), camPos);
+                        }
                     }
-                    return;
                 }
-            }
-
-            if (!node->isLoaded()) {
+            } else if (!node->isLoaded()) {
                 ensureLoaded(node, true);
             }
             return;
         }
 
-        if (!node->isLeaf()) {
-            for (int i = 0; i < 8; ++i) {
-                if (node->children[i]) {
-                    updateStreamingRecursive(node->children[i].get(), camPos);
-                }
-            }
-        }
     }
 
-    std::shared_ptr<NodeData> findRecursive(OctreeNode* node, const PointType& pos, float tolerance) const {
+    std::shared_ptr<NodeData> findRecursive(OctreeNode* node, const PointType& pos, float tolerance) {
         if (!node->contains(pos)) return nullptr;
         ensureLoaded(node, false);
         
@@ -1359,7 +1345,7 @@ private:
     }
 
     void searchNodeRecursive(OctreeNode* node, const PointType& center, float radiusSq, int objectid, 
-                               std::vector<std::shared_ptr<NodeData>>& results, std::unordered_set<std::shared_ptr<NodeData>>& seen) const {
+                               std::vector<std::shared_ptr<NodeData>>& results, std::unordered_set<std::shared_ptr<NodeData>>& seen) {
         PointType closestPoint;
         for (int i = 0; i < Dim; ++i) {
             closestPoint[i] = std::max(node->bounds.first[i], std::min(center[i], node->bounds.second[i]));
@@ -1387,13 +1373,13 @@ private:
     }
 
     void searchNode(OctreeNode* node, const PointType& center, float radiusSq, int objectid, 
-                               std::vector<std::shared_ptr<NodeData>>& results) const {
+                               std::vector<std::shared_ptr<NodeData>>& results) {
         std::unordered_set<std::shared_ptr<NodeData>> seen;
         searchNodeRecursive(node, center, radiusSq, objectid, results, seen);
     }
 
     void voxelTraverseRecursive(OctreeNode* node, float tMin, float tMax, float& maxDist, bool enableLOD,
-          const Ray& ray, std::shared_ptr<NodeData>& hit, bool asyncLoad = false) const {
+          const Ray& ray, std::shared_ptr<NodeData>& hit, bool asyncLoad = false) {
         if (!node->isLoaded()) {
             ensureLoaded(node, asyncLoad);
             if (!node->isLoaded()) {
@@ -1474,7 +1460,7 @@ private:
     }
     
     void fastVoxelTraverseRecursive(OctreeNode* node, float tMin, float tMax, float& maxDist,
-          const Ray& ray, std::shared_ptr<NodeData>& hit) const {
+          const Ray& ray, std::shared_ptr<NodeData>& hit) {
         if (!node->isLoaded()) {
             ensureLoaded(node, true);
             if (!node->isLoaded()) {
@@ -1790,8 +1776,7 @@ private:
     }
 
     void offloadRecursive(OctreeNode* node) {
-        if (!node) return;
-        
+        std::unique_lock<std::mutex> lock(node->nodeMutex);
         float sideLength = node->bounds.second.x() - node->bounds.first.x();
         if (sideLength <= regionTargetSize_ + 1e-4f) {
             if (node->isLoaded()) {
@@ -1890,11 +1875,7 @@ private:
             return false;
         }
 
-        if (tMin < 0.0f) {
-            t = tMax;
-        } else {
-            t = tMin;
-        }
+        t = tMin < 0.0f ? tMax : tMin;
         
         hitPoint = ray.origin + ray.dir * t;
         
@@ -1945,7 +1926,9 @@ private:
         return randomDir;
     }
 
-    void collectNodesByObjectIdRecursive(OctreeNode* node, int id, std::vector<std::shared_ptr<NodeData>>& results, std::unordered_set<std::shared_ptr<NodeData>>& seen) const {
+    void collectNodesByObjectIdRecursive(OctreeNode* node, int id,
+          std::vector<std::shared_ptr<NodeData>>& results,
+          std::unordered_set<std::shared_ptr<NodeData>>& seen) {
         if (!node) return;
         ensureLoaded(node);
         
@@ -1969,102 +1952,6 @@ private:
         std::unordered_set<std::shared_ptr<NodeData>> seen;
         collectNodesByObjectIdRecursive(node, id, results, seen);
     }
-
-    struct GridCell {
-        std::array<PointType, 8> p;
-        std::array<float, 8> val;
-        std::array<PointType, 8> color;
-    };
-
-    std::pair<PointType, PointType> vertexInterpolate(float isolevel, const PointType& p1, const PointType& p2, float val1, float val2, const PointType& c1, const PointType& c2) {
-        if (std::abs(isolevel - val1) < EPSILON) return {p1, c1};
-        if (std::abs(isolevel - val2) < EPSILON) return {p2, c2};
-        if (std::abs(val1 - val2) < EPSILON) return {p1, c1};
-        float mu = (isolevel - val1) / (val2 - val1);
-        PointType pos = p1 + mu * (p2 - p1);
-        PointType color = c1 + mu * (c2 - c1);
-        return {pos, color};
-    }
-
-    void polygonise(GridCell& grid, float isolevel, std::vector<PointType>& vertices, std::vector<Eigen::Vector3f>& colors, std::vector<Eigen::Vector3i>& triangles) {
-        int cubeindex = 0;
-        if (grid.val[0] < isolevel) cubeindex |= 1;
-        if (grid.val[1] < isolevel) cubeindex |= 2;
-        if (grid.val[2] < isolevel) cubeindex |= 4;
-        if (grid.val[3] < isolevel) cubeindex |= 8;
-        if (grid.val[4] < isolevel) cubeindex |= 16;
-        if (grid.val[5] < isolevel) cubeindex |= 32;
-        if (grid.val[6] < isolevel) cubeindex |= 64;
-        if (grid.val[7] < isolevel) cubeindex |= 128;
-
-        if (edgeTable[cubeindex] == 0) return;
-
-        std::array<PointType, 12> vertlist_pos;
-        std::array<PointType, 12> vertlist_color;
-
-        auto interpolate = [&](int edge_idx, int p_idx1, int p_idx2) {
-            auto [pos, col] = vertexInterpolate(isolevel, grid.p[p_idx1], grid.p[p_idx2], grid.val[p_idx1], grid.val[p_idx2], grid.color[p_idx1], grid.color[p_idx2]);
-            vertlist_pos[edge_idx] = pos;
-            vertlist_color[edge_idx] = col;
-        };
-
-        if (edgeTable[cubeindex] & 1)    interpolate(0, 0, 1);
-        if (edgeTable[cubeindex] & 2)    interpolate(1, 1, 2);
-        if (edgeTable[cubeindex] & 4)    interpolate(2, 2, 3);
-        if (edgeTable[cubeindex] & 8)    interpolate(3, 3, 0);
-        if (edgeTable[cubeindex] & 16)   interpolate(4, 4, 5);
-        if (edgeTable[cubeindex] & 32)   interpolate(5, 5, 6);
-        if (edgeTable[cubeindex] & 64)   interpolate(6, 6, 7);
-        if (edgeTable[cubeindex] & 128)  interpolate(7, 7, 4);
-        if (edgeTable[cubeindex] & 256)  interpolate(8, 0, 4);
-        if (edgeTable[cubeindex] & 512)  interpolate(9, 1, 5);
-        if (edgeTable[cubeindex] & 1024) interpolate(10, 2, 6);
-        if (edgeTable[cubeindex] & 2048) interpolate(11, 3, 7);
-
-        int currentVertCount = vertices.size();
-        
-        for (int i = 0; triTable[cubeindex][i] != -1; i += 3) {
-            Eigen::Vector3i tri;
-            for(int j=0; j<3; ++j) {
-                int table_idx = triTable[cubeindex][i+j];
-                tri[j] = currentVertCount + j; 
-                vertices.push_back(vertlist_pos[table_idx]);
-                colors.push_back(vertlist_color[table_idx]);
-            }
-            triangles.push_back(tri);
-            currentVertCount += 3;
-        }
-    }
-
-    std::pair<float, PointType> getScalarFieldValue(const PointType& pos, int objectId, float radius) {
-        auto neighbors = findInRadius(pos, radius, objectId);
-        float density = 0.0f;
-        PointType accumulatedColor = PointType::Zero();
-        float totalWeight = 0.0f;
-
-        if (neighbors.empty()) {
-            return {0.0f, {0.0f, 0.0f, 0.0f}};
-        }
-
-        for (auto& neighbor : neighbors) {
-            float distSq = (neighbor->position - pos).squaredNorm();
-            float rSq = radius * radius;
-            if (distSq < rSq) {
-                float x = distSq / rSq;
-                float w = (1.0f - x) * (1.0f - x);
-                density += w;
-                accumulatedColor += getColor(neighbor->colorIdx) * w;
-                totalWeight += w;
-            }
-        }
-
-        if (totalWeight > 1e-6) {
-            return {density, accumulatedColor / totalWeight};
-        }
-        
-        return {0.0f, {0.0f, 0.0f, 0.0f}};
-    }
-
 public:
     Octree(const PointType& minBound, const PointType& maxBound, size_t maxPointsPerNode=8, size_t maxDepth = 16) :
     root_(std::make_unique<OctreeNode>(minBound, maxBound)), maxPointsPerNode(maxPointsPerNode),
@@ -2254,13 +2141,13 @@ public:
     }
 
     void updateStreaming(const Camera& cam) {
-        if (streamingQueued_.exchange(true, std::memory_order_acquire)) return;
+        // if (streamingQueued_.exchange(true, std::memory_order_acquire)) return;
         PointType camPos = cam.origin;
         enqueueTask([this, camPos]() {
             if (root_) {
                 updateStreamingRecursive(root_.get(), camPos);
             }
-            streamingQueued_.store(false, std::memory_order_release);
+            // streamingQueued_.store(false, std::memory_order_release);
         });
     }
 
@@ -2388,7 +2275,7 @@ public:
         return false;
     }
 
-    std::vector<std::shared_ptr<NodeData>> findInRadius(const PointType& center, float radius, int objectid = -1) const {
+    std::vector<std::shared_ptr<NodeData>> findInRadius(const PointType& center, float radius, int objectid = -1) {
         std::vector<std::shared_ptr<NodeData>> results;
         if (!root_) return results;
         
@@ -2557,7 +2444,7 @@ public:
     }
 
     std::shared_ptr<NodeData> voxelTraverse(const PointType& origin, const PointType& direction,
-                                        float maxDist, bool enableLOD = false, bool asyncLoad = false) const {
+                                        float maxDist, bool enableLOD = false, bool asyncLoad = false) {
         std::shared_ptr<NodeData> hit;
         Ray oray(origin, direction);
         
@@ -2623,7 +2510,7 @@ public:
         return outFrame;
     }
 
-    std::shared_ptr<NodeData> fastVoxelTraverse(const Ray& ray, float maxDist) const {
+    std::shared_ptr<NodeData> fastVoxelTraverse(const Ray& ray, float maxDist) {
         std::shared_ptr<NodeData> hit;
         if (empty()) return hit;
         float tMin, tMax;
@@ -3004,7 +2891,7 @@ public:
     bool empty() const { return size == 0; }
 
     void clear() {
-        if (root_) {   
+        if (root_) {
             clearNode(root_.get());
         }
         PointType minBound = root_ ? root_->bounds.first : PointType::Zero();
