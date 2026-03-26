@@ -197,7 +197,7 @@ public:
             if (!sim.coreFilled) ImGui::BeginDisabled();
             ImGui::Checkbox("Simulate Asteroid Impacts (Real-time)", &simulateImpactsRealtime);
             
-            if (!sim.coreFilled) {
+            if (sim.coreFilled) {
                 ImGui::EndDisabled();
                 if (ImGui::Button("Spawn Single Asteroid", ImVec2(-1, 30))) {
                     sim.spawnAsteroid();
@@ -206,6 +206,7 @@ public:
                     sim.quickSmoothSurface();
                     applyDebugColorMode(); 
                 }
+            } else {
                 ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Requires 'Fill Planet' to be executed first.");
             }
         }
