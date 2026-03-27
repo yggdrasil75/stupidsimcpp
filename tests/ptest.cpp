@@ -82,6 +82,9 @@ int main() {
     planetSimUI planetApp;
     NoisePreviewState noiseState;
     PlantSimUI plantApp;
+    bool doShowPlanet = true;
+    bool doShowPlants = false;
+    bool doShowNoiseLab = true;
 
     if (noiseState.layers.empty()) {
         NoiseLayer defaultLayer;
@@ -101,13 +104,17 @@ int main() {
         ImGui::NewFrame();
 
         ImGui::GetMainViewport();
-        drawNoiseLab(noiseState);
-        planetApp.renderUI(window);
-        plantApp.renderUI(window);
+        if (doShowNoiseLab) drawNoiseLab(noiseState);
+        if (doShowPlanet) planetApp.renderUI(window);
+        if (doShowPlants) plantApp.renderUI(window);
 
         ImGui::Begin("Integration Control");
         ImGui::Text("Bridge: Noise Lab -> Planet Sim");
         ImGui::Separator();
+
+        ImGui::Checkbox("Show Planet", &doShowPlanet);
+        ImGui::Checkbox("Show Plants", &doShowPlants);
+        ImGui::Checkbox("Show Noise lab", &doShowNoiseLab);
         
         ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "Current Noise Layers: %zu", noiseState.layers.size());
         

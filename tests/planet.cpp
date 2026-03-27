@@ -25,7 +25,7 @@ private:
     int reflectCount = 4;
     bool slowRender = false;
     float lodDist = 1024.0f;
-    float lodDropoff = 0.001f;
+    float lodDropoff = 0.01f;
     float maxViewDistance = 4096;
     bool globalIllumination = false;
     bool useLod = true;
@@ -197,18 +197,18 @@ public:
             if (!sim.coreFilled) ImGui::BeginDisabled();
             ImGui::Checkbox("Simulate Asteroid Impacts (Real-time)", &simulateImpactsRealtime);
             
-            if (sim.coreFilled) {
+            if (ImGui::Button("Spawn Single Asteroid", ImVec2(-1, 30))) {
+                sim.spawnAsteroid();
+            }
+            if (ImGui::Button("Quick Smooth Surface", ImVec2(-1, 20))) {
+                sim.quickSmoothSurface();
+                applyDebugColorMode(); 
+            }
+            if (!sim.coreFilled) {
                 ImGui::EndDisabled();
-                if (ImGui::Button("Spawn Single Asteroid", ImVec2(-1, 30))) {
-                    sim.spawnAsteroid();
-                }
-                if (ImGui::Button("Quick Smooth Surface", ImVec2(-1, 20))) {
-                    sim.quickSmoothSurface();
-                    applyDebugColorMode(); 
-                }
-            } else {
                 ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Requires 'Fill Planet' to be executed first.");
             }
+            
         }
 
         if (ImGui::CollapsingHeader("Fillings")) {
@@ -390,9 +390,8 @@ public:
                     break;
             }
 
-            if (!sim.grid.setColor(p.currentPos, color)) {
-                snf++;
-            }
+            sim.grid.queuedsetColor(p.currentPos, color);
+                // snf++;
             // sim.grid.update(p.currentPos, p.currentPos, p, true, color, sim.config.voxelSize, true, -2, false, 0.0f, 0.0f, 0.0f);
         }
         for (auto& p : sim.config.interpolatedNodes) {
@@ -430,15 +429,13 @@ public:
                     break;
             }
 
-            if (!sim.grid.setColor(p.currentPos, color)) {
-                inf++;
-            }
+            sim.grid.queuedsetColor(p.currentPos, color);
             // sim.grid.update(p.currentPos, p.currentPos, p, true, color, sim.config.voxelSize, true, -2, false, 0.0f, 0.0f, 0.0f);
         }
-        if (snf > 0 || inf > 0) {
-            std::cout << snf << " original nodes failed to set" << std::endl;
-            std::cout << inf << " interpolated nodes failed to set" << std::endl;
-        }
+        // if (snf > 0 || inf > 0) {
+        //     std::cout << snf << " original nodes failed to set" << std::endl;
+        //     std::cout << inf << " interpolated nodes failed to set" << std::endl;
+        // }
     }
 
     void generateDebugMap(DebugMapMode mode) {

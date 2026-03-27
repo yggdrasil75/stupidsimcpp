@@ -1098,21 +1098,23 @@ private:
 
     bool insertRecursive(OctreeNode* node, const std::shared_ptr<NodeData>& pointData, int depth) {
         ensureLoaded(node);
+
+        BoundingBox cubeBounds = pointData->getCubeBounds();
+        if (!boxIntersectsBox(node->bounds, cubeBounds)) return false;
         {
             std::lock_guard<std::mutex> lock(node->nodeMutex);
             node->lodData = nullptr;
         }
 
-        BoundingBox cubeBounds = pointData->getCubeBounds();
-        if (!boxIntersectsBox(node->bounds, cubeBounds)) return false;
-
         if (!node->isLeaf() && pointData->size >= node->nodeSize) {
+            std::unique_lock<std::mutex> lock(node->nodeMutex);
             node->points.emplace_back(pointData);
             node->setDirty(true);
             return true;
         }
 
         if (node->isLeaf()) {
+            std::unique_lock<std::mutex> lock(node->nodeMutex);
             node->points.emplace_back(pointData);
             if (node->points.size() > maxPointsPerNode && depth < maxDepth) {
                 splitNode(node, depth);
@@ -1126,11 +1128,14 @@ private:
                 if (boxIntersectsBox(childBounds, cubeBounds)) {
                     if (!node->children[i]) {
                         node->children[i] = std::make_unique<OctreeNode>(childBounds.first, childBounds.second);
-                }
+                    }
                     inserted |= insertRecursive(node->children[i].get(), pointData, depth + 1);
                 }
             }
-            if (inserted) node->setDirty(true);
+            if (inserted) {
+                std::unique_lock<std::mutex> lock(node->nodeMutex);
+                node->setDirty(true);
+            }
             return inserted;
         }
     }
@@ -1141,8 +1146,8 @@ private:
         {
             std::lock_guard<std::mutex> lock(node->nodeMutex);
             node->lodData = nullptr;
+            node->setDirty(true);
         }
-        node->setDirty(true);
         if (!node->isLeaf()) {
             for (int i = 0; i < 8; ++i) {
                 if (node->children[i]) {
@@ -1330,7 +1335,7 @@ private:
         ensureLoaded(node, false);
         
         for (const auto& pointData : node->points) {
-            if (!pointData->isActive()) continue;
+            // if (!pointData->isActive()) continue;
             
             float distSq = (pointData->position - pos).squaredNorm();
             if (distSq <= tolerance * tolerance) {
@@ -1350,32 +1355,37 @@ private:
     bool removeRecursive(OctreeNode* node, const BoundingBox& bounds, const std::shared_ptr<NodeData>& targetPt) {
         if (!boxIntersectsBox(node->bounds, bounds)) return false;
         ensureLoaded(node, false);
+        bool foundAny = false;
         
         {
             std::lock_guard<std::mutex> lock(node->nodeMutex);
-            node->lodData = nullptr; 
+            
+            auto it = std::remove_if(node->points.begin(), node->points.end(),
+                [&](const std::shared_ptr<NodeData>& pointData) {
+                    return pointData == targetPt;
+                });
+            
+            if (it != node->points.end()) {
+                node->points.erase(it, node->points.end());
+                foundAny = true;
+            }
+            if (foundAny) {
+                node->lodData = nullptr; 
+                node->setDirty(true);
+            }
         }
-        
-        bool foundAny = false;
-        
-        auto it = std::remove_if(node->points.begin(), node->points.end(),
-            [&](const std::shared_ptr<NodeData>& pointData) {
-                return pointData == targetPt;
-            });
-        
-        if (it != node->points.end()) {
-            node->points.erase(it, node->points.end());
-            foundAny = true;
-        }
-
         if (!node->isLeaf()) {
             for (int i = 0; i < 8; ++i) {
                 if (node->children[i]) {
                     foundAny |= removeRecursive(node->children[i].get(), bounds, targetPt);
                 }
             }
+            if (foundAny) {
+                std::lock_guard<std::mutex> lock(node->nodeMutex);
+                node->lodData = nullptr;
+                node->setDirty(true);
+            }
         }
-        if (foundAny) node->setDirty(true);
         return foundAny;
     }
 
@@ -1809,7 +1819,6 @@ private:
     }
 
     void offloadRecursive(OctreeNode* node) {
-        // std::unique_lock<std::mutex> lock(node->nodeMutex);
         float sideLength = node->bounds.second.x() - node->bounds.first.x();
         if (sideLength <= regionTargetSize_ + 1e-4f) {
             if (node->isLoaded()) {
@@ -1990,9 +1999,9 @@ private:
     }
 public:
     Octree(const PointType& minBound, const PointType& maxBound, size_t maxPointsPerNode=8, size_t maxDepth = 16) :
-    root_(std::make_unique<OctreeNode>(minBound, maxBound)), maxPointsPerNode(maxPointsPerNode),
-    maxDepth(maxDepth), size(0), mapMutex_(std::make_unique<std::mutex>()), skybox_(1024, 1024),
-    streamingQueued_(false) {
+            root_(std::make_unique<OctreeNode>(minBound, maxBound)), maxPointsPerNode(maxPointsPerNode),
+            maxDepth(maxDepth), size(0), mapMutex_(std::make_unique<std::mutex>()), skybox_(1024, 1024),
+            streamingQueued_(false) {
         skybox_.setBackground(backgroundColor_.x(), backgroundColor_.y(), backgroundColor_.z(), 1.0f);
         startWorkerThread();
     }
@@ -2176,14 +2185,32 @@ public:
         return false;
     }
 
+    void queuedset(const T& data, const PointType& pos, bool visible, Eigen::Vector3f color, float size = 0.01f, bool active = true,
+             int objectId = -1, float emittance = 0.0f, float roughness = 1.0f, 
+             float metallic = 0.0f, float transmission = 0.0f, float ior = 1.45f) {
+        enqueueTask([this, data, pos, visible, color, size, active, objectId, emittance, roughness, metallic, transmission, ior]() {
+            IndexType cIdx = getColorIndex(color);
+            Material mat(emittance, roughness, metallic, transmission, ior);
+            IndexType mIdx = getMaterialIndex(mat);
+            
+            auto pointData = std::make_shared<NodeData>(data, pos, visible, cIdx, size, active, objectId, mIdx);
+            
+            ensureBounds(pointData->getCubeBounds());
+            
+            if (insertRecursive(root_.get(), pointData, 0)) {
+                this->size++;
+                return;
+            }
+            return;
+        });
+    }
+
     void updateStreaming(const Camera& cam) {
-        // if (streamingQueued_.exchange(true, std::memory_order_acquire)) return;
         PointType camPos = cam.origin;
         enqueueTask([this, camPos]() {
             if (root_) {
                 updateStreamingRecursive(root_.get(), camPos);
             }
-            // streamingQueued_.store(false, std::memory_order_release);
         });
     }
 
@@ -2297,6 +2324,11 @@ public:
         return findRecursive(root_.get(), pos, tolerance);
     }
 
+    std::shared_ptr<NodeData> findwNode(const PointType& pos, OctreeNode* node, float tolerance = EPSILON) {
+        // node = root_.get();
+        return findRecursive(node, pos, tolerance);
+    }
+
     bool inGrid(PointType pos) {
         return root_->contains(pos);
     }
@@ -2327,6 +2359,20 @@ public:
         else pointData->data = newData;
         invalidateLODForPoint(pointData);
         return true;
+    }
+
+    void queuedupdate(const PointType& pos, const T& newData) {
+        enqueueTask([this, pos, newData]() {
+            OctreeNode* node = root_.get();
+            auto pointData = findwNode(pos, node);
+            if (!pointData) return;
+            else {
+                std::lock_guard<std::mutex> lock(node->nodeMutex);
+                pointData->data = newData;
+            }
+            invalidateLODForPoint(pointData);
+            return;
+        });
     }
 
     bool update(const PointType& oldPos, const PointType& newPos, const T& newData, bool newVisible = true, 
@@ -2399,6 +2445,23 @@ public:
         return false;
     }
 
+    void queuedmove(const PointType& pos, const PointType& newPos) {
+        enqueueTask([this, pos, newPos]() {
+            auto pointData = find(pos);
+            if (!pointData) return;
+
+            removeRecursive(root_.get(), pointData->getCubeBounds(), pointData);
+            pointData->position = newPos;
+            ensureBounds(pointData->getCubeBounds());
+
+            if (insertRecursive(root_.get(), pointData, 0)) {
+                return;
+            }
+            size--;
+            return;
+        });
+    }
+
     bool setObjectId(const PointType& pos, int objectId, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
@@ -2437,6 +2500,20 @@ public:
         pointData->colorIdx = getColorIndex(color);
         invalidateLODForPoint(pointData);
         return true;
+    }
+
+    void queuedsetColor(const PointType& pos, Eigen::Vector3f color, float tolerance = EPSILON) {
+        enqueueTask([this, pos, color, tolerance]() {
+            OctreeNode* node = root_.get();
+            auto pointData = findwNode(pos, node, tolerance);
+            if (!pointData) return;
+            {
+                std::lock_guard<std::mutex> lock(node->nodeMutex);
+                pointData->colorIdx = getColorIndex(color);
+            }
+            invalidateLODForPoint(pointData);
+            return;
+        });
     }
 
     bool setEmittance(const PointType& pos, float emittance, float tolerance = EPSILON) {

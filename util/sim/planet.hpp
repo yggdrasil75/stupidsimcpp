@@ -310,7 +310,7 @@ public:
             pt.noiseDisplacement = 0.0f;
             pt.surface = true;
             config.surfaceNodes.emplace_back(pt);
-            grid.set(pt, pt.currentPos, true, pt.originColor.cast<float>(), config.voxelSize, true, 1, false, 0.0f, 0.0f, 0.0f);
+            grid.queuedset(pt, pt.currentPos, true, pt.originColor.cast<float>(), config.voxelSize, true, 1, false, 0.0f, 0.0f, 0.0f);
         }
         config.currentStep = 1;
         std::cout << "Step 1 done. base sphere generated" << std::endl;
@@ -325,10 +325,9 @@ public:
             Eigen::Vector3f normal = p.altPos->originalPos.cast<float>().normalized();
             p.altPos->noisePos = (p.altPos->originalPos.cast<float>() + (normal * displacementValue * config.noiseStrength)).cast<Eigen::half>();
             p.currentPos = p.altPos->noisePos.cast<float>();
-            grid.move(oldPos, p.currentPos);
-            grid.update(p.currentPos, p);
+            grid.queuedmove(oldPos, p.currentPos);
+            grid.queuedupdate(p.currentPos, p);
         }
-        grid.optimize();
     }
 
     void assignSeeds() {
@@ -831,10 +830,9 @@ public:
         for (auto& p : config.surfaceNodes) {
             Eigen::Vector3f oldPos = p.currentPos;
             p.currentPos = p.altPos->tectonicPos.cast<float>();
-            grid.move(oldPos, p.currentPos);
-            grid.update(p.currentPos, p);
+            grid.queuedmove(oldPos, p.currentPos);
+            grid.queuedupdate(p.currentPos, p);
         }
-        grid.optimize();
         std::cout << "Finalize apply results completed." << std::endl;
     }
 
@@ -986,7 +984,7 @@ public:
                         newPt.originColor = p3.originColor;
                     }
 
-                    grid.set(newPt, newPt.currentPos, true, newPt.originColor.cast<float>(), config.voxelSize, true, 1, false, 0.0f, 0.0f, 0.0f);
+                    grid.queuedset(newPt, newPt.currentPos, true, newPt.originColor.cast<float>(), config.voxelSize, true, 1, false, 0.0f, 0.0f, 0.0f);
                     
                     config.interpolatedNodes.push_back(newPt);
 
@@ -994,7 +992,6 @@ public:
                 }
             }
         }
-        grid.optimize();
         std::cout << "Interpolated " << counter << " surface gaps." << std::endl;
     }
 
@@ -1038,7 +1035,7 @@ public:
                             ip.originColor = finalColor.cast<Eigen::half>();
                             ip.mass = 100.0f;
 
-                            grid.set(ip, pos, true, finalColor, config.voxelSize, true, 1, false, 0.0f, 0.0f, 0.0f);
+                            grid.queuedset(ip, pos, true, finalColor, config.voxelSize, true, 1, false, 0.0f, 0.0f, 0.0f);
                             fillCount++;
                         }
                     }
@@ -1047,7 +1044,6 @@ public:
         }
 
         coreFilled = true;
-        grid.optimize();
         std::cout << "Volume Fill Complete. Inserted " << fillCount << " interior nodes directly into the grid." << std::endl;
     }
 
@@ -1161,9 +1157,7 @@ public:
             }
             ast.nodePositions = std::move(newPositions);
             
-            // Collision Detection
             bool hit = false;
-            // Radius check for nearby planet surface nodes
             auto neighbors = grid.findInRadius(ast.position, ast.radius + config.voxelSize * 1.5f);
             for (auto& n : neighbors) {
                 if (n->objectId != 2 && n->isActive()) { 
@@ -1176,13 +1170,11 @@ public:
             if (hit) {
                 handleImpact(ast);
             } else if (distToCenter > config.radius * 5.0f && ast.timeAlive > 15.0f) {
-                // If it flies away and stays away, turn it into a permanent orbiting skybody moon
                 ast.active = false;
                 makeMoonFromAsteroid(ast);
             }
         }
         
-        // Clean up inactive asteroids
         activeAsteroids.erase(std::remove_if(activeAsteroids.begin(), activeAsteroids.end(), 
             [](const Asteroid& a){ return !a.active; }), activeAsteroids.end());
     }
@@ -1191,11 +1183,9 @@ public:
         std::cout << "Asteroid " << ast.id << " IMPACTED planet surface!" << std::endl;
         ast.active = false;
         
-        // Crater parameters
         float craterRadius = ast.radius * 2.5f;
         impactHistory.push_back({ast.position, craterRadius});
         
-        // Cleanup asteroid chunks from the grid
         for (auto& pPos : ast.nodePositions) {
             grid.remove(pPos, config.voxelSize);
         }
@@ -1207,17 +1197,15 @@ public:
         std::vector<v3> removals;
         
         for (auto& node : affected) {
-            if (node->objectId == 2) continue; // Skip other asteroid parts
+            if (node->objectId == 2) continue;
             if (!node->isActive()) continue;
             
             float d = (node->position - ast.position).norm();
             
             if (d < ast.radius * 0.9f) {
-                // Ground Zero: Vaporize / dig cavern
                 removals.push_back(node->position);
                 node->setActive(false);
             } else {
-                // Impact rim: push material outward and up
                 v3 pushDir = (node->position - ast.position).normalized();
                 float pushStrength = std::pow((craterRadius - d) / craterRadius, 2.0f); 
                 v3 up = (node->position - config.center).normalized();
@@ -1226,7 +1214,7 @@ public:
                 movements.push_back({node->position, newPos});
                 
                 node->data.currentPos = newPos;
-                node->data.originColor = v3(0.25f, 0.2f, 0.2f).cast<Eigen::half>(); // Burnt rock look
+                node->data.originColor = v3(0.25f, 0.2f, 0.2f).cast<Eigen::half>();
             }
         }
         
@@ -1237,7 +1225,7 @@ public:
         for (auto& m : movements) {
             grid.move(m.oldP, m.newP);
             grid.setColor(m.newP, v3(0.25f, 0.2f, 0.2f));
-            grid.updateData(m.newP, grid.find(m.newP)->data); // Sync underlying Particle data
+            grid.updateData(m.newP, grid.find(m.newP)->data);
         }
         
         grid.optimize();
@@ -1249,7 +1237,6 @@ public:
         float angularRadius = std::asin(ast.radius / dist);
         v3 dir = (ast.position - config.center).normalized();
         
-        // Register dynamically as a small moon
         grid.addSkyBody(dynMoonId++, dir, angularRadius, 180, 180, 180, 50);
         
         for (auto& pPos : ast.nodePositions) {
@@ -1259,18 +1246,15 @@ public:
 
     void quickSmoothSurface() {
         TIME_FUNCTION;
-        // Simple smoothing pass: averages the position of exposed surface nodes with their neighbors.
-        // Quick & dirty "erosion" over the entire planet.
         auto allNodes = grid.findInRadius(config.center, config.radius * 1.5f);
         
         std::vector<std::pair<std::shared_ptr<Octree<Particle>::NodeData>, v3>> smoothMoves;
         
         for (auto& n : allNodes) {
-            if (!n->isActive() || n->objectId == 2) continue; // Skip inactive and asteroid nodes
+            if (!n->isActive() || n->objectId == 2) continue;
             
-            // Check if it's an exposed surface node by looking for free space
             auto neighbors = grid.findInRadius(n->position, config.voxelSize * 1.5f);
-            if (neighbors.size() > 20) continue; // It's packed tightly, ignore
+            if (neighbors.size() > 20) continue;
             
             v3 avgPos = v3::Zero();
             int count = 0;
@@ -1282,7 +1266,6 @@ public:
             }
             if (count > 0) {
                 avgPos /= static_cast<float>(count);
-                // Shift halfway to the localized average to smooth out peaks and pits
                 v3 newP = n->position * 0.5f + avgPos * 0.5f;
                 smoothMoves.push_back({n, newP});
             }
