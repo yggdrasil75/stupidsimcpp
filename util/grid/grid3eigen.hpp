@@ -114,6 +114,9 @@ public:
         bool isStatic() const {
             return flags & STATIC_BIT;
         }
+        bool isActiveAndVisible() const {
+            return (flags & (ACTIVE_BIT | VISIBLE_BIT)) != (ACTIVE_BIT | VISIBLE_BIT);
+        }
 
         void setActive(bool v) {
             if (v) flags |= ACTIVE_BIT;
@@ -147,7 +150,7 @@ public:
         uint8_t flags;
         
         mutable std::shared_ptr<NodeData> lodData;
-        mutable std::mutex nodeMutex; 
+        mutable std::shared_mutex nodeMutex;
 
         OctreeNode(const PointType& min, const PointType& max) : bounds(min,max), flags(0), lodData(nullptr) {
             setLeaf(true);
@@ -390,7 +393,7 @@ public:
         }
 
         void offload() {
-            std::lock_guard<std::mutex> lock(nodeMutex);
+            std::lock_guard<std::shared_mutex> lock(nodeMutex);
             if (isDirty()) return;
             setLoaded(false);
             for (int i = 0; i < 8; ++i) {
@@ -679,7 +682,7 @@ private:
 
     void lazilyOffload(OctreeNode* node) {
         {
-            std::unique_lock<std::mutex> lock(node->nodeMutex);
+            std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
             if (!node->isLoaded() || node->isSaveQueued()) return;
 
             node->setSaveQueued(true);
@@ -688,7 +691,7 @@ private:
 
         enqueueTask([this, node]() {
             {
-                std::lock_guard<std::mutex> nlock(node->nodeMutex);
+                std::shared_lock<std::shared_mutex> nlock(node->nodeMutex);
                 if (node->isLoaded() && node->isSaveQueued()) {
                     if (node->isDirty()) {
                         node->saveRegion(basePath_);
@@ -697,7 +700,7 @@ private:
             }
             node->offload();
             {
-                std::lock_guard<std::mutex> nlock(node->nodeMutex);
+                std::unique_lock<std::shared_mutex> nlock(node->nodeMutex);
                 node->setSaveQueued(false);
             }
         });
@@ -706,7 +709,7 @@ private:
     void ensureLoaded(OctreeNode* node, bool asyncLoad = false) {
         
         {
-            std::unique_lock<std::mutex> lock(node->nodeMutex);
+            std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
             if (node->isLoaded() || node->isQueued()) return; 
             else {
                 node->setLoadQueued(true);    
@@ -717,7 +720,7 @@ private:
             enqueueTask([this, node]() {
                 bool justLoaded = false;
                 {
-                    std::lock_guard<std::mutex> nlock(node->nodeMutex);
+                    std::unique_lock<std::shared_mutex> nlock(node->nodeMutex);
                     if (!node->isLoaded()) {
                         node->loadRegion(basePath_);
                         justLoaded = node->isLoaded();
@@ -731,7 +734,7 @@ private:
             });
         } else {
             {
-                std::lock_guard<std::mutex> nlock(node->nodeMutex);
+                std::unique_lock<std::shared_mutex> nlock(node->nodeMutex);
                 node->loadRegion(basePath_);
                 node->setLoadQueued(false);
             }
@@ -916,7 +919,7 @@ private:
             }
             
             {
-                std::lock_guard<std::mutex> lodLock(curr->nodeMutex);
+                std::unique_lock<std::shared_mutex> lodLock(curr->nodeMutex);
                 curr->lodData = nullptr;
             }
             
@@ -1102,19 +1105,19 @@ private:
         BoundingBox cubeBounds = pointData->getCubeBounds();
         if (!boxIntersectsBox(node->bounds, cubeBounds)) return false;
         {
-            std::lock_guard<std::mutex> lock(node->nodeMutex);
+            std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
             node->lodData = nullptr;
         }
 
         if (!node->isLeaf() && pointData->size >= node->nodeSize) {
-            std::unique_lock<std::mutex> lock(node->nodeMutex);
+            std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
             node->points.emplace_back(pointData);
             node->setDirty(true);
             return true;
         }
 
         if (node->isLeaf()) {
-            std::unique_lock<std::mutex> lock(node->nodeMutex);
+            std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
             node->points.emplace_back(pointData);
             if (node->points.size() > maxPointsPerNode && depth < maxDepth) {
                 splitNode(node, depth);
@@ -1133,7 +1136,7 @@ private:
                 }
             }
             if (inserted) {
-                std::unique_lock<std::mutex> lock(node->nodeMutex);
+                std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
                 node->setDirty(true);
             }
             return inserted;
@@ -1144,7 +1147,7 @@ private:
         if (!boxIntersectsBox(node->bounds, bounds)) return false;
         ensureLoaded(node);
         {
-            std::lock_guard<std::mutex> lock(node->nodeMutex);
+            std::lock_guard<std::shared_mutex> lock(node->nodeMutex);
             node->lodData = nullptr;
             node->setDirty(true);
         }
@@ -1216,7 +1219,7 @@ private:
 
     void ensureLOD(OctreeNode* node) {
         ensureLoaded(node);
-        std::lock_guard<std::mutex> lock(node->nodeMutex);
+        std::lock_guard<std::shared_mutex> lock(node->nodeMutex);
         if (node->lodData != nullptr) return;
 
         PointType avgPos = PointType::Zero();
@@ -1358,7 +1361,7 @@ private:
         bool foundAny = false;
         
         {
-            std::lock_guard<std::mutex> lock(node->nodeMutex);
+            std::lock_guard<std::shared_mutex> lock(node->nodeMutex);
             
             auto it = std::remove_if(node->points.begin(), node->points.end(),
                 [&](const std::shared_ptr<NodeData>& pointData) {
@@ -1381,7 +1384,7 @@ private:
                 }
             }
             if (foundAny) {
-                std::lock_guard<std::mutex> lock(node->nodeMutex);
+                std::lock_guard<std::shared_mutex> lock(node->nodeMutex);
                 node->lodData = nullptr;
                 node->setDirty(true);
             }
@@ -1506,19 +1509,24 @@ private:
     
     void fastVoxelTraverseRecursive(OctreeNode* node, float tMin, float tMax, float& maxDist,
           const Ray& ray, std::shared_ptr<NodeData>& hit) {
-        if (!node->isLoaded()) {
+        bool nodeloaded = false;
+        {
+            std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
+            nodeloaded = node->isLoaded();
+        }
+        if (!nodeloaded) {
             ensureLoaded(node, true);
-            if (!node->isLoaded()) {
-                if (node->lodData) {
-                    float t; PointType n, h;
-                    if (rayCubeIntersect(ray, node->lodData.get(), t, n, h)) {
-                        if (t >= 0 && t <= maxDist) { hit = node->lodData; maxDist = t; }
-                    }
+            std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
+            if (node->lodData) {
+                float t; PointType n, h;
+                if (rayCubeIntersect(ray, node->lodData.get(), t, n, h)) {
+                    if (t >= 0 && t <= maxDist) { hit = node->lodData; maxDist = t; }
                 }
-                return;
             }
+            return;
         }
 
+        std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
         if (!node->isLeaf() && node->lodData) {
             float dist = (node->center - ray.origin).norm();
             if (dist > lodMinDistance_ && (dist / node->nodeSize) > invLodf) {
@@ -1531,7 +1539,7 @@ private:
         }
 
         for (const auto& pt : node->points) {
-            if ((pt->flags & (ACTIVE_BIT | VISIBLE_BIT)) != (ACTIVE_BIT | VISIBLE_BIT)) continue;
+            if (pt->isActiveAndVisible()) continue;
             float t; PointType n, h;
             if (rayCubeIntersect(ray, pt.get(), t, n, h)) {
                 if (t >= 0 && t <= maxDist && t <= tMax + 0.001f) {
@@ -1805,7 +1813,7 @@ private:
             }), allPoints.end());
 
             if (allPoints.size() <= maxPointsPerNode) {
-                std::lock_guard<std::mutex> lock(node->nodeMutex);
+                std::lock_guard<std::shared_mutex> lock(node->nodeMutex);
                 node->points = std::move(allPoints);
                 for (int i = 0; i < 8; ++i) {
                     node->children[i].reset(nullptr);
@@ -1823,7 +1831,7 @@ private:
         if (sideLength <= regionTargetSize_ + 1e-4f) {
             if (node->isLoaded()) {
                 if (node->isDirty()) {
-                    std::unique_lock<std::mutex> lock(node->nodeMutex);
+                    std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
                     node->saveRegion(basePath_);
                 }
                 node->offload();
@@ -2367,7 +2375,7 @@ public:
             auto pointData = findwNode(pos, node);
             if (!pointData) return;
             else {
-                std::lock_guard<std::mutex> lock(node->nodeMutex);
+                std::lock_guard<std::shared_mutex> lock(node->nodeMutex);
                 pointData->data = newData;
             }
             invalidateLODForPoint(pointData);
@@ -2508,7 +2516,7 @@ public:
             auto pointData = findwNode(pos, node, tolerance);
             if (!pointData) return;
             {
-                std::lock_guard<std::mutex> lock(node->nodeMutex);
+                std::lock_guard<std::shared_mutex> lock(node->nodeMutex);
                 pointData->colorIdx = getColorIndex(color);
             }
             invalidateLODForPoint(pointData);
@@ -2653,8 +2661,9 @@ public:
         const float tanfovx = tanHalfFov * aspect;
         
         const PointType globalLightDir = (-cam.direction * 0.2f).normalized();
-        const float fogStart = 1000.0f;
-        const float minVisibility = 0.2f; 
+        const float minVisibility = 0.1f;
+        float maxmin = (maxDistance_ - lodMinDistance_);
+        float invMaxMin = 1 / maxmin;
         
         #pragma omp parallel for schedule(dynamic, 128) collapse(2)
         for (int y = 0; y < height; ++y) {
@@ -2690,7 +2699,7 @@ public:
                         color = color * intensity;
                     }
                     
-                    float fogFactor = std::clamp((maxDistance_ - t) / (maxDistance_ - fogStart), minVisibility, 1.0f);
+                    float fogFactor = std::clamp((maxDistance_ - t) * invMaxMin, minVisibility, 1.0f);
                     
                     color = color * fogFactor + skybox_.sampleVector(rayDir) * (1.0f - fogFactor);
                 }
