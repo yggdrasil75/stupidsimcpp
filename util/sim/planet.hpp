@@ -24,6 +24,18 @@
 #include "../imgui/backends/imgui_impl_opengl3.h"
 #include <GLFW/glfw3.h>
 #include "../stb/stb_image.h"
+#include <fstream>
+
+// Generic binary helpers for trivial structures and fixed-size Eigen Vectors
+template <typename T>
+inline void writeBin(std::ofstream& os, const T& val) {
+    os.write(reinterpret_cast<const char*>(&val), sizeof(T));
+}
+
+template <typename T>
+inline void readBin(std::ifstream& is, T& val) {
+    is.read(reinterpret_cast<char*>(&val), sizeof(T));
+}
 
 using v3 = Eigen::Vector3f;
 using v3half = Eigen::Matrix<Eigen::half, 3, 1>;
@@ -160,6 +172,90 @@ struct Particle {
 
     Particle(Particle&&) noexcept = default;
     Particle& operator=(Particle&&) noexcept = default;
+
+    void serialize(std::ofstream& out) const {
+        writeBin(out, noiseDisplacement);
+        writeBin(out, plateID);
+        
+        // Handle unique_ptr safely
+        bool hasAltPos = (altPos != nullptr);
+        writeBin(out, hasAltPos);
+        if (hasAltPos) {
+            writeBin(out, altPos->originalPos);
+            writeBin(out, altPos->noisePos);
+            writeBin(out, altPos->tectonicPos);
+        }
+        
+        writeBin(out, currentPos);
+        writeBin(out, plateDisplacement);
+        writeBin(out, originColor);
+        writeBin(out, surface);
+        writeBin(out, velocity);
+        writeBin(out, acceleration);
+        writeBin(out, forceAccumulator);
+        writeBin(out, density);
+        writeBin(out, pressure);
+        writeBin(out, pressureForce);
+        writeBin(out, viscosity);
+        writeBin(out, viscosityForce);
+        writeBin(out, restitution);
+        writeBin(out, mass);
+        writeBin(out, isStatic);
+        writeBin(out, soundSpeed);
+        writeBin(out, sandcontent);
+        writeBin(out, siltcontent);
+        writeBin(out, claycontent);
+        writeBin(out, rockcontent);
+        writeBin(out, metalcontent);
+        
+        for(int i = 0; i < 8; ++i) {
+            writeBin(out, nearNeighbors[i].index);
+            writeBin(out, nearNeighbors[i].distance);
+        }
+    }
+
+    static Particle deserialize(std::ifstream& in) {
+        Particle p;
+        readBin(in, p.noiseDisplacement);
+        readBin(in, p.plateID);
+        
+        bool hasAltPos;
+        readBin(in, hasAltPos);
+        if (hasAltPos) {
+            p.altPos = std::make_unique<AltPositions>();
+            readBin(in, p.altPos->originalPos);
+            readBin(in, p.altPos->noisePos);
+            readBin(in, p.altPos->tectonicPos);
+        }
+        
+        readBin(in, p.currentPos);
+        readBin(in, p.plateDisplacement);
+        readBin(in, p.originColor);
+        readBin(in, p.surface);
+        readBin(in, p.velocity);
+        readBin(in, p.acceleration);
+        readBin(in, p.forceAccumulator);
+        readBin(in, p.density);
+        readBin(in, p.pressure);
+        readBin(in, p.pressureForce);
+        readBin(in, p.viscosity);
+        readBin(in, p.viscosityForce);
+        readBin(in, p.restitution);
+        readBin(in, p.mass);
+        readBin(in, p.isStatic);
+        readBin(in, p.soundSpeed);
+        readBin(in, p.sandcontent);
+        readBin(in, p.siltcontent);
+        readBin(in, p.claycontent);
+        readBin(in, p.rockcontent);
+        readBin(in, p.metalcontent);
+        
+        for(int i = 0; i < 8; ++i) {
+            readBin(in, p.nearNeighbors[i].index);
+            readBin(in, p.nearNeighbors[i].distance);
+        }
+        return p;
+    }
 };
 
 struct planetConfig {
@@ -230,7 +326,7 @@ struct ImpactEvent {
 class planetsim {
 public:
     planetConfig config;
-    Octree<Particle> grid;
+    Octree<Particle, int16_t, "output/fibSphere"> grid;
     std::vector<PlateConfig> plates;
     std::mt19937 rng = std::mt19937(42);
     bool starAdded = false;
@@ -243,7 +339,7 @@ public:
 
     planetsim() {
         config = planetConfig();
-        grid = Octree<Particle>(v3(-config.gridSizeCube,-config.gridSizeCube,-config.gridSizeCube),v3(config.gridSizeCube,config.gridSizeCube,config.gridSizeCube), 16, 32);
+        grid = Octree<Particle, int16_t, "output/fibSphere">(v3(-config.gridSizeCube,-config.gridSizeCube,-config.gridSizeCube),v3(config.gridSizeCube,config.gridSizeCube,config.gridSizeCube), 16, 32);
     }
 
     float evaluate2DStack(const Eigen::Vector2f& point, const NoisePreviewState& state, PNoise2& gen) {
@@ -314,6 +410,7 @@ public:
         }
         config.currentStep = 1;
         std::cout << "Step 1 done. base sphere generated" << std::endl;
+        grid.waitForIdle();
         grid.save("output/fibSphere.yggs");
     }
 
@@ -326,6 +423,7 @@ public:
             p.altPos->noisePos = (p.altPos->originalPos.cast<float>() + (normal * displacementValue * config.noiseStrength)).cast<Eigen::half>();
             p.currentPos = p.altPos->noisePos.cast<float>();
             grid.queuedmove(oldPos, p.currentPos);
+            grid.waitForIdle();
             grid.queuedupdate(p.currentPos, p);
         }
     }
@@ -831,6 +929,7 @@ public:
             Eigen::Vector3f oldPos = p.currentPos;
             p.currentPos = p.altPos->tectonicPos.cast<float>();
             grid.queuedmove(oldPos, p.currentPos);
+            grid.waitForIdle();
             grid.queuedupdate(p.currentPos, p);
         }
         std::cout << "Finalize apply results completed." << std::endl;
@@ -965,9 +1064,9 @@ public:
 
                     v3 smoothPos = interpNormal * interpRadius;
 
-                    if (grid.find(smoothPos, config.voxelSize * 0.1f) != nullptr) {
-                        continue; 
-                    }
+                    // if (grid.find(smoothPos, config.voxelSize * 0.1f) != nullptr) {
+                    //     continue; 
+                    // }
 
                     Particle newPt;
                     newPt.surface = true;
@@ -1113,7 +1212,7 @@ public:
             spawnAsteroid();
         }
         
-        std::vector<std::shared_ptr<Octree<Particle>::NodeData>> allPlanetNodes;
+        std::vector<std::shared_ptr<Octree<Particle, int16_t, "output/fibSphere">::NodeData>> allPlanetNodes;
         if (!activeAsteroids.empty()) {
             auto localSearch = grid.findInRadius(config.center, config.radius * 1.5f);
             for (auto& n : localSearch) {
@@ -1248,7 +1347,7 @@ public:
         TIME_FUNCTION;
         auto allNodes = grid.findInRadius(config.center, config.radius * 1.5f);
         
-        std::vector<std::pair<std::shared_ptr<Octree<Particle>::NodeData>, v3>> smoothMoves;
+        std::vector<std::pair<std::shared_ptr<Octree<Particle, int16_t, "output/fibSphere">::NodeData>, v3>> smoothMoves;
         
         for (auto& n : allNodes) {
             if (!n->isActive() || n->objectId == 2) continue;

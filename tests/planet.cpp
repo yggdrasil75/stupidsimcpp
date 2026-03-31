@@ -25,7 +25,7 @@ private:
     int reflectCount = 4;
     bool slowRender = false;
     float lodDist = 1024.0f;
-    float lodDropoff = 0.01f;
+    float lodDropoff = 0.05f;
     float maxViewDistance = 4096;
     bool globalIllumination = false;
     bool useLod = true;
@@ -390,7 +390,9 @@ public:
                     break;
             }
 
-            sim.grid.queuedsetColor(p.currentPos, color);
+            sim.grid.waitForIdle();
+            // sim.grid.queuedsetColor(p.currentPos, color);
+            sim.grid.setColor(p.currentPos, color);
                 // snf++;
             // sim.grid.update(p.currentPos, p.currentPos, p, true, color, sim.config.voxelSize, true, -2, false, 0.0f, 0.0f, 0.0f);
         }
@@ -429,7 +431,9 @@ public:
                     break;
             }
 
-            sim.grid.queuedsetColor(p.currentPos, color);
+            sim.grid.waitForIdle();
+            // sim.grid.queuedsetColor(p.currentPos, color);
+            sim.grid.setColor(p.currentPos, color);
             // sim.grid.update(p.currentPos, p.currentPos, p, true, color, sim.config.voxelSize, true, -2, false, 0.0f, 0.0f, 0.0f);
         }
         // if (snf > 0 || inf > 0) {
