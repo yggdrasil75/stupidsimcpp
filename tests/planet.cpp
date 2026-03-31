@@ -32,7 +32,6 @@ private:
     std::map<int, bool> keyStates;
     float deltaTime = 0.16f;
     bool orbitEquator = false;
-    bool followAsteroid = false;
     float rotationRadius = 2500;
     float angle = 0.0f;
     const float ω = (std::pow(M_PI, 2) / 30) / 10;
@@ -43,7 +42,6 @@ private:
     std::string cachedStats;
     bool statsNeedUpdate = true;
     float framerate = 60.0;
-    bool simulateImpactsRealtime = false;
 
     enum class DebugColorMode {
         BASE,
@@ -86,9 +84,6 @@ public:
 
     void renderUI(GLFWwindow* window) {
         handleCameraControls(window);
-        if (simulateImpactsRealtime) {
-            sim.updateImpacts(deltaTime);
-        }
         ImGui::Begin("Planet Simulation");
         if (ImGui::BeginTable("MainLayout", 2, ImGuiTableFlags_Resizable | ImGuiTableFlags_BordersOuter)) {
             ImGui::TableSetupColumn("Controls", ImGuiTableColumnFlags_WidthStretch, 0.3f);
@@ -112,20 +107,6 @@ public:
             
             v3 target(sim.config.center);
             cam.direction = (target - cam.origin).normalized();
-        }
-        
-        if (followAsteroid && !sim.activeAsteroids.empty()) {
-            const auto& ast = sim.activeAsteroids.front();
-            v3 astVel = ast.velocity;
-            
-            if (astVel.norm() < 0.001f) {
-                astVel = (sim.config.center - ast.position).normalized();
-            } else {
-                astVel.normalize();
-            }
-            
-            cam.origin = ast.position - astVel * (ast.radius * 8.0f) + v3(0, ast.radius * 1.5f, 0);
-            cam.direction = (ast.position - cam.origin).normalized();
         }
 
         glfwPollEvents();
@@ -195,10 +176,14 @@ public:
             ImGui::Separator();
 
             if (!sim.coreFilled) ImGui::BeginDisabled();
-            ImGui::Checkbox("Simulate Asteroid Impacts (Real-time)", &simulateImpactsRealtime);
-            
-            if (ImGui::Button("Spawn Single Asteroid", ImVec2(-1, 30))) {
-                sim.spawnAsteroid();
+
+            static int numAsteroids = 5;
+            ImGui::InputInt("Asteroids Count", &numAsteroids);
+            if (numAsteroids < 1) numAsteroids = 1;
+
+            if (ImGui::Button("Generate Asteroid Impacts", ImVec2(-1, 30))) {
+                sim.generateAsteroidImpacts(numAsteroids);
+                applyDebugColorMode(); 
             }
             if (ImGui::Button("Quick Smooth Surface", ImVec2(-1, 20))) {
                 sim.quickSmoothSurface();
@@ -318,7 +303,6 @@ public:
             }
 
             if (ImGui::Button(orbitEquator ? "Stop Equator" : "Orbit Equator")) orbitEquator = !orbitEquator;
-            ImGui::Checkbox("Follow First Asteroid", &followAsteroid);
         }
 
         updateStatsCache();
@@ -373,16 +357,10 @@ public:
                     break;
                 }
                 case DebugColorMode::IMPACTS: {
-                    float maxHeat = 0.0f;
-                    for (const auto& impact : sim.impactHistory) {
-                        float dist = (p.currentPos - impact.position).norm();
-                        if (dist < impact.radius) {
-                            float heat = 1.0f - (dist / impact.radius);
-                            if (heat > maxHeat) maxHeat = heat;
-                        }
-                    }
-                    color = v3(0.5f + maxHeat * 0.5f, 0.5f - maxHeat * 0.5f, 0.5f - maxHeat * 0.5f);
-                    break;
+                    color = v3(p.impactHeat, p.impactShock, p.impactDebris);
+                    color = v3(0.2f, 0.2f, 0.2f) + color * 0.8f;
+                    
+                    color = color.cwiseMin(1.0f).cwiseMax(0.0f);
                 }
                 case DebugColorMode::BASE:
                 default:
@@ -414,16 +392,10 @@ public:
                     break;
                 }
                 case DebugColorMode::IMPACTS: {
-                    float maxHeat = 0.0f;
-                    for (const auto& impact : sim.impactHistory) {
-                        float dist = (p.currentPos - impact.position).norm();
-                        if (dist < impact.radius) {
-                            float heat = 1.0f - (dist / impact.radius);
-                            if (heat > maxHeat) maxHeat = heat;
-                        }
-                    }
-                    color = v3(0.5f + maxHeat * 0.5f, 0.5f - maxHeat * 0.5f, 0.5f - maxHeat * 0.5f);
-                    break;
+                    color = v3(p.impactHeat, p.impactShock, p.impactDebris);
+                    color = v3(0.2f, 0.2f, 0.2f) + color * 0.8f;
+                    
+                    color = color.cwiseMin(1.0f).cwiseMax(0.0f);
                 }
                 case DebugColorMode::BASE:
                 default:

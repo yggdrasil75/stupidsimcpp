@@ -91,6 +91,10 @@ struct Particle {
     float rockcontent = 1.0f;
     float metalcontent = 0.0f;
 
+    float impactShock = 0.0f;
+    float impactHeat = 0.0f;
+    float impactDebris = 0.0f;
+
     NeighborData nearNeighbors[8];
 
     Particle() = default;
@@ -120,6 +124,10 @@ struct Particle {
         claycontent = other.claycontent;
         rockcontent = other.rockcontent;
         metalcontent = other.metalcontent;
+        
+        impactShock = other.impactShock;
+        impactHeat = other.impactHeat;
+        impactDebris = other.impactDebris;
         
         for(int i = 0; i < 8; ++i) {
             nearNeighbors[i] = other.nearNeighbors[i];
@@ -156,6 +164,10 @@ struct Particle {
             claycontent = other.claycontent;
             rockcontent = other.rockcontent;
             metalcontent = other.metalcontent;
+            
+            impactShock = other.impactShock;
+            impactHeat = other.impactHeat;
+            impactDebris = other.impactDebris;
             
             for(int i = 0; i < 8; ++i) {
                 nearNeighbors[i] = other.nearNeighbors[i];
@@ -208,6 +220,10 @@ struct Particle {
         writeBin(out, rockcontent);
         writeBin(out, metalcontent);
         
+        writeBin(out, impactShock);
+        writeBin(out, impactHeat);
+        writeBin(out, impactDebris);
+        
         for(int i = 0; i < 8; ++i) {
             writeBin(out, nearNeighbors[i].index);
             writeBin(out, nearNeighbors[i].distance);
@@ -249,6 +265,10 @@ struct Particle {
         readBin(in, p.claycontent);
         readBin(in, p.rockcontent);
         readBin(in, p.metalcontent);
+        
+        readBin(in, p.impactShock);
+        readBin(in, p.impactHeat);
+        readBin(in, p.impactDebris);
         
         for(int i = 0; i < 8; ++i) {
             readBin(in, p.nearNeighbors[i].index);
@@ -307,17 +327,6 @@ struct PlateConfig {
     std::vector<int> assignedNodes;
 };
 
-struct Asteroid {
-    int id;
-    v3 position;
-    v3 velocity;
-    float radius;
-    float mass;
-    std::vector<v3> nodePositions; 
-    bool active = true;
-    float timeAlive = 0.0f;
-};
-
 struct ImpactEvent {
     v3 position;
     float radius;
@@ -332,14 +341,12 @@ public:
     bool starAdded = false;
     bool coreFilled = false;
 
-    std::vector<Asteroid> activeAsteroids;
     std::vector<ImpactEvent> impactHistory;
-    int nextAsteroidId = 0;
     int dynMoonId = 10;
 
     planetsim() {
         config = planetConfig();
-        grid = Octree<Particle, int16_t, "output/fibSphere">(v3(-config.gridSizeCube,-config.gridSizeCube,-config.gridSizeCube),v3(config.gridSizeCube,config.gridSizeCube,config.gridSizeCube), 16, 32);
+        grid = Octree<Particle, int16_t, "output/fibSphere">(v3(-config.gridSizeCubeMin,-config.gridSizeCubeMin,-config.gridSizeCubeMin),v3(config.gridSizeCubeMin,config.gridSizeCubeMin,config.gridSizeCubeMin), 16, 32);
     }
 
     float evaluate2DStack(const Eigen::Vector2f& point, const NoisePreviewState& state, PNoise2& gen) {
@@ -1242,201 +1249,200 @@ public:
         std::cout << "Volume Fill Complete. Inserted " << fillCount << " interior nodes directly into the grid." << std::endl;
     }
 
-    void spawnAsteroid() {
+    void applyDirectImpact(v3 targetPos, v3 velocity, float astRadius, float incidenceDot) {
+        float depth = astRadius * (1.0f + incidenceDot * 2.0f);
+        v3 impactCenter = targetPos + velocity * (depth * 0.5f);
+        
+        float affectRadius = astRadius * 1.5f;
+        auto affected = grid.findInRadius(impactCenter, affectRadius);
+        
+        std::vector<v3> toRemove;
+        std::vector<std::pair<v3, Particle>> toUpdate;
+        
+        for (auto& n : affected) {
+            if (!n->isActive()) continue;
+            
+            float dist = (n->position - impactCenter).norm();
+            if (dist < astRadius) {
+                toRemove.push_back(n->position);
+            } else {
+                Particle p = n->data;
+                float falloff = 1.0f - ((dist - astRadius) / (affectRadius - astRadius));
+                
+                p.impactHeat = std::clamp(p.impactHeat + falloff, 0.0f, 1.0f);
+                p.impactShock = std::clamp(p.impactShock + falloff, 0.0f, 1.0f);
+                p.metalcontent = std::clamp(p.metalcontent + falloff * 0.5f, 0.0f, 1.0f);
+                
+                v3 origCol = p.originColor.cast<float>();
+                v3 burnCol(0.1f, 0.05f, 0.05f); // Reddish dark scorch
+                v3 newCol = origCol * (1.0f - falloff) + burnCol * falloff;
+                p.originColor = newCol.cast<Eigen::half>();
+                
+                // Push nodes out slightly to form a crater rim
+                v3 pushDir = (n->position - impactCenter).normalized();
+                p.currentPos = n->position + pushDir * (falloff * config.voxelSize * 2.0f);
+                
+                toUpdate.push_back({n->position, p});
+            }
+        }
+        
+        for (auto& pos : toRemove) grid.remove(pos, config.voxelSize);
+        for (auto& up : toUpdate) {
+            grid.move(up.first, up.second.currentPos);
+            grid.updateData(up.second.currentPos, up.second);
+            grid.setColor(up.second.currentPos, up.second.originColor.cast<float>());
+        }
+        
+        impactHistory.push_back({targetPos, affectRadius});
+        std::cout << "  - Direct Impact processed. Radius: " << astRadius << std::endl;
+    }
+
+    void applyScrapeImpact(v3 targetPos, v3 velocity, float astRadius) {
+        float trenchLength = astRadius * (4.0f + 4.0f * (static_cast<float>(rng()) / RAND_MAX));
+        
+        int steps = std::max(1, static_cast<int>(trenchLength / (astRadius * 0.5f)));
+        for (int i = 0; i <= steps; i++) {
+            float t = static_cast<float>(i) / steps;
+            v3 currentPos = targetPos + velocity * (trenchLength * t);
+            
+            float currentRadius = astRadius * (1.0f - t * 0.5f);
+            float affectRadius = currentRadius * 1.5f;
+            
+            auto affected = grid.findInRadius(currentPos, affectRadius);
+            
+            std::vector<v3> toRemove;
+            std::vector<std::pair<v3, Particle>> toUpdate;
+            
+            for (auto& n : affected) {
+                if (!n->isActive()) continue;
+                float dist = (n->position - currentPos).norm();
+                if (dist < currentRadius) {
+                    toRemove.push_back(n->position);
+                } else {
+                    Particle p = n->data;
+                    float falloff = 1.0f - ((dist - currentRadius) / (affectRadius - currentRadius));
+                    
+                    p.impactHeat = std::clamp(p.impactHeat + falloff * 0.5f, 0.0f, 1.0f);
+                    p.impactShock = std::clamp(p.impactShock + falloff * 0.5f, 0.0f, 1.0f);
+                    
+                    v3 origCol = p.originColor.cast<float>();
+                    v3 burnCol(0.2f, 0.15f, 0.1f);
+                    p.originColor = (origCol * (1.0f - falloff) + burnCol * falloff).cast<Eigen::half>();
+                    
+                    toUpdate.push_back({n->position, p});
+                }
+            }
+            
+            for (auto& pos : toRemove) grid.remove(pos, config.voxelSize);
+            for (auto& up : toUpdate) {
+                grid.updateData(up.first, up.second);
+                grid.setColor(up.first, up.second.originColor.cast<float>());
+            }
+        }
+        
+        impactHistory.push_back({targetPos, astRadius * 3.0f});
+        std::cout << "  - Scrape Impact processed. Length: " << trenchLength << std::endl;
+    }
+
+    void applyAirburstImpact(v3 targetPos, v3 normal, float astRadius) {
+        int numFragments = 5 + (rng() % 10);
+        
+        for (int i = 0; i < numFragments; i++) {
+            v3 offset = v3(
+                (static_cast<float>(rng()) / RAND_MAX) - 0.5f,
+                (static_cast<float>(rng()) / RAND_MAX) - 0.5f,
+                (static_cast<float>(rng()) / RAND_MAX) - 0.5f
+            ).normalized() * (astRadius * 1.5f * (static_cast<float>(rng()) / RAND_MAX));
+            
+            v3 fragPos = targetPos + offset;
+            float fragRadius = astRadius * (0.1f + 0.3f * (static_cast<float>(rng()) / RAND_MAX));
+            
+            auto affected = grid.findInRadius(fragPos, fragRadius * 1.5f);
+            
+            std::vector<v3> toRemove;
+            std::vector<std::pair<v3, Particle>> toUpdate;
+            
+            for (auto& n : affected) {
+                if (!n->isActive()) continue;
+                float dist = (n->position - fragPos).norm();
+                if (dist < fragRadius) {
+                    toRemove.push_back(n->position);
+                } else {
+                    Particle p = n->data;
+                    float falloff = 1.0f - ((dist - fragRadius) / (fragRadius * 0.5f));
+                    
+                    p.impactDebris = std::clamp(p.impactDebris + falloff, 0.0f, 1.0f);
+                    
+                    v3 origCol = p.originColor.cast<float>();
+                    v3 dustCol(0.6f, 0.5f, 0.4f);
+                    p.originColor = (origCol * (1.0f - falloff) + dustCol * falloff).cast<Eigen::half>();
+                    
+                    toUpdate.push_back({n->position, p});
+                }
+            }
+            
+            for (auto& pos : toRemove) grid.remove(pos, config.voxelSize);
+            for (auto& up : toUpdate) {
+                grid.updateData(up.first, up.second);
+                grid.setColor(up.first, up.second.originColor.cast<float>());
+            }
+        }
+        
+        impactHistory.push_back({targetPos, astRadius * 2.0f});
+        std::cout << "  - Airburst Impact processed. Fragments: " << numFragments << std::endl;
+    }
+
+    void generateAsteroidImpacts(int count) {
+        TIME_FUNCTION;
         if (!coreFilled) {
             std::cout << "ERROR: Core must be filled before spawning asteroids!" << std::endl;
             return;
         }
-        Asteroid ast;
-        ast.id = nextAsteroidId++;
-        
-        ast.radius = config.radius * (0.05f + 0.1f * (static_cast<float>(rng()) / RAND_MAX)); 
-        ast.mass = std::pow(ast.radius, 3) * 0.1f; 
-        
-        v3 dir;
-        dir << (static_cast<float>(rng()) / RAND_MAX) - 0.5f, 
-               (static_cast<float>(rng()) / RAND_MAX) - 0.5f, 
-               (static_cast<float>(rng()) / RAND_MAX) - 0.5f;
-        dir.normalize();
-        ast.position = config.center + dir * config.radius * 4.0f;
-        
-        float totalPlanetMass = 0.0f;
-        auto planetNodes = grid.findInRadius(config.center, config.radius * 1.5f);
-        for (auto& n : planetNodes) {
-            if (n->isActive() && n->objectId != 2) totalPlanetMass += n->data.mass;
-        }
-        if (totalPlanetMass < 1.0f) totalPlanetMass = 50000.0f; 
-        
-        v3 toPlanet = (config.center - ast.position).normalized();
-        v3 tangent = toPlanet.cross(v3(0, 1, 0));
-        if (tangent.norm() < 0.1f) tangent = toPlanet.cross(v3(1, 0, 0));
-        tangent.normalize();
-        
-        float baseSpeed = std::sqrt(config.G_ATTRACTION * totalPlanetMass / (config.radius * 4.0f)); 
-        ast.velocity = toPlanet * baseSpeed * (0.5f + 0.5f * (static_cast<float>(rng()) / RAND_MAX)) 
-                     + tangent * baseSpeed * (0.5f + 1.5f * (static_cast<float>(rng()) / RAND_MAX));
-        
-        int steps = std::max(1, static_cast<int>(ast.radius / config.voxelSize));
-        for (int x = -steps; x <= steps; x++) {
-            for (int y = -steps; y <= steps; y++) {
-                for (int z = -steps; z <= steps; z++) {
-                    v3 offset = v3(x, y, z) * config.voxelSize;
-                    if (offset.norm() <= ast.radius) {
-                        v3 pPos = ast.position + offset;
-                        ast.nodePositions.push_back(pPos);
-                        
-                        Particle p;
-                        p.currentPos = pPos;
-                        p.originColor = v3(0.5f, 0.45f, 0.45f).cast<Eigen::half>(); 
-                        p.mass = 1.0f;
-                        p.velocity = ast.velocity;
-                        
-                        grid.set(p, p.currentPos, true, p.originColor.cast<float>(), config.voxelSize, true, 2, false, 0.0f, 0.0f, 0.0f);
-                    }
-                }
-            }
-        }
-        
-        ast.mass = ast.nodePositions.size() * 1.0f;
-        activeAsteroids.push_back(ast);
-        std::cout << "Asteroid " << ast.id << " Spawned! Radius: " << ast.radius << std::endl;
-    }
-    
-    void updateImpacts(float dt) {
-        if (!coreFilled) return;
-        if (activeAsteroids.size() < 3 && (static_cast<float>(rng()) / RAND_MAX) < (0.01f * dt * 60.0f)) {
-            spawnAsteroid();
-        }
-        
-        std::vector<std::shared_ptr<Octree<Particle, int16_t, "output/fibSphere">::NodeData>> allPlanetNodes;
-        if (!activeAsteroids.empty()) {
-            auto localSearch = grid.findInRadius(config.center, config.radius * 1.5f);
-            for (auto& n : localSearch) {
-                if (n->isActive() && n->objectId != 2) {
-                    allPlanetNodes.push_back(n);
-                }
-            }
-        }
-        
-        for (auto& ast : activeAsteroids) {
-            if (!ast.active) continue;
-            ast.timeAlive += dt;
-            
-            v3 totalAccel = v3::Zero();
-            for (const auto& pn : allPlanetNodes) {
-                v3 diff = pn->position - ast.position;
-                float distSq = diff.squaredNorm();
-                if (distSq > config.voxelSize * config.voxelSize) {
-                    float force = (config.G_ATTRACTION * pn->data.mass) / distSq;
-                    totalAccel += diff.normalized() * force;
-                }
-            }
-            
-            ast.velocity += totalAccel * dt;
-            
-            v3 delta = ast.velocity * dt;
-            ast.position += delta;
-            
-            std::vector<v3> newPositions;
-            newPositions.reserve(ast.nodePositions.size());
-            
-            for (auto& pPos : ast.nodePositions) {
-                v3 nPos = pPos + delta;
-                grid.move(pPos, nPos);
-                auto node = grid.find(nPos);
-                if (node) {
-                    node->data.currentPos = nPos;
-                    node->data.velocity = ast.velocity;
-                }
-                newPositions.push_back(nPos);
-            }
-            ast.nodePositions = std::move(newPositions);
-            
-            bool hit = false;
-            auto neighbors = grid.findInRadius(ast.position, ast.radius + config.voxelSize * 1.5f);
-            for (auto& n : neighbors) {
-                if (n->objectId != 2 && n->isActive()) { 
-                    hit = true; 
-                    break; 
-                }
-            }
-            
-            float distToCenter = (config.center - ast.position).norm();
-            if (hit) {
-                handleImpact(ast);
-            } else if (distToCenter > config.radius * 5.0f && ast.timeAlive > 15.0f) {
-                ast.active = false;
-                makeMoonFromAsteroid(ast);
-            }
-        }
-        
-        activeAsteroids.erase(std::remove_if(activeAsteroids.begin(), activeAsteroids.end(), 
-            [](const Asteroid& a){ return !a.active; }), activeAsteroids.end());
-    }
 
-    void handleImpact(Asteroid& ast) {
-        std::cout << "Asteroid " << ast.id << " IMPACTED planet surface!" << std::endl;
-        ast.active = false;
-        
-        float craterRadius = ast.radius * 2.5f;
-        impactHistory.push_back({ast.position, craterRadius});
-        
-        for (auto& pPos : ast.nodePositions) {
-            grid.remove(pPos, config.voxelSize);
-        }
-        
-        auto affected = grid.findInRadius(ast.position, craterRadius);
-        
-        struct MoveData { v3 oldP; v3 newP; };
-        std::vector<MoveData> movements;
-        std::vector<v3> removals;
-        
-        for (auto& node : affected) {
-            if (node->objectId == 2) continue;
-            if (!node->isActive()) continue;
+        std::uniform_real_distribution<float> rand(0.0f, 1.0f);
+        std::cout << "Generating " << count << " Asteroid Impacts..." << std::endl;
+
+        for (int i = 0; i < count; i++) {
+            v3 up = v3(rand(rng) - 0.5f, rand(rng) - 0.5f, rand(rng) - 0.5f).normalized();
+            v3 targetPos = config.center + up * config.radius;
             
-            float d = (node->position - ast.position).norm();
+            auto possibleNodes = grid.findInRadius(targetPos, config.radius * 0.5f);
+            float maxDist = 0.0f;
+            v3 actualPos = targetPos;
+            bool found = false;
             
-            if (d < ast.radius * 0.9f) {
-                removals.push_back(node->position);
-                node->setActive(false);
-            } else {
-                v3 pushDir = (node->position - ast.position).normalized();
-                float pushStrength = std::pow((craterRadius - d) / craterRadius, 2.0f); 
-                v3 up = (node->position - config.center).normalized();
-                
-                v3 newPos = node->position + pushDir * (pushStrength * ast.radius) + up * (pushStrength * ast.radius * 0.4f);
-                movements.push_back({node->position, newPos});
-                
-                node->data.currentPos = newPos;
-                node->data.originColor = v3(0.25f, 0.2f, 0.2f).cast<Eigen::half>();
+            for(auto& n : possibleNodes) {
+                if(!n->isActive()) continue;
+                float d = (n->position - config.center).norm();
+                if(d > maxDist) {
+                    maxDist = d;
+                    actualPos = n->position;
+                    found = true;
+                }
             }
-        }
-        
-        for (auto& r : removals) {
-            grid.remove(r, config.voxelSize);
-        }
-        
-        for (auto& m : movements) {
-            grid.move(m.oldP, m.newP);
-            grid.setColor(m.newP, v3(0.25f, 0.2f, 0.2f));
-            grid.updateData(m.newP, grid.find(m.newP)->data);
+            if (found) {
+                targetPos = actualPos;
+                up = (targetPos - config.center).normalized();
+            }
+
+            v3 randomTangent = up.cross(v3(rand(rng) - 0.5f, rand(rng) - 0.5f, rand(rng) - 0.5f)).normalized();
+            float incidenceDot = rand(rng); 
+            v3 velocity = (-up * incidenceDot + randomTangent * (1.0f - incidenceDot)).normalized();
+
+            float sizeClass = rand(rng);
+            float astRadius = config.radius * (0.02f + sizeClass * 0.08f); 
+
+            if (incidenceDot < 0.2f) {
+                applyScrapeImpact(targetPos, velocity, astRadius);
+            } else if (sizeClass < 0.2f) {
+                applyAirburstImpact(targetPos, up, astRadius);
+            } else {
+                applyDirectImpact(targetPos, velocity, astRadius, incidenceDot);
+            }
         }
         
         grid.optimize();
-    }
-    
-    void makeMoonFromAsteroid(Asteroid& ast) {
-        std::cout << "Asteroid " << ast.id << " settled into orbit. Converting to Skybox Moon." << std::endl;
-        float dist = (ast.position - config.center).norm();
-        float angularRadius = std::asin(ast.radius / dist);
-        v3 dir = (ast.position - config.center).normalized();
-        
-        grid.addSkyBody(dynMoonId++, dir, angularRadius, 180, 180, 180, 50);
-        
-        for (auto& pPos : ast.nodePositions) {
-            grid.remove(pPos, config.voxelSize);
-        }
+        std::cout << "Completed Asteroid Impacts." << std::endl;
     }
 
     void quickSmoothSurface() {
