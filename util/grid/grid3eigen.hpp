@@ -314,12 +314,16 @@ public:
         }
 
         static void writeVec3(std::ofstream& out, const Eigen::Vector3f& vec) {
-            writeVal(out, vec.x()); writeVal(out, vec.y()); writeVal(out, vec.z());
+            writeVal(out, vec.x());
+            writeVal(out, vec.y());
+            writeVal(out, vec.z());
         }
 
         static void readVec3(std::ifstream& in, Eigen::Vector3f& vec) {
             float x, y, z;
-            readVal(in, x); readVal(in, y); readVal(in, z);
+            readVal(in, x);
+            readVal(in, y);
+            readVal(in, z);
             vec = Eigen::Vector3f(x, y, z);
         }
 
@@ -333,7 +337,7 @@ public:
                 writeVal(out, hasData);
                 if (hasData) data->serialize(out);
             } else if constexpr (std::is_class_v<T>) {
-                data.serialize(out); 
+                data.serialize(out);
             } else {
                 writeVal(out, data);
             }
@@ -424,7 +428,9 @@ public:
                 deserializeData(in, pt->data);
                 readVec3(in, pt->position);
                 readVal(in, pt->objectId);
-                uint8_t f; readVal(in, f); pt->flags.store(f, std::memory_order_relaxed);
+                uint8_t f;
+                readVal(in, f);
+                pt->flags.store(f, std::memory_order_relaxed);
                 readVal(in, pt->size);
                 readVal(in, pt->colorIdx);
                 readVal(in, pt->materialIdx);
@@ -432,7 +438,8 @@ public:
             }
 
             if (!isLeaf()) {
-                uint8_t childMask; readVal(in, childMask);
+                uint8_t childMask;
+                readVal(in, childMask);
                 for (int i = 0; i < 8; ++i) {
                     if ((childMask >> i) & 1) {
                         PointType childMin, childMax;
@@ -536,7 +543,9 @@ public:
                 return;
             }
 
-            bool leaf; readVal(in, leaf); setLeaf(leaf);
+            bool leaf;
+            readVal(in, leaf);
+            setLeaf(leaf);
 
             size_t pointCount;
             readVal(in, pointCount);
@@ -546,7 +555,9 @@ public:
                 deserializeData(in, pt->data);
                 readVec3(in, pt->position);
                 readVal(in, pt->objectId);
-                uint8_t f; readVal(in, f); pt->flags.store(f, std::memory_order_relaxed);
+                uint8_t f;
+                readVal(in, f);
+                pt->flags.store(f, std::memory_order_relaxed);
                 readVal(in, pt->size);
                 readVal(in, pt->colorIdx);
                 readVal(in, pt->materialIdx);
@@ -554,7 +565,8 @@ public:
             }
 
             if (!isLeaf()) {
-                uint8_t childMask; readVal(in, childMask);
+                uint8_t childMask;
+                readVal(in, childMask);
                 for (int i = 0; i < 8; ++i) {
                     if ((childMask >> i) & 1) {
                         PointType childMin, childMax;
@@ -770,18 +782,13 @@ private:
     void lazilyOffload(OctreeNode* node) {
         {
             std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
-            if (!node->isLoaded() || node->isSaveQueued() || node->isKeepLoaded()) return;
+            if (!node->isLoaded() || node->isSaveQueued()) return;
 
             node->setSaveQueued(true);
-            lock.unlock();
+            node->setLoadQueued(false);
         }
 
         enqueueTask([this, node]() {
-            if (node->isKeepLoaded()) {
-                std::unique_lock<std::shared_mutex> nlock(node->nodeMutex);
-                node->setSaveQueued(false);
-                return;
-            }
             {
                 std::shared_lock<std::shared_mutex> nlock(node->nodeMutex);
                 if (node->isLoaded() && node->isSaveQueued()) {
@@ -790,9 +797,7 @@ private:
                     }
                 }
             }
-            if (!node->isKeepLoaded()) {
-                node->offload();
-            }
+            node->offload();
             {
                 std::unique_lock<std::shared_mutex> nlock(node->nodeMutex);
                 node->setSaveQueued(false);
@@ -801,12 +806,12 @@ private:
     }
 
     void ensureLoaded(OctreeNode* node, bool asyncLoad = false) {
-        
         {
-            std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
+            // std::unique_lock<std::shared_mutex> lock(node->nodeMutex); // using atomics so dont need this?
             if (node->isLoaded() || node->isQueued()) return; 
             else {
-                node->setLoadQueued(true);    
+                node->setLoadQueued(true);
+                node->setSaveQueued(false);
             }
         }
 
@@ -829,7 +834,7 @@ private:
         } else {
             {
                 std::unique_lock<std::shared_mutex> nlock(node->nodeMutex);
-                node->loadRegion();
+                if (!node->isLoaded()) node->loadRegion();
                 node->setLoadQueued(false);
             }
             if (node->isLoaded()) {
@@ -1121,7 +1126,8 @@ private:
     float lodFalloffRate_ = 0.1f; // Lower = better, higher = worse. 0-1
     float invLodf = 1 / lodFalloffRate_;
     float lodMinDistance_ = 100.0f;
-    float maxDistance_ = size * size;
+    float maxDistance_ = lodMinDistance_ * lodMinDistance_;
+    float keepDistance_ = maxDistance_ * 1.2;
     
     struct Ray {
         PointType origin;
@@ -1304,9 +1310,12 @@ private:
             PointType newMin = min;
             PointType newMax = max;
             
-            if (expandX < 0) newMin.x() -= size.x(); else newMax.x() += size.x();
-            if (expandY < 0) newMin.y() -= size.y(); else newMax.y() += size.y();
-            if (expandZ < 0) newMin.z() -= size.z(); else newMax.z() += size.z();
+            if (expandX < 0) newMin.x() -= size.x();
+            else newMax.x() += size.x();
+            if (expandY < 0) newMin.y() -= size.y();
+            else newMax.y() += size.y();
+            if (expandZ < 0) newMin.z() -= size.z();
+            else newMax.z() += size.z();
             
             auto newRoot = std::make_unique<OctreeNode>(newMin, newMax);
             newRoot->setLeaf(false);
@@ -1389,12 +1398,11 @@ private:
         }
     }
 
-    void updateStreamingRecursive(OctreeNode* node, const PointType& camPos, bool parentKeepLoaded = false) {
+    void updateStreamingRecursive(OctreeNode* node, const PointType& camPos) {
         if (!node) return;
-        bool keepLoaded = parentKeepLoaded || node->isKeepLoaded();
-
+        
+        float distSq = 0.0f;
         if (!node->contains(camPos)) {
-            float distSq = 0.0f;
             for(int i = 0; i < Dim; ++i) {
                 float v = camPos[i];
                 if(v < node->bounds.first[i]) {
@@ -1403,53 +1411,46 @@ private:
                     distSq += (v - node->bounds.second[i]) * (v - node->bounds.second[i]);
                 }
             }
-            float dist = std::sqrt(distSq);
+        }
+        float dist = std::sqrt(distSq);
 
-            if (dist > maxDistance_) {
-                if (keepLoaded) return;
-                if (!node->isLoaded()) return;
-                size_t subPoints = node->getSubtreePointCount();
-                bool fullyLoaded = node->isSubtreeFullyLoaded();
-                
-                if ((subPoints > regionTargetPoints_ && !node->isLeaf()) || !fullyLoaded) {
-                    if (!node->isLeaf()) {
-                        for (int i = 0; i < 8; ++i) {
-                            if (node->children[i]) {
-                                updateStreamingRecursive(node->children[i].get(), camPos, keepLoaded);
-                            }
-                        }
-                    }
-                } else if (subPoints > 0) {
-                    lazilyOffload(node);
-                }
-                return;
-            }
-
-            if (dist > lodMinDistance_) {
-                ensureLOD(node);
-                if (!node->isLeaf()) {
-                    for (int i = 0; i < 8; ++i) {
-                        if (node->children[i]) {
-                            updateStreamingRecursive(node->children[i].get(), camPos, keepLoaded);
-                        }
-                    }
-                }
-            } else if (!node->isLoaded()) {
-                ensureLoaded(node, true);
-                if (!node->isLeaf()){
-                    for (int i = 0; i < 8; ++i) {
-                        if (node->children[i]) {
-                            updateStreamingRecursive(node->children[i].get(), camPos, keepLoaded);
-                        }
+        if (dist < keepDistance_) {
+            if (!node->isLeaf()) {
+                for (int i = 0; i < 8; ++i) {
+                    if (node->children[i]) {
+                        updateStreamingRecursive(node->children[i].get(), camPos);
                     }
                 }
             }
             return;
         }
-        if (!node->isLeaf()){
+
+        if (dist > maxDistance_) {
+            if (!node->isLoaded()) return;
+            size_t subPoints = node->getSubtreePointCount();
+            bool fullyLoaded = node->isSubtreeFullyLoaded();
+
+            if ((subPoints > regionTargetPoints_ || node->isLeaf()) && fullyLoaded) {
+                if (subPoints > 0) lazilyOffload(node);
+                return;
+            }
+            if (!node->isLeaf()){
+                for (int i = 0; i < 8; ++i) {
+                    updateStreamingRecursive(node->children[i].get(), camPos);
+                }
+            }
+        }
+
+        if (dist > lodMinDistance_) {
+            ensureLoaded(node, true);
+            ensureLOD(node);
+        } else {
+            ensureLoaded(node, true);
+        }
+        if (!node->isLeaf()) {
             for (int i = 0; i < 8; ++i) {
                 if (node->children[i]) {
-                    updateStreamingRecursive(node->children[i].get(), camPos, keepLoaded);
+                    updateStreamingRecursive(node->children[i].get(), camPos);
                 }
             }
         }
@@ -1458,8 +1459,6 @@ private:
     std::shared_ptr<NodeData> findRecursive(OctreeNode* node, const PointType& pos, float tolerance) {
         if (!node->contains(pos)) return nullptr;
         ensureLoaded(node, false);
-        node->setKeepLoaded(true);
-        
         
         for (const auto& pointData : node->points) {
             float distSq = (pointData->position - pos).squaredNorm();
@@ -1474,7 +1473,6 @@ private:
                 return findRecursive(node->children[octant].get(), pos, tolerance);
             }
         }
-        node->setKeepLoaded(false);
         return nullptr;
     }
 
@@ -1558,7 +1556,8 @@ private:
                     float dist = (node->center - ray.origin).norm();
                     float ratio = dist / node->nodeSize;
                     if (dist > lodMinDistance_ && ratio > invLodf) {
-                        float t; PointType n, h;
+                        float t;
+                        PointType n, h;
                         if (rayCubeIntersect(ray, node->lodData.get(), t, n, h)) {
                             if (t >= 0 && t <= maxDist) {
                                 hit = node->lodData;
@@ -1632,30 +1631,38 @@ private:
     
     void fastVoxelTraverseRecursive(OctreeNode* node, float tMin, float tMax, float& maxDist,
           const Ray& ray, std::shared_ptr<NodeData>& hit) {
-        bool nodeloaded = false;
-        {
-            std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
-            nodeloaded = node->isLoaded();
-        }
-        if (!nodeloaded) {
-            ensureLoaded(node, true);
-            std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
-            if (node->lodData) {
-                float t; PointType n, h;
-                if (rayCubeIntersect(ray, node->lodData.get(), t, n, h)) {
-                    if (t >= 0 && t <= maxDist) { hit = node->lodData; maxDist = t; }
-                }
-            }
-            return;
-        }
+        bool nodeloaded = node->isLoaded();
+        ensureLoaded(node, true);
+        // {
+            // std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
+            // nodeloaded = 
+        // }
+        // if (!nodeloaded) {
+        //     // std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
+        //     if (node->lodData) {
+        //         float t;
+        //         PointType n, h;
+        //         if (rayCubeIntersect(ray, node->lodData.get(), t, n, h)) {
+                    // if (t >= 0 && t <= maxDist) {
+                    //     hit = node->lodData;
+                    //     maxDist = t;
+                    // }
+        //         }
+        //     }
+        //     return;
+        // }
 
         std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
         if (!node->isLeaf() && node->lodData) {
             float dist = (node->center - ray.origin).norm();
             if (dist > lodMinDistance_ && (dist / node->nodeSize) > invLodf) {
-                float t; PointType n, h;
+                float t;
+                PointType n, h;
                 if (rayCubeIntersect(ray, node->lodData.get(), t, n, h)) {
-                    if (t >= 0 && t <= maxDist) { hit = node->lodData; maxDist = t; }
+                    if (t >= 0 && t <= maxDist) {
+                        hit = node->lodData;
+                        maxDist = t;
+                    }
                 }
                 return;
             }
@@ -1663,10 +1670,12 @@ private:
 
         for (const auto& pt : node->points) {
             if (pt->isActiveAndVisible()) continue;
-            float t; PointType n, h;
+            float t;
+            PointType n, h;
             if (rayCubeIntersect(ray, pt.get(), t, n, h)) {
                 if (t >= 0 && t <= maxDist && t <= tMax + 0.001f) {
-                    maxDist = t; hit = pt;
+                    maxDist = t;
+                    hit = pt;
                 }
             }
         }
@@ -1949,10 +1958,8 @@ private:
         }
     }
 
-    void offloadRecursive(OctreeNode* node, bool parentKeepLoaded = false) {
+    void offloadRecursive(OctreeNode* node) {
         if (!node->isLoaded()) return;
-        bool keepLoaded = parentKeepLoaded || node->isKeepLoaded();
-        if (keepLoaded) return;
         
         size_t subPoints = node->getSubtreePointCount();
         bool fullyLoaded = node->isSubtreeFullyLoaded();
@@ -1968,7 +1975,7 @@ private:
 
         if (!node->isLeaf()) {
             for (int i = 0; i < 8; ++i) {
-                if (node->children[i]) offloadRecursive(node->children[i].get(), keepLoaded);
+                if (node->children[i]) offloadRecursive(node->children[i].get());
             }
         }
     }
@@ -2007,8 +2014,14 @@ private:
         if (a4.second > a5.second) std::swap(a4, a5);
         if (a6.second > a7.second) std::swap(a6, a7);
         
-        arr[0] = a0; arr[1] = a1; arr[2] = a2; arr[3] = a3;
-        arr[4] = a4; arr[5] = a5; arr[6] = a6; arr[7] = a7;
+        arr[0] = a0;
+        arr[1] = a1;
+        arr[2] = a2;
+        arr[3] = a3;
+        arr[4] = a4;
+        arr[5] = a5;
+        arr[6] = a6;
+        arr[7] = a7;
     }
 
     bool rayBoxIntersect(const Ray& ray, const BoundingBox& box, float& tMin, float& tMax) const {
@@ -2291,7 +2304,10 @@ public:
         invLodf = 1 / rate;
     }
     void setLODMinDistance(float dist) { lodMinDistance_ = dist; }
-    void setMaxDistance(float dist) { maxDistance_ = dist; }
+    void setMaxDistance(float dist) {
+        maxDistance_ = dist;
+        keepDistance_ = dist * 1.2;
+    }
     void setRegionTargetPoints(size_t points) { regionTargetPoints_ = points; }
     size_t getRegionTargetPoints() const { return regionTargetPoints_; }
 
@@ -2340,11 +2356,13 @@ public:
     }
 
     void updateStreaming(const Camera& cam) {
+        if (streamingQueued_.exchange(true, std::memory_order_acquire)) return;
         PointType camPos = cam.origin;
         enqueueTask([this, camPos]() {
             if (root_) {
-                updateStreamingRecursive(root_.get(), camPos, false);
+                updateStreamingRecursive(root_.get(), camPos);
             }
+            streamingQueued_.store(false, std::memory_order_release);
         });
     }
 
