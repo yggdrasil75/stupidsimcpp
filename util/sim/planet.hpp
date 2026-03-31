@@ -1105,38 +1105,134 @@ public:
         float safeRadius = config.radius - std::abs(config.valleyDepth) - (config.noiseStrength * 2.0f) - config.voxelSize;
         if (safeRadius <= 0) safeRadius = config.radius * 0.5f;
 
-        int maxSteps = std::ceil(safeRadius / config.voxelSize);
+        const int LON_RES = 720;
+        const int LAT_RES = 360;
+        std::vector<float> surfaceMap(LON_RES * LAT_RES, safeRadius);
+
+        for (const auto& p : config.surfaceNodes) {
+            v3 d = p.currentPos - config.center;
+            float r = d.norm();
+            if (r < 0.1f) continue;
+            
+            float phi = std::asin(std::clamp(d.y() / r, -1.0f, 1.0f));
+            float theta = std::atan2(d.z(), d.x());
+            
+            int u = std::clamp(static_cast<int>((theta + M_PI) / (2.0f * M_PI) * LON_RES), 0, LON_RES - 1);
+            int v = std::clamp(static_cast<int>((phi + M_PI / 2.0f) / M_PI * LAT_RES), 0, LAT_RES - 1);
+            
+            float angular_radius = (config.voxelSize * 1.5f) / r;
+            int u_radius = std::ceil(angular_radius / (2.0f * M_PI / LON_RES));
+            int v_radius = std::ceil(angular_radius / (M_PI / LAT_RES));
+            
+            for (int dv = -v_radius; dv <= v_radius; ++dv) {
+                for (int du = -u_radius; du <= u_radius; ++du) {
+                    if (du*du + dv*dv <= u_radius*u_radius) {
+                        int nu = ((u + du) % LON_RES + LON_RES) % LON_RES;
+                        int nv = std::clamp(v + dv, 0, LAT_RES - 1);
+                        int idx = nv * LON_RES + nu;
+                        if (r > surfaceMap[idx]) {
+                            surfaceMap[idx] = r;
+                        }
+                    }
+                }
+            }
+        }
+
+        for (const auto& p : config.interpolatedNodes) {
+            v3 d = p.currentPos - config.center;
+            float r = d.norm();
+            if (r < 0.1f) continue;
+            
+            float phi = std::asin(std::clamp(d.y() / r, -1.0f, 1.0f));
+            float theta = std::atan2(d.z(), d.x());
+            
+            int u = std::clamp(static_cast<int>((theta + M_PI) / (2.0f * M_PI) * LON_RES), 0, LON_RES - 1);
+            int v = std::clamp(static_cast<int>((phi + M_PI / 2.0f) / M_PI * LAT_RES), 0, LAT_RES - 1);
+            
+            float angular_radius = (config.voxelSize * 1.5f) / r;
+            int u_radius = std::ceil(angular_radius / (2.0f * M_PI / LON_RES));
+            int v_radius = std::ceil(angular_radius / (M_PI / LAT_RES));
+            
+            for (int dv = -v_radius; dv <= v_radius; ++dv) {
+                for (int du = -u_radius; du <= u_radius; ++du) {
+                    if (du*du + dv*dv <= u_radius*u_radius) {
+                        int nu = ((u + du) % LON_RES + LON_RES) % LON_RES;
+                        int nv = std::clamp(v + dv, 0, LAT_RES - 1);
+                        int idx = nv * LON_RES + nu;
+                        if (r > surfaceMap[idx]) {
+                            surfaceMap[idx] = r;
+                        }
+                    }
+                }
+            }
+        }
+
+        float maxPlanetRadius = config.radius + config.mountHeight + config.noiseStrength * 2.0f + config.voxelSize;
+
         size_t fillCount = 0;
 
-        for (int x = -maxSteps; x <= maxSteps; ++x) {
-            for (int y = -maxSteps; y <= maxSteps; ++y) {
-                for (int z = -maxSteps; z <= maxSteps; ++z) {
-                    v3 pos = config.center + v3(x, y, z) * config.voxelSize;
-                    float dist = (pos - config.center).norm();
+        float d_hcp = config.voxelSize;
+        float z_step = d_hcp * std::sqrt(2.0f / 3.0f);
+        float y_step = d_hcp * std::sqrt(3.0f) / 2.0f;
+        float x_step = d_hcp;
 
-                    if (dist <= safeRadius) {
-                        if (grid.find(pos, config.voxelSize * 0.5f) == nullptr) {
-                            Particle ip;
-                            ip.surface = false;
-                            ip.plateID = -1;
-                            ip.currentPos = pos;
+        int maxK = std::ceil(maxPlanetRadius / z_step);
+        int maxJ = std::ceil(maxPlanetRadius / y_step);
+        int maxI = std::ceil(maxPlanetRadius / x_step);
 
-                            float depthRatio = dist / safeRadius;
-                            Eigen::Vector3f coreColor(1.0f, 0.9f, 0.4f);
-                            Eigen::Vector3f mantleColor(0.8f, 0.15f, 0.0f);
-                            Eigen::Vector3f finalColor = mantleColor;
+        #pragma omp parallel for collapse(3)
+        for (int k = -maxK; k <= maxK; ++k) {
+            for (int j = -maxJ; j <= maxJ; ++j) {
+                for (int i = -maxI; i <= maxI; ++i) {
+                    float z = k * z_step;
+                    int k_mod2 = std::abs(k % 2); 
+                    int j_mod2 = std::abs(j % 2);
+                    float y = j * y_step + k_mod2 * d_hcp * std::sqrt(3.0f) / 6.0f;
+                    float x = i * x_step + j_mod2 * (d_hcp / 2.0f) + k_mod2 * (d_hcp / 2.0f);
 
-                            if (depthRatio < 0.5f) {
-                                float blend = depthRatio * 2.0f;
-                                finalColor = coreColor * (1.0f - blend) + mantleColor * blend;
-                            }
+                    v3 pos = config.center + v3(x, y, z);
+                    v3 dir = pos - config.center;
+                    float dist = dir.norm();
 
-                            ip.originColor = finalColor.cast<Eigen::half>();
-                            ip.mass = 100.0f;
+                    if (dist > maxPlanetRadius) continue;
 
-                            grid.queuedset(ip, pos, true, finalColor, config.voxelSize, true, 1, false, 0.0f, 0.0f, 0.0f);
-                            fillCount++;
+                    bool inside = (dist <= safeRadius);
+                    float localMaxRadius = config.radius;
+                    
+                    if (!inside && dist > 0.1f) {
+                        float phi = std::asin(std::clamp(dir.y() / dist, -1.0f, 1.0f));
+                        float theta = std::atan2(dir.z(), dir.x());
+                        int u = std::clamp(static_cast<int>((theta + M_PI) / (2.0f * M_PI) * LON_RES), 0, LON_RES - 1);
+                        int v = std::clamp(static_cast<int>((phi + M_PI / 2.0f) / M_PI * LAT_RES), 0, LAT_RES - 1);
+                        
+                        localMaxRadius = surfaceMap[v * LON_RES + u];
+                        
+                        if (dist <= localMaxRadius - config.voxelSize * 0.7f) {
+                            inside = true;
                         }
+                    }
+
+                    if (inside && grid.find(pos, config.voxelSize * 0.5f) == nullptr) {
+                        Particle ip;
+                        ip.surface = false;
+                        ip.plateID = -1;
+                        ip.currentPos = pos;
+
+                        float depthRatio = dist / localMaxRadius;
+                        Eigen::Vector3f coreColor(1.0f, 0.9f, 0.4f);
+                        Eigen::Vector3f mantleColor(0.8f, 0.15f, 0.0f);
+                        Eigen::Vector3f finalColor = mantleColor;
+
+                        if (depthRatio < 0.5f) {
+                            float blend = depthRatio * 2.0f;
+                            finalColor = coreColor * (1.0f - blend) + mantleColor * blend;
+                        }
+
+                        ip.originColor = finalColor.cast<Eigen::half>();
+                        ip.mass = 100.0f;
+
+                        grid.queuedset(ip, pos, true, finalColor, config.voxelSize, true, 1, false, 0.0f, 0.0f, 0.0f);
+                        fillCount++;
                     }
                 }
             }

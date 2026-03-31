@@ -41,6 +41,8 @@ namespace fs = std::filesystem;
 
 constexpr int Dim = 3;
 
+#ifndef gridheaders
+#define gridheaders
 static constexpr uint8_t ACTIVE_BIT = 1 << 0;
 static constexpr uint8_t VISIBLE_BIT = 1 << 1;
 static constexpr uint8_t STATIC_BIT = 1 << 7;
@@ -54,6 +56,7 @@ static constexpr uint8_t KEEPLOADED_BIT = 1 << 5;
 
 template<typename> struct is_shared_ptr : std::false_type {};
 template<typename T> struct is_shared_ptr<std::shared_ptr<T>> : std::true_type {};
+#endif
 
 template<size_t N>
 struct GridStoragePath {

@@ -11,6 +11,7 @@
 #include "../util/noise/pnoise.cpp"
 #include "planet.cpp"
 #include "plant.cpp"
+#include "terrain.cpp"
 #include "../util/basicdefines.hpp"
 
 void framebuffer_size_callback(GLFWwindow* window, int width, int height) {
@@ -82,9 +83,11 @@ int main() {
     planetSimUI planetApp;
     NoisePreviewState noiseState;
     PlantSimUI plantApp;
-    bool doShowPlanet = true;
+    TerrainSimUI terrainApp;
+    bool doShowPlanet = false;
     bool doShowPlants = false;
-    bool doShowNoiseLab = true;
+    bool doShowNoiseLab = false;
+    bool doShowTerrain = true;
 
     if (noiseState.layers.empty()) {
         NoiseLayer defaultLayer;
@@ -93,6 +96,10 @@ int main() {
         noiseState.layers.push_back(defaultLayer);
     }
     updateNoiseTexture(noiseState);
+    
+    Eigen::Vector3f selectedPlanetPos(1024.0f, 0.0f, 0.0f);
+    float regionSize = 1000.0f;
+    float regionResolution = 10.0f;
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
@@ -107,19 +114,36 @@ int main() {
         if (doShowNoiseLab) drawNoiseLab(noiseState);
         if (doShowPlanet) planetApp.renderUI(window);
         if (doShowPlants) plantApp.renderUI(window);
+        if (doShowTerrain) terrainApp.renderUI();
+
+        ImGui::Checkbox("Show Planet", &doShowPlanet);
+        ImGui::Checkbox("Show Plants", &doShowPlants);
+        ImGui::Checkbox("Show 2D Terrain", &doShowTerrain);
+        ImGui::Checkbox("Show Noise lab", &doShowNoiseLab);
 
         ImGui::Begin("Integration Control");
         ImGui::Text("Bridge: Noise Lab -> Planet Sim");
         ImGui::Separator();
-
-        ImGui::Checkbox("Show Planet", &doShowPlanet);
-        ImGui::Checkbox("Show Plants", &doShowPlants);
-        ImGui::Checkbox("Show Noise lab", &doShowNoiseLab);
         
         ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "Current Noise Layers: %zu", noiseState.layers.size());
         
         if (ImGui::Button("APPLY CURRENT NOISE TO PLANET", ImVec2(-1, 50))) {
             planetApp.applyNoise(noiseState);
+        }
+        
+        if (ImGui::Button("APPLY CURRENT NOISE TO 2D TERRAIN", ImVec2(-1, 30))) {
+            terrainApp.applyNoise(noiseState);
+        }
+        
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.6f, 0.9f, 0.6f, 1.0f), "Detailed Terrain Region Selection");
+        ImGui::DragFloat3("Center Coord (3D)", selectedPlanetPos.data(), 1.0f);
+        ImGui::DragFloat("Region Size (m)", &regionSize, 10.0f, 100.0f, 10000.0f);
+        ImGui::DragFloat("Resolution (m/vx)", &regionResolution, 0.1f, 0.5f, 100.0f);
+
+        if (ImGui::Button("Extract Region to Terrain Module", ImVec2(-1, 40))) {
+            terrainApp.applyRegion(selectedPlanetPos, regionSize, regionResolution, noiseState);
+            doShowTerrain = true;
         }
         
         ImGui::End();
