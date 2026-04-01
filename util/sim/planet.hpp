@@ -1219,7 +1219,7 @@ public:
                         }
                     }
 
-                    if (inside && grid.find(pos, config.voxelSize * 0.5f) == nullptr) {
+                    if (inside) {
                         Particle ip;
                         ip.surface = false;
                         ip.plateID = -1;

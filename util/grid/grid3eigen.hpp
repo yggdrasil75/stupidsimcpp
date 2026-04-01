@@ -1633,24 +1633,6 @@ private:
           const Ray& ray, std::shared_ptr<NodeData>& hit) {
         bool nodeloaded = node->isLoaded();
         ensureLoaded(node, true);
-        // {
-            // std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
-            // nodeloaded = 
-        // }
-        // if (!nodeloaded) {
-        //     // std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
-        //     if (node->lodData) {
-        //         float t;
-        //         PointType n, h;
-        //         if (rayCubeIntersect(ray, node->lodData.get(), t, n, h)) {
-                    // if (t >= 0 && t <= maxDist) {
-                    //     hit = node->lodData;
-                    //     maxDist = t;
-                    // }
-        //         }
-        //     }
-        //     return;
-        // }
 
         std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
         if (!node->isLeaf() && node->lodData) {
@@ -1694,6 +1676,58 @@ private:
             int physIdx = currIdx ^ ray.signMask;
             if (node->children[physIdx]) {
                 fastVoxelTraverseRecursive(node->children[physIdx].get(), tMin, tNext, maxDist, ray, hit);
+            }
+            
+            tMin = tNext;
+            currIdx |= ((tNextX <= tNext) ? 1 : 0) | ((tNextY <= tNext) ? 2 : 0) | ((tNextZ <= tNext) ? 4 : 0);
+        }
+    }
+    
+    void fastBypassVoxelTraverseRecursive(OctreeNode* node, float tMin, float tMax, float& maxDist,
+          const Ray& ray, std::shared_ptr<NodeData>& hit) {
+
+        std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
+        if (!node->isLeaf() && node->lodData) {
+            float dist = (node->center - ray.origin).norm();
+            if (dist > lodMinDistance_ && (dist / node->nodeSize) > invLodf) {
+                float t;
+                PointType n, h;
+                if (rayCubeIntersect(ray, node->lodData.get(), t, n, h)) {
+                    if (t >= 0 && t <= maxDist) {
+                        hit = node->lodData;
+                        maxDist = t;
+                    }
+                }
+                return;
+            }
+        }
+
+        for (const auto& pt : node->points) {
+            if (pt->isActiveAndVisible()) continue;
+            float t;
+            PointType n, h;
+            if (rayCubeIntersect(ray, pt.get(), t, n, h)) {
+                if (t >= 0 && t <= maxDist && t <= tMax + 0.001f) {
+                    maxDist = t;
+                    hit = pt;
+                }
+            }
+        }
+
+        if (node->isLeaf()) return;
+
+        Eigen::Vector3f ttt = (node->center - ray.origin).cwiseProduct(ray.invDir);
+        int currIdx = ((tMin >= ttt.x()) ? 1 : 0) | ((tMin >= ttt.y()) ? 2 : 0) | ((tMin >= ttt.z()) ? 4 : 0);
+        
+        while(tMin < tMax && tMin <= maxDist) {
+            float tNextX = (currIdx & 1) ? tMax : ttt.x();
+            float tNextY = (currIdx & 2) ? tMax : ttt.y();
+            float tNextZ = (currIdx & 4) ? tMax : ttt.z();
+            float tNext = std::min({tNextX, tNextY, tNextZ});
+            
+            int physIdx = currIdx ^ ray.signMask;
+            if (node->children[physIdx]) {
+                fastBypassVoxelTraverseRecursive(node->children[physIdx].get(), tMin, tNext, maxDist, ray, hit);
             }
             
             tMin = tNext;
@@ -2786,6 +2820,18 @@ public:
         return hit;
     }
 
+    std::shared_ptr<NodeData> fastBypassVoxelTraverse(const Ray& ray, float maxDist) {
+        std::shared_ptr<NodeData> hit;
+        if (empty()) return hit;
+        float tMin, tMax;
+        if (rayBoxIntersect(ray, root_->bounds, tMin, tMax)) {
+            tMax = std::min(tMax, maxDist);
+            float currentMaxDist = maxDist;
+            fastBypassVoxelTraverseRecursive(root_.get(), tMin, tMax, currentMaxDist, ray, hit);
+        }
+        return hit;
+    }
+
     frame fastRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB) {
         updateStreaming(cam);
         PointType origin = cam.origin;
@@ -2822,7 +2868,9 @@ public:
 
                 Eigen::Vector3f color = skybox_.sampleVector(rayDir);
                 Ray ray(origin, rayDir);
-                auto hit = fastVoxelTraverse(ray, maxDistance_);
+                std::shared_ptr<NodeData> hit;
+                if (x % 10 == 0 && y % 10 == 0) hit = fastVoxelTraverse(ray, maxDistance_);
+                else hit = fastBypassVoxelTraverse(ray, maxDistance_);
                 if (hit != nullptr) {
                     auto obj = hit;
                     
@@ -3113,7 +3161,7 @@ public:
                             maxTreeDepth, maxPointsInLeaf, minPointsInLeaf, lodGeneratedNodes, unloaded);
 
         if (leafNodes == 0) minPointsInLeaf = 0;
-        double avgPointsPerLeaf = leafNodes > 0 ? (double)actualPoints / leafNodes : 0.0;
+        double avgPointsPerLeaf = totalNodes > 0 ? (double)actualPoints / totalNodes : 0.0;
         
         size_t nodeMem = totalNodes * sizeof(OctreeNode);
         size_t dataMem = actualPoints * (sizeof(NodeData) + 16); 

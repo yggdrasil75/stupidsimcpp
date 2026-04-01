@@ -305,7 +305,7 @@ public:
             if (ImGui::Button(orbitEquator ? "Stop Equator" : "Orbit Equator")) orbitEquator = !orbitEquator;
         }
 
-        updateStatsCache();
+        // updateStatsCache();
         ImGui::TextUnformatted(cachedStats.c_str());
 
         ImGui::EndChild();
