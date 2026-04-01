@@ -1398,34 +1398,76 @@ private:
         }
     }
 
-    void updateStreamingRecursive(OctreeNode* node, const PointType& camPos) {
+    void loadSubtreeRecursive(OctreeNode* node) {
         if (!node) return;
-        
-        float distSq = 0.0f;
-        if (!node->contains(camPos)) {
-            for(int i = 0; i < Dim; ++i) {
-                float v = camPos[i];
-                if(v < node->bounds.first[i]) {
-                    distSq += (node->bounds.first[i] - v) * (node->bounds.first[i] - v);
-                } else if(v > node->bounds.second[i]) {
-                    distSq += (v - node->bounds.second[i]) * (v - node->bounds.second[i]);
-                }
+        ensureLoaded(node, true);
+        if (!node->isLeaf()) {
+            for (int i = 0; i < 8; ++i) {
+                loadSubtreeRecursive(node->children[i].get());
             }
         }
-        float dist = std::sqrt(distSq);
+    }
 
-        if (dist < keepDistance_) {
-            if (!node->isLeaf()) {
-                for (int i = 0; i < 8; ++i) {
-                    if (node->children[i]) {
-                        updateStreamingRecursive(node->children[i].get(), camPos);
-                    }
-                }
+    void loadAndLodSubtreeRecursive(OctreeNode* node) {
+        if (!node) return;
+        ensureLOD(node);
+        if (!node->isLeaf()) {
+            for (int i = 0; i < 8; ++i) {
+                loadAndLodSubtreeRecursive(node->children[i].get());
             }
+        }
+    }
+
+    void updateStreamingRecursive(OctreeNode* node, const PointType& camPos, const PointType& camDir) {
+        if (!node) return;
+        
+        float minDistSq = 0.0f;
+        float maxDistSq = 0.0f;
+
+        // if (!node->contains(camPos)) {
+        for(int i = 0; i < Dim; ++i) {
+            float v = camPos[i];
+            float minBound = node->bounds.first[i];
+            float maxBound = node->bounds.second[i];
+            
+            float d1 = v - minBound;
+            float d2 = v - maxBound;
+            
+            if(v < minBound) {
+                minDistSq += d1 * d1;
+            } else if(v > maxBound) {
+                minDistSq += d2 * d2;
+            }
+            
+            float maxD = std::max(std::abs(d1), std::abs(d2));
+            maxDistSq += maxD * maxD;
+        }
+
+        bool isBehind = false;
+        PointType maxPoint;
+        maxPoint.x() = (camDir.x() >= 0) ? node->bounds.second.x() : node->bounds.first.x();
+        maxPoint.y() = (camDir.y() >= 0) ? node->bounds.second.y() : node->bounds.first.y();
+        maxPoint.z() = (camDir.z() >= 0) ? node->bounds.second.z() : node->bounds.first.z();
+        
+        if ((maxPoint - camPos).dot(camDir) < -0.05f) {
+            isBehind = true;
+        }
+        
+        float lodDistSq = lodMinDistance_ * lodMinDistance_;
+        float maxDistSq_max = maxDistance_ * maxDistance_;
+        float keepDistSq = keepDistance_ * keepDistance_;
+        
+        if (maxDistSq <= lodDistSq) {
+            loadSubtreeRecursive(node);
             return;
         }
 
-        if (dist > maxDistance_) {
+        if (maxDistSq <= maxDistSq_max && minDistSq > lodDistSq) {
+            loadAndLodSubtreeRecursive(node);
+            return;
+        }
+        
+        if (minDistSq > keepDistSq) {
             if (!node->isLoaded()) return;
             size_t subPoints = node->getSubtreePointCount();
             bool fullyLoaded = node->isSubtreeFullyLoaded();
@@ -1436,13 +1478,13 @@ private:
             }
             if (!node->isLeaf()){
                 for (int i = 0; i < 8; ++i) {
-                    updateStreamingRecursive(node->children[i].get(), camPos);
+                    updateStreamingRecursive(node->children[i].get(), camPos, camDir);
                 }
             }
+            return;
         }
 
-        if (dist > lodMinDistance_) {
-            ensureLoaded(node, true);
+        if (minDistSq > lodDistSq) {
             ensureLOD(node);
         } else {
             ensureLoaded(node, true);
@@ -1450,7 +1492,7 @@ private:
         if (!node->isLeaf()) {
             for (int i = 0; i < 8; ++i) {
                 if (node->children[i]) {
-                    updateStreamingRecursive(node->children[i].get(), camPos);
+                    updateStreamingRecursive(node->children[i].get(), camPos, camDir);
                 }
             }
         }
@@ -2392,9 +2434,10 @@ public:
     void updateStreaming(const Camera& cam) {
         if (streamingQueued_.exchange(true, std::memory_order_acquire)) return;
         PointType camPos = cam.origin;
-        enqueueTask([this, camPos]() {
+        PointType camDir = cam.direction.normalized();
+        enqueueTask([this, camPos, camDir]() {
             if (root_) {
-                updateStreamingRecursive(root_.get(), camPos);
+                updateStreamingRecursive(root_.get(), camPos, camDir);
             }
             streamingQueued_.store(false, std::memory_order_release);
         });
@@ -3220,6 +3263,47 @@ public:
         }
         
         size = 0;
+    }
+    
+    void getLoadedStatsSafe(const OctreeNode* node, size_t& loadedNodes, size_t& loadedPoints) const {
+        if (!node) return;
+        loadedNodes++;
+        
+        std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
+        if (!node->isLoaded()) return;
+        
+        loadedPoints += node->points.size();
+        if (!node->isLeaf()) {
+            for (int i = 0; i < 8; ++i) {
+                if (node->children[i]) {
+                    getLoadedStatsSafe(node->children[i].get(), loadedNodes, loadedPoints);
+                }
+            }
+        }
+    }
+
+    size_t getEstimatedMemoryUsageMB() const {
+        size_t loadedNodes = 0;
+        size_t loadedPoints = 0;
+        getLoadedStatsSafe(root_.get(), loadedNodes, loadedPoints);
+        
+        size_t nodeMem = loadedNodes * sizeof(OctreeNode);
+        size_t pointMem = loadedPoints * (sizeof(NodeData) + sizeof(std::shared_ptr<NodeData>));
+        
+        size_t mapMem = 0;
+        if (mapMutex_) {
+            std::lock_guard<std::mutex> lock(*mapMutex_);
+            mapMem = colorMap_.size() * sizeof(Eigen::Vector3f) * 12 + materialMap_.size() * (5 * 4);
+        }
+        
+        return (nodeMem + pointMem + mapMem) / (1024 * 1024);
+    }
+
+    size_t getLoadedPointCount() const {
+        size_t loadedNodes = 0;
+        size_t loadedPoints = 0;
+        getLoadedStatsSafe(root_.get(), loadedNodes, loadedPoints);
+        return loadedPoints;
     }
 };
 

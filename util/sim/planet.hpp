@@ -346,7 +346,7 @@ public:
 
     planetsim() {
         config = planetConfig();
-        grid = Octree<Particle, int16_t, "output/fibSphere">(v3(-config.gridSizeCubeMin,-config.gridSizeCubeMin,-config.gridSizeCubeMin),v3(config.gridSizeCubeMin,config.gridSizeCubeMin,config.gridSizeCubeMin), 16, 32);
+        grid = Octree<Particle, int16_t, "output/fibSphere">(v3(-config.gridSizeCubeMin,-config.gridSizeCubeMin,-config.gridSizeCubeMin),v3(config.gridSizeCubeMin,config.gridSizeCubeMin,config.gridSizeCubeMin), 4, 64);
     }
 
     float evaluate2DStack(const Eigen::Vector2f& point, const NoisePreviewState& state, PNoise2& gen) {

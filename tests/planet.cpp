@@ -42,6 +42,13 @@ private:
     std::string cachedStats;
     bool statsNeedUpdate = true;
     float framerate = 60.0;
+    bool autoAdjustDistance = true;
+    int targetMemoryMB = 1024;
+    float minAutoDistance = 1024.0f;
+    float maxAutoDistance = 16384.0f;
+    size_t currentMemoryMB = 0;
+    size_t currentLoadedPoints = 0;
+    std::chrono::steady_clock::time_point lastAutoAdjustTime = std::chrono::steady_clock::now();
 
     enum class DebugColorMode {
         BASE,
@@ -304,6 +311,30 @@ public:
 
             if (ImGui::Button(orbitEquator ? "Stop Equator" : "Orbit Equator")) orbitEquator = !orbitEquator;
         }
+        
+        if (ImGui::CollapsingHeader("Streaming & LOD Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Checkbox("Use LOD", &useLod);
+            ImGui::Checkbox("Auto-Adjust View Distance", &autoAdjustDistance);
+            
+            if (autoAdjustDistance) {
+                ImGui::InputInt("Target Memory Budget (MB)", &targetMemoryMB);
+                ImGui::DragFloat("Min Auto Distance", &minAutoDistance, 10.0f, 10.0f, maxAutoDistance);
+                ImGui::DragFloat("Max Auto Distance", &maxAutoDistance, 10.0f, minAutoDistance, 65536.0f);
+                
+                ImGui::BeginDisabled();
+                ImGui::DragFloat("Max View Distance", &maxViewDistance, 10.0f, 100.0f, 65536.0f);
+                ImGui::DragFloat("LOD Distance", &lodDist, 10.0f, 10.0f, 5000.0f);
+                ImGui::EndDisabled();
+            } else {
+                ImGui::DragFloat("Max View Distance", &maxViewDistance, 10.0f, 100.0f, 65536.0f);
+                ImGui::DragFloat("LOD Distance", &lodDist, 10.0f, 10.0f, 5000.0f);
+            }
+            ImGui::DragFloat("LOD Dropoff", &lodDropoff, 0.01f, 0.01f, 1.0f);
+            
+            ImGui::Separator();
+            ImGui::Text("Est. Memory Usage: %zu MB", currentMemoryMB);
+            ImGui::Text("Currently Loaded Points: %zu", currentLoadedPoints);
+        }
 
         // updateStatsCache();
         ImGui::TextUnformatted(cachedStats.c_str());
@@ -547,16 +578,36 @@ public:
         std::lock_guard<std::mutex> lock(PreviewMutex);
         updatePreview = true;
         
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastAutoAdjustTime).count() > 1500) {
+            lastAutoAdjustTime = now;
+            
+            currentMemoryMB = sim.grid.getEstimatedMemoryUsageMB();
+            currentLoadedPoints = sim.grid.getLoadedPointCount();
+            
+            if (autoAdjustDistance) {
+                if (currentMemoryMB > (size_t)targetMemoryMB) {
+                    maxViewDistance *= 0.85f;
+                    lodDist *= 0.85f;
+                } else if (currentMemoryMB < (size_t)targetMemoryMB * 0.8f) {
+                    maxViewDistance *= 1.05f;
+                    lodDist *= 1.05f;
+                }
+                
+                maxViewDistance = std::clamp(maxViewDistance, minAutoDistance, maxAutoDistance);
+                lodDist = std::clamp(lodDist, 10.0f, maxViewDistance * 0.5f);
+            }
+        }
+
         sim.grid.setLODMinDistance(lodDist);
         sim.grid.setLODFalloff(lodDropoff);
         sim.grid.setMaxDistance(maxViewDistance);
+        
         float invFrameRate = 1 / framerate;
         
         if (slowRender) {
-            // currentPreviewFrame = sim.grid.renderFrameTimed(cam, outHeight, outWidth, frame::colormap::RGB, invFrameRate, reflectCount, globalIllumination, useLod);
             currentPreviewFrame = sim.grid.renderFrame(cam, outHeight, outWidth, frame::colormap::RGB, 3, reflectCount, globalIllumination, useLod);
         } else {
-            // currentPreviewFrame = sim.grid.renderFrameTimed(cam, outHeight, outWidth, frame::colormap::RGB, invFrameRate, reflectCount, globalIllumination, useLod);
             currentPreviewFrame = sim.grid.fastRenderFrame(cam, outHeight, outWidth, frame::colormap::RGB);
         }
         
