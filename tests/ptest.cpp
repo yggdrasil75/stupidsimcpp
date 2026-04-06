@@ -84,8 +84,8 @@ int main() {
     NoisePreviewState noiseState;
     PlantSimUI plantApp;
     // TerrainSimUI terrainApp;
-    bool doShowPlanet = true;
-    bool doShowPlants = false;
+    bool doShowPlanet = false;
+    bool doShowPlants = true;
     bool doShowNoiseLab = false;
     // bool doShowTerrain = true;
 

@@ -382,12 +382,24 @@ public:
             float nVal = sampleNoiseLayer(gen, layer.type, samplePoint, layer);
             
             switch (layer.blend) {
-                case BlendMode::Replace:   finalValue = nVal * layer.strength; break;
-                case BlendMode::Add:       finalValue += nVal * layer.strength; break;
-                case BlendMode::Subtract:  finalValue -= nVal * layer.strength; break;
-                case BlendMode::Multiply:  finalValue *= (nVal * layer.strength); break;
-                case BlendMode::Max:       finalValue = std::max(finalValue, nVal * layer.strength); break;
-                case BlendMode::Min:       finalValue = std::min(finalValue, nVal * layer.strength); break;
+                case BlendMode::Replace:
+                    finalValue = nVal * layer.strength;
+                    break;
+                case BlendMode::Add:
+                    finalValue += nVal * layer.strength;
+                    break;
+                case BlendMode::Subtract:
+                    finalValue -= nVal * layer.strength;
+                    break;
+                case BlendMode::Multiply:
+                    finalValue *= (nVal * layer.strength);
+                    break;
+                case BlendMode::Max:
+                    finalValue = std::max(finalValue, nVal * layer.strength);
+                    break;
+                case BlendMode::Min:
+                    finalValue = std::min(finalValue, nVal * layer.strength);
+                    break;
             }
         }
         

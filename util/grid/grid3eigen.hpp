@@ -74,12 +74,6 @@ public:
     using PointType = Eigen::Matrix<float, Dim, 1>;
     using BoundingBox = std::pair<PointType, PointType>;
 
-    struct Vector3fCompare {
-        bool operator()(const Eigen::Vector3f& a, const Eigen::Vector3f& b) const {
-            return std::tie(a.x(), a.y(), a.z()) < std::tie(b.x(), b.y(), b.z());
-        }
-    };
-
     struct Material {
         float emittance;
         float roughness;
@@ -104,24 +98,24 @@ public:
         PointType position;
         int objectId;
         float size;
-        IndexType colorIdx;
-        IndexType materialIdx;
+        Eigen::Vector3f color;
+        Material material;
         std::atomic<uint8_t> flags;
 
-        NodeData(const T& data, const PointType& pos, bool visible, IndexType colorIdx, float size = 0.01f,
-                 bool active = true, int objectId = -1, IndexType materialIdx = 0, bool staticbit = 0) 
+        NodeData(const T& data, const PointType& pos, bool visible, const Eigen::Vector3f& color, float size = 0.01f,
+                 bool active = true, int objectId = -1, const Material& material = Material(), bool staticbit = 0) 
                 : data(data), position(pos), objectId(objectId), size(size), 
-                  colorIdx(colorIdx), materialIdx(materialIdx), flags(0) {
+                  color(color), material(material), flags(0) {
             setActive(active);
             setVisible(visible);
             setStatic(staticbit);
         }
         
-        NodeData() : objectId(-1), size(0.0f), colorIdx(0), materialIdx(0), flags(0) {}
+        NodeData() : objectId(-1), size(0.0f), color(Eigen::Vector3f::Zero()), material(), flags(0) {}
 
         NodeData(const NodeData& other)
             : data(other.data), position(other.position), objectId(other.objectId), size(other.size),
-              colorIdx(other.colorIdx), materialIdx(other.materialIdx), flags(other.flags.load(std::memory_order_relaxed)) {}
+              color(other.color), material(other.material), flags(other.flags.load(std::memory_order_relaxed)) {}
 
         NodeData& operator=(const NodeData& other) {
             if (this != &other) {
@@ -129,8 +123,8 @@ public:
                 position = other.position;
                 objectId = other.objectId;
                 size = other.size;
-                colorIdx = other.colorIdx;
-                materialIdx = other.materialIdx;
+                color = other.color;
+                material = other.material;
                 flags.store(other.flags.load(std::memory_order_relaxed), std::memory_order_relaxed);
             }
             return *this;
@@ -401,8 +395,8 @@ public:
                 writeVal(out, pt->objectId);
                 writeVal(out, pt->flags.load(std::memory_order_relaxed));
                 writeVal(out, pt->size);
-                writeVal(out, pt->colorIdx);
-                writeVal(out, pt->materialIdx);
+                writeVec3(out, pt->color);
+                writeVal(out, pt->material);
             }
 
             if (!isLeaf()) {
@@ -432,8 +426,8 @@ public:
                 readVal(in, f);
                 pt->flags.store(f, std::memory_order_relaxed);
                 readVal(in, pt->size);
-                readVal(in, pt->colorIdx);
-                readVal(in, pt->materialIdx);
+                readVec3(in, pt->color);
+                readVal(in, pt->material);
                 points.push_back(pt);
             }
 
@@ -519,8 +513,8 @@ public:
                 writeVal(out, pt->objectId);
                 writeVal(out, pt->flags.load(std::memory_order_relaxed));
                 writeVal(out, pt->size);
-                writeVal(out, pt->colorIdx);
-                writeVal(out, pt->materialIdx);
+                writeVec3(out, pt->color);
+                writeVal(out, pt->material);
             }
 
             if (!isLeaf()) {
@@ -560,8 +554,8 @@ public:
                 readVal(in, f);
                 pt->flags.store(f, std::memory_order_relaxed);
                 readVal(in, pt->size);
-                readVal(in, pt->colorIdx);
-                readVal(in, pt->materialIdx);
+                readVec3(in, pt->color);
+                readVal(in, pt->material);
                 points.push_back(pt);
             }
 
@@ -762,13 +756,6 @@ private:
     Skybox skybox_;
     Eigen::Vector3f skylight_ = {0.1f, 0.1f, 0.1f};
     Eigen::Vector3f backgroundColor_ = {0.53f, 0.81f, 0.92f};
-    
-    std::unique_ptr<std::mutex> mapMutex_;
-    std::vector<Eigen::Vector3f> colorMap_;
-    std::map<Eigen::Vector3f, IndexType, Vector3fCompare> colorToIndex_;
-    
-    std::vector<Material> materialMap_;
-    std::map<Material, IndexType> materialToIndex_;
 
     mutable std::queue<std::function<void()>> taskQueue_;
     mutable std::mutex taskMutex_;
@@ -901,202 +888,8 @@ private:
         uint32_t zz = static_cast<uint32_t>(z * 1023.0f);
         return (expandBits10(xx) << 2) | (expandBits10(yy) << 1) | expandBits10(zz);
     }
-
-    void reorderMapsZCurve() {
-        if (!root_) return;
-        std::lock_guard<std::mutex> lock(*mapMutex_);
-        
-        size_t numColors = colorMap_.size();
-        size_t numMats = materialMap_.size();
-        if (numColors == 0 && numMats == 0) return;
-
-        std::vector<PointType> colorSum(numColors, PointType::Zero());
-        std::vector<size_t> colorCount(numColors, 0);
-        std::vector<PointType> matSum(numMats, PointType::Zero());
-        std::vector<size_t> matCount(numMats, 0);
-        std::unordered_set<NodeData*> visited;
-        std::vector<OctreeNode*> stack;
-        stack.push_back(root_.get());
-        while (!stack.empty()) {
-            OctreeNode* curr = stack.back();
-            stack.pop_back();
-            if (!curr->isLoaded()) continue;
-            
-            for (auto& pt : curr->points) {
-                if (visited.insert(pt.get()).second) {
-                    if (pt->colorIdx < numColors) {
-                        colorSum[pt->colorIdx] += pt->position;
-                        colorCount[pt->colorIdx]++;
-                    }
-                    if (pt->materialIdx < numMats) {
-                        matSum[pt->materialIdx] += pt->position;
-                        matCount[pt->materialIdx]++;
-                    }
-                }
-            }
-            if (!curr->isLeaf()) {
-                for (int i = 0; i < 8; ++i) {
-                    if (curr->children[i]) stack.push_back(curr->children[i].get());
-                }
-            }
-        }
-
-        PointType rootMin = root_->bounds.first;
-        PointType rootSize = root_->bounds.second - root_->bounds.first;
-        PointType invSize(
-            rootSize.x() > 0 ? 1.0f / rootSize.x() : 1.0f,
-            rootSize.y() > 0 ? 1.0f / rootSize.y() : 1.0f,
-            rootSize.z() > 0 ? 1.0f / rootSize.z() : 1.0f
-        );
-
-        struct SIdx {
-            IndexType oldIdx;
-            uint32_t morton;
-            bool operator<(const SIdx& o) const { return morton < o.morton; }
-        };
-
-        std::vector<SIdx> sortedColors;
-        sortedColors.reserve(numColors);
-        for (size_t i = 0; i < numColors; ++i) {
-            if (colorCount[i] > 0) {
-                PointType avg = colorSum[i] / static_cast<float>(colorCount[i]);
-                PointType norm = (avg - rootMin).cwiseProduct(invSize);
-                sortedColors.push_back({static_cast<IndexType>(i), morton3D_10(norm.x(), norm.y(), norm.z())});
-            } else {
-                sortedColors.push_back({static_cast<IndexType>(i), 0}); 
-            }
-        }
-        std::sort(sortedColors.begin(), sortedColors.end());
-
-        std::vector<IndexType> colorRemap(numColors);
-        std::vector<Eigen::Vector3f> newColorMap(numColors);
-        colorToIndex_.clear();
-        for (size_t newIdx = 0; newIdx < numColors; ++newIdx) {
-            IndexType oldIdx = sortedColors[newIdx].oldIdx;
-            colorRemap[oldIdx] = static_cast<IndexType>(newIdx);
-            newColorMap[newIdx] = colorMap_[oldIdx];
-            colorToIndex_[newColorMap[newIdx]] = static_cast<IndexType>(newIdx);
-        }
-        colorMap_ = std::move(newColorMap);
-
-        std::vector<SIdx> sortedMats;
-        sortedMats.reserve(numMats);
-        for (size_t i = 0; i < numMats; ++i) {
-            if (matCount[i] > 0) {
-                PointType avg = matSum[i] / static_cast<float>(matCount[i]);
-                PointType norm = (avg - rootMin).cwiseProduct(invSize);
-                sortedMats.push_back({static_cast<IndexType>(i), morton3D_10(norm.x(), norm.y(), norm.z())});
-            } else {
-                sortedMats.push_back({static_cast<IndexType>(i), 0});
-            }
-        }
-        std::sort(sortedMats.begin(), sortedMats.end());
-
-        std::vector<IndexType> matRemap(numMats);
-        std::vector<Material> newMatMap(numMats);
-        materialToIndex_.clear();
-        for (size_t newIdx = 0; newIdx < numMats; ++newIdx) {
-            IndexType oldIdx = sortedMats[newIdx].oldIdx;
-            matRemap[oldIdx] = static_cast<IndexType>(newIdx);
-            newMatMap[newIdx] = materialMap_[oldIdx];
-            materialToIndex_[newMatMap[newIdx]] = static_cast<IndexType>(newIdx);
-        }
-        materialMap_ = std::move(newMatMap);
-
-        visited.clear();
-        stack.push_back(root_.get());
-        while (!stack.empty()) {
-            OctreeNode* curr = stack.back();
-            stack.pop_back();
-
-            if (!curr->isLoaded()) continue;
-            
-            for (auto& pt : curr->points) {
-                if (visited.insert(pt.get()).second) {
-                    if (pt->colorIdx < numColors) pt->colorIdx = colorRemap[pt->colorIdx];
-                    if (pt->materialIdx < numMats) pt->materialIdx = matRemap[pt->materialIdx];
-                }
-            }
-            
-            {
-                std::unique_lock<std::shared_mutex> lodLock(curr->nodeMutex);
-                curr->lodData = nullptr;
-            }
-            
-            if (!curr->isLeaf()) {
-                for (int i = 0; i < 8; ++i) {
-                    if (curr->children[i]) stack.push_back(curr->children[i].get());
-                }
-            }
-        }
-    }
     
 public:
-    inline IndexType getColorIndex(const Eigen::Vector3f& color) {
-        std::lock_guard<std::mutex> lock(*mapMutex_);
-        auto it = colorToIndex_.find(color);
-        if (it != colorToIndex_.end()) return it->second;
-
-        if (colorMap_.size() >= std::numeric_limits<IndexType>::max()) {
-            IndexType bestIdx = 0;
-            float bestDist = std::numeric_limits<float>::max();
-            for (size_t i = 0; i < colorMap_.size(); ++i) {
-                float dist = (colorMap_[i] - color).squaredNorm();
-                if (dist < bestDist) {
-                    bestDist = dist;
-                    bestIdx = static_cast<IndexType>(i);
-                }
-            }
-            return bestIdx;
-        }
-
-        IndexType idx = static_cast<IndexType>(colorMap_.size());
-        colorMap_.push_back(color);
-        colorToIndex_[color] = idx;
-        return idx;
-    }
-
-    inline const Eigen::Vector3f& getColor(IndexType idx) const {
-        if (idx < colorMap_.size()) return colorMap_[idx];
-        static const Eigen::Vector3f fallback = Eigen::Vector3f::Zero();
-        return fallback;
-    }
-
-    inline IndexType getMaterialIndex(const Material& mat) {
-        std::lock_guard<std::mutex> lock(*mapMutex_);
-        auto it = materialToIndex_.find(mat);
-        if (it != materialToIndex_.end()) return it->second;
-
-        if (materialMap_.size() >= std::numeric_limits<IndexType>::max()) {
-            IndexType bestIdx = 0;
-            float bestDist = std::numeric_limits<float>::max();
-            for (size_t i = 0; i < materialMap_.size(); ++i) {
-                float d_e = materialMap_[i].emittance - mat.emittance;
-                float d_r = materialMap_[i].roughness - mat.roughness;
-                float d_m = materialMap_[i].metallic - mat.metallic;
-                float d_t = materialMap_[i].transmission - mat.transmission;
-                float d_i = materialMap_[i].ior - mat.ior;
-                float dist = d_e*d_e + d_r*d_r + d_m*d_m + d_t*d_t + d_i*d_i;
-                if (dist < bestDist) {
-                    bestDist = dist;
-                    bestIdx = static_cast<IndexType>(i);
-                }
-            }
-            return bestIdx;
-        }
-
-        IndexType idx = static_cast<IndexType>(materialMap_.size());
-        materialMap_.push_back(mat);
-        materialToIndex_[mat] = idx;
-        return idx;
-    }
-
-    inline const Material& getMaterial(IndexType idx) const {
-        if (idx < materialMap_.size()) return materialMap_[idx];
-        static const Material fallback;
-        return fallback;
-    }
-
     void addSkyBody(int id, const PointType& dir, float angularRadius, uint8_t r, uint8_t g, uint8_t b, uint8_t emittance = 255) {
         skybox_.addBody(id, dir, angularRadius, r, g, b, emittance);
     }
@@ -1356,8 +1149,8 @@ private:
 
         auto accumulate = [&](const std::shared_ptr<NodeData>& item) {
             if (!item || !item->isActive() || !item->isVisible()) return;
-            avgColor += getColor(item->colorIdx);
-            Material mat = getMaterial(item->materialIdx);
+            avgColor += item->color;
+            Material mat = item->material;
             avgEmittance += mat.emittance;
             avgRoughness += mat.roughness;
             avgMetallic += mat.metallic;
@@ -1386,10 +1179,10 @@ private:
             PointType nodeDims = node->bounds.second - node->bounds.first;
             lod->size = nodeDims.maxCoeff();
 
-            lod->colorIdx = getColorIndex(avgColor * invCount);
+            lod->color = avgColor * invCount;
             Material avgMat(avgEmittance * invCount, avgRoughness * invCount, 
                             avgMetallic * invCount, avgTransmission * invCount, avgIor * invCount);
-            lod->materialIdx = getMaterialIndex(avgMat);
+            lod->material = avgMat;
             
             lod->setActive(true);
             lod->setVisible(true);
@@ -1836,8 +1629,8 @@ private:
         Ray ray(rayOrig, rayDir);
         rayCubeIntersect(ray, obj.get(), t, normal, hitPoint);
         
-        Eigen::Vector3f objColor = getColor(obj->colorIdx);
-        Material objMat = getMaterial(obj->materialIdx);
+        Eigen::Vector3f objColor = obj->color;
+        Material objMat = obj->material;
 
         Eigen::Vector3f finalColor = globalIllumination ? skylight_ : Eigen::Vector3f::Zero();
         if (objMat.emittance > 0.0f) {
@@ -2229,13 +2022,13 @@ private:
 public:
     Octree(const PointType& minBound, const PointType& maxBound, size_t maxPointsPerNode=8, size_t maxDepth = 16) :
             root_(std::make_unique<OctreeNode>(minBound, maxBound)), maxPointsPerNode(maxPointsPerNode),
-            maxDepth(maxDepth), size(0), mapMutex_(std::make_unique<std::mutex>()), skybox_(1024, 1024),
+            maxDepth(maxDepth), size(0), skybox_(1024, 1024),
             streamingQueued_(false) {
         skybox_.setBackground(backgroundColor_.x(), backgroundColor_.y(), backgroundColor_.z(), 1.0f);
         startWorkerThread();
     }
 
-    Octree() : root_(nullptr), maxPointsPerNode(8), maxDepth(16), size(0), mapMutex_(std::make_unique<std::mutex>()), skybox_(1024, 1024), streamingQueued_(false) {
+    Octree() : root_(nullptr), maxPointsPerNode(8), maxDepth(16), size(0), skybox_(1024, 1024), streamingQueued_(false) {
         skybox_.setBackground(backgroundColor_.x(), backgroundColor_.y(), backgroundColor_.z(), 1.0f);
         startWorkerThread();
     }
@@ -2245,26 +2038,16 @@ public:
     }
     
     Octree(const Octree& other) : maxDepth(other.maxDepth), size(other.size), maxPointsPerNode(other.maxPointsPerNode),
-            skylight_(other.skylight_), backgroundColor_(other.backgroundColor_),
-            mapMutex_(std::make_unique<std::mutex>()), autoOptimize_(other.autoOptimize_.load()),
+            skylight_(other.skylight_), backgroundColor_(other.backgroundColor_), autoOptimize_(other.autoOptimize_.load()),
             streamingQueued_(false), skybox_(other.skybox_), regionTargetPoints_(other.regionTargetPoints_) {
-        {
-            std::lock_guard<std::mutex> lock(*other.mapMutex_);
-            colorMap_ = other.colorMap_;
-            colorToIndex_ = other.colorToIndex_;
-            materialMap_ = other.materialMap_;
-            materialToIndex_ = other.materialToIndex_;
-        }
         if (other.root_) root_ = other.root_->clone();
         startWorkerThread();
     }
 
     Octree(Octree&& other) noexcept : maxDepth(other.maxDepth), size(other.size), maxPointsPerNode(other.maxPointsPerNode),
             skylight_(std::move(other.skylight_)), backgroundColor_(std::move(other.backgroundColor_)),
-            mapMutex_(std::move(other.mapMutex_)), colorMap_(std::move(other.colorMap_)),
-            colorToIndex_(std::move(other.colorToIndex_)), materialMap_(std::move(other.materialMap_)),
-            materialToIndex_(std::move(other.materialToIndex_)), autoOptimize_(other.autoOptimize_.load()),
-            streamingQueued_(false), regionTargetPoints_(other.regionTargetPoints_) {
+            autoOptimize_(other.autoOptimize_.load()),
+            streamingQueued_(false), skybox_(std::move(other.skybox_)), regionTargetPoints_(other.regionTargetPoints_) {
         other.stopWorkerThread();
         root_ = std::move(other.root_);
         
@@ -2292,17 +2075,6 @@ public:
         streamingQueued_.store(false);
         skybox_ = other.skybox_;
         regionTargetPoints_ = other.regionTargetPoints_;
-        
-        {
-            std::lock(*mapMutex_, *other.mapMutex_);
-            std::lock_guard<std::mutex> l1(*mapMutex_, std::adopt_lock);
-            std::lock_guard<std::mutex> l2(*other.mapMutex_, std::adopt_lock);
-            
-            colorMap_ = other.colorMap_;
-            colorToIndex_ = other.colorToIndex_;
-            materialMap_ = other.materialMap_;
-            materialToIndex_ = other.materialToIndex_;
-        }
 
         if (other.root_) root_ = other.root_->clone();
         
@@ -2325,12 +2097,6 @@ public:
         streamingQueued_.store(false);
         skybox_ = std::move(other.skybox_);
         regionTargetPoints_ = std::move(other.regionTargetPoints_);
-        
-        mapMutex_ = std::move(other.mapMutex_);
-        colorMap_ = std::move(other.colorMap_);
-        colorToIndex_ = std::move(other.colorToIndex_);
-        materialMap_ = std::move(other.materialMap_);
-        materialToIndex_ = std::move(other.materialToIndex_);
         
         root_ = std::move(other.root_);
         
@@ -2398,11 +2164,8 @@ public:
              int objectId = -1, float emittance = 0.0f, float roughness = 1.0f, 
              float metallic = 0.0f, float transmission = 0.0f, float ior = 1.45f) {
         
-        IndexType cIdx = getColorIndex(color);
         Material mat(emittance, roughness, metallic, transmission, ior);
-        IndexType mIdx = getMaterialIndex(mat);
-        
-        auto pointData = std::make_shared<NodeData>(data, pos, visible, cIdx, size, active, objectId, mIdx);
+        auto pointData = std::make_shared<NodeData>(data, pos, visible, color, size, active, objectId, mat);
         
         ensureBounds(pointData->getCubeBounds());
         
@@ -2417,11 +2180,8 @@ public:
              int objectId = -1, float emittance = 0.0f, float roughness = 1.0f, 
              float metallic = 0.0f, float transmission = 0.0f, float ior = 1.45f) {
         enqueueTask([this, data, pos, visible, color, size, active, objectId, emittance, roughness, metallic, transmission, ior]() {
-            IndexType cIdx = getColorIndex(color);
             Material mat(emittance, roughness, metallic, transmission, ior);
-            IndexType mIdx = getMaterialIndex(mat);
-            
-            auto pointData = std::make_shared<NodeData>(data, pos, visible, cIdx, size, active, objectId, mIdx);
+            auto pointData = std::make_shared<NodeData>(data, pos, visible, color, size, active, objectId, mat);
             
             ensureBounds(pointData->getCubeBounds());
             
@@ -2460,25 +2220,6 @@ public:
         
         OctreeNode::writeVec3(out, skylight_);
         OctreeNode::writeVec3(out, backgroundColor_);
-
-        {
-            std::lock_guard<std::mutex> lock(*mapMutex_);
-            size_t cMapSize = colorMap_.size();
-            OctreeNode::writeVal(out, cMapSize);
-            for (const auto& c : colorMap_) {
-                OctreeNode::writeVec3(out, c);
-            }
-
-            size_t mMapSize = materialMap_.size();
-            OctreeNode::writeVal(out, mMapSize);
-            for (const auto& m : materialMap_) {
-                OctreeNode::writeVal(out, m.emittance);
-                OctreeNode::writeVal(out, m.roughness);
-                OctreeNode::writeVal(out, m.metallic);
-                OctreeNode::writeVal(out, m.transmission);
-                OctreeNode::writeVal(out, m.ior);
-            }
-        }
         
         OctreeNode::writeVec3(out, root_->bounds.first);
         OctreeNode::writeVec3(out, root_->bounds.second);
@@ -2508,34 +2249,6 @@ public:
         
         OctreeNode::readVec3(in, skylight_);
         OctreeNode::readVec3(in, backgroundColor_);
-
-        {
-            std::lock_guard<std::mutex> lock(*mapMutex_);
-            colorMap_.clear();
-            colorToIndex_.clear();
-            materialMap_.clear();
-            materialToIndex_.clear();
-
-            size_t cMapSize;
-            OctreeNode::readVal(in, cMapSize);
-            colorMap_.resize(cMapSize);
-            for (size_t i = 0; i < cMapSize; ++i) {
-                OctreeNode::readVec3(in, colorMap_[i]);
-                colorToIndex_[colorMap_[i]] = static_cast<IndexType>(i);
-            }
-
-            size_t mMapSize;
-            OctreeNode::readVal(in, mMapSize);
-            materialMap_.resize(mMapSize);
-            for (size_t i = 0; i < mMapSize; ++i) {
-                OctreeNode::readVal(in, materialMap_[i].emittance);
-                OctreeNode::readVal(in, materialMap_[i].roughness);
-                OctreeNode::readVal(in, materialMap_[i].metallic);
-                OctreeNode::readVal(in, materialMap_[i].transmission);
-                OctreeNode::readVal(in, materialMap_[i].ior);
-                materialToIndex_[materialMap_[i]] = static_cast<IndexType>(i);
-            }
-        }
 
         PointType minBound, maxBound;
         OctreeNode::readVec3(in, minBound);
@@ -2620,34 +2333,26 @@ public:
         pointData->position = newPos;
         pointData->setVisible(newVisible);
         
-        if (newColor != Eigen::Vector3f(1.0f, 1.0f, 1.0f)) pointData->colorIdx = getColorIndex(newColor);
+        if (newColor != Eigen::Vector3f(1.0f, 1.0f, 1.0f)) pointData->color = newColor;
         if (newSize > 0) pointData->size = newSize;
         pointData->setActive(newActive);
         pointData->objectId = targetObjId;
         
-        Material mat = getMaterial(pointData->materialIdx);
-        bool matChanged = false;
         if (newEmittance >= 0) {
-            mat.emittance = newEmittance;
-            matChanged = true;
+            pointData->material.emittance = newEmittance;
         }
         if (newRoughness >= 0) { 
-            mat.roughness = newRoughness;
-            matChanged = true;
+            pointData->material.roughness = newRoughness;
         }
         if (newMetallic >= 0) { 
-            mat.metallic = newMetallic;
-            matChanged = true;
+            pointData->material.metallic = newMetallic;
         }
         if (newTransmission >= 0) { 
-            mat.transmission = newTransmission;
-            matChanged = true;
+            pointData->material.transmission = newTransmission;
         }
         if (newIor >= 0) { 
-            mat.ior = newIor;
-            matChanged = true;
+            pointData->material.ior = newIor;
         }
-        if (matChanged) pointData->materialIdx = getMaterialIndex(mat);
         
         ensureBounds(pointData->getCubeBounds());
         bool res = insertRecursive(root_.get(), pointData, 0);
@@ -2744,7 +2449,7 @@ public:
     bool setColor(const PointType& pos, Eigen::Vector3f color, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
-        pointData->colorIdx = getColorIndex(color);
+        pointData->color = color;
         invalidateLODForPoint(pointData);
         return true;
     }
@@ -2754,10 +2459,9 @@ public:
             OctreeNode* node = root_.get();
             auto pointData = findwNode(pos, node, tolerance);
             if (!pointData) return;
-            IndexType gci = getColorIndex(color);
             {
                 std::lock_guard<std::shared_mutex> lock(node->nodeMutex);
-                pointData->colorIdx = gci;
+                pointData->color = color;
             }
             invalidateLODForPoint(pointData);
             return;
@@ -2767,9 +2471,7 @@ public:
     bool setEmittance(const PointType& pos, float emittance, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
-        Material mat = getMaterial(pointData->materialIdx);
-        mat.emittance = emittance;
-        pointData->materialIdx = getMaterialIndex(mat);
+        pointData->material.emittance = emittance;
         invalidateLODForPoint(pointData);
         return true;
     }
@@ -2777,9 +2479,7 @@ public:
     bool setRoughness(const PointType& pos, float roughness, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
-        Material mat = getMaterial(pointData->materialIdx);
-        mat.roughness = roughness;
-        pointData->materialIdx = getMaterialIndex(mat);
+        pointData->material.roughness = roughness;
         invalidateLODForPoint(pointData);
         return true;
     }
@@ -2787,9 +2487,7 @@ public:
     bool setMetallic(const PointType& pos, float metallic, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
-        Material mat = getMaterial(pointData->materialIdx);
-        mat.metallic = metallic;
-        pointData->materialIdx = getMaterialIndex(mat);
+        pointData->material.metallic = metallic;
         invalidateLODForPoint(pointData);
         return true;
     }
@@ -2797,9 +2495,7 @@ public:
     bool setTransmission(const PointType& pos, float transmission, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
-        Material mat = getMaterial(pointData->materialIdx);
-        mat.transmission = transmission;
-        pointData->materialIdx = getMaterialIndex(mat);
+        pointData->material.transmission = transmission;
         invalidateLODForPoint(pointData);
         return true;
     }
@@ -2941,8 +2637,8 @@ public:
                     PointType normal, hitPoint;
 
                     rayCubeIntersect(ray, obj.get(), t, normal, hitPoint);
-                    color = getColor(obj->colorIdx);
-                    Material objMat = getMaterial(obj->materialIdx);
+                    color = obj->color;
+                    Material objMat = obj->material;
                     
                     if (objMat.emittance > 0.0f) {
                         color = color * objMat.emittance;
@@ -3015,8 +2711,8 @@ public:
                     PointType normal, hitPoint;
 
                     rayCubeIntersect(ray, obj.get(), t, normal, hitPoint);
-                    color = getColor(obj->colorIdx);
-                    Material objMat = getMaterial(obj->materialIdx);
+                    color = obj->color;
+                    Material objMat = obj->material;
                     
                     if (objMat.emittance > 0.0f) {
                         color = color * objMat.emittance;
@@ -3166,7 +2862,7 @@ public:
             for(int i=0; i<6; ++i) {
                 auto neighbor = find(node->position + dirs[i] * node->size, checkRad);
                 if(neighbor && neighbor->objectId == objectId && neighbor->isActive()) {
-                    Material nMat = getMaterial(neighbor->materialIdx);
+                    Material nMat = neighbor->material;
                     if (nMat.transmission < 0.01f) {
                         hiddenSides++;
                     }
@@ -3200,7 +2896,6 @@ public:
     void optimize() {
         if (root_) {
             optimizeRecursive(root_.get());
-            reorderMapsZCurve();
             generateLODs();
         }
     }
@@ -3228,8 +2923,6 @@ public:
         
         size_t nodeMem = totalNodes * sizeof(OctreeNode);
         size_t dataMem = actualPoints * (sizeof(NodeData) + 16); 
-        size_t mapMem = colorMap_.size() * sizeof(Eigen::Vector3f) + materialMap_.size() * sizeof(Material);
-        size_t maxSize = ((1 << (sizeof(IndexType)*8 - 2) - 1) * 2) + 1;
 
         os << "========================================\n";
         os << "             OCTREE STATS               \n";
@@ -3251,16 +2944,12 @@ public:
         os << "  Points/Leaf (Avg) : " << std::fixed << std::setprecision(2) << avgPointsPerLeaf << "\n";
         os << "  Points/Leaf (Min) : " << minPointsInLeaf << "\n";
         os << "  Points/Leaf (Max) : " << maxPointsInLeaf << "\n";
-        os << "Maps:\n";
-        os << "  Unique Colors     : " << colorMap_.size() << "/" << maxSize << "\n";
-        os << "  Unique Materials  : " << materialMap_.size() << "/" << maxSize << "\n";
         os << "Bounds:\n";
         os << "  Min               : [" << root_->bounds.first.transpose() << "]\n";
         os << "  Max               : [" << root_->bounds.second.transpose() << "]\n";
         os << "Memory (Approx):\n";
         os << "  Node Structure    : " << (nodeMem / 1024.0) << " KB\n";
         os << "  Point Data        : " << (dataMem / 1024.0) << " KB\n";
-        os << "  Dictionary Maps   : " << (mapMem / 1024.0) << " KB\n";
         os << "========================================\n" << std::defaultfloat;
     }
 
@@ -3273,14 +2962,6 @@ public:
         PointType minBound = root_ ? root_->bounds.first : PointType::Zero();
         PointType maxBound = root_ ? root_->bounds.second : PointType::Zero();
         root_ = std::make_unique<OctreeNode>(minBound, maxBound);
-        
-        {
-            std::lock_guard<std::mutex> lock(*mapMutex_);
-            colorMap_.clear();
-            colorToIndex_.clear();
-            materialMap_.clear();
-            materialToIndex_.clear();
-        }
         
         size = 0;
     }
@@ -3310,13 +2991,7 @@ public:
         size_t nodeMem = loadedNodes * sizeof(OctreeNode);
         size_t pointMem = loadedPoints * (sizeof(NodeData) + sizeof(std::shared_ptr<NodeData>));
         
-        size_t mapMem = 0;
-        if (mapMutex_) {
-            std::lock_guard<std::mutex> lock(*mapMutex_);
-            mapMem = colorMap_.size() * sizeof(Eigen::Vector3f) * 12 + materialMap_.size() * (5 * 4);
-        }
-        
-        return (nodeMem + pointMem + mapMem) / (1024 * 1024);
+        return (nodeMem + pointMem) / (1024 * 1024);
     }
 
     size_t getLoadedPointCount() const {
