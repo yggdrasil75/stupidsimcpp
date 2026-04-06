@@ -15,6 +15,7 @@
 #include <unordered_map>
 #include <set>
 #include <memory>
+#include <iostream>
 
 #include "../grid/grid3eigen.hpp"
 #include "../timing_decorator.cpp"
@@ -48,9 +49,9 @@ enum class PlateType {
 };
 
 struct AltPositions {
-    v3half originalPos;
-    v3half noisePos;
-    v3half tectonicPos;
+    v3 originalPos;
+    v3 noisePos;
+    v3 tectonicPos;
 };
 
 struct NeighborData {
@@ -69,7 +70,7 @@ struct Particle {
     float plateDisplacement = 0.0f;
     // float temperature = -1;
     // float water = -1;
-    v3half originColor;
+    v3 originColor;
     bool surface = false;
 
     //gravity factors:
@@ -276,6 +277,11 @@ struct Particle {
         }
         return p;
     }
+
+    // friend ostream& operator<<(ostream& os) {
+
+    //     return os;
+    // }
 };
 
 struct planetConfig {
@@ -289,8 +295,8 @@ struct planetConfig {
     int currentStep = 0;
     
     float displacementStrength = 200.0f;
-    std::vector<Particle> surfaceNodes;
-    std::vector<Particle> interpolatedNodes;
+    std::vector<v3> surfaceNodes;
+    std::vector<v3> interpolatedNodes;
     float noiseStrength = 10.0f;
     int numPlates = 15;
     int smoothingPasses = 3;
@@ -315,7 +321,8 @@ struct planetConfig {
 
 struct PlateConfig {
     int plateId = -1;
-    Particle plateEulerPole;
+    v3 plateEulerPolep;
+    // Particle plateEulerPole;
     Eigen::Vector3f direction;
     float angularVelocity = 0;
     float thickness = 0;
@@ -390,8 +397,10 @@ public:
 
     void generateFibSphere() {
         TIME_FUNCTION;
+        grid.load("output/fibSphere.yggs");
         grid.clear();
         config.surfaceNodes.clear();
+        config.surfaceNodes.resize(config.surfacePoints);
         for (int i = 0; i < config.surfacePoints; i++) {
             float y = 1.0f - (i * 2.0f) / (config.surfacePoints - 1);
             float radiusY = std::sqrt(1.0f- y * y);
@@ -404,16 +413,16 @@ public:
             Particle pt;
             
             pt.altPos = std::make_unique<AltPositions>();
-            pt.altPos->originalPos = pos.cast<Eigen::half>();
-            pt.altPos->noisePos = pos.cast<Eigen::half>();
-            pt.altPos->tectonicPos = pos.cast<Eigen::half>();
+            pt.altPos->originalPos = pos;
+            pt.altPos->noisePos = pos;
+            pt.altPos->tectonicPos = pos;
             
             pt.currentPos = pos;
-            pt.originColor = config.color.cast<Eigen::half>();
+            pt.originColor = config.color;
             pt.noiseDisplacement = 0.0f;
             pt.surface = true;
-            config.surfaceNodes.emplace_back(pt);
-            grid.queuedset(pt, pt.currentPos, true, pt.originColor.cast<float>(), config.voxelSize, true, 1, false, 0.0f, 0.0f, 0.0f);
+            config.surfaceNodes[i] = pt.currentPos;
+            grid.set(pt, pt.currentPos, true, pt.originColor, config.voxelSize, true, 1, false, 0.0f, 0.0f, 0.0f);
         }
         config.currentStep = 1;
         std::cout << "Step 1 done. base sphere generated" << std::endl;
@@ -422,47 +431,79 @@ public:
     }
 
     inline void _applyNoise(std::function<float(const Eigen::Vector3f&)> noiseFunc) {
-        for (auto& p : config.surfaceNodes) {
+        std::vector<v3> newPos(config.surfaceNodes.size());
+        // grid.waitForIdle();
+        for (int i = 0; i < config.surfaceNodes.size(); i++) {
+            v3 pos = config.surfaceNodes[i];
+        // for (auto& pos : config.surfaceNodes) {
+            
+            auto node = grid.find(pos, config.voxelSize * 0.5f);
+            // if (!node) continue;
+            if (!node) {
+                std::cout << "something broke as early as applynoise!" << std::endl;
+            }
+            Particle p = node->data;
             Eigen::Vector3f oldPos = p.currentPos;
-            float displacementValue = noiseFunc(p.altPos->originalPos.cast<float>());
+            float displacementValue = noiseFunc(p.altPos->originalPos);
             p.noiseDisplacement = displacementValue;
-            Eigen::Vector3f normal = p.altPos->originalPos.cast<float>().normalized();
-            p.altPos->noisePos = (p.altPos->originalPos.cast<float>() + (normal * displacementValue * config.noiseStrength)).cast<Eigen::half>();
-            p.currentPos = p.altPos->noisePos.cast<float>();
-            grid.queuedmove(oldPos, p.currentPos);
-            grid.waitForIdle();
-            grid.queuedupdate(p.currentPos, p);
+            Eigen::Vector3f normal = p.altPos->originalPos.normalized();
+            p.altPos->noisePos = (p.altPos->originalPos + (normal * displacementValue * config.noiseStrength));
+            p.currentPos = p.altPos->noisePos;
+            newPos[i] = p.currentPos;
+            grid.move(oldPos, p.currentPos);
+            grid.update(p.currentPos, p);
+            // grid.queuedupdate(oldPos, p.currentPos, p);
+            // grid.queuedupdate(p.currentPos, p);
         }
+        config.surfaceNodes = newPos;
+        std::cout << "applied noise" << std::endl;
     }
 
     void assignSeeds() {
+        grid.waitForIdle();
+        std::cout << "assigning seeds" << std::endl;
+        int asdf = 0;
         plates.clear();
         plates.resize(config.numPlates);
         float sphereSurfaceArea = 4.0f * M_PI * config.radius * config.radius;
         float averageAreaPerPlate = sphereSurfaceArea / config.numPlates;
         float minDistance = std::sqrt(averageAreaPerPlate) * 0.4f;
         std::vector<int> selectedSeedIndices;
-        std::uniform_int_distribution<int> distNode(0, config.surfaceNodes.size() - 1);
+        std::uniform_int_distribution<int> distNode(0, config.surfacePoints - 1);
+        // std::cout << asdf++ << std::endl;
         for (int i = 0; i < config.numPlates; ++i) {
-            int attempts = 1000;
+            int attempts = 10;
             bool foundValidSeed = false;
+            // std::cout << asdf++ << std::endl;
             int seedid = distNode(rng);
             plates[i].plateId = i;
+            // std::cout << asdf++ << std::endl;
 
             while (!foundValidSeed && attempts > 0) {
                 int seedIndex = distNode(rng);
                 
                 bool tooClose = false;
                 for (int selectedIndex : selectedSeedIndices) {
-                    const auto& existingSeed = config.surfaceNodes[selectedIndex];
-                    const auto& candidateSeed = config.surfaceNodes[seedIndex];
-                    
-                    float dot = existingSeed.altPos->originalPos.cast<float>().normalized().dot(candidateSeed.altPos->originalPos.cast<float>().normalized());
+                    // std::cout << asdf++ << std::endl;
+                    auto existingNode = grid.find(config.surfaceNodes[selectedIndex], config.voxelSize * 0.5f);
+                    auto candidateNode = grid.find(config.surfaceNodes[seedIndex], config.voxelSize * 0.5f);
+                    // std::cout << asdf++ << std::endl;
+                    if (!existingNode || !candidateNode) {
+                        std::cout << "no nodes" << std::endl;
+                        continue;
+                    }
+
+                    const auto& existingSeed = existingNode->data;
+                    const auto& candidateSeed = candidateNode->data;
+                    // std::cout << asdf++ << std::endl;
+
+                    float dot = existingSeed.altPos->originalPos.normalized().dot(candidateSeed.altPos->originalPos.normalized());
                     float angle = std::acos(std::clamp(dot, -1.0f, 1.0f));
                     float distanceOnSphere = angle * config.radius;
                     
                     if (distanceOnSphere < minDistance) {
                         tooClose = true;
+                        std::cout << "too close" << std::endl;
                         break;
                     }
                 }
@@ -470,8 +511,15 @@ public:
                 if (!tooClose || selectedSeedIndices.empty()) {
                     selectedSeedIndices.push_back(seedIndex);
                     plates[i].plateId = i;
-                    config.surfaceNodes[seedIndex].plateID = i; 
-                    plates[i].plateEulerPole = config.surfaceNodes[seedIndex];
+                    
+                    auto sNode = grid.find(config.surfaceNodes[seedIndex], config.voxelSize * 0.5f);
+                    if (sNode) {
+                        Particle p = sNode->data;
+                        p.plateID = i; 
+                        grid.updateData(config.surfaceNodes[seedIndex], p);
+                        plates[i].plateEulerPolep = sNode->position;
+                        // plates[i].plateEulerPole = p;
+                    }
 
                     float colorVal = static_cast<float>(seedid) / config.surfaceNodes.size();
                     if (i % 3 == 0) {
@@ -494,7 +542,15 @@ public:
                 int seedIndex = distNode(rng);
                 selectedSeedIndices.push_back(seedIndex);
                 plates[i].plateId = i;
-                plates[i].plateEulerPole = config.surfaceNodes[seedIndex];
+
+                auto sNode = grid.find(config.surfaceNodes[seedIndex], config.voxelSize * 0.5f);
+                if (sNode) {
+                    Particle p = sNode->data;
+                    p.plateID = i;
+                    grid.updateData(config.surfaceNodes[seedIndex], p);
+                    plates[i].plateEulerPolep = sNode->position;
+                    // plates[i].plateEulerPole = p;
+                }
 
                 float colorVal = static_cast<float>(seedIndex) / config.surfaceNodes.size();
                 if (i % 3 == 0) {
@@ -507,24 +563,33 @@ public:
                     float b = static_cast<float>(seedid * seedid) / config.surfaceNodes.size();
                     plates[i].debugColor = v3(colorVal, colorVal, b);
                 }
-                config.surfaceNodes[seedIndex].plateID = i; 
             }
         }
-        
+        std::cout << "finished assigning seeds" << std::endl;
     }
 
     void buildAdjacencyList() {
         TIME_FUNCTION;
+        grid.waitForIdle();
+        std::cout << "building an adjacency list" << std::endl;
         int numNodes = config.surfaceNodes.size();
         std::vector<v3> normPos(numNodes);
         #pragma omp parallel for schedule(static)
         for (int i = 0; i < numNodes; i++) {
-            normPos[i] = config.surfaceNodes[i].altPos->originalPos.cast<float>().normalized();
+            auto node = grid.find(config.surfaceNodes[i], config.voxelSize * 0.5f);
+            if (node) {
+                normPos[i] = node->data.altPos->originalPos.normalized();
+            } else {
+                normPos[i] = config.surfaceNodes[i].normalized();
+            }
         }
         
         #pragma omp parallel for schedule(static)
         for (int i = 0; i < config.surfaceNodes.size(); i++) {
-            Particle& in = config.surfaceNodes[i];
+            auto node = grid.find(config.surfaceNodes[i], config.voxelSize * 0.5f);
+            if (!node) continue;
+            Particle in = node->data;
+            
             v3 inn = normPos[i];
             std::priority_queue<std::pair<float, int>> top8;
             
@@ -550,25 +615,37 @@ public:
                 nIdx++;
                 top8.pop();
             }
+            grid.updateData(config.surfaceNodes[i], in);
+            // grid.queuedupdate(config.surfaceNodes[i], in);
         }
+        grid.waitForIdle();
     }
 
     void growPlatesRandom() {
         TIME_FUNCTION;
+        grid.waitForIdle();
+        std::cout << "growing randomly" << std::endl;
         int unassignedCount = 0;
         std::vector<int> plateWeights(config.numPlates, 1);
         std::vector<std::vector<int>> frontiers(config.numPlates);
         
         for (int i = 0; i < config.surfaceNodes.size(); i++) {
-            int pID = config.surfaceNodes[i].plateID;
+            auto node = grid.find(config.surfaceNodes[i], config.voxelSize * 0.5f);
+            if (!node) {
+                std::cout << "gpr couldnt find" << std::endl;
+                continue;
+            }
+            int pID = node->data.plateID;
             if (pID == -1) {
                 unassignedCount++;
             } else {
+                std::cout << "found seed for " << pID << std::endl;
                 plates[pID].assignedNodes.push_back(i);
                 for (int n = 0; n < 8; n++) {
-                    int nIdx = config.surfaceNodes[i].nearNeighbors[n].index;
+                    int nIdx = node->data.nearNeighbors[n].index;
                     if (nIdx == -1) break;
-                    if (config.surfaceNodes[nIdx].plateID == -1) {
+                    auto nNode = grid.find(config.surfaceNodes[nIdx], config.voxelSize * 0.5f);
+                    if (nNode && nNode->data.plateID == -1) {
                         frontiers[pID].push_back(nIdx);
                     }
                 }
@@ -589,6 +666,7 @@ public:
                 break;
             }
             
+            // std::cout << "have " << unassignedCount << " remaining nodes" << std::endl;
             int randVal = distFloat(rng) * totalWeight;
             int selPlate = -1;
             float accum = 0.0f;
@@ -611,20 +689,27 @@ public:
                 frontiers[selPlate][fIdx] = frontiers[selPlate].back();
                 frontiers[selPlate].pop_back();
 
-                if (config.surfaceNodes[candIdx].plateID == -1) {
-                    config.surfaceNodes[candIdx].plateID = selPlate;
+                auto candNode = grid.find(config.surfaceNodes[candIdx], config.voxelSize * 0.5f);
+                if (candNode && candNode->data.plateID == -1) {
+                    Particle p = candNode->data;
+                    p.plateID = selPlate;
+                    grid.updateData(config.surfaceNodes[candIdx], p);
+                    
                     plates[selPlate].assignedNodes.push_back(candIdx);
                     unassignedCount--;
                     successfulGrowth = true;
 
                     for (int n = 0; n < 8; n++) {
-                        int nIdx = config.surfaceNodes[candIdx].nearNeighbors[n].index;
+                        int nIdx = p.nearNeighbors[n].index;
                         if (nIdx == -1) break;
-                        if (config.surfaceNodes[nIdx].plateID == -1) {
+                        auto nNode = grid.find(config.surfaceNodes[nIdx], config.voxelSize * 0.5f);
+                        if (nNode && nNode->data.plateID == -1) {
                             frontiers[selPlate].push_back(nIdx);
                         }
                     }
                 }
+            } else {
+                plateWeights[selPlate] = 0;
             }
 
             if (successfulGrowth) {
@@ -640,9 +725,12 @@ public:
 
     void growPlatesCellular() {
         TIME_FUNCTION;
+        grid.waitForIdle();
+        std::cout << "growing using cellular automata" << std::endl;
         int unassignedCount = 0;
-        for (const auto& p : config.surfaceNodes) {
-            if (p.plateID == -1) unassignedCount++;
+        for (const auto& pos : config.surfaceNodes) {
+            auto node = grid.find(pos, config.voxelSize * 0.5f);
+            if (node && node->data.plateID == -1) unassignedCount++;
         }
 
         while (unassignedCount > 0) {
@@ -650,17 +738,23 @@ public:
             int assignedThisRound = 0;
             
             for (int i = 0; i < config.surfaceNodes.size(); i++) {
-                if (config.surfaceNodes[i].plateID != -1) {
-                    nextState[i] = config.surfaceNodes[i].plateID;
+                auto node = grid.find(config.surfaceNodes[i], config.voxelSize * 0.5f);
+                if (!node) continue;
+                
+                if (node->data.plateID != -1) {
+                    nextState[i] = node->data.plateID;
                 } else {
                     std::unordered_map<int, int> counts;
                     int bestPlate = -1;
                     int maxCount = 0;
                     
                     for (int n = 0; n < 8; n++) {
-                        int nIdx = config.surfaceNodes[i].nearNeighbors[n].index;
+                        int nIdx = node->data.nearNeighbors[n].index;
                         if (nIdx == -1) break;
-                        int pID = config.surfaceNodes[nIdx].plateID;
+                        auto nNode = grid.find(config.surfaceNodes[nIdx], config.voxelSize * 0.5f);
+                        if (!nNode) continue;
+                        
+                        int pID = nNode->data.plateID;
                         if (pID != -1) {
                             counts[pID]++;
                             if (counts[pID] > maxCount || (counts[pID] == maxCount && (rng() % 2 == 0))) {
@@ -677,8 +771,11 @@ public:
             }
             
             for (int i = 0; i < config.surfaceNodes.size(); i++) {
-                if (config.surfaceNodes[i].plateID == -1 && nextState[i] != -1) {
-                    config.surfaceNodes[i].plateID = nextState[i];
+                auto node = grid.find(config.surfaceNodes[i], config.voxelSize * 0.5f);
+                if (node && node->data.plateID == -1 && nextState[i] != -1) {
+                    Particle p = node->data;
+                    p.plateID = nextState[i];
+                    grid.updateData(config.surfaceNodes[i], p);
                     plates[nextState[i]].assignedNodes.push_back(i);
                     unassignedCount--;
                 }
@@ -686,17 +783,21 @@ public:
             
             if (assignedThisRound == 0 && unassignedCount > 0) {
                 for (int i = 0; i < config.surfaceNodes.size(); i++) {
-                    if (config.surfaceNodes[i].plateID == -1) {
+                    auto node = grid.find(config.surfaceNodes[i], config.voxelSize * 0.5f);
+                    if (node && node->data.plateID == -1) {
                         int closestPlate = 0;
                         float minDist = std::numeric_limits<float>::max();
                         for (int p = 0; p < config.numPlates; p++) {
-                            float d = (config.surfaceNodes[i].altPos->originalPos.cast<float>() - plates[p].plateEulerPole.altPos->originalPos.cast<float>()).norm();
+                            auto asdfsdfsdfsdfs = grid.find(plates[p].plateEulerPolep);
+                            float d = (node->data.altPos->originalPos - asdfsdfsdfsdfs->data.altPos->originalPos).norm();
                             if (d < minDist) {
                                 minDist = d;
                                 closestPlate = p;
                             }
                         }
-                        config.surfaceNodes[i].plateID = closestPlate;
+                        Particle pt = node->data;
+                        pt.plateID = closestPlate;
+                        grid.updateData(config.surfaceNodes[i], pt);
                         plates[closestPlate].assignedNodes.push_back(i);
                         unassignedCount--;
                     }
@@ -707,20 +808,26 @@ public:
 
     void fixBoundaries() {
         TIME_FUNCTION;
+        grid.waitForIdle();
+        std::cout << "fixing boundaries" << std::endl;
         for (int pass = 0; pass < config.smoothingPasses; pass++) {
-            std::vector<int> nextPlateID(config.surfaceNodes.size());
+            std::vector<int> nextPlateID(config.surfaceNodes.size(), -1);
             
             for (int i = 0; i < config.surfaceNodes.size(); i++) {
+                auto node = grid.find(config.surfaceNodes[i], config.voxelSize * 0.5f);
+                if (!node) continue;
+                
                 std::unordered_map<int, int> counts;
-                counts[config.surfaceNodes[i].plateID]++;
+                counts[node->data.plateID]++;
                 
                 for (int n = 0; n < 8; n++) {
-                    int nIdx = config.surfaceNodes[i].nearNeighbors[n].index;
+                    int nIdx = node->data.nearNeighbors[n].index;
                     if (nIdx == -1) break;
-                    counts[config.surfaceNodes[nIdx].plateID]++;
+                    auto nNode = grid.find(config.surfaceNodes[nIdx], config.voxelSize * 0.5f);
+                    if (nNode) counts[nNode->data.plateID]++;
                 }
                 
-                int bestPlate = config.surfaceNodes[i].plateID;
+                int bestPlate = node->data.plateID;
                 int maxCount = 0;
                 for (auto& pair : counts) {
                     if (pair.second > maxCount) {
@@ -732,7 +839,12 @@ public:
             }
             
             for (int i = 0; i < config.surfaceNodes.size(); i++) {
-                config.surfaceNodes[i].plateID = nextPlateID[i];
+                auto node = grid.find(config.surfaceNodes[i], config.voxelSize * 0.5f);
+                if (node && nextPlateID[i] != -1) {
+                    Particle p = node->data;
+                    p.plateID = nextPlateID[i];
+                    grid.updateData(config.surfaceNodes[i], p);
+                }
             }
         }
         
@@ -740,14 +852,17 @@ public:
             plate.assignedNodes.clear();
         }
         for (int i = 0; i < config.surfaceNodes.size(); i++) {
-            if (config.surfaceNodes[i].plateID != -1) {
-                plates[config.surfaceNodes[i].plateID].assignedNodes.push_back(i);
+            auto node = grid.find(config.surfaceNodes[i], config.voxelSize * 0.5f);
+            if (node && node->data.plateID != -1) {
+                plates[node->data.plateID].assignedNodes.push_back(i);
             }
         }
     }
 
     void extraplateste() {
         TIME_FUNCTION;
+        grid.waitForIdle();
+        std::cout << "plate setting stuff" << std::endl;
         std::uniform_real_distribution<float> distFloat(0.0f, 1.0f);
         std::vector<std::pair<int, float>> plateStats;
         for (int i = 0; i < config.numPlates; i++) {
@@ -759,8 +874,10 @@ public:
             Eigen::Vector3f centroid(0,0,0);
             
             for (int nIdx : plates[i].assignedNodes) {
-                sumElevation += config.surfaceNodes[nIdx].currentPos.norm();
-                centroid += config.surfaceNodes[nIdx].altPos->originalPos.cast<float>();
+                auto node = grid.find(config.surfaceNodes[nIdx], config.voxelSize * 0.5f);
+                if (!node) continue;
+                sumElevation += node->data.currentPos.norm();
+                centroid += node->data.altPos->originalPos;
             }
             
             if (!plates[i].assignedNodes.empty()) {
@@ -769,24 +886,36 @@ public:
 
                 float maxSpread = 0.0f;
                 for (int nIdx : plates[i].assignedNodes) {
-                    float d = (config.surfaceNodes[nIdx].altPos->originalPos.cast<float>() - centroid).norm();
+                    auto node = grid.find(config.surfaceNodes[nIdx], config.voxelSize * 0.5f);
+                    if (!node) continue;
+                    float d = (node->data.altPos->originalPos - centroid).norm();
                     if (d > maxSpread) maxSpread = d;
                 }
 
-                float distToCentroid = (plates[i].plateEulerPole.altPos->originalPos.cast<float>() - centroid).norm();
-                
-                if (distToCentroid > maxSpread * 0.6f) {
-                    int bestNodeIdx = plates[i].assignedNodes[0];
-                    float minDistToCentroid = std::numeric_limits<float>::max();
+                auto asdfasdflkj = grid.find(plates[i].plateEulerPolep);
+                if (asdfasdflkj) {
+                    Particle pasdf = asdfasdflkj->data;
+                    float distToCentroid = (pasdf.altPos->originalPos - centroid).norm();
                     
-                    for (int nIdx : plates[i].assignedNodes) {
-                        float d = (config.surfaceNodes[nIdx].altPos->originalPos.cast<float>() - centroid).norm();
-                        if (d < minDistToCentroid) {
-                            minDistToCentroid = d;
-                            bestNodeIdx = nIdx;
+                    if (distToCentroid > maxSpread * 0.6f) {
+                        int bestNodeIdx = plates[i].assignedNodes[0];
+                        float minDistToCentroid = std::numeric_limits<float>::max();
+                        
+                        for (int nIdx : plates[i].assignedNodes) {
+                            auto node = grid.find(config.surfaceNodes[nIdx], config.voxelSize * 0.5f);
+                            if (!node) continue;
+                            float d = (node->data.altPos->originalPos - centroid).norm();
+                            if (d < minDistToCentroid) {
+                                minDistToCentroid = d;
+                                bestNodeIdx = nIdx;
+                            }
                         }
+                        auto bestNode = grid.find(config.surfaceNodes[bestNodeIdx], config.voxelSize * 0.5f);
+                        if (bestNode) {
+                            plates[i].plateEulerPolep = bestNode->position;
+                        }
+                        // grid.update(plates[i].plateEulerPolep, pasdf);
                     }
-                    plates[i].plateEulerPole = config.surfaceNodes[bestNodeIdx]; 
                 }
             } else {
                 plateStats[i].second = config.radius;
@@ -795,8 +924,14 @@ public:
             Eigen::Vector3f randomDir(distFloat(rng) - 0.5f, distFloat(rng) - 0.5f, distFloat(rng) - 0.5f);
             randomDir.normalize();
             
-            Eigen::Vector3f poleDir = plates[i].plateEulerPole.altPos->originalPos.cast<float>().normalized();
-            plates[i].direction = (randomDir - poleDir * randomDir.dot(poleDir)).normalized();
+            auto pasd = grid.find(plates[i].plateEulerPolep);
+            if (pasd) {
+                Particle pasddata = pasd->data;
+                Eigen::Vector3f poleDir = pasddata.altPos->originalPos;
+                poleDir.normalize();
+                plates[i].direction = (randomDir - poleDir * randomDir.dot(poleDir));
+                plates[i].direction.normalize();
+            }
             
             plates[i].angularVelocity = distFloat(rng) * 0.1f + 0.02f;
             plates[i].rigidity = distFloat(rng) * 100.0f;
@@ -830,13 +965,16 @@ public:
 
     void boundaryStress() {
         TIME_FUNCTION;
+        grid.waitForIdle();
+        std::cout << "applying boundary stresses" << std::endl;
         int numNodes = config.surfaceNodes.size();
         std::vector<float> nodeStress(numNodes, 0.0f);
         std::vector<float> nodeNoise(numNodes, 0.0f);
         
         std::vector<Eigen::Vector3f> ω(config.numPlates);
         for (int i = 0; i < config.numPlates; i++) {
-            ω[i] = plates[i].plateEulerPole.altPos->originalPos.cast<float>().normalized().cross(plates[i].direction) * plates[i].angularVelocity;
+            auto asdfasdflkj = grid.find(plates[i].plateEulerPolep);
+            ω[i] = asdfasdflkj->data.altPos->originalPos.normalized().cross(plates[i].direction) * plates[i].angularVelocity;
         }
 
         std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
@@ -846,10 +984,14 @@ public:
             std::vector<float> newNoise = nodeNoise;
             
             for (int i = 0; i < numNodes; i++) {
-                int myPlate = config.surfaceNodes[i].plateID;
+                auto node = grid.find(config.surfaceNodes[i], config.voxelSize * 0.5f);
+                if (!node) continue;
+                Particle p = node->data;
+
+                int myPlate = p.plateID;
                 if (myPlate == -1) continue;
                 
-                Eigen::Vector3f myPos = config.surfaceNodes[i].altPos->originalPos.cast<float>().normalized();
+                Eigen::Vector3f myPos = p.altPos->originalPos.normalized();
                 Eigen::Vector3f myVel = ω[myPlate].cross(myPos);
                 
                 float localStress = 0.0f;
@@ -857,13 +999,16 @@ public:
                 int boundaryCount = 0;
                 
                 for (int n = 0; n < 8; n++) {
-                    int nIdx = config.surfaceNodes[i].nearNeighbors[n].index;
+                    int nIdx = p.nearNeighbors[n].index;
                     if (nIdx == -1) break;
                     
-                    int nPlate = config.surfaceNodes[nIdx].plateID;
+                    auto nNode = grid.find(config.surfaceNodes[nIdx], config.voxelSize * 0.5f);
+                    if (!nNode) continue;
+
+                    int nPlate = nNode->data.plateID;
                     if (nPlate != -1 && myPlate != nPlate) {
                         boundaryCount++;
-                        Eigen::Vector3f nPos = config.surfaceNodes[nIdx].altPos->originalPos.cast<float>().normalized();
+                        Eigen::Vector3f nPos = nNode->data.altPos->originalPos.normalized();
                         Eigen::Vector3f nVel = ω[nPlate].cross(nPos);
                         
                         Eigen::Vector3f relVel = nVel - myVel;
@@ -899,7 +1044,7 @@ public:
                     int validNeighbors = 0;
                     
                     for (int n = 0; n < 8; n++) {
-                        int nIdx = config.surfaceNodes[i].nearNeighbors[n].index;
+                        int nIdx = p.nearNeighbors[n].index;
                         if (nIdx == -1) break;
                         sumS += nodeStress[nIdx];
                         sumN += nodeNoise[nIdx];
@@ -917,28 +1062,48 @@ public:
         }
         
         for (int i = 0; i < numNodes; i++) {
-            Particle& p = config.surfaceNodes[i];
+            auto node = grid.find(config.surfaceNodes[i], config.voxelSize * 0.5f);
+            if (!node) continue;
+            Particle p = node->data;
             p.plateDisplacement = nodeStress[i];
             
             float noiseVal = dist(rng) * nodeNoise[i];
             
-            Eigen::Vector3f normal = p.altPos->originalPos.cast<float>().normalized();
-            p.altPos->tectonicPos = (p.altPos->noisePos.cast<float>() + (normal * (p.plateDisplacement + noiseVal))).cast<Eigen::half>();
+            Eigen::Vector3f normal = p.altPos->originalPos.normalized();
+            p.altPos->tectonicPos = (p.altPos->noisePos + (normal * (p.plateDisplacement + noiseVal)));
+            
+            grid.updateData(config.surfaceNodes[i], p);
+            // grid.queuedupdate(config.surfaceNodes[i], p);
         }
     }
 
     void finalizeApplyResults() {
         TIME_FUNCTION;
+        std::cout << "finalizing results" << std::endl;
         ///TODO: fix this not being used.
         float maxAllowedDisp = config.radius * config.maxElevationRatio;
 
-        for (auto& p : config.surfaceNodes) {
+        grid.waitForIdle();
+        std::vector<v3> newPos(config.surfaceNodes.size());
+        for (int i = 0; i < config.surfaceNodes.size(); i++) {
+            v3 pos = config.surfaceNodes[i];
+        // for (auto& pos : config.surfaceNodes) {
+            auto node = grid.find(pos, config.voxelSize * 0.5f);
+            if (!node || !node->isActive()) {
+                newPos[i] = pos;
+                continue;
+            }
+            Particle p = node->data;
             Eigen::Vector3f oldPos = p.currentPos;
-            p.currentPos = p.altPos->tectonicPos.cast<float>();
-            grid.queuedmove(oldPos, p.currentPos);
-            grid.waitForIdle();
-            grid.queuedupdate(p.currentPos, p);
+            p.currentPos = p.altPos->tectonicPos;
+            newPos[i] = p.currentPos;
+            grid.updateData(oldPos, p);
+            grid.move(oldPos, p.currentPos);
+            // grid.queuedupdate(oldPos, p.currentPos, p);
+            // grid.waitForIdle();
+            // grid.update(p.currentPos, p);
         }
+        config.surfaceNodes = newPos;
         std::cout << "Finalize apply results completed." << std::endl;
     }
 
@@ -1001,25 +1166,41 @@ public:
         TIME_FUNCTION;
         
         config.interpolatedNodes.clear();
+        grid.waitForIdle();
 
         std::set<std::tuple<int, int, int>> uniqueTriangles;
 
         for (int i = 0; i < config.surfaceNodes.size(); i++) {
-            Particle& p1 = config.surfaceNodes[i];
+            auto pt1 = grid.find(config.surfaceNodes[i], config.voxelSize * 0.5f);
+            if (!pt1) {
+                std::cout << "something broke interpolate find" << std::endl;
+                continue;
+            }
+            Particle p1 = pt1->data;
+            if (!p1.altPos) {
+                std::cout << "missing alt positions" << std::endl;
+            }
+
             for (int n1 = 0; n1 < 8; n1++) {
                 int j = p1.nearNeighbors[n1].index;
                 if (j == -1) break;
                 if (j >= i) continue; 
                 
-                Particle& p2 = config.surfaceNodes[j];
+                auto pt2 = grid.find(config.surfaceNodes[j], config.voxelSize * 0.5f);
+                if (!pt2) continue;
+                Particle p2 = pt2->data;
+
                 for (int n2 = 0; n2 < 8; n2++) {
                     int k = p2.nearNeighbors[n2].index;
                     if (k == -1) break;
                     if (k <= j) continue;
                     
+                    auto pt3 = grid.find(config.surfaceNodes[k], config.voxelSize * 0.5f);
+                    if (!pt3) continue;
+
                     bool isNeighbor = false;
                     for (int n3 = 0; n3 < 8; n3++) {
-                        int nIdx = config.surfaceNodes[k].nearNeighbors[n3].index;
+                        int nIdx = pt3->data.nearNeighbors[n3].index;
                         if (nIdx == -1) break;
                         if (nIdx == i) { isNeighbor = true; break; }
                     }
@@ -1039,9 +1220,32 @@ public:
             int idx2 = std::get<1>(tri);
             int idx3 = std::get<2>(tri);
 
-            const Particle& p1 = config.surfaceNodes[idx1];
-            const Particle& p2 = config.surfaceNodes[idx2];
-            const Particle& p3 = config.surfaceNodes[idx3];
+            auto pt1 = grid.find(config.surfaceNodes[idx1], config.voxelSize * 0.5f);
+            // if (!pt1) continue;
+            Particle p1 = pt1->data;
+            auto pt2 = grid.find(config.surfaceNodes[idx2], config.voxelSize * 0.5f);
+            // if (!pt2) continue;
+            Particle p2 = pt2->data;
+            auto pt3 = grid.find(config.surfaceNodes[idx3], config.voxelSize * 0.5f);
+            // if (!pt3) continue;
+            Particle p3 = pt3->data;
+
+            if (!p1.altPos) {
+                std::cout << "broken p1" << std::endl;
+                std::cout << p1.altPos << std::endl;
+                continue;
+            }
+            if (!p2.altPos) {
+                std::cout << "broken p2" << std::endl;
+                // std::cout << "data: " << p2 << std::endl;
+                std::cout << "pos: " << p2.altPos << std::endl;
+                continue;
+            }
+            if (!p3.altPos) {
+                std::cout << "broken p3" << std::endl;
+                std::cout << p3.altPos << std::endl;
+                continue;
+            }
 
             float d1 = (p2.currentPos - p1.currentPos).norm();
             float d2 = (p3.currentPos - p1.currentPos).norm();
@@ -1059,9 +1263,9 @@ public:
                     
                     if (w1 > 0.99f || w2 > 0.99f || w3 > 0.99f) continue;
 
-                    v3 interpNormal = (p1.altPos->originalPos.cast<float>().normalized() * w1 + 
-                                       p2.altPos->originalPos.cast<float>().normalized() * w2 + 
-                                       p3.altPos->originalPos.cast<float>().normalized() * w3);
+                    v3 interpNormal = (p1.altPos->originalPos * w1 + 
+                                       p2.altPos->originalPos * w2 + 
+                                       p3.altPos->originalPos * w3);
                     interpNormal.normalize(); 
                     
                     float r1 = p1.currentPos.norm();
@@ -1070,10 +1274,6 @@ public:
                     float interpRadius = (r1 * w1) + (r2 * w2) + (r3 * w3);
 
                     v3 smoothPos = interpNormal * interpRadius;
-
-                    // if (grid.find(smoothPos, config.voxelSize * 0.1f) != nullptr) {
-                    //     continue; 
-                    // }
 
                     Particle newPt;
                     newPt.surface = true;
@@ -1090,14 +1290,15 @@ public:
                         newPt.originColor = p3.originColor;
                     }
 
-                    grid.queuedset(newPt, newPt.currentPos, true, newPt.originColor.cast<float>(), config.voxelSize, true, 1, false, 0.0f, 0.0f, 0.0f);
+                    grid.queuedset(newPt, newPt.currentPos, true, newPt.originColor, config.voxelSize, true, 1, false, 0.0f, 0.0f, 0.0f);
                     
-                    config.interpolatedNodes.push_back(newPt);
+                    config.interpolatedNodes.push_back(newPt.currentPos);
 
                     counter++;
                 }
             }
         }
+        grid.waitForIdle();
         std::cout << "Interpolated " << counter << " surface gaps." << std::endl;
     }
 
@@ -1116,8 +1317,10 @@ public:
         const int LAT_RES = 360;
         std::vector<float> surfaceMap(LON_RES * LAT_RES, safeRadius);
 
-        for (const auto& p : config.surfaceNodes) {
-            v3 d = p.currentPos - config.center;
+        for (const auto& pos : config.surfaceNodes) {
+            auto node = grid.find(pos, config.voxelSize * 0.5f);
+            if (!node) continue;
+            v3 d = node->data.currentPos - config.center;
             float r = d.norm();
             if (r < 0.1f) continue;
             
@@ -1145,8 +1348,10 @@ public:
             }
         }
 
-        for (const auto& p : config.interpolatedNodes) {
-            v3 d = p.currentPos - config.center;
+        for (const auto& pos : config.interpolatedNodes) {
+            auto node = grid.find(pos, config.voxelSize * 0.5f);
+            if (!node) continue;
+            v3 d = node->data.currentPos - config.center;
             float r = d.norm();
             if (r < 0.1f) continue;
             
@@ -1235,15 +1440,18 @@ public:
                             finalColor = coreColor * (1.0f - blend) + mantleColor * blend;
                         }
 
-                        ip.originColor = finalColor.cast<Eigen::half>();
+                        ip.originColor = finalColor;
                         ip.mass = 100.0f;
 
                         grid.queuedset(ip, pos, true, finalColor, config.voxelSize, true, 1, false, 0.0f, 0.0f, 0.0f);
+                        #pragma omp atomic
                         fillCount++;
                     }
                 }
             }
         }
+
+        grid.waitForIdle();
 
         coreFilled = true;
         std::cout << "Volume Fill Complete. Inserted " << fillCount << " interior nodes directly into the grid." << std::endl;
@@ -1273,10 +1481,10 @@ public:
                 p.impactShock = std::clamp(p.impactShock + falloff, 0.0f, 1.0f);
                 p.metalcontent = std::clamp(p.metalcontent + falloff * 0.5f, 0.0f, 1.0f);
                 
-                v3 origCol = p.originColor.cast<float>();
+                v3 origCol = p.originColor;
                 v3 burnCol(0.1f, 0.05f, 0.05f); // Reddish dark scorch
                 v3 newCol = origCol * (1.0f - falloff) + burnCol * falloff;
-                p.originColor = newCol.cast<Eigen::half>();
+                p.originColor = newCol;
                 
                 // Push nodes out slightly to form a crater rim
                 v3 pushDir = (n->position - impactCenter).normalized();
@@ -1290,7 +1498,7 @@ public:
         for (auto& up : toUpdate) {
             grid.move(up.first, up.second.currentPos);
             grid.updateData(up.second.currentPos, up.second);
-            grid.setColor(up.second.currentPos, up.second.originColor.cast<float>());
+            grid.setColor(up.second.currentPos, up.second.originColor);
         }
         
         impactHistory.push_back({targetPos, affectRadius});
@@ -1325,9 +1533,9 @@ public:
                     p.impactHeat = std::clamp(p.impactHeat + falloff * 0.5f, 0.0f, 1.0f);
                     p.impactShock = std::clamp(p.impactShock + falloff * 0.5f, 0.0f, 1.0f);
                     
-                    v3 origCol = p.originColor.cast<float>();
+                    v3 origCol = p.originColor;
                     v3 burnCol(0.2f, 0.15f, 0.1f);
-                    p.originColor = (origCol * (1.0f - falloff) + burnCol * falloff).cast<Eigen::half>();
+                    p.originColor = (origCol * (1.0f - falloff) + burnCol * falloff);
                     
                     toUpdate.push_back({n->position, p});
                 }
@@ -1336,7 +1544,7 @@ public:
             for (auto& pos : toRemove) grid.remove(pos, config.voxelSize);
             for (auto& up : toUpdate) {
                 grid.updateData(up.first, up.second);
-                grid.setColor(up.first, up.second.originColor.cast<float>());
+                grid.setColor(up.first, up.second.originColor);
             }
         }
         
@@ -1373,9 +1581,9 @@ public:
                     
                     p.impactDebris = std::clamp(p.impactDebris + falloff, 0.0f, 1.0f);
                     
-                    v3 origCol = p.originColor.cast<float>();
+                    v3 origCol = p.originColor;
                     v3 dustCol(0.6f, 0.5f, 0.4f);
-                    p.originColor = (origCol * (1.0f - falloff) + dustCol * falloff).cast<Eigen::half>();
+                    p.originColor = (origCol * (1.0f - falloff) + dustCol * falloff);
                     
                     toUpdate.push_back({n->position, p});
                 }
@@ -1384,7 +1592,7 @@ public:
             for (auto& pos : toRemove) grid.remove(pos, config.voxelSize);
             for (auto& up : toUpdate) {
                 grid.updateData(up.first, up.second);
-                grid.setColor(up.first, up.second.originColor.cast<float>());
+                grid.setColor(up.first, up.second.originColor);
             }
         }
         

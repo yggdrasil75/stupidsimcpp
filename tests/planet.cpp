@@ -360,18 +360,21 @@ public:
 
         float minNoise = std::numeric_limits<float>::max();
         float maxNoise = std::numeric_limits<float>::lowest();
-        int minSub = std::numeric_limits<int>::max();
-        int maxSub = std::numeric_limits<int>::lowest();
 
-        for (const auto& p : sim.config.surfaceNodes) {
-            if (p.noiseDisplacement < minNoise) minNoise = p.noiseDisplacement;
-            if (p.noiseDisplacement > maxNoise) maxNoise = p.noiseDisplacement;
+        if (currentColorMode == DebugColorMode::NOISE) {
+            for (const auto& pos : sim.config.surfaceNodes) {
+                auto pt = sim.grid.find(pos, sim.config.voxelSize * 0.5f);
+                if (!pt) continue;
+                if (pt->data.noiseDisplacement < minNoise) minNoise = pt->data.noiseDisplacement;
+                if (pt->data.noiseDisplacement > maxNoise) maxNoise = pt->data.noiseDisplacement;
+            }
         }
-        int snf = 0;
-        int inf = 0;
 
-        for (auto& p : sim.config.surfaceNodes) {
-            v3 color = p.originColor.cast<float>();
+        for (auto& pos : sim.config.surfaceNodes) {
+            auto pt = sim.grid.find(pos, sim.config.voxelSize * 0.5f);
+            if (!pt) continue;
+            auto& p = pt->data;
+            v3 color = p.originColor;
             
             switch (currentColorMode) {
                 case DebugColorMode::PLATES:
@@ -392,10 +395,11 @@ public:
                     color = v3(0.2f, 0.2f, 0.2f) + color * 0.8f;
                     
                     color = color.cwiseMin(1.0f).cwiseMax(0.0f);
+                    break;
                 }
                 case DebugColorMode::BASE:
                 default:
-                    color = p.originColor.cast<float>();
+                    color = p.originColor;
                     break;
             }
 
@@ -405,8 +409,11 @@ public:
                 // snf++;
             // sim.grid.update(p.currentPos, p.currentPos, p, true, color, sim.config.voxelSize, true, -2, false, 0.0f, 0.0f, 0.0f);
         }
-        for (auto& p : sim.config.interpolatedNodes) {
-            v3 color = p.originColor.cast<float>();
+        for (auto& pos : sim.config.interpolatedNodes) {
+            auto pt = sim.grid.find(pos, sim.config.voxelSize * 0.5f);
+            if (!pt) continue;
+            auto& p = pt->data;
+            v3 color = p.originColor;
             
             switch (currentColorMode) {
                 case DebugColorMode::PLATES:
@@ -427,10 +434,11 @@ public:
                     color = v3(0.2f, 0.2f, 0.2f) + color * 0.8f;
                     
                     color = color.cwiseMin(1.0f).cwiseMax(0.0f);
+                    break;
                 }
                 case DebugColorMode::BASE:
                 default:
-                    color = p.originColor.cast<float>();
+                    color = p.originColor;
                     break;
             }
 
@@ -454,51 +462,59 @@ public:
         float minD = std::numeric_limits<float>::max();
         float maxD = std::numeric_limits<float>::lowest();
 
-        for (const auto& p : sim.config.surfaceNodes) {
-            v3 pos;
+        for (const auto& pos : sim.config.surfaceNodes) {
+            auto pt = sim.grid.find(pos, sim.config.voxelSize * 0.5f);
+            if (!pt || !pt->isActive()) continue;
+            auto& p = pt->data;
+
+            v3 p_pos;
             switch(mode) {
                 case DebugMapMode::BASE: 
-                    pos = p.altPos->originalPos.cast<float>();
+                    p_pos = p.altPos->originalPos;
                     break;
                 case DebugMapMode::NOISE: 
-                    pos = p.altPos->noisePos.cast<float>();
+                    p_pos = p.altPos->noisePos;
                     break;
                 case DebugMapMode::TECTONIC: 
-                    pos = p.altPos->tectonicPos.cast<float>();
+                    p_pos = p.altPos->tectonicPos;
                     break;
                 case DebugMapMode::CURRENT:
                 default: 
-                    pos = p.currentPos;
+                    p_pos = p.currentPos;
                     break;
             }
-            float d = pos.norm();
+            float d = p_pos.norm();
             if (d < minD) minD = d;
             if (d > maxD) maxD = d;
         }
 
-        for (const auto& p : sim.config.surfaceNodes) {
-            v3 pos;
+        for (const auto& pos : sim.config.surfaceNodes) {
+            auto pt = sim.grid.find(pos, sim.config.voxelSize * 0.5f);
+            if (!pt || !pt->isActive()) continue;
+            auto& p = pt->data;
+
+            v3 p_pos;
             switch(mode) {
                 case DebugMapMode::BASE: 
-                    pos = p.altPos->originalPos.cast<float>();
+                    p_pos = p.altPos->originalPos;
                     break;
                 case DebugMapMode::NOISE: 
-                    pos = p.altPos->noisePos.cast<float>();
+                    p_pos = p.altPos->noisePos;
                     break;
                 case DebugMapMode::TECTONIC: 
-                    pos = p.altPos->tectonicPos.cast<float>();
+                    p_pos = p.altPos->tectonicPos;
                     break;
                 case DebugMapMode::TECTONICCOLOR: 
-                    pos = sim.plates[p.plateID].debugColor;
+                    p_pos = sim.plates[p.plateID].debugColor;
                     break;
                 case DebugMapMode::CURRENT:
                 default:
-                    pos = p.currentPos;
+                    p_pos = p.currentPos;
                     break;
             }
 
-            float d = pos.norm();
-            v3 n = p.altPos->originalPos.cast<float>().normalized();
+            float d = p_pos.norm();
+            v3 n = p.altPos->originalPos.normalized();
             
             float u = 0.5f + std::atan2(n.z(), n.x()) / (2.0f * static_cast<float>(M_PI));
             float v = 0.5f - std::asin(n.y()) / static_cast<float>(M_PI);
@@ -633,9 +649,11 @@ public:
     }
 
     void simulateTectonics() {
+        sim.grid.waitForIdle();
         
         currentColorMode = DebugColorMode::PLATES;
         
+        sim.grid.waitForIdle();
         sim.assignSeeds();
         sim.buildAdjacencyList();
         if (platesUseCellular) {

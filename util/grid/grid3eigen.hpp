@@ -449,6 +449,7 @@ public:
                             childMax[d] = high ? bounds.second[d] : center[d];
                         }
                         children[i] = std::make_unique<OctreeNode>(childMin, childMax);
+                        std::lock_guard<std::shared_mutex> lock(children[i]->nodeMutex);
                         children[i]->deserializeSubtree(in);
                     } else {
                         children[i] = nullptr;
@@ -1501,6 +1502,7 @@ private:
     std::shared_ptr<NodeData> findRecursive(OctreeNode* node, const PointType& pos, float tolerance) {
         if (!node->contains(pos)) return nullptr;
         ensureLoaded(node, false);
+        std::lock_guard<std::shared_mutex> lock(node->nodeMutex);
         
         for (const auto& pointData : node->points) {
             float distSq = (pointData->position - pos).squaredNorm();
@@ -2588,7 +2590,7 @@ public:
         return true;
     }
 
-    void queuedupdate(const PointType& pos, const T& newData) {
+    void queuedupdate(const PointType pos, const T newData) {
         enqueueTask([this, pos, newData]() {
             OctreeNode* node = root_.get();
             auto pointData = findwNode(pos, node);
@@ -2672,7 +2674,7 @@ public:
         return false;
     }
 
-    void queuedmove(const PointType& pos, const PointType& newPos) {
+    void queuedmove(const PointType pos, const PointType newPos) {
         enqueueTask([this, pos, newPos]() {
             auto pointData = find(pos);
             if (!pointData) return;
@@ -2686,6 +2688,24 @@ public:
             }
             size--;
             return;
+        });
+    }
+
+    void queuedupdate(const PointType pos, const PointType newPos, const T newData) {
+        enqueueTask([this, pos, newPos, newData]() {
+            auto pointData = find(pos);
+            if (!pointData) return;
+            
+            removeRecursive(root_.get(), pointData->getCubeBounds(), pointData);
+            
+            auto newPointData = std::make_shared<NodeData>(*pointData);
+            newPointData->position = newPos;
+            newPointData->data = newData;
+            
+            ensureBounds(newPointData->getCubeBounds());
+            if (!insertRecursive(root_.get(), newPointData, 0)) {
+                size--;
+            }
         });
     }
 
