@@ -1745,14 +1745,6 @@ private:
             root_.reset();
         }
         
-        {
-            std::lock_guard<std::mutex> lock(*mapMutex_);
-            colorMap_.clear();
-            colorToIndex_.clear();
-            materialMap_.clear();
-            materialToIndex_.clear();
-        }
-        
         size = 0;
     }
 
