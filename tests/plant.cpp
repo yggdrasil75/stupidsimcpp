@@ -68,12 +68,9 @@ private:
     }
 public:
     PlantSimUI() {
-        std::cout << "plantsimui" << std::endl;
-        // Position camera to look at the dirt
         cam.origin = v3(0, 5, 30);
         cam.lookAt(v3(0, 2, 0));
         cam.fov = 45;
-        std::cout << "plantsimui done" << std::endl;
     }
 
     ~PlantSimUI() {
@@ -81,7 +78,6 @@ public:
     }
 
     void renderUI(GLFWwindow* window) {
-        // std::cout << "plantsimui render frame" << std::endl;
         handleCameraControls(window);
 
         ImGui::Begin("Plant Simulation Laboratory", nullptr, ImGuiWindowFlags_NoCollapse);
@@ -121,7 +117,6 @@ public:
         
         ImGui::End();
         sim.grid.waitForIdle();
-        // std::cout << "plantsimui render frame end" << std::endl;
     }
 
 private:

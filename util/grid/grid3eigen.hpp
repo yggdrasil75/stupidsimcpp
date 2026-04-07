@@ -1072,7 +1072,6 @@ private:
             invalidateNodeLODRecursive(root_.get(), pointData->getCubeBounds());
         }
     }
-    
     void ensureBounds(const BoundingBox& targetBounds) {
         if (!root_) {
             PointType center = (targetBounds.first + targetBounds.second) * 0.5f;
@@ -1096,6 +1095,10 @@ private:
             PointType min = root_->bounds.first;
             PointType max = root_->bounds.second;
             PointType size = max - min;
+            
+            if (size.x() <= 0.0f) size.x() = 1.0f;
+            if (size.y() <= 0.0f) size.y() = 1.0f;
+            if (size.z() <= 0.0f) size.z() = 1.0f;
             
             int expandX = (targetBounds.first.x() < min.x()) ? -1 : 1;
             int expandY = (targetBounds.first.y() < min.y()) ? -1 : 1;
@@ -1735,22 +1738,22 @@ private:
             }
         }
     }
-    
-    void clearNode(OctreeNode* node) {
-        if (!node) return;
-        
-        node->points.clear();
-        node->points.shrink_to_fit();
-        node->lodData = nullptr;
-        
-        for (int i = 0; i < 8; ++i) {
-            if (node->children[i]) {
-                clearNode(node->children[i].get());
-                node->children[i].reset(nullptr);
-            }
+
+    void clear() {
+        if (root_) {
+            clearNode(root_.get());
+            root_.reset();
         }
         
-        node->setLeaf(true);
+        {
+            std::lock_guard<std::mutex> lock(*mapMutex_);
+            colorMap_.clear();
+            colorToIndex_.clear();
+            materialMap_.clear();
+            materialToIndex_.clear();
+        }
+        
+        size = 0;
     }
 
     void printStatsRecursive(const OctreeNode* node, size_t depth, size_t& totalNodes, size_t& leafNodes, size_t& actualPoints, 

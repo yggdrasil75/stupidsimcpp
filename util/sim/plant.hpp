@@ -378,7 +378,8 @@ struct PlantsimParticle {
     bool anchored = false;
     float strength = 15.0f;
 
-    PlantsimParticle(ParticleType t = ParticleType::AIR, float e = 0.0f) : pt(t), energy(e) {}
+    PlantsimParticle(ParticleType t = ParticleType::AIR, float e = 0.0f) : pt(t), energy(e) {
+    }
     virtual ~PlantsimParticle() = default;
     
     virtual void serialize(std::ofstream& out) const {
@@ -410,8 +411,8 @@ struct AirParticle : public PlantsimParticle {
     float temperature;
     float oxygen;
 
-    AirParticle(float c = 400.0f, float t = 20.0f) 
-        : PlantsimParticle(ParticleType::AIR, 0.0f), co2(c), temperature(t), oxygen(21.0f) {}
+    AirParticle(float c = 400.0f, float t = 20.0f) : PlantsimParticle(ParticleType::AIR, 0.0f), co2(c), temperature(t), oxygen(21.0f) {
+        }
         
     void serializeDerived(std::ofstream& out) const override {
         out.write(reinterpret_cast<const char*>(&co2), sizeof(co2));
@@ -437,7 +438,8 @@ struct DirtParticle : public PlantsimParticle {
 
     DirtParticle(float n = 100.0f, float p = 100.0f, float k = 100.0f, float c = 100.0f, float mg = 100.0f) 
         : PlantsimParticle(ParticleType::DIRT, 0.0f), nitrogen(n), phosphorus(p), potassium(k), 
-          carbon(c), magnesium(mg), hydration(0.0f), temperature(20.0f) {}
+          carbon(c), magnesium(mg), hydration(0.0f), temperature(20.0f) {
+          }
 
     void serializeDerived(std::ofstream& out) const override {
         out.write(reinterpret_cast<const char*>(&nitrogen), sizeof(nitrogen));
@@ -478,7 +480,8 @@ struct PlantParticle : public PlantsimParticle {
     float totalBiomass = 1.0f; 
 
     PlantParticle(PlantPart p = PlantPart::SEED, std::shared_ptr<PlantDNA> d = nullptr, v3 sp = v3(0,0,0), v3 gd = v3(0,1,0), int bd = 0) 
-        : PlantsimParticle(ParticleType::PLANT, 10.0f), part(p), dna(d), seedPos(sp), growthDir(gd), branchDepth(bd) {}
+        : PlantsimParticle(ParticleType::PLANT, 10.0f), part(p), dna(d), seedPos(sp), growthDir(gd), branchDepth(bd) {
+        }
 
     void serializeDerived(std::ofstream& out) const override {
         out.write(reinterpret_cast<const char*>(&part), sizeof(part));
@@ -533,7 +536,8 @@ struct PlantParticle : public PlantsimParticle {
 };
 
 struct WaterParticle : public PlantsimParticle {
-    WaterParticle() : PlantsimParticle(ParticleType::WATER, 5.0f) {}
+    WaterParticle() : PlantsimParticle(ParticleType::WATER, 5.0f) {
+    }
     
     void serializeDerived(std::ofstream& out) const override {}
     void deserializeDerived(std::ifstream& in) override {}
@@ -541,7 +545,8 @@ struct WaterParticle : public PlantsimParticle {
 
 struct SnowParticle : public PlantsimParticle {
     float meltProgress = 0.0f;
-    SnowParticle() : PlantsimParticle(ParticleType::SNOW, 2.0f) {}
+    SnowParticle() : PlantsimParticle(ParticleType::SNOW, 2.0f) {
+    }
 
     void serializeDerived(std::ofstream& out) const override {
         out.write(reinterpret_cast<const char*>(&meltProgress), sizeof(meltProgress));
@@ -613,7 +618,7 @@ class PlantSim {
 public:
     enum class WeatherState { CLEAR, RAIN, SNOW };
 
-    Octree<std::shared_ptr<PlantsimParticle>> grid;
+    Octree<std::shared_ptr<PlantsimParticle>, uint8_t, "output/plants"> grid;
     PlantConfig config;
     std::mt19937 rng;
 
@@ -660,9 +665,8 @@ public:
 
         float minGround = -config.groundSize;
         float maxGround = config.groundSize;
-        float vSize = config.voxelSize * 10;
+        float vSize = config.voxelSize;
 
-        std::cout << "setting up dirt" << std::endl;
         for (float x = minGround; x <= maxGround; x += vSize) {
             for (float z = minGround; z <= maxGround; z += vSize) {
                 float y = -vSize;
@@ -671,28 +675,23 @@ public:
                 grid.queuedset(dirt, v3(x, y, z), true, v3(0.4f, 0.25f, 0.1f), vSize, true, 0);
             }
         }
-        std::cout << "setting up dirt done" << std::endl;
+        
+        auto air = std::make_shared<AirParticle>();
+        grid.queuedset(air, v3(0.0f, vSize / 2.0f, 0.0f), false, v3(0.0f, 0.0f, 0.0f), vSize, true, 2);
 
-        // std::cout << "setting up air" << std::endl;
-        // auto air = std::make_shared<AirParticle>();
-        // grid.queuedset(air, v3(0.0f, vSize / 2.0f, 0.0f), false, v3(0.0f, 0.0f, 0.0f), vSize, true, 2);
-        // std::cout << "setting up air done" << std::endl;
-
-        // std::cout << "setting up the plant" << std::endl;
-        // auto seedDNA = std::make_shared<PlantDNA>();
-        // v3 startPos = v3(0.0f, 0.0f, 0.0f);
-        // auto seed = std::make_shared<PlantParticle>(PlantPart::SEED, seedDNA, startPos, v3(0.0f, 1.0f, 0.0f), 0);
-        // grid.queuedset(seed, startPos, true, v3(0.2f, 0.8f, 0.2f), vSize, true, 1);
-        // activeMeristems.push_back(startPos);
-        // std::cout << "setting up the plant done" << std::endl;
+        auto seedDNA = std::make_shared<PlantDNA>();
+        v3 startPos = v3(0.0f, 0.0f, 0.0f);
+        auto seed = std::make_shared<PlantParticle>(PlantPart::SEED, seedDNA, startPos, v3(0.0f, 1.0f, 0.0f), 0);
+        grid.queuedset(seed, startPos, true, v3(0.2f, 0.8f, 0.2f), vSize, true, 1);
+        activeMeristems.push_back(startPos);
     }
 
     void update(float dt) {
-        // simulateEnvironment(dt);
-        // processMetabolism(dt);   
-        // processGrowth(dt);       
-        // processPollination();    
-        // processDeath();          
+        simulateEnvironment(dt);
+        processMetabolism(dt);
+        processGrowth(dt);
+        processPollination();
+        processDeath();          
     }
 
 private:
