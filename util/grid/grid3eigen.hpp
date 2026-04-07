@@ -1738,14 +1738,22 @@ private:
             }
         }
     }
-
-    void clear() {
-        if (root_) {
-            clearNode(root_.get());
-            root_.reset();
+    
+    void clearNode(OctreeNode* node) {
+        if (!node) return;
+        
+        node->points.clear();
+        node->points.shrink_to_fit();
+        node->lodData = nullptr;
+        
+        for (int i = 0; i < 8; ++i) {
+            if (node->children[i]) {
+                clearNode(node->children[i].get());
+                node->children[i].reset(nullptr);
+            }
         }
         
-        size = 0;
+        node->setLeaf(true);
     }
 
     void printStatsRecursive(const OctreeNode* node, size_t depth, size_t& totalNodes, size_t& leafNodes, size_t& actualPoints, 
@@ -2953,10 +2961,8 @@ public:
     void clear() {
         if (root_) {
             clearNode(root_.get());
+            root_.reset();
         }
-        PointType minBound = root_ ? root_->bounds.first : PointType::Zero();
-        PointType maxBound = root_ ? root_->bounds.second : PointType::Zero();
-        root_ = std::make_unique<OctreeNode>(minBound, maxBound);
         
         size = 0;
     }
