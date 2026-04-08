@@ -37,6 +37,10 @@
 #include <immintrin.h>
 #endif
 
+#ifdef VULKAN_SUPPORT
+#include <vulkan/vulkan.h>
+#endif
+
 namespace fs = std::filesystem;
 
 constexpr int Dim = 3;
@@ -625,6 +629,364 @@ private:
             points.clear();
         }
     };
+    
+#ifdef VULKAN_SUPPORT
+    struct alignas(16) GPURenderNode {
+        Eigen::Vector3f boundsMin;
+        float padding1;
+        Eigen::Vector3f boundsMax;
+        float padding2;
+        Eigen::Vector3f center;
+        float nodeSize;
+        uint32_t isLeaf;
+        uint32_t isLoaded;
+        uint32_t childMask;
+        uint32_t firstPoint;
+        uint32_t pointCount;
+        int32_t  lodPoint;
+        uint32_t firstChild;
+        uint32_t padding3;
+    };
+
+    struct alignas(16) GPUFastRenderData {
+        Eigen::Vector3f position;
+        float size;
+        Eigen::Vector3f color;
+        float emittance;
+        Eigen::Vector3f boundsMin;
+        float padding1;
+        Eigen::Vector3f boundsMax;
+        float padding2;
+    };
+
+    struct alignas(16) GPUPBRRenderData {
+        Eigen::Vector3f position;
+        float size;
+        Eigen::Vector3f color;
+        float emittance;
+        float roughness;
+        float metallic;
+        float transmission;
+        float ior;
+        Eigen::Vector3f boundsMin;
+        float padding1;
+        Eigen::Vector3f boundsMax;
+        float padding2;
+    };
+
+    struct alignas(16) GPUCameraData {
+        Eigen::Vector3f origin;
+        float padding1;
+        Eigen::Vector3f dir;
+        float padding2;
+        Eigen::Vector3f up;
+        float padding3;
+        Eigen::Vector3f right;
+        float maxDist;
+        Eigen::Vector3f skylight;
+        float tanfovx;
+        Eigen::Vector3f bgColor;
+        float tanfovy;
+        int width;
+        int height;
+        int samples;
+        int maxBounces;
+        int useLod;
+        float lodMinDist;
+        float invLodf;
+        float minVisibility;
+        float invFogRange;
+        uint32_t frameCount;
+        float padding5;
+    };
+    
+    struct VulkanContext {
+        VkInstance instance = VK_NULL_HANDLE;
+        VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+        VkDevice device = VK_NULL_HANDLE;
+        VkQueue queue = VK_NULL_HANDLE;
+        uint32_t queueFamilyIndex = 0;
+        VkCommandPool commandPool = VK_NULL_HANDLE;
+        VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+        
+        VkShaderModule fastShader = VK_NULL_HANDLE;
+        VkShaderModule pbrShader = VK_NULL_HANDLE;
+        VkPipelineLayout fastPipelineLayout = VK_NULL_HANDLE;
+        VkPipelineLayout pbrPipelineLayout = VK_NULL_HANDLE;
+        VkPipeline fastPipeline = VK_NULL_HANDLE;
+        VkPipeline pbrPipeline = VK_NULL_HANDLE;
+        VkDescriptorSetLayout fastDescLayout = VK_NULL_HANDLE;
+        VkDescriptorSetLayout pbrDescLayout = VK_NULL_HANDLE;
+        VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
+        VkDescriptorSet fastDescSet = VK_NULL_HANDLE;
+        VkDescriptorSet pbrDescSet = VK_NULL_HANDLE;
+
+        VkBuffer nodeBuffer = VK_NULL_HANDLE;
+        VkBuffer outBuffer = VK_NULL_HANDLE;
+        VkBuffer uboBuffer = VK_NULL_HANDLE;
+        VkBuffer fastPointBuffer = VK_NULL_HANDLE;
+        VkBuffer pbrPointBuffer = VK_NULL_HANDLE;
+        VkDeviceMemory nodeMem = VK_NULL_HANDLE;
+        VkDeviceMemory outMem = VK_NULL_HANDLE;
+        VkDeviceMemory uboMem = VK_NULL_HANDLE;
+        VkDeviceMemory fastPointMem = VK_NULL_HANDLE;
+        VkDeviceMemory pbrPointMem = VK_NULL_HANDLE;
+
+        size_t currentNodesCap = 0;
+        size_t  currentOutCap = 0;
+        size_t currentFastPointsCap = 0;
+        size_t  currentPBRPointsCap = 0;
+
+        bool initialized = false;
+
+        uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
+            VkPhysicalDeviceMemoryProperties memProperties;
+            vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
+            for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+                if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties)
+                    return i;
+            }
+            return 0;
+        }
+
+        void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties,
+                          VkBuffer& buffer, VkDeviceMemory& bufferMemory) {
+            VkBufferCreateInfo bufferInfo{};
+            bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+            bufferInfo.size = size;
+            bufferInfo.usage = usage;
+            bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            vkCreateBuffer(device, &bufferInfo, nullptr, &buffer);
+
+            VkMemoryRequirements memRequirements;
+            vkGetBufferMemoryRequirements(device, buffer, &memRequirements);
+
+            VkMemoryAllocateInfo allocInfo{};
+            allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            allocInfo.allocationSize = memRequirements.size;
+            allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties);
+            vkAllocateMemory(device, &allocInfo, nullptr, &bufferMemory);
+            vkBindBufferMemory(device, buffer, bufferMemory, 0);
+        }
+
+        VkShaderModule createShaderModule(const std::string& path) {
+            std::ifstream file(path, std::ios::ate | std::ios::binary);
+            if (!file.is_open()) {
+                std::cerr << "FAILED TO LOAD " << path << "!\n";
+                return VK_NULL_HANDLE;
+            }
+            size_t fileSize = (size_t) file.tellg();
+            std::vector<char> buffer(fileSize);
+            file.seekg(0); file.read(buffer.data(), fileSize); file.close();
+            VkShaderModuleCreateInfo moduleInfo{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+            moduleInfo.codeSize = buffer.size();
+            moduleInfo.pCode = reinterpret_cast<const uint32_t*>(buffer.data());
+            VkShaderModule shaderModule;
+            vkCreateShaderModule(device, &moduleInfo, nullptr, &shaderModule);
+            return shaderModule;
+        }
+
+        void init() {
+            if (initialized) return;
+            VkApplicationInfo appInfo{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+            appInfo.apiVersion = VK_API_VERSION_1_0;
+            VkInstanceCreateInfo createInfo{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+            createInfo.pApplicationInfo = &appInfo;
+            vkCreateInstance(&createInfo, nullptr, &instance);
+
+            uint32_t deviceCount = 0;
+            vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
+            std::vector<VkPhysicalDevice> devices(deviceCount);
+            vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data());
+            physicalDevice = devices[0];
+
+            uint32_t queueFamilyCount = 0;
+            vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
+            std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
+            vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, queueFamilies.data());
+            for (uint32_t i = 0; i < queueFamilies.size(); i++) {
+                if (queueFamilies[i].queueFlags & VK_QUEUE_COMPUTE_BIT) { queueFamilyIndex = i; break; }
+            }
+
+            float queuePriority = 1.0f;
+            VkDeviceQueueCreateInfo queueCreateInfo{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+            queueCreateInfo.queueFamilyIndex = queueFamilyIndex;
+            queueCreateInfo.queueCount = 1;
+            queueCreateInfo.pQueuePriorities = &queuePriority;
+
+            VkDeviceCreateInfo deviceCreateInfo{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+            deviceCreateInfo.queueCreateInfoCount = 1;
+            deviceCreateInfo.pQueueCreateInfos = &queueCreateInfo;
+            vkCreateDevice(physicalDevice, &deviceCreateInfo, nullptr, &device);
+            vkGetDeviceQueue(device, queueFamilyIndex, 0, &queue);
+
+            VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+            poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+            poolInfo.queueFamilyIndex = queueFamilyIndex;
+            vkCreateCommandPool(device, &poolInfo, nullptr, &commandPool);
+
+            VkCommandBufferAllocateInfo allocInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+            allocInfo.commandPool = commandPool;
+            allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            allocInfo.commandBufferCount = 1;
+            vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
+
+            VkDescriptorPoolSize poolSizes[] = { 
+                {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 6},
+                {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2}
+            };
+            VkDescriptorPoolCreateInfo poolCreateInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+            poolCreateInfo.poolSizeCount = 2;
+            poolCreateInfo.pPoolSizes = poolSizes;
+            poolCreateInfo.maxSets = 2;
+            vkCreateDescriptorPool(device, &poolCreateInfo, nullptr, &descriptorPool);
+
+            VkDescriptorSetLayoutBinding bindings[4] = {};
+            for(int i=0; i<4; i++) {
+                bindings[i].binding = i;
+                bindings[i].descriptorType = i==3 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                bindings[i].descriptorCount = 1;
+                bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+            }
+            VkDescriptorSetLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+            layoutInfo.bindingCount = 4;
+            layoutInfo.pBindings = bindings;
+
+            vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &fastDescLayout);
+            vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &pbrDescLayout);
+
+            VkDescriptorSetAllocateInfo allocSetInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+            allocSetInfo.descriptorPool = descriptorPool;
+            allocSetInfo.descriptorSetCount = 1;
+            allocSetInfo.pSetLayouts = &fastDescLayout;
+            vkAllocateDescriptorSets(device, &allocSetInfo, &fastDescSet);
+            allocSetInfo.pSetLayouts = &pbrDescLayout;
+            vkAllocateDescriptorSets(device, &allocSetInfo, &pbrDescSet);
+
+            fastShader = createShaderModule("./bin/fast_raytrace.spv");
+            pbrShader = createShaderModule("./bin/pbr_raytrace.spv");
+
+            VkPipelineLayoutCreateInfo pipelineLayoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+            pipelineLayoutInfo.setLayoutCount = 1;
+            pipelineLayoutInfo.pSetLayouts = &fastDescLayout;
+            vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &fastPipelineLayout);
+            pipelineLayoutInfo.pSetLayouts = &pbrDescLayout;
+            vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pbrPipelineLayout);
+
+            VkComputePipelineCreateInfo computePipelineInfo{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+            computePipelineInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            computePipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+            computePipelineInfo.stage.pName = "main";
+
+            if (fastShader) {
+                computePipelineInfo.layout = fastPipelineLayout;
+                computePipelineInfo.stage.module = fastShader;
+                vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &computePipelineInfo, nullptr, &fastPipeline);
+            }
+            if (pbrShader) {
+                computePipelineInfo.layout = pbrPipelineLayout;
+                computePipelineInfo.stage.module = pbrShader;
+                vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &computePipelineInfo, nullptr, &pbrPipeline);
+            }
+
+            initialized = true;
+        }
+
+        void updateCommonBuffers(const std::vector<GPURenderNode>& nodes, size_t outSize,GPUCameraData& camData) {
+            size_t nodeSize = std::max((size_t)256, nodes.size() * sizeof(GPURenderNode));
+            size_t uboSize = sizeof(GPUCameraData);
+
+            if(nodeSize > currentNodesCap) {
+                if(nodeBuffer) {
+                    vkDestroyBuffer(device, nodeBuffer, nullptr);
+                    vkFreeMemory(device, nodeMem, nullptr);
+                }
+                createBuffer(nodeSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, nodeBuffer, nodeMem);
+                currentNodesCap = nodeSize;
+            }
+            if(outSize > currentOutCap) {
+                if(outBuffer) {
+                    vkDestroyBuffer(device, outBuffer, nullptr);
+                    vkFreeMemory(device, outMem, nullptr);
+                }
+                createBuffer(outSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, outBuffer, outMem);
+                currentOutCap = outSize;
+            }
+            if(!uboBuffer) {
+                createBuffer(uboSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, uboBuffer, uboMem);
+            }
+
+            void* data;
+            if(!nodes.empty()) { 
+                vkMapMemory(device, nodeMem, 0, nodeSize, 0, &data);
+                memcpy(data, nodes.data(), nodes.size() * sizeof(GPURenderNode));
+                vkUnmapMemory(device, nodeMem);
+            }
+            vkMapMemory(device, uboMem, 0, uboSize, 0, &data);
+            memcpy(data, &camData, uboSize);
+            vkUnmapMemory(device, uboMem);
+        }
+
+        void updateFastBuffers(const std::vector<GPUFastRenderData>& points) {
+            size_t pointSize = std::max((size_t)256, points.size() * sizeof(GPUFastRenderData));
+            if(pointSize > currentFastPointsCap) {
+                if(fastPointBuffer) { vkDestroyBuffer(device, fastPointBuffer, nullptr); vkFreeMemory(device, fastPointMem, nullptr); }
+                createBuffer(pointSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, fastPointBuffer, fastPointMem);
+                currentFastPointsCap = pointSize;
+            }
+            
+            void* data;
+            if(!points.empty()) {
+                vkMapMemory(device, fastPointMem, 0, pointSize, 0, &data);
+                memcpy(data, points.data(), points.size() * sizeof(GPUFastRenderData));
+                vkUnmapMemory(device, fastPointMem);
+            }
+
+            VkDescriptorBufferInfo bInfos[4] = { {nodeBuffer, 0, VK_WHOLE_SIZE}, {fastPointBuffer, 0, VK_WHOLE_SIZE}, {outBuffer, 0, VK_WHOLE_SIZE}, {uboBuffer, 0, VK_WHOLE_SIZE} };
+            VkWriteDescriptorSet writes[4] = {};
+            for(int i=0; i<4; i++) {
+                writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                writes[i].dstSet = fastDescSet;
+                writes[i].dstBinding = i;
+                writes[i].descriptorCount = 1;
+                writes[i].descriptorType = i==3 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                writes[i].pBufferInfo = &bInfos[i];
+            }
+            vkUpdateDescriptorSets(device, 4, writes, 0, nullptr);
+        }
+
+        void updatePBRBuffers(const std::vector<GPUPBRRenderData>& points) {
+            size_t pointSize = std::max((size_t)256, points.size() * sizeof(GPUPBRRenderData));
+            if(pointSize > currentPBRPointsCap) {
+                if(pbrPointBuffer) {
+                    vkDestroyBuffer(device, pbrPointBuffer, nullptr);
+                    vkFreeMemory(device, pbrPointMem, nullptr);
+                }
+                createBuffer(pointSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, pbrPointBuffer, pbrPointMem);
+                currentPBRPointsCap = pointSize;
+            }
+            
+            void* data;
+            if(!points.empty()) {
+                vkMapMemory(device, pbrPointMem, 0, pointSize, 0, &data);
+                memcpy(data, points.data(), points.size() * sizeof(GPUPBRRenderData));
+                vkUnmapMemory(device, pbrPointMem);
+            }
+
+            VkDescriptorBufferInfo bInfos[4] = { {nodeBuffer, 0, VK_WHOLE_SIZE}, {pbrPointBuffer, 0, VK_WHOLE_SIZE}, {outBuffer, 0, VK_WHOLE_SIZE}, {uboBuffer, 0, VK_WHOLE_SIZE} };
+            VkWriteDescriptorSet writes[4] = {};
+            for(int i=0; i<4; i++) {
+                writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                writes[i].dstSet = pbrDescSet;
+                writes[i].dstBinding = i;
+                writes[i].descriptorCount = 1;
+                writes[i].descriptorType = i==3 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                writes[i].pBufferInfo = &bInfos[i];
+            }
+            vkUpdateDescriptorSets(device, 4, writes, 0, nullptr);
+        }
+    } vkCtx;
+#endif
 
     int countBits(uint8_t mask) const {
         int count = 0;
@@ -896,6 +1258,7 @@ private:
     std::atomic<bool> stopWorker_{false};
     std::atomic<bool> autoOptimize_{true};
     std::atomic<bool> streamingQueued_{false};
+    std::atomic<uint32_t> frameCounter_{0};
 
     float minLodVolume_ = 0.0f;
     float minLodSize_ = 0.0f;
@@ -1219,6 +1582,7 @@ private:
             invalidateNodeLODRecursive(root_.get(), pointData->getCubeBounds());
         }
     }
+    
     void ensureBounds(const BoundingBox& targetBounds) {
         if (!root_) {
             PointType center = (targetBounds.first + targetBounds.second) * 0.5f;
@@ -1561,204 +1925,7 @@ private:
         std::unordered_set<std::shared_ptr<NodeData>> seen;
         searchNodeRecursive(node, center, radiusSq, objectid, results, seen);
     }
-
-    void voxelTraverseRecursive(const RenderBuffer& buffer, uint32_t nodeIdx, float tMin, float tMax,
-             float& maxDist, bool enableLOD, const Ray& ray, const RenderData*& hit, bool asyncLoad) {
-        const RenderNode& node = buffer.nodes[nodeIdx];
-        
-        if (!node.isLoaded) {
-            if (asyncLoad && node.originalNode) {
-                ensureLoaded(node.originalNode, asyncLoad);
-            }
-            if (enableLOD && node.lodPoint != -1) {
-                float dist = (node.center - ray.origin).norm();
-                float ratio = dist / node.nodeSize;
-                    if (dist > lodMinDistance_ && ratio > invLodf) {
-                    float t;
-                    PointType n;
-                    PointType h;
-                    if (rayCubeIntersect(ray, &buffer.points[node.lodPoint], t, n, h)) {
-                        if (t >= 0 && t <= maxDist) {
-                            hit = &buffer.points[node.lodPoint];
-                            maxDist = t;
-                        }
-                    }
-                }
-            }
-            return;
-        }
-        
-        if (enableLOD && !node.isLeaf) {
-            float dist = (node.center - ray.origin).norm();
-            float ratio = dist / node.nodeSize;
-            
-            if (dist > lodMinDistance_ && ratio > invLodf && node.lodPoint != -1) {
-                float t;
-                PointType n;
-                PointType h;
-                if (rayCubeIntersect(ray, &buffer.points[node.lodPoint], t, n, h)) {
-                    if (t >= 0 && t <= maxDist) {
-                        hit = &buffer.points[node.lodPoint];
-                        maxDist = t;
-                    }
-                }
-                return;
-            }
-        }
-
-        for (uint32_t i = 0; i < node.pointCount; ++i) {
-            const RenderData& pt = buffer.points[node.firstPoint + i];
-            
-            float t;
-            PointType normal, hitPoint;
-            if (rayCubeIntersect(ray, &pt, t, normal, hitPoint)) {
-                if (t >= 0 && t <= maxDist && t <= tMax + 0.001f) {
-                    maxDist = t;
-                    hit = &pt;
-                }
-            }
-        }
-
-        if (node.isLeaf) return;
-
-        PointType center = node.center;
-        Eigen::Vector3f ttt = (center - ray.origin).cwiseProduct(ray.invDir);
-        int currIdx = ((tMin >= ttt.x()) ? 1 : 0) | ((tMin >= ttt.y()) ? 2 : 0) | ((tMin >= ttt.z()) ? 4 : 0);
-
-        while(tMin < tMax && tMin <= maxDist) {
-            Eigen::Vector3f next_t;
-            next_t[0] = (currIdx & 1) ? tMax : ttt[0];
-            next_t[1] = (currIdx & 2) ? tMax : ttt[1];
-            next_t[2] = (currIdx & 4) ? tMax : ttt[2];
-
-            float tNext = next_t.minCoeff();
-
-            int physIdx = currIdx ^ ray.signMask;
-
-            if (node.childMask & (1 << physIdx)) {
-                int childOffset = countBits(node.childMask & ((1 << physIdx) - 1));
-                voxelTraverseRecursive(buffer, node.firstChild + childOffset, tMin, tNext, maxDist, enableLOD, ray, hit, asyncLoad);
-            }
-
-            tMin = tNext;
-            currIdx |= ((next_t[0] <= tNext) ? 1 : 0) | ((next_t[1] <= tNext) ? 2 : 0) | ((next_t[2] <= tNext) ? 4 : 0);
-        }
-    }
     
-    void fastVoxelTraverseRecursive(const RenderBuffer& buffer, uint32_t nodeIdx, float tMin, float tMax,
-                                    float& maxDist, const Ray& ray, const RenderData*& hit) {
-        const RenderNode& node = buffer.nodes[nodeIdx];
-        
-        if (!node.isLoaded && node.originalNode) {
-            ensureLoaded(node.originalNode, true);
-        }
-
-        if (!node.isLeaf && node.lodPoint != -1) {
-            float dist = (node.center - ray.origin).norm();
-            if (dist > lodMinDistance_ && (dist / node.nodeSize) > invLodf) {
-                float t;
-                PointType n, h;
-                if (rayCubeIntersect(ray, &buffer.points[node.lodPoint], t, n, h)) {
-                    if (t >= 0 && t <= maxDist) {
-                        hit = &buffer.points[node.lodPoint];
-                        maxDist = t;
-                    }
-                }
-                return;
-            }
-        }
-
-        for (uint32_t i = 0; i < node.pointCount; ++i) {
-            const RenderData& pt = buffer.points[node.firstPoint + i];
-            float t;
-            PointType n, h;
-            if (rayCubeIntersect(ray, &pt, t, n, h)) {
-                if (t >= 0 && t <= maxDist && t <= tMax + 0.001f) {
-                    maxDist = t;
-                    hit = &pt;
-                }
-            }
-        }
-
-        if (node.isLeaf || !node.isLoaded) return;
-
-        Eigen::Vector3f ttt = (node.center - ray.origin).cwiseProduct(ray.invDir);
-        int currIdx = ((tMin >= ttt.x()) ? 1 : 0) | ((tMin >= ttt.y()) ? 2 : 0) | ((tMin >= ttt.z()) ? 4 : 0);
-        
-        while(tMin < tMax && tMin <= maxDist) {
-            Eigen::Vector3f next_t;
-            next_t[0] = (currIdx & 1) ? tMax : ttt[0];
-            next_t[1] = (currIdx & 2) ? tMax : ttt[1];
-            next_t[2] = (currIdx & 4) ? tMax : ttt[2];
-
-            float tNext = next_t.minCoeff();
-            
-            int physIdx = currIdx ^ ray.signMask;
-            if (node.childMask & (1 << physIdx)) {
-                int childOffset = countBits(node.childMask & ((1 << physIdx) - 1));
-                fastVoxelTraverseRecursive(buffer, node.firstChild + childOffset, tMin, tNext, maxDist, ray, hit);
-            }
-            
-            tMin = tNext;
-            currIdx |= ((next_t[0] <= tNext) ? 1 : 0) | ((next_t[1] <= tNext) ? 2 : 0) | ((next_t[2] <= tNext) ? 4 : 0);
-        }
-    }
-    
-    void fastBypassVoxelTraverseRecursive(const RenderBuffer& buffer, uint32_t nodeIdx, float tMin,
-                                 float tMax, float& maxDist, const Ray& ray, const RenderData*& hit) {
-        const RenderNode& node = buffer.nodes[nodeIdx];
-
-        if (!node.isLeaf && node.lodPoint != -1) {
-            float dist = (node.center - ray.origin).norm();
-            if (dist > lodMinDistance_ && (dist / node.nodeSize) > invLodf) {
-                float t;
-                PointType n, h;
-                if (rayCubeIntersect(ray, &buffer.points[node.lodPoint], t, n, h)) {
-                    if (t >= 0 && t <= maxDist) {
-                        hit = &buffer.points[node.lodPoint];
-                        maxDist = t;
-                    }
-                }
-                return;
-            }
-        }
-
-        for (uint32_t i = 0; i < node.pointCount; ++i) {
-            const RenderData& pt = buffer.points[node.firstPoint + i];
-            float t;
-            PointType n, h;
-            if (rayCubeIntersect(ray, &pt, t, n, h)) {
-                if (t >= 0 && t <= maxDist && t <= tMax + 0.001f) {
-                    maxDist = t;
-                    hit = &pt;
-                }
-            }
-        }
-
-        if (node.isLeaf || !node.isLoaded) return;
-
-        Eigen::Vector3f ttt = (node.center - ray.origin).cwiseProduct(ray.invDir);
-        int currIdx = ((tMin >= ttt.x()) ? 1 : 0) | ((tMin >= ttt.y()) ? 2 : 0) | ((tMin >= ttt.z()) ? 4 : 0);
-        
-        while(tMin < tMax && tMin <= maxDist) {
-            Eigen::Vector3f next_t;
-            next_t[0] = (currIdx & 1) ? tMax : ttt[0];
-            next_t[1] = (currIdx & 2) ? tMax : ttt[1];
-            next_t[2] = (currIdx & 4) ? tMax : ttt[2];
-
-            float tNext = next_t.minCoeff();
-            
-            int physIdx = currIdx ^ ray.signMask;
-            if (node.childMask & (1 << physIdx)) {
-                int childOffset = countBits(node.childMask & ((1 << physIdx) - 1));
-                fastBypassVoxelTraverseRecursive(buffer, node.firstChild + childOffset, tMin, tNext, maxDist, ray, hit);
-            }
-            
-            tMin = tNext;
-            currIdx |= ((next_t[0] <= tNext) ? 1 : 0) | ((next_t[1] <= tNext) ? 2 : 0) | ((next_t[2] <= tNext) ? 4 : 0);
-        }
-    }
-
     PointType sampleGGX(const PointType& n, float roughness, uint32_t& state) const {
         float alpha = std::max(EPSILON, roughness * roughness);
         float r1 = float(rand_r(&state)) / float(RAND_MAX);
@@ -2809,14 +2976,120 @@ public:
                                         float maxDist, bool enableLOD = false, bool asyncLoad = false) {
         const RenderData* hit = nullptr;
         if (buffer.nodes.empty()) return hit;
-        Ray oray(origin, direction);
+        Ray ray(origin, direction);
         
         float tMin, tMax;
         BoundingBox rootBounds(buffer.nodes[0].boundsMin, buffer.nodes[0].boundsMax);
-        if (rayBoxIntersect(oray, rootBounds, tMin, tMax)) {
+        if (rayBoxIntersect(ray, rootBounds, tMin, tMax)) {
             tMax = std::min(tMax, maxDist);
             float currentMaxDist = maxDist;
-            voxelTraverseRecursive(buffer, 0, tMin, tMax, currentMaxDist, enableLOD, oray, hit, asyncLoad);
+            
+            struct StackItem {
+                uint32_t nodeIdx;
+                float tMin;
+                float tMax;
+            };
+            
+            StackItem stack[256];
+            int stackPtr = 0;
+            stack[stackPtr++] = {0, std::max(0.0f, tMin), tMax};
+
+            while(stackPtr > 0) {
+                StackItem current = stack[--stackPtr];
+                if (current.tMin > currentMaxDist) continue;
+                
+                const RenderNode& node = buffer.nodes[current.nodeIdx];
+
+                if (!node.isLoaded) {
+                    if (asyncLoad && node.originalNode) {
+                        ensureLoaded(node.originalNode, asyncLoad);
+                    }
+                    if (enableLOD && node.lodPoint != -1) {
+                        float dist = (node.center - ray.origin).norm();
+                        float ratio = dist / node.nodeSize;
+                        if (dist > lodMinDistance_ && ratio > invLodf) {
+                            float t;
+                            PointType n, h;
+                            if (rayCubeIntersect(ray, &buffer.points[node.lodPoint], t, n, h)) {
+                                if (t >= 0 && t <= currentMaxDist) {
+                                    hit = &buffer.points[node.lodPoint];
+                                    currentMaxDist = t;
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                if (enableLOD && !node.isLeaf) {
+                    float dist = (node.center - ray.origin).norm();
+                    float ratio = dist / node.nodeSize;
+                    if (dist > lodMinDistance_ && ratio > invLodf && node.lodPoint != -1) {
+                        float t;
+                        PointType n, h;
+                        if (rayCubeIntersect(ray, &buffer.points[node.lodPoint], t, n, h)) {
+                            if (t >= 0 && t <= currentMaxDist) {
+                                hit = &buffer.points[node.lodPoint];
+                                currentMaxDist = t;
+                            }
+                        }
+                        continue;
+                    }
+                }
+
+                for (uint32_t i = 0; i < node.pointCount; ++i) {
+                    const RenderData& pt = buffer.points[node.firstPoint + i];
+                    float t;
+                    PointType normal, hitPoint;
+                    if (rayCubeIntersect(ray, &pt, t, normal, hitPoint)) {
+                        if (t >= 0 && t <= currentMaxDist && t <= current.tMax + 0.001f) {
+                            currentMaxDist = t;
+                            hit = &pt;
+                        }
+                    }
+                }
+
+                if (node.isLeaf) continue;
+
+                float t0 = current.tMin;
+                float t1 = current.tMax;
+
+                Eigen::Vector3f ttt = (node.center - ray.origin).cwiseProduct(ray.invDir);
+                int currIdx = ((t0 >= ttt.x()) ? 1 : 0) | ((t0 >= ttt.y()) ? 2 : 0) | ((t0 >= ttt.z()) ? 4 : 0);
+
+                struct ChildInterval {
+                    uint32_t nodeIdx;
+                    float tMin;
+                    float tMax;
+                };
+                ChildInterval children[4];
+                int childCount = 0;
+
+                while(t0 < t1 && t0 <= currentMaxDist) {
+                    Eigen::Vector3f next_t;
+                    next_t[0] = (currIdx & 1) ? t1 : ttt[0];
+                    next_t[1] = (currIdx & 2) ? t1 : ttt[1];
+                    next_t[2] = (currIdx & 4) ? t1 : ttt[2];
+
+                    float tNext = next_t.minCoeff();
+
+                    int physIdx = currIdx ^ ray.signMask;
+
+                    if (node.childMask & (1 << physIdx)) {
+                        int childOffset = countBits(node.childMask & ((1 << physIdx) - 1));
+                        children[childCount++] = {node.firstChild + childOffset, t0, tNext};
+                    }
+
+                    t0 = tNext;
+                    currIdx |= ((next_t[0] <= tNext) ? 1 : 0) | ((next_t[1] <= tNext) ? 2 : 0) | ((next_t[2] <= tNext) ? 4 : 0);
+                }
+
+                if (stackPtr + childCount > 256) continue;
+
+                for (int i = childCount - 1; i >= 0; --i) {
+                    stack[stackPtr++] = {children[i].nodeIdx, children[i].tMin, children[i].tMax};
+                }
+            }
         }
         return hit;
     }
@@ -2828,12 +3101,123 @@ public:
         Ray ray(origin, direction.normalized());
         
         float tMin, tMax;
-        if (rayBoxIntersect(ray, root_->bounds, tMin, tMax)) {
-            tMax = std::min(tMax, maxDist);
-            float currentMaxDist = maxDist;
-            return raycastRecursive(root_.get(), ray, tMin, tMax, currentMaxDist, hit, ignoreNode);
+        if (!rayBoxIntersect(ray, root_->bounds, tMin, tMax)) return false;
+        tMax = std::min(tMax, maxDist);
+        float currentMaxDist = maxDist;
+        
+        bool hitSomething = false;
+
+        struct StackItem {
+            OctreeNode* node;
+            float tMin;
+            float tMax;
+        };
+        StackItem stack[256];
+        int stackPtr = 0;
+        stack[stackPtr++] = {root_.get(), std::max(0.0f, tMin), tMax};
+
+        while(stackPtr > 0) {
+            StackItem current = stack[--stackPtr];
+            if (current.tMin > currentMaxDist) continue;
+
+            OctreeNode* node = current.node;
+
+            if (!node->isLoaded()) {
+                ensureLoaded(node, true);
+                continue;
+            }
+
+            std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
+
+            for (const auto& pt : node->points) {
+                if (!pt->isActive() || pt == ignoreNode) continue;
+                
+                BoundingBox bounds = pt->getCubeBounds();
+                
+                float t0x = (bounds.first[0] - ray.origin[0]) * ray.invDir[0];
+                float t1x = (bounds.second[0] - ray.origin[0]) * ray.invDir[0];
+                if (ray.invDir[0] < 0.0f) std::swap(t0x, t1x);
+
+                float t0y = (bounds.first[1] - ray.origin[1]) * ray.invDir[1];
+                float t1y = (bounds.second[1] - ray.origin[1]) * ray.invDir[1];
+                if (ray.invDir[1] < 0.0f) std::swap(t0y, t1y);
+
+                float tMinPt = std::max(t0x, t0y);
+                float tMaxPt = std::min(t1x, t1y);
+
+                float t0z = (bounds.first[2] - ray.origin[2]) * ray.invDir[2];
+                float t1z = (bounds.second[2] - ray.origin[2]) * ray.invDir[2];
+                if (ray.invDir[2] < 0.0f) std::swap(t0z, t1z);
+
+                tMinPt = std::max(tMinPt, t0z);
+                tMaxPt = std::min(tMaxPt, t1z);
+
+                if (tMaxPt >= std::max(0.0f, tMinPt) && tMaxPt >= 0.0f) {
+                    float t = tMinPt < 0.0f ? tMaxPt : tMinPt;
+                    if (t >= 0 && t <= currentMaxDist && t <= current.tMax + 0.001f) {
+                        currentMaxDist = t;
+                        hit.node = pt;
+                        hit.distance = t;
+                        hitSomething = true;
+                        
+                        hit.hitPoint = ray.origin + ray.dir * t;
+                        PointType dMin = (hit.hitPoint - bounds.first).cwiseAbs();
+                        PointType dMax = (hit.hitPoint - bounds.second).cwiseAbs();
+                        float minDist = std::numeric_limits<float>::max();
+                        int minAxis = 0;
+                        float sign = 1.0f;
+                        
+                        for (int i = 0; i < Dim; ++i) {
+                            if (dMin[i] < minDist) { minDist = dMin[i]; minAxis = i; sign = -1.0f; }
+                            if (dMax[i] < minDist) { minDist = dMax[i]; minAxis = i; sign = 1.0f; }
+                        }
+                        hit.normal = PointType::Zero();
+                        hit.normal[minAxis] = sign;
+                    }
+                }
+            }
+
+            if (node->isLeaf()) continue;
+
+            float t0 = current.tMin;
+            float t1 = current.tMax;
+
+            Eigen::Vector3f ttt = (node->center - ray.origin).cwiseProduct(ray.invDir);
+            int currIdx = ((t0 >= ttt.x()) ? 1 : 0) | ((t0 >= ttt.y()) ? 2 : 0) | ((t0 >= ttt.z()) ? 4 : 0);
+
+            struct ChildInterval {
+                OctreeNode* node;
+                float tMin;
+                float tMax;
+            };
+            ChildInterval children[4];
+            int childCount = 0;
+
+            while(t0 < t1 && t0 <= currentMaxDist) {
+                Eigen::Vector3f next_t;
+                next_t[0] = (currIdx & 1) ? t1 : ttt[0];
+                next_t[1] = (currIdx & 2) ? t1 : ttt[1];
+                next_t[2] = (currIdx & 4) ? t1 : ttt[2];
+
+                float tNext = next_t.minCoeff();
+                int physIdx = currIdx ^ ray.signMask;
+
+                if (node->children[physIdx]) {
+                    children[childCount++] = {node->children[physIdx].get(), t0, tNext};
+                }
+
+                t0 = tNext;
+                currIdx |= ((next_t[0] <= tNext) ? 1 : 0) | ((next_t[1] <= tNext) ? 2 : 0) | ((next_t[2] <= tNext) ? 4 : 0);
+            }
+
+            if (stackPtr + childCount > 256) continue;
+
+            for (int i = childCount - 1; i >= 0; --i) {
+                stack[stackPtr++] = {children[i].node, children[i].tMin, children[i].tMax};
+            }
         }
-        return false;
+        
+        return hitSomething;
     }
 
     frame renderFrame(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB, int samplesPerPixel = 2,
@@ -2893,6 +3277,151 @@ public:
         return outFrame;
     }
 
+#ifdef VULKAN_SUPPORT
+    frame renderFrameVulkan(const Camera& cam, int height, int width,
+                frame::colormap colorformat = frame::colormap::RGB, int samplesPerPixel = 2,
+                int maxBounces = 4, bool useLod = true) {
+        updateStreaming(cam);
+        optimize();
+        thread_local RenderBuffer tl_buffer;
+        buildRender(tl_buffer);
+        
+        vkCtx.init();
+
+        std::vector<GPURenderNode> gpuNodes;
+        gpuNodes.reserve(tl_buffer.nodes.size());
+        for(const auto& n : tl_buffer.nodes) {
+            gpuNodes.push_back({n.boundsMin, 0, n.boundsMax, 0, n.center, n.nodeSize, (uint32_t)n.isLeaf,
+                (uint32_t)n.isLoaded, n.childMask, n.firstPoint, n.pointCount, n.lodPoint, n.firstChild, 0});
+        }
+        std::vector<GPUPBRRenderData> gpuPoints;
+        gpuPoints.reserve(tl_buffer.points.size());
+        for(const auto& p : tl_buffer.points) {
+            gpuPoints.push_back({p.position, p.size, p.color, p.material.emittance, p.material.roughness,
+                p.material.metallic, p.material.transmission, p.material.ior, p.boundsMin, 0, p.boundsMax, 0});
+        }
+
+        if(gpuNodes.empty()) gpuNodes.push_back(GPURenderNode{});
+        if(gpuPoints.empty()) gpuPoints.push_back(GPUPBRRenderData{});
+
+        float aspect = static_cast<float>(width) / height;
+        float fovRad = cam.fovRad();
+        float tanHalfFov = tan(fovRad * 0.5f);
+        float invFogRange = 1.0f / std::max(0.001f, maxDistance_ - lodMinDistance_);
+
+        GPUCameraData camData = {
+            cam.origin, 0, cam.direction.normalized(), 0, cam.up.normalized(), 0, cam.right(), maxDistance_,
+            skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
+            width, height, samplesPerPixel, maxBounces, useLod ? 1 : 0, lodMinDistance_, invLodf,
+            0.1f, invFogRange, frameCounter_++, 0.0f
+        };
+
+        size_t outSize = width * height * 3 * sizeof(float);
+        vkCtx.updateCommonBuffers(gpuNodes, outSize, camData);
+        vkCtx.updatePBRBuffers(gpuPoints);
+
+        VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        vkBeginCommandBuffer(vkCtx.commandBuffer, &beginInfo);
+        vkCmdBindPipeline(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.pbrPipeline);
+        vkCmdBindDescriptorSets(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.pbrPipelineLayout, 0, 1, &vkCtx.pbrDescSet, 0, nullptr);
+        
+        vkCmdDispatch(vkCtx.commandBuffer, (width + 7) / 8, (height + 7) / 8, 1);
+        vkEndCommandBuffer(vkCtx.commandBuffer);
+
+        VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &vkCtx.commandBuffer;
+
+        VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        VkFence fence;
+        vkCreateFence(vkCtx.device, &fenceInfo, nullptr, &fence);
+
+        vkQueueSubmit(vkCtx.queue, 1, &submitInfo, fence);
+        vkWaitForFences(vkCtx.device, 1, &fence, VK_TRUE, UINT64_MAX);
+        vkDestroyFence(vkCtx.device, fence, nullptr);
+
+        frame outFrame(width, height, colorformat);
+        std::vector<float> colorBuffer(width * height * 3);
+        void* mappedData;
+        vkMapMemory(vkCtx.device, vkCtx.outMem, 0, outSize, 0, &mappedData);
+        memcpy(colorBuffer.data(), mappedData, outSize);
+        vkUnmapMemory(vkCtx.device, vkCtx.outMem);
+
+        outFrame.setData(colorBuffer, frame::colormap::RGB);
+        return outFrame;
+    }
+
+    frame fastRenderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB) {
+        updateStreaming(cam);
+        optimize();
+        thread_local RenderBuffer tl_buffer;
+        buildRender(tl_buffer);
+        
+        vkCtx.init();
+
+        std::vector<GPURenderNode> gpuNodes;
+        gpuNodes.reserve(tl_buffer.nodes.size());
+        for(const auto& n : tl_buffer.nodes) {
+            gpuNodes.push_back({n.boundsMin, 0, n.boundsMax, 0, n.center, n.nodeSize, (uint32_t)n.isLeaf,
+                (uint32_t)n.isLoaded, n.childMask, n.firstPoint, n.pointCount, n.lodPoint, n.firstChild, 0});
+        }
+        std::vector<GPUFastRenderData> gpuPoints;
+        gpuPoints.reserve(tl_buffer.points.size());
+        for(const auto& p : tl_buffer.points) {
+            gpuPoints.push_back({p.position, p.size, p.color, p.material.emittance, p.boundsMin, 0, p.boundsMax, 0});
+        }
+
+        if(gpuNodes.empty()) gpuNodes.push_back(GPURenderNode{});
+        if(gpuPoints.empty()) gpuPoints.push_back(GPUFastRenderData{});
+
+        float aspect = static_cast<float>(width) / height;
+        float fovRad = cam.fovRad();
+        float tanHalfFov = tan(fovRad * 0.5f);
+        float invFogRange = 1.0f / std::max(0.001f, maxDistance_ - lodMinDistance_);
+
+        GPUCameraData camData = {
+            cam.origin, 0, cam.direction.normalized(), 0, cam.up.normalized(), 0, cam.right(), maxDistance_,
+            skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
+            width, height, 1, 1, 1, lodMinDistance_, invLodf,
+            0.1f, invFogRange, frameCounter_++, 0.0f
+        };
+
+        size_t outSize = width * height * 3 * sizeof(float);
+        vkCtx.updateCommonBuffers(gpuNodes, outSize, camData);
+        vkCtx.updateFastBuffers(gpuPoints);
+
+        VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        vkBeginCommandBuffer(vkCtx.commandBuffer, &beginInfo);
+        vkCmdBindPipeline(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.fastPipeline);
+        vkCmdBindDescriptorSets(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.fastPipelineLayout, 0, 1, &vkCtx.fastDescSet, 0, nullptr);
+        
+        vkCmdDispatch(vkCtx.commandBuffer, (width + 7) / 8, (height + 7) / 8, 1);
+        vkEndCommandBuffer(vkCtx.commandBuffer);
+
+        VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &vkCtx.commandBuffer;
+
+        VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        VkFence fence;
+        vkCreateFence(vkCtx.device, &fenceInfo, nullptr, &fence);
+
+        vkQueueSubmit(vkCtx.queue, 1, &submitInfo, fence);
+        vkWaitForFences(vkCtx.device, 1, &fence, VK_TRUE, UINT64_MAX);
+        vkDestroyFence(vkCtx.device, fence, nullptr);
+
+        frame outFrame(width, height, colorformat);
+        std::vector<float> colorBuffer(width * height * 3);
+        void* mappedData;
+        vkMapMemory(vkCtx.device, vkCtx.outMem, 0, outSize, 0, &mappedData);
+        memcpy(colorBuffer.data(), mappedData, outSize);
+        vkUnmapMemory(vkCtx.device, vkCtx.outMem);
+
+        outFrame.setData(colorBuffer, frame::colormap::RGB);
+        return outFrame;
+    }
+#endif
+
     const RenderData* fastVoxelTraverse(const RenderBuffer& buffer, const Ray& ray, float maxDist) {
         const RenderData* hit = nullptr;
         if (buffer.nodes.empty()) return hit;
@@ -2901,7 +3430,94 @@ public:
         if (rayBoxIntersect(ray, rootBounds, tMin, tMax)) {
             tMax = std::min(tMax, maxDist);
             float currentMaxDist = maxDist;
-            fastVoxelTraverseRecursive(buffer, 0, tMin, tMax, currentMaxDist, ray, hit);
+            
+            struct StackItem {
+                uint32_t nodeIdx;
+                float tMin;
+                float tMax;
+            };
+            
+            StackItem stack[256];
+            int stackPtr = 0;
+            stack[stackPtr++] = {0, std::max(0.0f, tMin), tMax};
+
+            while(stackPtr > 0) {
+                StackItem current = stack[--stackPtr];
+                if (current.tMin > currentMaxDist) continue;
+                
+                const RenderNode& node = buffer.nodes[current.nodeIdx];
+
+                if (!node.isLoaded && node.originalNode) {
+                    ensureLoaded(node.originalNode, true);
+                }
+
+                if (!node.isLeaf && node.lodPoint != -1) {
+                    float dist = (node.center - ray.origin).norm();
+                    if (dist > lodMinDistance_ && (dist / node.nodeSize) > invLodf) {
+                        float t;
+                        PointType n, h;
+                        if (rayCubeIntersect(ray, &buffer.points[node.lodPoint], t, n, h)) {
+                            if (t >= 0 && t <= currentMaxDist) {
+                                hit = &buffer.points[node.lodPoint];
+                                currentMaxDist = t;
+                            }
+                        }
+                        continue;
+                    }
+                }
+
+                for (uint32_t i = 0; i < node.pointCount; ++i) {
+                    const RenderData& pt = buffer.points[node.firstPoint + i];
+                    float t;
+                    PointType n, h;
+                    if (rayCubeIntersect(ray, &pt, t, n, h)) {
+                        if (t >= 0 && t <= currentMaxDist && t <= current.tMax + 0.001f) {
+                            currentMaxDist = t;
+                            hit = &pt;
+                        }
+                    }
+                }
+
+                if (node.isLeaf || !node.isLoaded) continue;
+
+                float t0 = current.tMin;
+                float t1 = current.tMax;
+
+                Eigen::Vector3f ttt = (node.center - ray.origin).cwiseProduct(ray.invDir);
+                int currIdx = ((t0 >= ttt.x()) ? 1 : 0) | ((t0 >= ttt.y()) ? 2 : 0) | ((t0 >= ttt.z()) ? 4 : 0);
+                
+                struct ChildInterval {
+                    uint32_t nodeIdx;
+                    float tMin;
+                    float tMax;
+                };
+                ChildInterval children[4];
+                int childCount = 0;
+
+                while(t0 < t1 && t0 <= currentMaxDist) {
+                    Eigen::Vector3f next_t;
+                    next_t[0] = (currIdx & 1) ? t1 : ttt[0];
+                    next_t[1] = (currIdx & 2) ? t1 : ttt[1];
+                    next_t[2] = (currIdx & 4) ? t1 : ttt[2];
+
+                    float tNext = next_t.minCoeff();
+                    
+                    int physIdx = currIdx ^ ray.signMask;
+                    if (node.childMask & (1 << physIdx)) {
+                        int childOffset = countBits(node.childMask & ((1 << physIdx) - 1));
+                        children[childCount++] = {node.firstChild + childOffset, t0, tNext};
+                    }
+                    
+                    t0 = tNext;
+                    currIdx |= ((next_t[0] <= tNext) ? 1 : 0) | ((next_t[1] <= tNext) ? 2 : 0) | ((next_t[2] <= tNext) ? 4 : 0);
+                }
+
+                if (stackPtr + childCount > 256) continue;
+
+                for (int i = childCount - 1; i >= 0; --i) {
+                    stack[stackPtr++] = {children[i].nodeIdx, children[i].tMin, children[i].tMax};
+                }
+            }
         }
         return hit;
     }
@@ -2914,7 +3530,90 @@ public:
         if (rayBoxIntersect(ray, rootBounds, tMin, tMax)) {
             tMax = std::min(tMax, maxDist);
             float currentMaxDist = maxDist;
-            fastBypassVoxelTraverseRecursive(buffer, 0, tMin, tMax, currentMaxDist, ray, hit);
+
+            struct StackItem {
+                uint32_t nodeIdx;
+                float tMin;
+                float tMax;
+            };
+            
+            StackItem stack[256];
+            int stackPtr = 0;
+            stack[stackPtr++] = {0, std::max(0.0f, tMin), tMax};
+
+            while(stackPtr > 0) {
+                StackItem current = stack[--stackPtr];
+                if (current.tMin > currentMaxDist) continue;
+
+                const RenderNode& node = buffer.nodes[current.nodeIdx];
+
+                if (!node.isLeaf && node.lodPoint != -1) {
+                    float dist = (node.center - ray.origin).norm();
+                    if (dist > lodMinDistance_ && (dist / node.nodeSize) > invLodf) {
+                        float t;
+                        PointType n, h;
+                        if (rayCubeIntersect(ray, &buffer.points[node.lodPoint], t, n, h)) {
+                            if (t >= 0 && t <= currentMaxDist) {
+                                hit = &buffer.points[node.lodPoint];
+                                currentMaxDist = t;
+                            }
+                        }
+                        continue;
+                    }
+                }
+
+                for (uint32_t i = 0; i < node.pointCount; ++i) {
+                    const RenderData& pt = buffer.points[node.firstPoint + i];
+                    float t;
+                    PointType n, h;
+                    if (rayCubeIntersect(ray, &pt, t, n, h)) {
+                        if (t >= 0 && t <= currentMaxDist && t <= current.tMax + 0.001f) {
+                            currentMaxDist = t;
+                            hit = &pt;
+                        }
+                    }
+                }
+
+                if (node.isLeaf || !node.isLoaded) continue;
+
+                float t0 = current.tMin;
+                float t1 = current.tMax;
+
+                Eigen::Vector3f ttt = (node.center - ray.origin).cwiseProduct(ray.invDir);
+                int currIdx = ((t0 >= ttt.x()) ? 1 : 0) | ((t0 >= ttt.y()) ? 2 : 0) | ((t0 >= ttt.z()) ? 4 : 0);
+                
+                struct ChildInterval {
+                    uint32_t nodeIdx;
+                    float tMin;
+                    float tMax;
+                };
+                ChildInterval children[4];
+                int childCount = 0;
+
+                while(t0 < t1 && t0 <= currentMaxDist) {
+                    Eigen::Vector3f next_t;
+                    next_t[0] = (currIdx & 1) ? tMax : ttt[0];
+                    next_t[1] = (currIdx & 2) ? tMax : ttt[1];
+                    next_t[2] = (currIdx & 4) ? tMax : ttt[2];
+
+                    float tNext = next_t.minCoeff();
+                    
+                    int physIdx = currIdx ^ ray.signMask;
+                    if (node.childMask & (1 << physIdx)) {
+                        int childOffset = countBits(node.childMask & ((1 << physIdx) - 1));
+                        children[childCount++] = {node.firstChild + childOffset, t0, tNext};
+                    }
+                    
+                    t0 = tNext;
+                    currIdx |= ((next_t[0] <= tNext) ? 1 : 0) | ((next_t[1] <= tNext) ? 2 : 0) | ((next_t[2] <= tNext) ? 4 : 0);
+                }
+
+                if (stackPtr + childCount > 256) continue;
+
+                for (int i = childCount - 1; i >= 0; --i) {
+                    stack[stackPtr++] = {children[i].nodeIdx, children[i].tMin, children[i].tMax};
+                }
+            }
         }
         return hit;
     }

@@ -717,9 +717,17 @@ public:
         float invFrameRate = 1 / framerate;
         
         if (slowRender) {
+            #ifdef VULKAN_SUPPORT
+            currentPreviewFrame = sim.grid.renderFrameVulkan(cam, outHeight, outWidth, frame::colormap::RGB, 3, reflectCount, useLod);
+            #else
             currentPreviewFrame = sim.grid.renderFrame(cam, outHeight, outWidth, frame::colormap::RGB, 3, reflectCount, globalIllumination, useLod);
+            #endif
         } else {
+            #ifdef VULKAN_SUPPORT
+            currentPreviewFrame = sim.grid.fastRenderFrameVulkan(cam, outHeight, outWidth, frame::colormap::RGB);
+            #else
             currentPreviewFrame = sim.grid.fastRenderFrame(cam, outHeight, outWidth, frame::colormap::RGB);
+            #endif
         }
         
         if (textu == 0) {

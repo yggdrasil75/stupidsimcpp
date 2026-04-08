@@ -4,16 +4,19 @@ SRC_DIR := ./tests
 IMGUI_DIR = ./imgui
 OBJ_DIR := $(BIN_DIR)/obj
 STB_DIR := ./stb
+SHADER_DIR := ./shaders
 
 # Compiler and flags
 CXX := g++
 BASE_CXXFLAGS = -std=c++23 -O3 -fopenmp -march=native -I$(IMGUI_DIR) -I$(IMGUI_DIR)/backends -I$(STB_DIR) -g
 BASE_CXXFLAGS += `pkg-config --cflags glfw3`
+
+LINUX_GL_LIBS = -lGL -ltbb -lvulkan
+PKG_FLAGS := $(LINUX_GL_LIBS) `pkg-config --static --cflags --libs glfw3`
+BASE_CXXFLAGS += $(PKG_FLAGS) -DVULKAN_SUPPORT
+
 CFLAGS = $(BASE_CXXFLAGS)
 LDFLAGS := -L./imgui -limgui -lGL
-LINUX_GL_LIBS = -lGL -ltbb
-PKG_FLAGS := $(LINUX_GL_LIBS) `pkg-config --static --cflags --libs glfw3`
-BASE_CXXFLAGS += $(PKG_FLAGS)
 
 # Test if AVX is supported (run once, store result)
 AVX_SUPPORTED := $(shell echo "int main(){}" | $(CXX) -mavx -x c++ -o /dev/null - 2>/dev/null && echo "yes" || echo "no")
@@ -31,7 +34,7 @@ else
     $(warning No SIMD support detected, building scalar version)
 endif
 
-CXXFLAGS = $(BASE_CXXFLAGS) $(SIMD_CXXFLAGS)
+CXXFLAGS = $(BASE_CXXFLAGS) $(SIMD_CXXFLAGS) 
 
 # Source files
 SRC := $(SRC_DIR)/ptest.cpp
@@ -42,6 +45,11 @@ SRC += $(SRC_DIR)/stb_image.cpp
 OBJS = $(addprefix $(OBJ_DIR)/, $(addsuffix .o, $(basename $(notdir $(SRC)))))
 UNAME_S := $(shell uname -s)
 EXE := $(BIN_DIR)/g2gradc
+
+GLSLC := glslc
+
+SHADER_SRCS := $(SHADER_DIR)/fast_raytrace.comp $(SHADER_DIR)/pbr_raytrace.comp
+SHADER_SPVS := $(patsubst $(SHADER_DIR)/%.comp,$(BIN_DIR)/%.spv,$(SHADER_SRCS))
 
 $(shell mkdir -p $(OBJ_DIR))
 
@@ -60,11 +68,15 @@ $(OBJ_DIR)/%.o: $(IMGUI_DIR)/backends/%.cpp
 $(OBJ_DIR)/%.o: $(STB_DIR)/%.cpp
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
-all: $(EXE)
+all: $(EXE) $(SHADER_SPVS)
 	@echo "Build complete for $(UNAME_S)"
+
+$(BIN_DIR)/%.spv: $(SHADER_DIR)/%.comp
+	@echo "Compiling shader $< -> $@"
+	$(GLSLC) $< -o $@
 
 $(EXE): $(OBJS)
 	$(CXX) -o $@ $^ $(CXXFLAGS) $(LIBS)
 
 clean:
-	rm -f $(EXE) $(OBJS)
+	rm -f $(EXE) $(OBJS) $(SHADER_SPVS)

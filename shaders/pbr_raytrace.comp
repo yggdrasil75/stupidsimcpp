@@ -1,0 +1,339 @@
+#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+
+#define PI 3.14159265359
+
+// --- Data Structures ---
+struct GPURenderNode {
+    vec3 boundsMin; float padding1;
+    vec3 boundsMax; float padding2;
+    vec3 center;    float nodeSize;
+    uint isLeaf;
+    uint isLoaded;
+    uint childMask;
+    uint firstPoint;
+    uint pointCount;
+    int  lodPoint;
+    uint firstChild;
+    uint padding3;
+};
+
+struct GPUPBRRenderData {
+    vec3 position;
+    float size;
+    vec3 color;
+    float emittance;
+    float roughness;
+    float metallic;
+    float transmission;
+    float ior;
+    vec3 boundsMin;
+    float padding1;
+    vec3 boundsMax;
+    float padding2;
+};
+
+// --- Buffers and UBO ---
+layout(std430, binding = 0) readonly buffer NodeBuffer { GPURenderNode nodes[]; };
+layout(std430, binding = 1) readonly buffer PointBuffer { GPUPBRRenderData points[]; };
+layout(std430, binding = 2) writeonly buffer OutputBuffer { float pixels[]; };
+
+layout(binding = 3) uniform CameraData {
+    vec3 origin;
+    float padding1;
+    vec3 dir;
+    float padding2;
+    vec3 up;
+    float padding3;
+    vec3 right;
+    float maxDist;
+    vec3 skylight;
+    float tanfovx;
+    vec3 bgColor;
+    float tanfovy;
+    int width;
+    int height;
+    int samples;
+    int maxBounces;
+    int useLod;
+    float lodMinDist;
+    float invLodf;
+    float minVisibility;
+    float invFogRange;
+    uint frameCount;
+    float padding5;
+} cam;
+
+// --- Ray, RNG, and Intersection ---
+struct Ray {vec3 origin; vec3 dir; vec3 invDir; ivec3 signMask; };
+
+uint rng_state;
+
+uint pcg_hash(uint seed) {
+    uint state = seed * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+void init_rng(ivec2 pixel_coord) {
+    rng_state = pcg_hash(pixel_coord.x + pixel_coord.y * cam.width + pcg_hash(cam.frameCount));
+}
+
+float random_float() {
+    rng_state = pcg_hash(rng_state);
+    return float(rng_state) / float(0xFFFFFFFFu);
+}
+
+Ray makeRay(vec3 o, vec3 d) {
+    Ray r;
+    r.origin = o;
+    r.dir = d;
+    r.invDir = 1.0 / d;
+    r.signMask = ivec3(r.invDir.x < 0 ? 1 : 0, r.invDir.y < 0 ? 1 : 0, r.invDir.z < 0 ? 1 : 0);
+    return r;
+}
+
+bool rayBoxIntersect(Ray ray, vec3 bMin, vec3 bMax, out float tMin, out float tMax);
+bool rayCubeIntersect(Ray ray, GPUPBRRenderData pt, out float t, out vec3 normal);
+int voxelTraverse(Ray ray, out int hitIndex, out float outT, out vec3 outNormal);
+
+vec3 schlick(float cos_theta, vec3 F0) { return F0 + (1.0 - F0) * pow(1.0 - cos_theta, 5.0); }
+void createOrthoNormalBasis(vec3 n, out vec3 t, out vec3 b) {
+    vec3 up = abs(n.z) < 0.999 ? vec3(0,0,1) : vec3(1,0,0);
+    t = normalize(cross(up, n));
+    b = cross(n, t);
+}
+vec3 hemisphereSample(vec3 n) {
+    float r1 = random_float();
+    float r2 = random_float();
+    float phi = 2.0 * PI * r1;
+    float r = sqrt(r2);
+    float x = r * cos(phi);
+    float y = r * sin(phi);
+    float z = sqrt(max(0.0, 1.0 - x*x - y*y));
+    vec3 t,b;
+    createOrthoNormalBasis(n, t, b);
+    return t * x + b * y + n * z;
+}
+
+// --- Main Path Tracing Loop ---
+vec3 traceRay(Ray initialRay) {
+    vec3 finalColor = vec3(0.0);
+    vec3 throughput = vec3(1.0);
+    Ray currentRay = initialRay;
+    float p = 1.0;
+
+    for (int bounce = 0;bounce < cam.maxBounces; ++bounce) {
+        int hitIndex;
+        float t;
+        vec3 normal;
+        int hitResult = voxelTraverse(currentRay, hitIndex, t, normal);
+        
+        if (hitResult == 0) {
+            finalColor += throughput * cam.skylight;
+            break;
+        }
+
+        GPUPBRRenderData hitData = points[hitIndex];
+        vec3 hitPoint = currentRay.origin + currentRay.dir * t;
+        float rayOffset = 0.0001;
+
+        finalColor += throughput * hitData.emittance * hitData.color;
+
+        vec3 V = -currentRay.dir;
+        bool is_inside = dot(normal, V) < 0;
+        vec3 n_eff = is_inside ? -normal : normal;
+
+        vec3 F0 = mix(vec3(0.04), hitData.color, hitData.metallic);
+        vec3 F = schlick(max(0.0, dot(n_eff, V)), F0);
+
+        float spec_prob = max(F.r, max(F.g, F.b));
+        float diffuse_prob = (1.0 - spec_prob) * (1.0 - hitData.transmission);
+        float transmission_prob = (1.0 - spec_prob) * hitData.transmission;
+        
+        vec3 albedo = hitData.color;
+
+        // Russian Roulette
+        p = max(albedo.r, max(albedo.g, albedo.b));
+        if (bounce > 2) {
+            if (random_float() > p) break;
+            throughput /= p;
+        }
+        
+        float r = random_float();
+        if (r < spec_prob) { // Specular reflection
+            vec3 H = hemisphereSample(n_eff);
+            currentRay.dir = reflect(-V, H);
+            currentRay.origin = hitPoint + n_eff * rayOffset;
+            throughput *= F;
+        } else if (r < spec_prob + diffuse_prob) { // Diffuse
+            currentRay.dir = hemisphereSample(n_eff);
+            currentRay.origin = hitPoint + n_eff * rayOffset;
+            throughput *= (1.0 - F) * (1.0 - hitData.transmission) * albedo;
+        } else { // Transmission / Refraction
+            float eta = is_inside ? hitData.ior : 1.0 / hitData.ior;
+            vec3 R = refract(-V, n_eff, eta);
+            if (dot(R,R) == 0.0) { // Total internal reflection
+                 currentRay.dir = reflect(-V, n_eff);
+                 currentRay.origin = hitPoint + n_eff * rayOffset;
+            } else {
+                 currentRay.dir = R;
+                 currentRay.origin = hitPoint - n_eff * rayOffset;
+            }
+            throughput *= (1.0 - F) * albedo;
+        }
+    }
+    return finalColor;
+}
+
+// --- Main Function ---
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= cam.width || coord.y >= cam.height) return;
+
+    init_rng(coord);
+    
+    vec3 accumulatedColor = vec3(0.0);
+    for (int s = 0; s < cam.samples; ++s) {
+        float px = (2.0 * (float(coord.x) + random_float()) / float(cam.width) - 1.0) * cam.tanfovx;
+        float py = (1.0 - 2.0 * (float(coord.y) + random_float()) / float(cam.height)) * cam.tanfovy;
+        vec3 rayDir = normalize(cam.dir + cam.right * px + cam.up * py);
+        Ray ray = makeRay(cam.origin, rayDir);
+        accumulatedColor += traceRay(ray);
+    }
+
+    vec3 finalColor = accumulatedColor / float(cam.samples);
+    finalColor = pow(finalColor, vec3(1.0/2.2)); // Gamma correction
+    
+    finalColor = clamp(finalColor, 0.0, 1.0);
+    uint idx = (coord.y * cam.width + coord.x) * 3;
+    pixels[idx]     = finalColor.r;
+    pixels[idx + 1] = finalColor.g;
+    pixels[idx + 2] = finalColor.b;
+}
+
+// VoxelTraverse and Ray-Cube Intersection Implementations (same as fast shader)
+bool rayBoxIntersect(Ray ray, vec3 bMin, vec3 bMax, out float tMin, out float tMax) {
+    vec3 t0 = (bMin - ray.origin) * ray.invDir;
+    vec3 t1 = (bMax - ray.origin) * ray.invDir;
+    vec3 tsmall = min(t0, t1);
+    vec3 tbig = max(t0, t1);
+    tMin = max(max(tsmall.x, tsmall.y), tsmall.z);
+    tMax = min(min(tbig.x, tbig.y), tbig.z);
+    return tMax >= max(0.0, tMin);
+}
+bool rayCubeIntersect(Ray ray, GPUPBRRenderData pt, out float t, out vec3 normal) {
+    float tMin, tMax;
+    if (!rayBoxIntersect(ray, pt.boundsMin, pt.boundsMax, tMin, tMax) || tMax < 0.0) return false;
+    t = tMin < 0.0 ? tMax : tMin;
+    vec3 hitPoint = ray.origin + ray.dir * t;
+    vec3 dMin = abs(hitPoint - pt.boundsMin);
+    vec3 dMax = abs(hitPoint - pt.boundsMax);
+    float minDist = 999999.0;
+    int minAxis = 0;
+    float sgn = 1.0;
+    if(dMin.x < minDist) {
+        minDist = dMin.x;
+        minAxis = 0;
+        sgn = -1.0;
+        } 
+    if(dMin.y < minDist) {
+        minDist = dMin.y;
+        minAxis = 1;
+        sgn = -1.0;
+        }
+    if(dMin.z < minDist) {
+        minDist = dMin.z;
+        minAxis = 2;
+        sgn = -1.0;
+        }
+    if(dMax.x < minDist) {
+        minDist = dMax.x;
+        minAxis = 0;
+        sgn = 1.0;
+        }
+    if(dMax.y < minDist) {
+        minDist = dMax.y;
+        minAxis = 1;
+        sgn = 1.0;
+        }
+    if(dMax.z < minDist) {
+        minDist = dMax.z;
+        minAxis = 2;
+        sgn = 1.0;
+        }
+    normal = vec3(0);
+    normal[minAxis] = sgn;
+    return true;
+}
+int voxelTraverse(Ray ray, out int hitIndex, out float outT, out vec3 outNormal) {
+    float tMin, tMax;
+    if (nodes.length() == 0 || !rayBoxIntersect(ray, nodes[0].boundsMin, nodes[0].boundsMax, tMin, tMax)) return 0;
+    float currentMaxDist = cam.maxDist;
+    tMax = min(tMax, currentMaxDist);
+    uint stackNodes[64];
+    float stackTMin[64];
+    float stackTMax[64];
+    int stackPtr = 1;
+    stackNodes[0] = 0;
+    stackTMin[0] = max(0.0, tMin);
+    stackTMax[0] = tMax;
+    int hitFound = 0;
+    while(stackPtr > 0) {
+        stackPtr--;
+        uint nodeIdx = stackNodes[stackPtr];
+        float t0 = stackTMin[stackPtr];
+        float t1 = stackTMax[stackPtr];
+        if (t0 > currentMaxDist) continue;
+        GPURenderNode node = nodes[nodeIdx];
+        if (cam.useLod == 1 && node.lodPoint != -1) {
+            float dist = distance(node.center, ray.origin);
+            if (node.isLoaded == 0 || (dist > cam.lodMinDist && (dist / node.nodeSize) > cam.invLodf)) {
+                float t;
+                vec3 n;
+                if (rayCubeIntersect(ray, points[node.lodPoint], t, n)) {
+                    if (t >= 0.0 && t <= currentMaxDist) {
+                        currentMaxDist = t;
+                        outT = t;
+                        outNormal = n;
+                        hitIndex = node.lodPoint;
+                        hitFound = 1;
+                    }
+                } if (node.isLoaded == 0 || node.isLeaf == 0) continue;
+            }
+        }
+        for (uint i = 0; i < node.pointCount; ++i) {
+            float t;
+            vec3 n;
+            uint pointIdx = node.firstPoint + i;
+            if (rayCubeIntersect(ray, points[pointIdx], t, n)) {
+                if (t >= 0.0 && t <= currentMaxDist && t <= t1 + 0.001) {
+                    currentMaxDist = t;
+                    outT = t;
+                    outNormal = n;
+                    hitIndex = int(pointIdx);
+                    hitFound = 1;
+                }
+            }
+        }
+        if (node.isLeaf == 1 || node.isLoaded == 0) continue;
+        vec3 ttt = (node.center - ray.origin) * ray.invDir;
+        int currIdx = ((t0 >= ttt.x) ? 1 : 0) | ((t0 >= ttt.y) ? 2 : 0) | ((t0 >= ttt.z) ? 4 : 0);
+        int raySignMask = ray.signMask.x | (ray.signMask.y << 1) | (ray.signMask.z << 2);
+        while(t0 < t1 && t0 <= currentMaxDist) {
+            vec3 next_t = vec3( (currIdx & 1) != 0 ? t1 : ttt.x, (currIdx & 2) != 0 ? t1 : ttt.y, (currIdx & 4) != 0 ? t1 : ttt.z );
+            float tNext = min(min(next_t.x, next_t.y), next_t.z);
+            int physIdx = currIdx ^ raySignMask;
+            if ((node.childMask & (1 << physIdx)) != 0 && stackPtr < 64) {
+                uint mask = node.childMask & ((1 << physIdx) - 1);
+                uint childOffset = bitCount(mask);
+                stackNodes[stackPtr] = node.firstChild + childOffset;
+                stackTMin[stackPtr] = t0;
+                stackTMax[stackPtr] = tNext;
+                stackPtr++;
+            }
+            t0 = tNext;
+            currIdx |= ((next_t.x <= tNext) ? 1 : 0) | ((next_t.y <= tNext) ? 2 : 0) | ((next_t.z <= tNext) ? 4 : 0);
+        }
+    } return hitFound;
+}
