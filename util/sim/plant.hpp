@@ -765,18 +765,44 @@ private:
 
         if (sunDir.y() > 0.0f) {
             float intensity = config.sunIntensity * sunDir.y();
+            std::uniform_real_distribution<float> distOffset(-0.5f, 0.5f);
+            
             for (const v3& leafPos : activeLeaves) {
-                v3 rayOrigin = leafPos + sunDir * (config.voxelSize * 1.5f);
-                auto hit = grid.voxelTraverse(rayOrigin, sunDir, config.sunDistance, false, false);
-                if (!hit) {
-                    auto leafData = grid.find(leafPos);
-                    if (leafData) {
-                        auto p = std::static_pointer_cast<PlantParticle>(leafData->data);
-                        if (p) {
-                            p->energy += intensity * dt;
-                            totalPlantEnergy += intensity * dt;
-                        }
+                auto leafNode = grid.find(leafPos);
+                if (!leafNode) continue;
+                
+                auto p = std::static_pointer_cast<PlantParticle>(leafNode->data);
+                if (!p) continue;
+                
+                int raysToCast = std::max(1, static_cast<int>(p->dna->leaf.widthMultiplier * p->dna->leaf.lengthMultiplier * 2.0f));
+                float hitsReachingSun = 0.0f;
+                
+                for (int r = 0; r < raysToCast; ++r) {
+                    v3 offset(0, 0, 0);
+                    if (r > 0) {
+                        offset = v3(
+                            distOffset(rng) * p->dna->leaf.widthMultiplier * config.voxelSize,
+                            0.0f,
+                            distOffset(rng) * p->dna->leaf.lengthMultiplier * config.voxelSize
+                        );
                     }
+                    
+                    v3 rayOrigin = leafPos + offset;
+                    
+                    using GridType = std::decay_t<decltype(grid)>;
+                    GridType::RayHit hitInfo;
+                    
+                    bool occluded = grid.raycast(rayOrigin, sunDir, config.sunDistance, hitInfo, leafNode);
+                    
+                    if (!occluded) {
+                        hitsReachingSun += 1.0f;
+                    }
+                }
+                
+                if (hitsReachingSun > 0.0f) {
+                    float receivedEnergy = (intensity * dt * hitsReachingSun) / static_cast<float>(raysToCast);
+                    p->energy += receivedEnergy;
+                    totalPlantEnergy += receivedEnergy;
                 }
             }
         }
