@@ -765,6 +765,8 @@ private:
     std::atomic<bool> autoOptimize_{true};
     std::atomic<bool> streamingQueued_{false};
 
+    float minLodVolume_ = 0.0f;
+    float minLodSize_ = 0.0f;
     size_t regionTargetPoints_ = 4096;
 
     void lazilyOffload(OctreeNode* node) {
@@ -1134,31 +1136,52 @@ private:
         std::lock_guard<std::shared_mutex> lock(node->nodeMutex);
         if (node->lodData != nullptr) return;
 
-        PointType avgPos = PointType::Zero();
-        Eigen::Vector3f avgColor = Eigen::Vector3f::Zero();
-        float avgEmittance = 0.0f;
-        float avgRoughness = 0.0f;
-        float avgMetallic = 0.0f;
-        float avgTransmission = 0.0f;
-        float avgIor = 0.0f;
-        int count = 0;
-        
-        if (node->isLeaf() && node->points.size() == 1) {
-            node->lodData = node->points[0];
-            return;
-        } else if (node->isLeaf() && node->points.empty()) {
-            return;
+        if (node->isLeaf()) {
+            if (node->points.empty()) {
+                auto lod = std::make_shared<NodeData>();
+                lod->position = node->center;
+                node->lodData = lod;
+                return;
+            } else if (node->points.size() == 1) {
+                const auto& pt = node->points[0];
+                if (pt->isActive() && pt->isVisible()) {
+                    double v = static_cast<double>(pt->size) * pt->size * pt->size;
+                    if (v > static_cast<double>(minLodVolume_)) {
+                        node->lodData = pt;
+                        return;
+                    }
+                }
+                auto lod = std::make_shared<NodeData>();
+                lod->position = node->center;
+                node->lodData = lod;
+                return;
+            }
         }
+
+        Eigen::Vector3f avgPos = Eigen::Vector3f::Zero();
+        Eigen::Vector3f avgColor = Eigen::Vector3f::Zero();
+        float avgEmittance = 0.0;
+        float avgRoughness = 0.0;
+        float avgMetallic = 0.0;
+        float avgTransmission = 0.0;
+        float avgIor = 0.0;
+        float totalVolume = 0.0;
+        int count = 0;
 
         auto accumulate = [&](const std::shared_ptr<NodeData>& item) {
             if (!item || !item->isActive() || !item->isVisible()) return;
-            avgColor += item->color;
+            float v = item->size * item->size * item->size;
+            if (v <= 0.0) return;
+
+            totalVolume += v;
+            avgPos += item->position * v;
+            avgColor += item->color * v;
             Material mat = item->material;
-            avgEmittance += mat.emittance;
-            avgRoughness += mat.roughness;
-            avgMetallic += mat.metallic;
-            avgTransmission += mat.transmission;
-            avgIor += mat.ior;
+            avgEmittance += mat.emittance * v;
+            avgRoughness += mat.roughness * v;
+            avgMetallic += mat.metallic * v;
+            avgTransmission += mat.transmission * v;
+            avgIor += mat.ior * v;
             count++;
         };
 
@@ -1173,24 +1196,25 @@ private:
             }
         }
 
-        if (count > 0) {
-            float invCount = 1.0f / count;
+        if (count > 0 && totalVolume > minLodVolume_) {
+            double invVol = 1.0 / totalVolume;
             
             auto lod = std::make_shared<NodeData>();
-            lod->position = node->center;
-            
-            PointType nodeDims = node->bounds.second - node->bounds.first;
-            lod->size = nodeDims.maxCoeff();
+            lod->position = (avgPos * invVol);
+            lod->size = std::cbrt(totalVolume);
 
-            lod->color = avgColor * invCount;
-            Material avgMat(avgEmittance * invCount, avgRoughness * invCount, 
-                            avgMetallic * invCount, avgTransmission * invCount, avgIor * invCount);
+            lod->color = (avgColor * invVol);
+            Material avgMat(avgEmittance * invVol, avgRoughness * invVol, avgMetallic * invVol,
+                            avgTransmission * invVol, avgIor * invVol);
             lod->material = avgMat;
             
             lod->setActive(true);
             lod->setVisible(true);
             lod->objectId = -1; 
-
+            node->lodData = lod;
+        } else {
+            auto lod = std::make_shared<NodeData>();
+            lod->position = node->center;
             node->lodData = lod;
         }
     }
@@ -2042,7 +2066,8 @@ public:
     
     Octree(const Octree& other) : maxDepth(other.maxDepth), size(other.size), maxPointsPerNode(other.maxPointsPerNode),
             skylight_(other.skylight_), backgroundColor_(other.backgroundColor_), autoOptimize_(other.autoOptimize_.load()),
-            streamingQueued_(false), skybox_(other.skybox_), regionTargetPoints_(other.regionTargetPoints_) {
+            streamingQueued_(false), skybox_(other.skybox_), regionTargetPoints_(other.regionTargetPoints_),
+            minLodSize_(other.minLodSize_), minLodVolume_(other.minLodVolume_) {
         if (other.root_) root_ = other.root_->clone();
         startWorkerThread();
     }
@@ -2050,7 +2075,8 @@ public:
     Octree(Octree&& other) noexcept : maxDepth(other.maxDepth), size(other.size), maxPointsPerNode(other.maxPointsPerNode),
             skylight_(std::move(other.skylight_)), backgroundColor_(std::move(other.backgroundColor_)),
             autoOptimize_(other.autoOptimize_.load()),
-            streamingQueued_(false), skybox_(std::move(other.skybox_)), regionTargetPoints_(other.regionTargetPoints_) {
+            streamingQueued_(false), skybox_(std::move(other.skybox_)), regionTargetPoints_(other.regionTargetPoints_),
+            minLodSize_(other.minLodSize_), minLodVolume_(other.minLodVolume_) {
         other.stopWorkerThread();
         root_ = std::move(other.root_);
         
@@ -2078,6 +2104,8 @@ public:
         streamingQueued_.store(false);
         skybox_ = other.skybox_;
         regionTargetPoints_ = other.regionTargetPoints_;
+        minLodSize_ = other.minLodSize_;
+        minLodVolume_ = other.minLodVolume_;
 
         if (other.root_) root_ = other.root_->clone();
         
@@ -2100,6 +2128,8 @@ public:
         streamingQueued_.store(false);
         skybox_ = std::move(other.skybox_);
         regionTargetPoints_ = std::move(other.regionTargetPoints_);
+        minLodSize_ = other.minLodSize_;
+        minLodVolume_ = other.minLodVolume_;
         
         root_ = std::move(other.root_);
         
@@ -2155,6 +2185,11 @@ public:
         maxDistance_ = dist;
         keepDistance_ = dist * 1.2;
     }
+    void setMinLODSize(float size) {
+        minLodSize_ = size;
+        minLodVolume_ = size * size * size;
+    }
+    float getMinLODSize() const { return minLodSize_; }
     void setRegionTargetPoints(size_t points) { regionTargetPoints_ = points; }
     size_t getRegionTargetPoints() const { return regionTargetPoints_; }
 

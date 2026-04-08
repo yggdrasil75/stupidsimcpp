@@ -68,8 +68,9 @@ struct Particle {
     Eigen::Vector3f currentPos;
     
     float plateDisplacement = 0.0f;
-    // float temperature = -1;
-    // float water = -1;
+    float temperature = 0.0f;
+    float water = 0.0f;
+    float moisture = 0.0f;
     v3 originColor;
     bool surface = false;
 
@@ -86,11 +87,10 @@ struct Particle {
     float mass = 1.0f;
     bool isStatic = false;
     float soundSpeed = 100.0f;
-    float sandcontent = 0.0f;
-    float siltcontent = 0.0f;
-    float claycontent = 0.0f;
-    float rockcontent = 1.0f;
-    float metalcontent = 0.0f;
+
+    // Matrix rows: 0: Sand, 1: Silt, 2: Clay, 3: Rock, 4: Metal
+    // Columns are 10 sub-variants for each type.
+    Eigen::Matrix<Eigen::half, 5, 10> materials = Eigen::Matrix<Eigen::half, 5, 10>::Zero();
 
     float impactShock = 0.0f;
     float impactHeat = 0.0f;
@@ -98,7 +98,10 @@ struct Particle {
 
     NeighborData nearNeighbors[8];
 
-    Particle() = default;
+    Particle() {
+        materials(3, 0) = Eigen::half(1.0f);
+    }
+
 
     Particle(const Particle& other) {
         noiseDisplacement = other.noiseDisplacement;
@@ -120,11 +123,11 @@ struct Particle {
         mass = other.mass;
         isStatic = other.isStatic;
         soundSpeed = other.soundSpeed;
-        sandcontent = other.sandcontent;
-        siltcontent = other.siltcontent;
-        claycontent = other.claycontent;
-        rockcontent = other.rockcontent;
-        metalcontent = other.metalcontent;
+        
+        materials = other.materials;
+        water = other.water;
+        temperature = other.temperature;
+        moisture = other.moisture;
         
         impactShock = other.impactShock;
         impactHeat = other.impactHeat;
@@ -160,11 +163,11 @@ struct Particle {
             mass = other.mass;
             isStatic = other.isStatic;
             soundSpeed = other.soundSpeed;
-            sandcontent = other.sandcontent;
-            siltcontent = other.siltcontent;
-            claycontent = other.claycontent;
-            rockcontent = other.rockcontent;
-            metalcontent = other.metalcontent;
+            
+            materials = other.materials;
+            water = other.water;
+            temperature = other.temperature;
+            moisture = other.moisture;
             
             impactShock = other.impactShock;
             impactHeat = other.impactHeat;
@@ -190,7 +193,6 @@ struct Particle {
         writeBin(out, noiseDisplacement);
         writeBin(out, plateID);
         
-        // Handle unique_ptr safely
         bool hasAltPos = (altPos != nullptr);
         writeBin(out, hasAltPos);
         if (hasAltPos) {
@@ -215,11 +217,11 @@ struct Particle {
         writeBin(out, mass);
         writeBin(out, isStatic);
         writeBin(out, soundSpeed);
-        writeBin(out, sandcontent);
-        writeBin(out, siltcontent);
-        writeBin(out, claycontent);
-        writeBin(out, rockcontent);
-        writeBin(out, metalcontent);
+        
+        writeBin(out, materials);
+        writeBin(out, water);
+        writeBin(out, temperature);
+        writeBin(out, moisture);
         
         writeBin(out, impactShock);
         writeBin(out, impactHeat);
@@ -261,11 +263,11 @@ struct Particle {
         readBin(in, p.mass);
         readBin(in, p.isStatic);
         readBin(in, p.soundSpeed);
-        readBin(in, p.sandcontent);
-        readBin(in, p.siltcontent);
-        readBin(in, p.claycontent);
-        readBin(in, p.rockcontent);
-        readBin(in, p.metalcontent);
+        
+        readBin(in, p.materials);
+        readBin(in, p.water);
+        readBin(in, p.temperature);
+        readBin(in, p.moisture);
         
         readBin(in, p.impactShock);
         readBin(in, p.impactHeat);
@@ -277,11 +279,6 @@ struct Particle {
         }
         return p;
     }
-
-    // friend ostream& operator<<(ostream& os) {
-
-    //     return os;
-    // }
 };
 
 struct planetConfig {
@@ -297,7 +294,7 @@ struct planetConfig {
     float displacementStrength = 200.0f;
     std::vector<v3> surfaceNodes;
     std::vector<v3> interpolatedNodes;
-    float noiseStrength = 10.0f;
+    float noiseStrength = 25.0f;
     int numPlates = 15;
     int smoothingPasses = 3;
     float mountHeight = 250.0f;
@@ -317,6 +314,9 @@ struct planetConfig {
     float coreRepulsionRadius = 1000.0f; 
     float coreRepulsionStiffness = 100000.0f;
     float dampingFactor = 0.98f;
+    
+    int erosionDrops = 500000;
+    int weatherIterations = 100;
 };
 
 struct PlateConfig {
@@ -463,7 +463,8 @@ public:
             p.currentPos = p.altPos->noisePos;
             newPos[i] = p.currentPos;
             grid.move(oldPos, p.currentPos);
-            grid.update(p.currentPos, p);
+            // grid.update(p.currentPos, p);
+            grid.updateData(p.currentPos, p);
             // grid.queuedupdate(oldPos, p.currentPos, p);
             // grid.queuedupdate(p.currentPos, p);
         }
@@ -474,7 +475,6 @@ public:
     void assignSeeds() {
         grid.waitForIdle();
         std::cout << "assigning seeds" << std::endl;
-        int asdf = 0;
         plates.clear();
         plates.resize(config.numPlates);
         float sphereSurfaceArea = 4.0f * M_PI * config.radius * config.radius;
@@ -482,24 +482,19 @@ public:
         float minDistance = std::sqrt(averageAreaPerPlate) * 0.4f;
         std::vector<int> selectedSeedIndices;
         std::uniform_int_distribution<int> distNode(0, config.surfacePoints - 1);
-        // std::cout << asdf++ << std::endl;
         for (int i = 0; i < config.numPlates; ++i) {
             int attempts = 10;
             bool foundValidSeed = false;
-            // std::cout << asdf++ << std::endl;
             int seedid = distNode(rng);
             plates[i].plateId = i;
-            // std::cout << asdf++ << std::endl;
 
             while (!foundValidSeed && attempts > 0) {
                 int seedIndex = distNode(rng);
                 
                 bool tooClose = false;
                 for (int selectedIndex : selectedSeedIndices) {
-                    // std::cout << asdf++ << std::endl;
                     auto existingNode = grid.find(config.surfaceNodes[selectedIndex], config.voxelSize * 0.5f);
                     auto candidateNode = grid.find(config.surfaceNodes[seedIndex], config.voxelSize * 0.5f);
-                    // std::cout << asdf++ << std::endl;
                     if (!existingNode || !candidateNode) {
                         std::cout << "no nodes" << std::endl;
                         continue;
@@ -507,7 +502,6 @@ public:
 
                     const auto& existingSeed = existingNode->data;
                     const auto& candidateSeed = candidateNode->data;
-                    // std::cout << asdf++ << std::endl;
 
                     float dot = existingSeed.altPos->originalPos.normalized().dot(candidateSeed.altPos->originalPos.normalized());
                     float angle = std::acos(std::clamp(dot, -1.0f, 1.0f));
@@ -530,7 +524,6 @@ public:
                         p.plateID = i; 
                         grid.updateData(config.surfaceNodes[seedIndex], p);
                         plates[i].plateEulerPolep = sNode->position;
-                        // plates[i].plateEulerPole = p;
                     }
 
                     float colorVal = static_cast<float>(seedid) / config.surfaceNodes.size();
@@ -561,7 +554,6 @@ public:
                     p.plateID = i;
                     grid.updateData(config.surfaceNodes[seedIndex], p);
                     plates[i].plateEulerPolep = sNode->position;
-                    // plates[i].plateEulerPole = p;
                 }
 
                 float colorVal = static_cast<float>(seedIndex) / config.surfaceNodes.size();
@@ -628,7 +620,6 @@ public:
                 top8.pop();
             }
             grid.updateData(config.surfaceNodes[i], in);
-            // grid.queuedupdate(config.surfaceNodes[i], in);
         }
         grid.waitForIdle();
     }
@@ -651,7 +642,6 @@ public:
             if (pID == -1) {
                 unassignedCount++;
             } else {
-                std::cout << "found seed for " << pID << std::endl;
                 plates[pID].assignedNodes.push_back(i);
                 for (int n = 0; n < 8; n++) {
                     int nIdx = node->data.nearNeighbors[n].index;
@@ -665,7 +655,6 @@ public:
         }
         
         std::uniform_real_distribution<float> distFloat(0.0f, 1.0f);
-        std::cout << "have " << unassignedCount << " remaining nodes" << std::endl;
         
         while (unassignedCount > 0) {
             int totalWeight = 0;
@@ -678,7 +667,6 @@ public:
                 break;
             }
             
-            // std::cout << "have " << unassignedCount << " remaining nodes" << std::endl;
             int randVal = distFloat(rng) * totalWeight;
             int selPlate = -1;
             float accum = 0.0f;
@@ -926,7 +914,6 @@ public:
                         if (bestNode) {
                             plates[i].plateEulerPolep = bestNode->position;
                         }
-                        // grid.update(plates[i].plateEulerPolep, pasdf);
                     }
                 }
             } else {
@@ -1092,14 +1079,11 @@ public:
     void finalizeApplyResults() {
         TIME_FUNCTION;
         std::cout << "finalizing results" << std::endl;
-        ///TODO: fix this not being used.
-        float maxAllowedDisp = config.radius * config.maxElevationRatio;
 
         grid.waitForIdle();
         std::vector<v3> newPos(config.surfaceNodes.size());
         for (int i = 0; i < config.surfaceNodes.size(); i++) {
             v3 pos = config.surfaceNodes[i];
-        // for (auto& pos : config.surfaceNodes) {
             auto node = grid.find(pos, config.voxelSize * 0.5f);
             if (!node || !node->isActive()) {
                 newPos[i] = pos;
@@ -1111,9 +1095,6 @@ public:
             newPos[i] = p.currentPos;
             grid.updateData(oldPos, p);
             grid.move(oldPos, p.currentPos);
-            // grid.queuedupdate(oldPos, p.currentPos, p);
-            // grid.waitForIdle();
-            // grid.update(p.currentPos, p);
         }
         config.surfaceNodes = newPos;
         std::cout << "Finalize apply results completed." << std::endl;
@@ -1233,31 +1214,13 @@ public:
             int idx3 = std::get<2>(tri);
 
             auto pt1 = grid.find(config.surfaceNodes[idx1], config.voxelSize * 0.5f);
-            // if (!pt1) continue;
             Particle p1 = pt1->data;
             auto pt2 = grid.find(config.surfaceNodes[idx2], config.voxelSize * 0.5f);
-            // if (!pt2) continue;
             Particle p2 = pt2->data;
             auto pt3 = grid.find(config.surfaceNodes[idx3], config.voxelSize * 0.5f);
-            // if (!pt3) continue;
             Particle p3 = pt3->data;
 
-            if (!p1.altPos) {
-                std::cout << "broken p1" << std::endl;
-                std::cout << p1.altPos << std::endl;
-                continue;
-            }
-            if (!p2.altPos) {
-                std::cout << "broken p2" << std::endl;
-                // std::cout << "data: " << p2 << std::endl;
-                std::cout << "pos: " << p2.altPos << std::endl;
-                continue;
-            }
-            if (!p3.altPos) {
-                std::cout << "broken p3" << std::endl;
-                std::cout << p3.altPos << std::endl;
-                continue;
-            }
+            if (!p1.altPos || !p2.altPos || !p3.altPos) continue;
 
             float d1 = (p2.currentPos - p1.currentPos).norm();
             float d2 = (p3.currentPos - p1.currentPos).norm();
@@ -1491,7 +1454,7 @@ public:
                 
                 p.impactHeat = std::clamp(p.impactHeat + falloff, 0.0f, 1.0f);
                 p.impactShock = std::clamp(p.impactShock + falloff, 0.0f, 1.0f);
-                p.metalcontent = std::clamp(p.metalcontent + falloff * 0.5f, 0.0f, 1.0f);
+                p.materials(4, 0) = Eigen::half(std::clamp(static_cast<float>(p.materials(4, 0)) + falloff * 0.5f, 0.0f, 1.0f));
                 
                 v3 origCol = p.originColor;
                 v3 burnCol(0.1f, 0.05f, 0.05f); // Reddish dark scorch
@@ -1702,14 +1665,219 @@ public:
     }
 
     void erosion() {
-        ///TODO: simulate erosion by spawning many nodes all over the surface one at a time and then pulling them towards the lowest neighboring points. reducing height from source as it flows downhill and increasing at bottom.
-        // this needs to be run on a separate thread to allow visuals to continue.
+        TIME_FUNCTION;
+        std::cout << "Starting hydraulic erosion with " << config.erosionDrops << " drops." << std::endl;
+        grid.waitForIdle();
+
+        std::vector<Particle> surfData(config.surfaceNodes.size());
+        for (int i = 0; i < config.surfaceNodes.size(); i++) {
+            auto node = grid.find(config.surfaceNodes[i], config.voxelSize * 0.5f);
+            if (node) surfData[i] = node->data;
+            else {
+                surfData[i] = Particle(); 
+                surfData[i].currentPos = config.surfaceNodes[i];
+            }
+        }
+
+        std::uniform_int_distribution<int> distNode(0, config.surfaceNodes.size() - 1);
+        
+        float evapRate = 0.05f;
+        float depositionRate = 0.1f;
+        float minVol = 0.01f;
+        float friction = 0.1f;
+        
+        for (int d = 0; d < config.erosionDrops; d++) {
+            int idx = distNode(rng);
+            float water = 1.0f;
+            float vel = 1.0f;
+            float sediment = 0.0f;
+            
+            int maxSteps = 50;
+            for (int step = 0; step < maxSteps; step++) {
+                Particle& p = surfData[idx];
+                
+                int lowestIdx = idx;
+                float minHeight = p.currentPos.norm() + p.water; 
+                
+                for (int n = 0; n < 8; n++) {
+                    int nIdx = p.nearNeighbors[n].index;
+                    if (nIdx == -1) break;
+                    float nh = surfData[nIdx].currentPos.norm() + surfData[nIdx].water;
+                    if (nh < minHeight) {
+                        minHeight = nh;
+                        lowestIdx = nIdx;
+                    }
+                }
+                
+                if (lowestIdx == idx) {
+                    p.water += water;
+                    float heightIncrease = sediment;
+                    p.currentPos += p.currentPos.normalized() * heightIncrease;
+                    p.materials(0, 0) = Eigen::half(static_cast<float>(p.materials(0,0)) + sediment);
+                    break;
+                }
+                
+                Particle& nP = surfData[lowestIdx];
+                float hDiff = (p.currentPos.norm() + p.water) - (nP.currentPos.norm() + nP.water);
+                
+                float capacity = std::max(0.01f, vel * water * hDiff * 2.0f);
+                
+                if (sediment > capacity) {
+                    float amount = (sediment - capacity) * depositionRate;
+                    sediment -= amount;
+                    p.currentPos += p.currentPos.normalized() * amount;
+                    p.materials(0, 0) = Eigen::half(static_cast<float>(p.materials(0,0)) + amount);
+                } else {
+                    float amount = std::min((capacity - sediment) * depositionRate, hDiff * 0.9f); 
+                    sediment += amount;
+                    p.currentPos -= p.currentPos.normalized() * amount;
+                    float currentRock = static_cast<float>(p.materials(3, 0));
+                    if(currentRock > amount) {
+                        p.materials(3, 0) = Eigen::half(currentRock - amount);
+                    } else {
+                        float currentSand = static_cast<float>(p.materials(0, 0));
+                        if (currentSand > amount) {
+                            p.materials(0, 0) = Eigen::half(currentSand - amount);
+                        }
+                    }
+                }
+                
+                vel = std::sqrt(std::max(0.01f, vel * vel + hDiff * 10.0f));
+                vel *= (1.0f - friction);
+                water *= (1.0f - evapRate);
+                
+                idx = lowestIdx;
+                
+                if (water < minVol) {
+                    p.currentPos += p.currentPos.normalized() * sediment;
+                    p.materials(0, 0) = Eigen::half(static_cast<float>(p.materials(0,0)) + sediment);
+                    break;
+                }
+            }
+        }
+
+        std::vector<v3> newPos(config.surfaceNodes.size());
+        for (int i = 0; i < config.surfaceNodes.size(); i++) {
+            v3 oldP = config.surfaceNodes[i];
+            Particle p = surfData[i];
+            newPos[i] = p.currentPos;
+            grid.move(oldP, p.currentPos);
+            grid.updateData(p.currentPos, p);
+        }
+        config.surfaceNodes = newPos;
+        grid.optimize();
+        std::cout << "Erosion completed." << std::endl;
     }
 
     void storms() {
-        ///TODO: generate weather patterns to determine stuff like rock vs dirt vs sand vs clay, etc. 
-        //this will probably require putting a lot more into individual particle data to be able to simulate heat and such.
-        // this needs to be run on a separate thread to allow visuals to continue.
+        TIME_FUNCTION;
+        std::cout << "Starting weather simulation for " << config.weatherIterations << " iterations..." << std::endl;
+        grid.waitForIdle();
+
+        std::vector<Particle> surfData(config.surfaceNodes.size());
+        std::vector<v3> normals(config.surfaceNodes.size());
+        std::vector<float> heights(config.surfaceNodes.size());
+        for (int i = 0; i < config.surfaceNodes.size(); i++) {
+            auto node = grid.find(config.surfaceNodes[i], config.voxelSize * 0.5f);
+            if (node) {
+                surfData[i] = node->data;
+                normals[i] = node->data.currentPos.normalized();
+                heights[i] = node->data.currentPos.norm();
+            } else {
+                surfData[i] = Particle();
+                normals[i] = config.surfaceNodes[i].normalized();
+                heights[i] = config.surfaceNodes[i].norm();
+            }
+        }
+
+        v3 starDir = v3(1.0f, 0.0f, 0.0f);
+        for (int i = 0; i < config.surfaceNodes.size(); i++) {
+            float latitude = std::asin(std::clamp(normals[i].y(), -1.0f, 1.0f));
+            float insolation = std::max(0.0f, normals[i].dot(starDir)); 
+            
+            float baseTemp = std::cos(latitude) * 30.0f - 10.0f; 
+            
+            float altitude = heights[i] - config.radius;
+            baseTemp -= std::max(0.0f, altitude) * 0.02f; 
+
+            surfData[i].temperature = baseTemp;
+        }
+
+        std::vector<float> moisture(config.surfaceNodes.size(), 0.0f);
+        std::vector<float> clouds(config.surfaceNodes.size(), 0.0f);
+        
+        for (int it = 0; it < config.weatherIterations; it++) {
+            std::vector<float> nextClouds = clouds;
+            
+            for (int i = 0; i < config.surfaceNodes.size(); i++) {
+                if (surfData[i].water > 0.0f) {
+                    float evap = std::max(0.0f, surfData[i].temperature + 10.0f) * 0.005f * std::min(1.0f, surfData[i].water);
+                    nextClouds[i] += evap;
+                }
+
+                float lat = std::asin(std::clamp(normals[i].y(), -1.0f, 1.0f));
+                v3 up = normals[i];
+                v3 N = v3(0, 1, 0);
+                v3 east = N.cross(up);
+                if (east.norm() < 1e-4f) {
+                    east = v3(1, 0, 0); 
+                } else {
+                    east.normalize();
+                }
+                v3 north = up.cross(east).normalized();
+                
+                v3 windDir;
+                float absLat = std::abs(lat);
+                if (absLat < M_PI / 6.0f) { 
+                    windDir = -east + (lat > 0 ? -north : north) * 0.2f;
+                } else if (absLat < M_PI / 3.0f) { 
+                    windDir = east + (lat > 0 ? north : -north) * 0.2f;
+                } else { 
+                    windDir = -east + (lat > 0 ? -north : north) * 0.2f;
+                }
+                windDir.normalize();
+
+                int bestNeighbor = -1;
+                float maxDot = -1.0f;
+                for (int n = 0; n < 8; n++) {
+                    int nIdx = surfData[i].nearNeighbors[n].index;
+                    if (nIdx == -1) break;
+                    v3 toNeighbor = (normals[nIdx] - normals[i]).normalized();
+                    float d = toNeighbor.dot(windDir);
+                    if (d > maxDot) {
+                        maxDot = d;
+                        bestNeighbor = nIdx;
+                    }
+                }
+
+                if (bestNeighbor != -1 && clouds[i] > 0.0f) {
+                    float transfer = clouds[i] * 0.8f; 
+                    nextClouds[i] -= transfer;
+                    nextClouds[bestNeighbor] += transfer;
+                    
+                    float hDiff = heights[bestNeighbor] - heights[i];
+                    if (hDiff > 0) {
+                        float rain = std::min(transfer, hDiff * 0.05f);
+                        nextClouds[bestNeighbor] -= rain;
+                        moisture[bestNeighbor] += rain;
+                    }
+                }
+                
+                float capacity = std::max(0.1f, (surfData[i].temperature + 10.0f) * 0.2f);
+                if (nextClouds[i] > capacity) {
+                    float rain = (nextClouds[i] - capacity) * 0.5f;
+                    nextClouds[i] -= rain;
+                    moisture[i] += rain;
+                }
+            }
+            clouds = nextClouds;
+        }
+
+        for (int i = 0; i < config.surfaceNodes.size(); i++) {
+            surfData[i].moisture = moisture[i];
+            grid.updateData(surfData[i].currentPos, surfData[i]);
+        }
+        std::cout << "Weather simulation completed." << std::endl;
     }
 
 };

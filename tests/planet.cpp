@@ -54,7 +54,11 @@ private:
         BASE,
         PLATES,
         NOISE,
-        IMPACTS
+        IMPACTS,
+        WATER,
+        TEMPERATURE,
+        MOISTURE,
+        MATERIALS
     };
     DebugColorMode currentColorMode = DebugColorMode::BASE;
 
@@ -196,6 +200,20 @@ public:
                 sim.quickSmoothSurface();
                 applyDebugColorMode(); 
             }
+            ImGui::Separator();
+            
+            ImGui::DragInt("Erosion Drops", &sim.config.erosionDrops, 1000, 1000, 1000000);
+            if (ImGui::Button("Simulate Erosion", ImVec2(-1, 30))) {
+                sim.erosion();
+                applyDebugColorMode();
+            }
+            
+            ImGui::DragInt("Weather Iterations", &sim.config.weatherIterations, 10, 10, 1000);
+            if (ImGui::Button("Simulate Weather", ImVec2(-1, 30))) {
+                sim.storms();
+                applyDebugColorMode();
+            }
+
             if (!sim.coreFilled) {
                 ImGui::EndDisabled();
                 ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Requires 'Fill Planet' to be executed first.");
@@ -232,6 +250,25 @@ public:
             ImGui::SameLine();
             if (ImGui::RadioButton("Impacts", currentColorMode == DebugColorMode::IMPACTS)) { 
                 currentColorMode = DebugColorMode::IMPACTS; 
+                colorChanged = true; 
+            }
+
+            if (ImGui::RadioButton("Materials", currentColorMode == DebugColorMode::MATERIALS)) { 
+                currentColorMode = DebugColorMode::MATERIALS; 
+                colorChanged = true; 
+            }
+            ImGui::SameLine();
+            if (ImGui::RadioButton("Water", currentColorMode == DebugColorMode::WATER)) { 
+                currentColorMode = DebugColorMode::WATER; 
+                colorChanged = true; 
+            }
+            if (ImGui::RadioButton("Temp", currentColorMode == DebugColorMode::TEMPERATURE)) { 
+                currentColorMode = DebugColorMode::TEMPERATURE; 
+                colorChanged = true; 
+            }
+            ImGui::SameLine();
+            if (ImGui::RadioButton("Moisture", currentColorMode == DebugColorMode::MOISTURE)) { 
+                currentColorMode = DebugColorMode::MOISTURE; 
                 colorChanged = true; 
             }
 
@@ -336,7 +373,7 @@ public:
             ImGui::Text("Currently Loaded Points: %zu", currentLoadedPoints);
         }
 
-        // updateStatsCache();
+        updateStatsCache();
         ImGui::TextUnformatted(cachedStats.c_str());
 
         ImGui::EndChild();
@@ -397,6 +434,35 @@ public:
                     color = color.cwiseMin(1.0f).cwiseMax(0.0f);
                     break;
                 }
+                case DebugColorMode::WATER: {
+                    float w = std::min(1.0f, p.water * 0.1f);
+                    if (w > 0.0f) color = v3(0.1f, 0.2f, 0.4f + w * 0.6f);
+                    else color = v3(0.4f, 0.4f, 0.4f); 
+                    break;
+                }
+                case DebugColorMode::TEMPERATURE: {
+                    float t = (p.temperature + 20.0f) / 50.0f;
+                    t = std::clamp(t, 0.0f, 1.0f);
+                    color = v3(t, 0.2f, 1.0f - t); 
+                    break;
+                }
+                case DebugColorMode::MOISTURE: {
+                    float m = std::min(1.0f, p.moisture * 0.05f);
+                    color = v3(1.0f - m, 1.0f, 1.0f - m); 
+                    break;
+                }
+                case DebugColorMode::MATERIALS: {
+                    float sand = static_cast<float>(p.materials(0,0));
+                    float rock = static_cast<float>(p.materials(3,0));
+                    float silt = static_cast<float>(p.materials(1,0));
+                    float sum = sand + rock + silt + 0.001f;
+                    color = v3(
+                        (sand + rock * 0.5f) / sum, 
+                        (silt + rock * 0.5f) / sum, 
+                        (rock * 0.5f) / sum
+                    );
+                    break;
+                }
                 case DebugColorMode::BASE:
                 default:
                     color = p.originColor;
@@ -434,6 +500,35 @@ public:
                     color = v3(0.2f, 0.2f, 0.2f) + color * 0.8f;
                     
                     color = color.cwiseMin(1.0f).cwiseMax(0.0f);
+                    break;
+                }
+                case DebugColorMode::WATER: {
+                    float w = std::min(1.0f, p.water * 0.1f);
+                    if (w > 0.0f) color = v3(0.1f, 0.2f, 0.4f + w * 0.6f);
+                    else color = v3(0.4f, 0.4f, 0.4f); 
+                    break;
+                }
+                case DebugColorMode::TEMPERATURE: {
+                    float t = (p.temperature + 20.0f) / 50.0f;
+                    t = std::clamp(t, 0.0f, 1.0f);
+                    color = v3(t, 0.2f, 1.0f - t); 
+                    break;
+                }
+                case DebugColorMode::MOISTURE: {
+                    float m = std::min(1.0f, p.moisture * 0.05f);
+                    color = v3(1.0f - m, 1.0f, 1.0f - m); 
+                    break;
+                }
+                case DebugColorMode::MATERIALS: {
+                    float sand = static_cast<float>(p.materials(0,0));
+                    float rock = static_cast<float>(p.materials(3,0));
+                    float silt = static_cast<float>(p.materials(1,0));
+                    float sum = sand + rock + silt + 0.001f;
+                    color = v3(
+                        (sand + rock * 0.5f) / sum, 
+                        (silt + rock * 0.5f) / sum, 
+                        (rock * 0.5f) / sum
+                    );
                     break;
                 }
                 case DebugColorMode::BASE:

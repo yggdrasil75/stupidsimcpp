@@ -4,7 +4,6 @@
 #include "../util/sim/plant.hpp"
 #include "../util/grid/camera.hpp"
 
-// Assuming ImGui headers are available via ptest.cpp or similar include paths
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
@@ -30,6 +29,7 @@ private:
     bool slowRender = false;
     bool globalIllumination = true;
     float deltaTime = 0.016f;
+    int simulationSpeed = 1;
     int reflectCount = 2;
     float maxDist = 200.0f;
     bool keyStates[GLFW_KEY_LAST + 1] = {false};
@@ -113,7 +113,10 @@ public:
             
             ImGui::EndTable();
         }
-        sim.update(deltaTime);
+
+        for(int i = 0; i < simulationSpeed; ++i) {
+            sim.update(deltaTime);
+        }
         
         ImGui::End();
         sim.grid.waitForIdle();
@@ -139,6 +142,9 @@ private:
 
     void renderControls() {
         if (ImGui::CollapsingHeader("World State", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::SliderInt("Simulation Speed Multiplier", &simulationSpeed, 1, 100);
+            ImGui::SliderFloat("Plant Growth Speed", &sim.config.growthSpeedMultiplier, 0.1f, 100.0f);
+
             ImGui::Text("Day: %d / %d", sim.config.currentDay + 1, sim.config.daysPerYear);
             ImGui::Text("Season: %s", getSeasonName(sim.config.season, sim.config.latitude));
             ImGui::Text("Global Temperature: %.1f °C", sim.currentTemperature);
@@ -151,6 +157,7 @@ private:
             if (sim.weatherTimer > 0.0f) {
                 ImGui::TextColored(weatherColor, "(Time Remaining: %.1fs)", sim.weatherTimer);
             }
+            ImGui::BulletText("Active Raindrops: %zu", sim.activeRainDrops.size());
             
             ImGui::Separator();
             ImGui::Text("Atmospheric Moisture: %.1f", sim.atmosphericMoisture);
@@ -202,6 +209,7 @@ private:
             ImGui::Separator();
             ImGui::ColorEdit3("Sun Color", sim.config.sunColor.data());
             ImGui::DragFloat("Sun Intensity", &sim.config.sunIntensity, 0.1f, 0.0f, 200.0f);
+            ImGui::DragFloat("Precipitation Rate", &sim.config.precipRate, 1.0f, 0.0f, 1000.0f);
         }
 
         if (ImGui::CollapsingHeader("Render Settings")) {
@@ -252,7 +260,7 @@ private:
             ImGui::SliderFloat("Woodiness", &currentDesignerDNA->stem.woodiness, 0.0f, 1.0f);
             ImGui::SliderFloat("Flexibility", &currentDesignerDNA->stem.flexibility, 0.0f, 1.0f);
             ImGui::SliderFloat("Max Height", &currentDesignerDNA->stem.maxHeight, 1.0f, 100.0f);
-            ImGui::SliderFloat("Max Girth", &currentDesignerDNA->stem.maxGirth, 0.1f, 10.0f);
+            ImGui::SliderFloat("Max Girth", &currentDesignerDNA->stem.maxGirth, 0.01f, 10.0f);
             ImGui::SliderInt("Max Branch Depth", &currentDesignerDNA->stem.maxBranchDepth, 0, 6);
             ImGui::SliderFloat("Apical Dominance", &currentDesignerDNA->stem.apicalDominance, 0.0f, 1.0f);
             ImGui::SliderFloat("Branch Angle", &currentDesignerDNA->stem.branchAngle, 0.1f, 3.14f);
@@ -282,8 +290,8 @@ private:
             ImGui::SliderFloat("Temp Tolerance", &currentDesignerDNA->tempTolerance, 5.0f, 30.0f);
             ImGui::SliderFloat("Photosynthesis Eff.", &currentDesignerDNA->photosynthesisEfficiency, 0.1f, 5.0f);
             ImGui::SliderFloat("Water Absorption", &currentDesignerDNA->waterAbsorptionRate, 1.0f, 20.0f);
-            ImGui::SliderFloat("Growth Cost (Energy)", &currentDesignerDNA->growthCostEnergy, 1.0f, 50.0f);
-            ImGui::SliderFloat("Growth Cost (Water)", &currentDesignerDNA->growthCostWater, 1.0f, 50.0f);
+            ImGui::SliderFloat("Growth Cost (Energy)", &currentDesignerDNA->growthCostEnergy, 0.1f, 50.0f);
+            ImGui::SliderFloat("Growth Cost (Water)", &currentDesignerDNA->growthCostWater, 0.1f, 50.0f);
         }
     }
 
@@ -330,11 +338,11 @@ private:
         ImGui::SliderFloat("Ground Size", &sim.config.groundSize, 10.0f, 100.0f);
         
         if (ImGui::Button("Rebuild World (Keep Seeds)", ImVec2(-1, 0))) {
-            sim.initWorld();
+            sim.initWorld(false);
         }
         
-        if (ImGui::Button("Rebuild World (Clear All)", ImVec2(-1, 0))) {// Init the simulation
-            sim.initWorld();
+        if (ImGui::Button("Rebuild World (Clear All)", ImVec2(-1, 0))) {
+            sim.initWorld(true);
             v3 bg = v3(0.511f, 0.625f, 0.868f);
             sim.grid.setBackgroundColor(bg);
             sim.grid.setSkylight(bg);
@@ -352,15 +360,97 @@ private:
             sim.rootCount = 0;
         }
 
+        if (ImGui::Button("Generate Ecosystem (Tree, Bushes, Grass)", ImVec2(-1, 0))) {
+            generateEcosystem();
+        }
+
         ImGui::Separator();
         ImGui::Text("Evolution Parameters");
         ImGui::SliderFloat("Base Mutation Rate", &sim.config.baseMutationRate, 0.0f, 0.5f);
         ImGui::SliderFloat("Somatic Mutation Rate", &sim.config.somaticMutationRate, 0.0f, 0.1f);
     }
 
+    void generateEcosystem() {
+        sim.config.groundSize = 30.0f; 
+        sim.initWorld(false); 
+        
+        v3 bg = v3(0.511f, 0.625f, 0.868f);
+        sim.grid.setBackgroundColor(bg);
+        sim.grid.setSkylight(bg);
+        
+        sim.activeMeristems.clear();
+        sim.activeRoots.clear();
+        sim.activeLeaves.clear();
+        sim.activeFlowers.clear();
+        sim.leafCount = 0;
+        sim.rootCount = 0;
+        
+        auto treeDNA = std::make_shared<PlantDNA>();
+        treeDNA->speciesName = "Great Oak";
+        treeDNA->stem.maxHeight = 25.0f;
+        treeDNA->stem.maxGirth = 3.0f;
+        treeDNA->stem.maxBranchDepth = 4;
+        treeDNA->stem.apicalDominance = 0.85f;
+        treeDNA->stem.internodeLength = 1.0f;
+        treeDNA->stem.barkColor = v3(0.3f, 0.18f, 0.1f);
+        treeDNA->leaf.color = v3(0.15f, 0.45f, 0.15f);
+        treeDNA->leaf.leafDensity = 0.6f;
+        treeDNA->growthCostEnergy = 5.0f;
+        treeDNA->growthCostWater = 5.0f;
+        spawnSeed(v3(0, 0, 0), treeDNA);
+
+        auto bushDNA = std::make_shared<PlantDNA>();
+        bushDNA->speciesName = "Wild Bush";
+        bushDNA->stem.maxHeight = 4.0f;
+        bushDNA->stem.maxGirth = 0.5f;
+        bushDNA->stem.maxBranchDepth = 2;
+        bushDNA->stem.apicalDominance = 0.2f;
+        bushDNA->stem.branchAngle = 1.5f;
+        bushDNA->stem.barkColor = v3(0.4f, 0.3f, 0.2f);
+        bushDNA->leaf.color = v3(0.2f, 0.6f, 0.2f);
+        bushDNA->leaf.leafDensity = 0.9f;
+        bushDNA->growthCostEnergy = 2.0f;
+        bushDNA->growthCostWater = 2.0f;
+        
+        std::uniform_real_distribution<float> dist(-sim.config.groundSize + 2.0f, sim.config.groundSize - 2.0f);
+        for(int i = 0; i < 20; i++) {
+            float rx = dist(sim.rng);
+            float rz = dist(sim.rng);
+            if (rx*rx + rz*rz > 20.0f) {
+                spawnSeed(v3(rx, 0, rz), bushDNA);
+            }
+        }
+
+        auto grassDNA = std::make_shared<PlantDNA>();
+        grassDNA->speciesName = "Field Grass";
+        grassDNA->stem.maxHeight = 0.6f;
+        grassDNA->stem.maxGirth = 0.05f; 
+        grassDNA->stem.maxBranchDepth = 0; 
+        grassDNA->stem.apicalDominance = 1.0f;
+        grassDNA->stem.barkColor = v3(0.25f, 0.7f, 0.2f); 
+        grassDNA->leaf.leafDensity = 0.0f; 
+        grassDNA->growthCostEnergy = 0.1f;
+        grassDNA->growthCostWater = 0.1f;
+        
+        for(int i = 0; i < 2000; i++) {
+            float rx = dist(sim.rng);
+            float rz = dist(sim.rng);
+            spawnSeed(v3(rx, 0, rz), grassDNA);
+        }
+        
+        speciesLibrary.push_back(treeDNA);
+        speciesLibrary.push_back(bushDNA);
+        speciesLibrary.push_back(grassDNA);
+    }
+
     void spawnSeed(v3 pos, std::shared_ptr<PlantDNA> dna) {
+        float startSize = sim.config.voxelSize;
+        if (dna->stem.maxGirth < 1.0f) {
+            startSize *= std::max(0.01f, dna->stem.maxGirth);
+        }
+
         auto seed = std::make_shared<PlantParticle>(PlantPart::SEED, dna, pos, v3(0.0f, 1.0f, 0.0f), 0);
-        if (sim.grid.set(seed, pos, true, v3(0.2f, 0.8f, 0.2f), sim.config.voxelSize, true, 1)) {
+        if (sim.grid.set(seed, pos, true, v3(0.2f, 0.8f, 0.2f), startSize, true, 1)) {
             sim.activeMeristems.push_back(pos);
             sim.seeds.push_back(pos);
         }
