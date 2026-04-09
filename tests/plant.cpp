@@ -164,33 +164,35 @@ private:
         }
         
         if (ImGui::CollapsingHeader("Plant Statistics", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::BulletText("Active Plants: %zu", sim.plantStates.size());
             ImGui::BulletText("Active Meristems (Buds): %zu", sim.activeMeristems.size());
-            ImGui::BulletText("Leaves: %d", sim.leafCount);
-            ImGui::BulletText("Roots: %d", sim.rootCount);
-            ImGui::Text("Total Organism Resources:");
             
-            float eCap = std::max(100.0f, static_cast<float>(sim.leafCount + sim.rootCount) * 20.0f);
-            ImGui::ProgressBar(std::min(sim.totalPlantEnergy / eCap, 1.0f), ImVec2(-1, 0), 
-                ("Energy: " + std::to_string((int)sim.totalPlantEnergy)).c_str());
-            ImGui::ProgressBar(std::min(sim.totalPlantWater / eCap, 1.0f), ImVec2(-1, 0), 
-                ("Water: " + std::to_string((int)sim.totalPlantWater)).c_str());
+            int totalLeaves = 0;
+            int totalRoots = 0;
+            float avgEnergy = 0.0f;
+            float avgWater = 0.0f;
+            for (auto& pair : sim.plantStates) {
+                totalLeaves += pair.second->leafCount;
+                totalRoots += pair.second->rootCount;
+                avgEnergy += pair.second->energy;
+                avgWater += pair.second->water;
+            }
+            if (!sim.plantStates.empty()) {
+                avgEnergy /= sim.plantStates.size();
+                avgWater /= sim.plantStates.size();
         }
             
-        // if (ImGui::CollapsingHeader("Soil Environment"), ImGuiTreeNodeFlags_DefaultClosed) {
-        //     float currentHydration = 0.0f;
-        //     float currentTemp = 0.0f;
-        //     auto dirtNodes = sim.grid.findInRadius(v3(0, -sim.config.voxelSize / 2.0f, 0), sim.config.voxelSize, 0);
-        //     if (!dirtNodes.empty()) {
-        //         auto dp = std::static_pointer_cast<DirtParticle>(dirtNodes[0]->data);
-        //         if(dp) {
-        //             currentHydration = dp->hydration;
-        //             currentTemp = dp->temperature;
-        //         }
-        //     }
-        //     ImGui::Text("Soil Temp (Center): %.1f °C", currentTemp);
-        //     ImGui::ProgressBar(std::min(currentHydration / 500.0f, 1.0f), ImVec2(-1, 0), 
-        //         ("Water (Center): " + std::to_string((int)currentHydration)).c_str());
-        // }
+            ImGui::BulletText("Total Leaves: %d", totalLeaves);
+            ImGui::BulletText("Total Roots: %d", totalRoots);
+            
+            float eCap = std::max(100.0f, static_cast<float>(totalLeaves + totalRoots) * 20.0f);
+            if (sim.plantStates.size() > 0) eCap /= sim.plantStates.size();
+
+            ImGui::ProgressBar(std::min(avgEnergy / eCap, 1.0f), ImVec2(-1, 0), 
+                ("Avg Energy: " + std::to_string((int)avgEnergy)).c_str());
+            ImGui::ProgressBar(std::min(avgWater / eCap, 1.0f), ImVec2(-1, 0), 
+                ("Avg Water: " + std::to_string((int)avgWater)).c_str());
+        }
 
         if (ImGui::CollapsingHeader("Sun & Seasons", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::SliderFloat("Time of Day", &sim.config.timeOfDay, 0.0f, 1.0f);
@@ -207,8 +209,15 @@ private:
             ImGui::SliderFloat("Axial Tilt", &sim.config.axialTilt, 0.0f, 90.0f);
             
             ImGui::Separator();
-            ImGui::ColorEdit3("Sun Color", sim.config.sunColor.data());
+            if (ImGui::ColorEdit3("Sun Color", sim.config.sunColor.data())) sim.updateSkyBodies();
             ImGui::DragFloat("Sun Intensity", &sim.config.sunIntensity, 0.1f, 0.0f, 200.0f);
+            if (ImGui::DragFloat("Sun Size", &sim.config.sunSize, 0.1f, 1.0f, 90.0f)) sim.updateSkyBodies();
+
+            ImGui::Separator();
+            if (ImGui::ColorEdit3("Moon Color", sim.config.moonColor.data())) sim.updateSkyBodies();
+            if (ImGui::DragFloat("Moon Size", &sim.config.moonSize, 0.1f, 1.0f, 90.0f)) sim.updateSkyBodies();
+            
+            ImGui::Separator();
             ImGui::DragFloat("Precipitation Rate", &sim.config.precipRate, 1.0f, 0.0f, 1000.0f);
         }
 
@@ -263,8 +272,13 @@ private:
             ImGui::SliderFloat("Max Girth", &currentDesignerDNA->stem.maxGirth, 0.01f, 10.0f);
             ImGui::SliderInt("Max Branch Depth", &currentDesignerDNA->stem.maxBranchDepth, 0, 6);
             ImGui::SliderFloat("Apical Dominance", &currentDesignerDNA->stem.apicalDominance, 0.0f, 1.0f);
-            ImGui::SliderFloat("Branch Angle", &currentDesignerDNA->stem.branchAngle, 0.1f, 3.14f);
-            ImGui::SliderFloat("Gravitropism", &currentDesignerDNA->stem.gravitropism, -1.0f, 1.0f);
+            
+            ImGui::Text("Tropisms (Behavioral growth)");
+            ImGui::SliderFloat("Gravitropism", &currentDesignerDNA->stem.gravitropism, -1.0f, 1.0f, "%.2f ( -1=Up )");
+            ImGui::SliderFloat("Phototropism", &currentDesignerDNA->stem.phototropism, 0.0f, 1.0f, "%.2f ( Seeks Light )");
+            ImGui::SliderFloat("Skototropism", &currentDesignerDNA->stem.skototropism, 0.0f, 1.0f, "%.2f ( Seeks Shade )");
+            ImGui::SliderFloat("Thigmotropism", &currentDesignerDNA->stem.thigmotropism, 0.0f, 1.0f, "%.2f ( Climbs Solids )");
+            ImGui::SliderFloat("Aerotropism", &currentDesignerDNA->stem.aerotropism, 0.0f, 1.0f, "%.2f ( Up from Water )");
             ImGui::ColorEdit3("Bark Color", currentDesignerDNA->stem.barkColor.data());
         }
 
@@ -282,14 +296,15 @@ private:
             ImGui::SliderFloat("Max Depth", &currentDesignerDNA->root.maxDepth, 1.0f, 50.0f);
             ImGui::SliderFloat("Spread Radius", &currentDesignerDNA->root.spreadRadius, 1.0f, 50.0f);
             ImGui::SliderFloat("Vertical Drive", &currentDesignerDNA->root.verticalDrive, 0.0f, 1.0f);
-            ImGui::SliderFloat("Horizontal Drive", &currentDesignerDNA->root.horizontalDrive, 0.0f, 1.0f);
+            ImGui::SliderFloat("Water Seeking (Hydrotropism)", &currentDesignerDNA->root.waterSeekStrength, 0.0f, 1.0f);
         }
 
         if (ImGui::CollapsingHeader("Metabolism & Resistance")) {
             ImGui::SliderFloat("Optimal Temp", &currentDesignerDNA->optimalTemp, 0.0f, 40.0f);
             ImGui::SliderFloat("Temp Tolerance", &currentDesignerDNA->tempTolerance, 5.0f, 30.0f);
-            ImGui::SliderFloat("Photosynthesis Eff.", &currentDesignerDNA->photosynthesisEfficiency, 0.1f, 5.0f);
+            ImGui::SliderFloat("Photosynthesis Eff.", &currentDesignerDNA->photosynthesisEfficiency, 0.0f, 5.0f);
             ImGui::SliderFloat("Water Absorption", &currentDesignerDNA->waterAbsorptionRate, 1.0f, 20.0f);
+            ImGui::SliderFloat("Fungal Saprotrophy", &currentDesignerDNA->special.fungalSaprotrophy, 0.0f, 1.0f, "%.2f ( Feeds on damp dirt )");
             ImGui::SliderFloat("Growth Cost (Energy)", &currentDesignerDNA->growthCostEnergy, 0.1f, 50.0f);
             ImGui::SliderFloat("Growth Cost (Water)", &currentDesignerDNA->growthCostWater, 0.1f, 50.0f);
         }
@@ -335,7 +350,8 @@ private:
     void renderWorldControls() {
         ImGui::Text("Environment Generation");
         ImGui::SliderFloat("Voxel Size", &sim.config.voxelSize, 0.1f, 2.0f);
-        ImGui::SliderFloat("Ground Size", &sim.config.groundSize, 10.0f, 100.0f);
+        ImGui::SliderFloat("Ground Size", &sim.config.groundSize, 10.0f, 150.0f);
+        ImGui::SliderFloat("Water Level", &sim.config.waterLevel, -20.0f, 20.0f);
         
         if (ImGui::Button("Rebuild World (Keep Seeds)", ImVec2(-1, 0))) {
             sim.initWorld(false);
@@ -343,24 +359,19 @@ private:
         
         if (ImGui::Button("Rebuild World (Clear All)", ImVec2(-1, 0))) {
             sim.initWorld(true);
-            v3 bg = v3(0.511f, 0.625f, 0.868f);
-            sim.grid.setBackgroundColor(bg);
-            sim.grid.setSkylight(bg);
 
             currentDesignerDNA = std::make_shared<PlantDNA>();
             std::strncpy(nameBuffer, currentDesignerDNA->speciesName.c_str(), sizeof(nameBuffer));
+            speciesLibrary.clear();
             speciesLibrary.push_back(std::make_shared<PlantDNA>(*currentDesignerDNA));
             selectedSpeciesIndex = 0;
-            sim.grid.remove(v3(0.0f, 0.0f, 0.0f), sim.config.voxelSize);
             sim.activeMeristems.clear();
             sim.activeRoots.clear();
             sim.activeLeaves.clear();
             sim.activeFlowers.clear();
-            sim.leafCount = 0;
-            sim.rootCount = 0;
         }
 
-        if (ImGui::Button("Generate Ecosystem (Tree, Bushes, Grass)", ImVec2(-1, 0))) {
+        if (ImGui::Button("Generate Rich Ecosystem", ImVec2(-1, 0))) {
             generateEcosystem();
         }
 
@@ -373,16 +384,10 @@ private:
     void generateEcosystem() {
         sim.initWorld(false); 
         
-        v3 bg = v3(0.511f, 0.625f, 0.868f);
-        sim.grid.setBackgroundColor(bg);
-        sim.grid.setSkylight(bg);
-        
         sim.activeMeristems.clear();
         sim.activeRoots.clear();
         sim.activeLeaves.clear();
         sim.activeFlowers.clear();
-        sim.leafCount = 0;
-        sim.rootCount = 0;
         
         auto treeDNA = std::make_shared<PlantDNA>();
         treeDNA->speciesName = "Great Oak";
@@ -390,7 +395,7 @@ private:
         treeDNA->stem.maxGirth = 3.0f;
         treeDNA->stem.maxBranchDepth = 4;
         treeDNA->stem.apicalDominance = 0.85f;
-        treeDNA->stem.internodeLength = 1.0f;
+        treeDNA->stem.phototropism = 0.8f;
         treeDNA->stem.barkColor = v3(0.3f, 0.18f, 0.1f);
         treeDNA->leaf.color = v3(0.15f, 0.45f, 0.15f);
         treeDNA->leaf.leafDensity = 0.6f;
@@ -398,48 +403,97 @@ private:
         treeDNA->growthCostWater = 5.0f;
         spawnSeed(v3(0, 0, 0), treeDNA);
 
-        auto bushDNA = std::make_shared<PlantDNA>();
-        bushDNA->speciesName = "Wild Bush";
-        bushDNA->stem.maxHeight = 4.0f;
-        bushDNA->stem.maxGirth = 0.5f;
-        bushDNA->stem.maxBranchDepth = 2;
-        bushDNA->stem.apicalDominance = 0.2f;
-        bushDNA->stem.branchAngle = 1.5f;
-        bushDNA->stem.barkColor = v3(0.4f, 0.3f, 0.2f);
-        bushDNA->leaf.color = v3(0.2f, 0.6f, 0.2f);
-        bushDNA->leaf.leafDensity = 0.9f;
-        bushDNA->growthCostEnergy = 2.0f;
-        bushDNA->growthCostWater = 2.0f;
+        auto vineDNA = std::make_shared<PlantDNA>();
+        vineDNA->speciesName = "Strangler Vine";
+        vineDNA->stem.maxHeight = 35.0f;
+        vineDNA->stem.maxGirth = 0.3f;
+        vineDNA->stem.maxBranchDepth = 1;
+        vineDNA->stem.apicalDominance = 0.95f;
+        vineDNA->stem.thigmotropism = 1.0f;
+        vineDNA->stem.skototropism = 0.5f; // Initially seeks dark tree trunks
+        vineDNA->stem.gravitropism = -0.2f; // Weak upward push
+        vineDNA->stem.barkColor = v3(0.1f, 0.5f, 0.2f);
+        vineDNA->leaf.leafDensity = 0.3f;
+
+        // 3. Shade Fern (Low-light loving floor plant)
+        auto fernDNA = std::make_shared<PlantDNA>();
+        fernDNA->speciesName = "Shade Fern";
+        fernDNA->stem.maxHeight = 1.5f;
+        fernDNA->stem.maxGirth = 0.2f;
+        fernDNA->stem.maxBranchDepth = 2;
+        fernDNA->stem.apicalDominance = 0.1f;
+        fernDNA->stem.skototropism = 0.6f;
+        fernDNA->leaf.color = v3(0.05f, 0.35f, 0.15f);
+        fernDNA->leaf.leafDensity = 1.0f;
+        fernDNA->leaf.widthMultiplier = 2.0f;
+
+        // 4. River Kelp (Underwater Aerotropic Plant)
+        auto kelpDNA = std::make_shared<PlantDNA>();
+        kelpDNA->speciesName = "Abyssal Kelp";
+        kelpDNA->stem.maxHeight = 30.0f;
+        kelpDNA->stem.maxGirth = 0.5f;
+        kelpDNA->stem.maxBranchDepth = 1;
+        kelpDNA->stem.apicalDominance = 0.9f;
+        kelpDNA->stem.gravitropism = 0.0f; // Neutral buoyancy
+        kelpDNA->stem.aerotropism = 1.0f;  // Strong drive to the surface
+        kelpDNA->stem.barkColor = v3(0.1f, 0.4f, 0.2f);
+        kelpDNA->leaf.leafDensity = 0.4f;
+        kelpDNA->waterAbsorptionRate = 20.0f; // Rapid water usage
+
+        // 5. Cave Glowcap (Fungal saprotroph)
+        auto shroomDNA = std::make_shared<PlantDNA>();
+        shroomDNA->speciesName = "Cave Glowcap";
+        shroomDNA->stem.maxHeight = 2.0f;
+        shroomDNA->stem.maxGirth = 0.8f;
+        shroomDNA->stem.maxBranchDepth = 0;
+        shroomDNA->stem.phototropism = 0.0f;
+        shroomDNA->stem.skototropism = 0.8f; // Strongly prefers dark ravines
+        shroomDNA->stem.barkColor = v3(0.85f, 0.85f, 0.95f);
+        shroomDNA->leaf.leafDensity = 0.0f;  // Fungi have no leaves
+        shroomDNA->photosynthesisEfficiency = 0.0f;
+        shroomDNA->special.fungalSaprotrophy = 0.8f; // Feeds off the dirt
         
         std::uniform_real_distribution<float> dist(-sim.config.groundSize + 2.0f, sim.config.groundSize - 2.0f);
-        for(int i = 0; i < 20; i++) {
+        
+        // Spawn Ecosystem Distribution
+        for (int i = 0; i < 30; i++) {
             float rx = dist(sim.rng);
             float rz = dist(sim.rng);
-            if (rx*rx + rz*rz > 20.0f) {
-                spawnSeed(v3(rx, 0, rz), bushDNA);
+            float ry = sim.getTerrainHeight(rx, rz);
+
+            if (ry >= sim.config.waterLevel) {
+                spawnSeed(v3(rx, ry, rz), treeDNA);
+                
+                // Spawn a vine directly next to the tree
+                spawnSeed(v3(rx + sim.config.voxelSize, ry, rz), vineDNA);
+
+                // Spawn some ferns around the tree base
+                for(int j = 0; j < 3; j++) {
+                    float fx = rx + (dist(sim.rng) * 0.1f);
+                    float fz = rz + (dist(sim.rng) * 0.1f);
+                    spawnSeed(v3(fx, sim.getTerrainHeight(fx, fz), fz), fernDNA);
+                }
+            } else {
+                // Spawning underwater
+                spawnSeed(v3(rx, ry, rz), kelpDNA);
             }
         }
 
-        auto grassDNA = std::make_shared<PlantDNA>();
-        grassDNA->speciesName = "Field Grass";
-        grassDNA->stem.maxHeight = 0.6f;
-        grassDNA->stem.maxGirth = 0.05f; 
-        grassDNA->stem.maxBranchDepth = 0; 
-        grassDNA->stem.apicalDominance = 1.0f;
-        grassDNA->stem.barkColor = v3(0.25f, 0.7f, 0.2f); 
-        grassDNA->leaf.leafDensity = 0.0f; 
-        grassDNA->growthCostEnergy = 0.1f;
-        grassDNA->growthCostWater = 0.1f;
-        
-        for(int i = 0; i < 2000; i++) {
+        // Spawn Mushrooms in natural depressions/valleys
+        for (int i = 0; i < 50; i++) {
             float rx = dist(sim.rng);
             float rz = dist(sim.rng);
-            spawnSeed(v3(rx, 0, rz), grassDNA);
+            float ry = sim.getTerrainHeight(rx, rz);
+            if (ry > sim.config.waterLevel && ry < 2.0f) { // Low but not underwater
+                spawnSeed(v3(rx, ry, rz), shroomDNA);
+            }
         }
         
         speciesLibrary.push_back(treeDNA);
-        speciesLibrary.push_back(bushDNA);
-        speciesLibrary.push_back(grassDNA);
+        speciesLibrary.push_back(vineDNA);
+        speciesLibrary.push_back(fernDNA);
+        speciesLibrary.push_back(kelpDNA);
+        speciesLibrary.push_back(shroomDNA);
     }
 
     void spawnSeed(v3 pos, std::shared_ptr<PlantDNA> dna) {
@@ -448,10 +502,20 @@ private:
             startSize *= std::max(0.01f, dna->stem.maxGirth);
         }
 
+        int pId = sim.nextPlantId++;
+        auto state = std::make_shared<PlantState>();
+        state->energy = 50.0f; // Give proper starter energy to sprout leaves
+        state->water = 50.0f;
+        sim.plantStates[pId] = state;
+
         auto seed = std::make_shared<PlantParticle>(PlantPart::SEED, dna, pos, v3(0.0f, 1.0f, 0.0f), 0);
+        seed->plantId = pId;
+
         if (sim.grid.set(seed, pos, true, v3(0.2f, 0.8f, 0.2f), startSize, true, 1)) {
             sim.activeMeristems.push_back(pos);
             sim.seeds.push_back(pos);
+        } else {
+            sim.plantStates.erase(pId);
         }
     }
 
@@ -494,11 +558,11 @@ private:
         sim.grid.setMaxDistance(maxDist);
         
         if (slowRender) {
-            #ifdef VULKAN_SUPPORT
-            currentPreviewFrame = sim.grid.renderFrameVulkan(cam, outHeight, outWidth, frame::colormap::RGB, 3, reflectCount, useLod);
-            #else
+            // #ifdef VULKAN_SUPPORT
+            // currentPreviewFrame = sim.grid.renderFrameVulkan(cam, outHeight, outWidth, frame::colormap::RGB, 3, reflectCount, useLod);
+            // #else
             currentPreviewFrame = sim.grid.renderFrame(cam, outHeight, outWidth, frame::colormap::RGB, 3, reflectCount, globalIllumination, useLod);
-            #endif
+            // #endif
         } else {
             #ifdef VULKAN_SUPPORT
             currentPreviewFrame = sim.grid.fastRenderFrameVulkan(cam, outHeight, outWidth, frame::colormap::RGB);

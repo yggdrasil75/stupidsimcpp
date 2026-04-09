@@ -1368,24 +1368,6 @@ private:
         }
     }
 
-    uint32_t expandBits10(uint32_t v) const noexcept {
-        v = (v | (v << 16)) & 0x030000FF;
-        v = (v | (v <<  8)) & 0x0300F00F;
-        v = (v | (v <<  4)) & 0x030C30C3;
-        v = (v | (v <<  2)) & 0x09249249;
-        return v;
-    }
-
-    uint32_t morton3D_10(float x, float y, float z) const noexcept {
-        x = std::max(0.0f, std::min(1.0f, x));
-        y = std::max(0.0f, std::min(1.0f, y));
-        z = std::max(0.0f, std::min(1.0f, z));
-        uint32_t xx = static_cast<uint32_t>(x * 1023.0f);
-        uint32_t yy = static_cast<uint32_t>(y * 1023.0f);
-        uint32_t zz = static_cast<uint32_t>(z * 1023.0f);
-        return (expandBits10(xx) << 2) | (expandBits10(yy) << 1) | expandBits10(zz);
-    }
-
 public:
     void addSkyBody(int id, const PointType& dir, float angularRadius, uint8_t r, uint8_t g, uint8_t b, uint8_t emittance = 255) {
         skybox_.addBody(id, dir, angularRadius, r, g, b, emittance);
