@@ -685,6 +685,7 @@ public:
             grid.queuedset(seed, startPos, true, v3(0.2f, 0.8f, 0.2f), vSize, true, 1);
             activeMeristems.push_back(startPos);
         }
+        grid.save("output/plants.yggs");
     }
 
     void update(float dt) {
@@ -711,7 +712,7 @@ private:
         atmosphericMoisture += dt * 0.5f;
         if (atmosphericMoisture > 100.0f) {
             currentWeather = WeatherState::RAIN;
-            weatherTimer = 15.0f;
+            weatherTimer = 600.0f;
             atmosphericMoisture = 0.0f;
         }
 
@@ -871,9 +872,9 @@ private:
                 for (auto& dirtData : dirts) {
                     auto d = std::static_pointer_cast<DirtParticle>(dirtData->data);
                     if (d && d->hydration > 0.0f) {
-                        float draw = std::min(d->hydration, dt * 5.0f);
+                        float draw = std::min(d->hydration, dt * 1.0f);
                         d->hydration -= draw;
-                        totalPlantWater += draw;
+                        totalPlantWater -= draw;
                     }
                 }
             }

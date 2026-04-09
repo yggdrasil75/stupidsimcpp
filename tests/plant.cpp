@@ -371,7 +371,6 @@ private:
     }
 
     void generateEcosystem() {
-        sim.config.groundSize = 30.0f; 
         sim.initWorld(false); 
         
         v3 bg = v3(0.511f, 0.625f, 0.868f);
@@ -494,12 +493,19 @@ private:
         sim.grid.setLODFalloff(lodDropoff);
         sim.grid.setMaxDistance(maxDist);
         
-        // Render
-        // if (slowRender) {
-            // currentPreviewFrame = sim.grid.renderFrame(cam, outHeight, outWidth, frame::colormap::RGB, 10, reflectCount, globalIllumination, useLod);
-        // } else {
+        if (slowRender) {
+            #ifdef VULKAN_SUPPORT
+            currentPreviewFrame = sim.grid.renderFrameVulkan(cam, outHeight, outWidth, frame::colormap::RGB, 3, reflectCount, useLod);
+            #else
+            currentPreviewFrame = sim.grid.renderFrame(cam, outHeight, outWidth, frame::colormap::RGB, 3, reflectCount, globalIllumination, useLod);
+            #endif
+        } else {
+            #ifdef VULKAN_SUPPORT
+            currentPreviewFrame = sim.grid.fastRenderFrameVulkan(cam, outHeight, outWidth, frame::colormap::RGB);
+            #else
             currentPreviewFrame = sim.grid.fastRenderFrame(cam, outHeight, outWidth, frame::colormap::RGB);
-        // }
+            #endif
+        }
 
         // Upload to GPU
         if (textu == 0) glGenTextures(1, &textu);

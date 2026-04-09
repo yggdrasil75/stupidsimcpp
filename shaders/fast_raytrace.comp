@@ -124,20 +124,33 @@ bool rayCubeIntersect(Ray ray, GPUFastRenderData pt, out float t, out vec3 norma
     return true;
 }
 
+
+struct ChildHit {
+    uint nodeIdx;
+    float tMin;
+};
+
 int voxelTraverse(Ray ray, out int hitIndex, out float outT, out vec3 outNormal) {
     float tMin, tMax;
-    if (nodes.length() == 0 || !rayBoxIntersect(ray, nodes[0].boundsMin, nodes[0].boundsMax, tMin, tMax)) return 0;
+    if (nodes.length() == 0 || !rayBoxIntersect(ray, nodes[0].boundsMin, nodes[0].boundsMax, tMin, tMax)) {
+        return 0;
+    }
     
     float currentMaxDist = cam.maxDist;
     tMax = min(tMax, currentMaxDist);
     
-    uint stackNodes[64];
-    float stackTMin[64];
-    float stackTMax[64];
-    int stackPtr = 1;
-    stackNodes[0] = 0;
-    stackTMin[0] = max(0.0, tMin);
-    stackTMax[0] = tMax;
+    uint stackNodes[256];
+    float stackTMin[256];
+    float stackTMax[256];
+    int stackPtr = 0;
+    
+    // Initial push of the root node if it's in front of the ray
+    if (tMax > 0.0) {
+        stackNodes[stackPtr] = 0;
+        stackTMin[stackPtr] = max(0.0, tMin);
+        stackTMax[stackPtr] = tMax;
+        stackPtr++;
+    }
     
     int hitFound = 0;
 
@@ -148,6 +161,7 @@ int voxelTraverse(Ray ray, out int hitIndex, out float outT, out vec3 outNormal)
         float t1 = stackTMax[stackPtr];
         
         if (t0 > currentMaxDist) continue;
+        
         GPURenderNode node = nodes[nodeIdx];
 
         if (cam.useLod == 1 && node.lodPoint != -1) {
@@ -155,16 +169,14 @@ int voxelTraverse(Ray ray, out int hitIndex, out float outT, out vec3 outNormal)
             if (node.isLoaded == 0 || (dist > cam.lodMinDist && (dist / node.nodeSize) > cam.invLodf)) {
                 float t;
                 vec3 n;
-                if (rayCubeIntersect(ray, points[node.lodPoint], t, n)) {
-                    if (t >= 0.0 && t <= currentMaxDist) {
-                        currentMaxDist = t;
-                        outT = t;
-                        outNormal = n;
-                        hitIndex = node.lodPoint;
-                        hitFound = 1;
-                    }
+                if (rayCubeIntersect(ray, points[node.lodPoint], t, n) && t >= 0.0 && t <= currentMaxDist) {
+                    currentMaxDist = t;
+                    outT = t;
+                    outNormal = n;
+                    hitIndex = node.lodPoint;
+                    hitFound = 1;
                 }
-                if (node.isLoaded == 0 || node.isLeaf == 0) continue;
+                if (node.isLoaded == 0 || node.isLeaf == 1) continue;
             }
         }
 
@@ -172,38 +184,64 @@ int voxelTraverse(Ray ray, out int hitIndex, out float outT, out vec3 outNormal)
             float t;
             vec3 n;
             uint pointIdx = node.firstPoint + i;
-            if (rayCubeIntersect(ray, points[pointIdx], t, n)) {
-                if (t >= 0.0 && t <= currentMaxDist && t <= t1 + 0.001) {
-                    currentMaxDist = t;
-                    outT = t;
-                    outNormal = n;
-                    hitIndex = int(pointIdx);
-                    hitFound = 1;
-                }
+            if (rayCubeIntersect(ray, points[pointIdx], t, n) && t >= 0.0 && t <= currentMaxDist && t <= t1 + 0.001) {
+                currentMaxDist = t;
+                outT = t;
+                outNormal = n;
+                hitIndex = int(pointIdx);
+                hitFound = 1;
             }
         }
 
         if (node.isLeaf == 1 || node.isLoaded == 0) continue;
 
         vec3 ttt = (node.center - ray.origin) * ray.invDir;
-        int currIdx = ((t0 >= ttt.x) ? 1 : 0) | ((t0 >= ttt.y) ? 2 : 0) | ((t0 >= ttt.z) ? 4 : 0);
         int raySignMask = ray.signMask.x | (ray.signMask.y << 1) | (ray.signMask.z << 2);
+        
+        ChildHit childHits[8];
+        int childCount = 0;
 
-        while(t0 < t1 && t0 <= currentMaxDist) {
+        float current_tMin = t0;
+        int currIdx = ((current_tMin >= ttt.x) ? 1 : 0) | ((current_tMin >= ttt.y) ? 2 : 0) | ((current_tMin >= ttt.z) ? 4 : 0);
+
+        while(current_tMin < t1 && current_tMin <= currentMaxDist) {
             vec3 next_t = vec3( (currIdx & 1) != 0 ? t1 : ttt.x, (currIdx & 2) != 0 ? t1 : ttt.y, (currIdx & 4) != 0 ? t1 : ttt.z );
             float tNext = min(min(next_t.x, next_t.y), next_t.z);
             int physIdx = currIdx ^ raySignMask;
 
-            if ((node.childMask & (1 << physIdx)) != 0 && stackPtr < 64) {
+            if ((node.childMask & (1 << physIdx)) != 0) {
                 uint mask = node.childMask & ((1 << physIdx) - 1);
                 uint childOffset = bitCount(mask);
-                stackNodes[stackPtr] = node.firstChild + childOffset;
-                stackTMin[stackPtr] = t0;
-                stackTMax[stackPtr] = tNext;
+                childHits[childCount].nodeIdx = node.firstChild + childOffset;
+                childHits[childCount].tMin = current_tMin;
+                childCount++;
+            }
+            
+            current_tMin = tNext;
+            currIdx |= ((next_t.x <= tNext + 0.0001) ? 1 : 0) | ((next_t.y <= tNext + 0.0001) ? 2 : 0) | ((next_t.z <= tNext + 0.0001) ? 4 : 0);
+        }
+
+        for (int i = 1; i < childCount; ++i) {
+            ChildHit key = childHits[i];
+            int j = i - 1;
+            while (j >= 0 && childHits[j].tMin > key.tMin) {
+                childHits[j + 1] = childHits[j];
+                j = j - 1;
+            }
+            childHits[j + 1] = key;
+        }
+
+        for(int i = childCount - 1; i >= 0; --i) {
+            if (stackPtr < 256) {
+                GPURenderNode childNode = nodes[childHits[i].nodeIdx];
+                float child_tMin, child_tMax;
+                rayBoxIntersect(ray, childNode.boundsMin, childNode.boundsMax, child_tMin, child_tMax);
+                
+                stackNodes[stackPtr] = childHits[i].nodeIdx;
+                stackTMin[stackPtr] = max(t0, child_tMin);
+                stackTMax[stackPtr] = min(t1, child_tMax);
                 stackPtr++;
             }
-            t0 = tNext;
-            currIdx |= ((next_t.x <= tNext) ? 1 : 0) | ((next_t.y <= tNext) ? 2 : 0) | ((next_t.z <= tNext) ? 4 : 0);
         }
     }
     return hitFound;
