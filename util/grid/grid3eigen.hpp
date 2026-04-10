@@ -84,9 +84,10 @@ public:
         float metallic;
         float transmission;
         float ior;
+        Eigen::Vector3f absorption;
 
-        Material(float e = 0.0f, float r = 1.0f, float m = 0.0f, float t = 0.0f, float i = 1.45f)
-            : emittance(e), roughness(r), metallic(m), transmission(t), ior(i) {}
+        Material(float e = 0.0f, float r = 1.0f, float m = 0.0f, float t = 0.0f, float i = 1.45f, Eigen::Vector3f a = Eigen::Vector3f::Zero())
+            : emittance(e), roughness(r), metallic(m), transmission(t), ior(i), absorption(a) {}
 
         bool operator<(const Material& o) const {
             if (emittance != o.emittance) return emittance < o.emittance;
@@ -1962,113 +1963,100 @@ private:
         PointType normal;
         float t = 0.0f;
         Ray ray(rayOrig, rayDir);
-        rayCubeIntersect(ray, hit, t, normal, hitPoint);
-        
-        Eigen::Vector3f objColor = hit->color;
-        Material objMat = hit->material;
+        float texit = 0;
+        rayCubeIntersect(ray, hit, t, normal, hitPoint, &texit);
+        float intDist = texit - t;
 
-        Eigen::Vector3f finalColor = globalIllumination ? skylight_ : Eigen::Vector3f::Zero();
-        if (objMat.emittance > 0.0f) {
-            finalColor += objColor * objMat.emittance;
-        }
+        PointType offsetNormal = normal;
+        bool entering = rayDir.dot(normal) < 0.0f;
+        if (!entering) offsetNormal = -normal;
 
-        float roughness = std::clamp(objMat.roughness, 0.01f, 1.0f);
-        float metallic = std::clamp(objMat.metallic, 0.0f, 1.0f);
-        float transmission = std::clamp(objMat.transmission, 0.0f, 1.0f);
-        
-        PointType V = -rayDir;
-        float cosThetaI = normal.dot(V);
-        bool isInside = cosThetaI < 0.0f;
-        PointType n_eff = isInside ? -normal : normal;
-        cosThetaI = std::max(0.001f, n_eff.dot(V));
+        Eigen::Vector3f albedo = hit->color;
+        Material mat = hit->material;
+        float roughness = mat.roughness;
+        float metallic = mat.metallic;
+        float transmission = mat.transmission;
+        float ior = mat.ior;
+        Eigen::Vector3f emitted = albedo * mat.emittance;
 
-        float coordMax = hitPoint.cwiseAbs().maxCoeff();
-        float rayOffset = std::max(1e-4f, 1e-5f * coordMax);
-
+        float continueProb = std::min(0.95f, albedo.maxCoeff());
+        if (bounces > 2 && rand_r(&rngState) / float(RAND_MAX) > continueProb) return emitted;
         Eigen::Vector3f F0 = Eigen::Vector3f::Constant(0.04f);
-        F0 = F0 * (1.0f - metallic) + objColor * metallic;
+        F0 = F0 * (1.0f - metallic) + albedo * metallic;
+        PointType V = -rayDir;
+        float cosTheta = std::abs(normal.dot(V));
+        float eta = entering ? (1.0f / ior) : ior;
 
-        PointType H = sampleGGX(n_eff, roughness, rngState);
-        float VdotH = std::max(0.001f, V.dot(H));
+        Eigen::Vector3f F = F0 + (Eigen::Vector3f::Constant(1.0f) - F0) * std::pow(1.0f - cosTheta, 5.0f);
+
+        float alpha = roughness * roughness;
+        float r1 = rand_r(&rngState) / float(RAND_MAX);
+        float r2 = rand_r(&rngState) / float(RAND_MAX);
+        float phi = 2.0f * M_PI * r1;
+        float cosThetaM = std::sqrt((1.0f - r2) / (1.0f + (alpha*alpha - 1.0f) * r2));
+        float sinThetaM = std::sqrt(1.0f - cosThetaM*cosThetaM);
+        PointType H_local(sinThetaM * std::cos(phi), sinThetaM * std::sin(phi), cosThetaM);
+
+        PointType up = std::abs(normal.z()) < 0.999f ? PointType(0,0,1) : PointType(1,0,0);
+        PointType tangent = up.cross(normal).normalized();
+        PointType bitangent = normal.cross(tangent);
+        PointType H = (tangent * H_local.x() + bitangent * H_local.y() + normal * H_local.z()).normalized();
+        float VdotH = std::max(0.0f, V.dot(H));
+        float NdotV = std::max(0.0f, normal.dot(V));
+        float NdotH = std::max(0.0f, normal.dot(H));
+        float reflectProb = metallic > 0.5f ? 1.0f : (F.maxCoeff() * (1.0f - transmission) + transmission * 0.0f);
+        bool doReflect = (rand_r(&rngState) / float(RAND_MAX)) < reflectProb;
+        Eigen::Vector3f weight = Eigen::Vector3f::Ones();
+        PointType newDir;
+        PointType newOrigin;
+
         
-        Eigen::Vector3f F_spec = F0 + (Eigen::Vector3f::Constant(1.0f) - F0) * std::pow(std::max(0.0f, 1.0f - VdotH), 5.0f);
-        
-        PointType specDir = (2.0f * VdotH * H - V).normalized();
-        Eigen::Vector3f W_spec = Eigen::Vector3f::Zero();
-        
-        if (specDir.dot(n_eff) > 0.0f) {
-            float NdotV = cosThetaI;
-            float NdotL = std::max(0.001f, n_eff.dot(specDir));
-            float NdotH = std::max(0.001f, n_eff.dot(H));
-            
-            float k_smith = (roughness * roughness) / 2.0f;
-            float G = (NdotV / (NdotV * (1.0f - k_smith) + k_smith)) * (NdotL / (NdotL * (1.0f - k_smith) + k_smith));
-            
-            W_spec = F_spec * G * VdotH / (NdotV * NdotH);
-        }
 
-        Eigen::Vector3f W_second = Eigen::Vector3f::Zero();
-        PointType secondDir;
-        PointType secondOrigin;
+        if (doReflect) {
+            newDir = (2.0f * VdotH * H - V).normalized();
+            newOrigin = hitPoint + offsetNormal * EPSILON;
+            if (newDir.dot(normal) < 0.0f) newDir = -newDir;
 
-        float transmissionWeight = transmission * (1.0f - metallic);
-        float diffuseWeight = (1.0f - transmission) * (1.0f - metallic);
+            float D = alpha*alpha / (M_PI * std::pow(cosThetaM*cosThetaM*(alpha*alpha-1.0f)+1.0f, 2.0f));
+            float G = 1.0f / (1.0f + (alpha * std::tan(std::acos(NdotV))) * 0.5f);
+            float denominator = 4.0f * NdotV * NdotH;
+            if (denominator > 0.0f) weight = F * D * G / denominator;
+            else weight = Eigen::Vector3f::Zero();
 
-        if (transmissionWeight > 0.0f) {
-            float eta = isInside ? objMat.ior : (1.0f / objMat.ior);
-            float k = 1.0f - eta * eta * (1.0f - VdotH * VdotH);
-            
-            if (k >= 0.0f) {
-                secondDir = ((eta * VdotH - std::sqrt(k)) * H - eta * V).normalized();
-                secondOrigin = hitPoint - n_eff * rayOffset;
-                W_second = (Eigen::Vector3f::Constant(1.0f) - F_spec) * transmissionWeight;
-                W_second = W_second.cwiseProduct(objColor);
-            } else {
-                Eigen::Vector3f tirWeight = (Eigen::Vector3f::Constant(1.0f) - F_spec) * transmissionWeight;
-                W_spec += tirWeight.cwiseProduct(objColor);
-            }
-        } else if (diffuseWeight > 0.0f) {
-            secondDir = sampleCosineHemisphere(n_eff, rngState);
-            secondOrigin = hitPoint + n_eff * rayOffset;
-            W_second = (Eigen::Vector3f::Constant(1.0f) - F_spec) * diffuseWeight;
-            W_second = W_second.cwiseProduct(objColor);
-        }
-
-        W_spec = W_spec.cwiseMin(Eigen::Vector3f::Constant(4.0f));
-        W_second = W_second.cwiseMin(Eigen::Vector3f::Constant(4.0f));
-
-        float lumSpec = W_spec.maxCoeff();
-        float lumSecond = W_second.maxCoeff();
-        
-        bool doSplit = (bounces <= 1);
-
-        if (doSplit) {
-            Eigen::Vector3f specColor = Eigen::Vector3f::Zero();
-            if (lumSpec > 0.001f) {
-                specColor = W_spec.cwiseProduct(traceRay(buffer, hitPoint + n_eff * rayOffset, specDir, bounces + 1, rngState, maxBounces, globalIllumination, useLod, asyncLoad));
-            }
-            
-            Eigen::Vector3f secondColor = Eigen::Vector3f::Zero();
-            if (lumSecond > 0.001f) {
-                secondColor = W_second.cwiseProduct(traceRay(buffer, secondOrigin, secondDir, bounces + 1, rngState, maxBounces, globalIllumination, useLod, asyncLoad));
-            }
-            
-            return finalColor + specColor + secondColor;
+            if (metallic > 0.0f) weight = weight.cwiseProduct(albedo);
         } else {
-            float totalLum = lumSpec + lumSecond;
-            if (totalLum < 0.0001f) return finalColor;
-            
-            float pSpec = lumSpec / totalLum;
-            float roll = float(rand_r(&rngState)) / float(RAND_MAX);
-            
-            if (roll < pSpec) {
-                Eigen::Vector3f sample = traceRay(buffer, hitPoint + n_eff * rayOffset, specDir, bounces + 1, rngState, maxBounces, globalIllumination, useLod, asyncLoad);
-                return finalColor + (W_spec / std::max(EPSILON, pSpec)).cwiseProduct(sample);
+            float cosThetaT;
+            float sinThetaT2 = eta*eta * (1.0f - VdotH*VdotH);
+            if (sinThetaT2 >= 1.0f) {
+                newDir = (2.0f * VdotH * H - V).normalized();
+                newOrigin = hitPoint + offsetNormal * EPSILON;
+                weight = Eigen::Vector3f::Ones();
             } else {
-                Eigen::Vector3f sample = traceRay(buffer, secondOrigin, secondDir, bounces + 1, rngState, maxBounces, globalIllumination, useLod, asyncLoad);
-                return finalColor + (W_second / std::max(EPSILON, 1.0f - pSpec)).cwiseProduct(sample);
+                cosThetaT = std::sqrt(1.0f - sinThetaT2);
+                newDir = (eta * VdotH - cosThetaT) * H - eta * V;
+                newDir.normalize();
+                newOrigin = hitPoint - offsetNormal * EPSILON;
+
+                float D = alpha*alpha / (M_PI * std::pow(cosThetaM*cosThetaM*(alpha*alpha-1.0f)+1.0f, 2.0f));
+                float G = 1.0f / (1.0f + (alpha * std::tan(std::acos(NdotV))) * 0.5f);
+                float denom = NdotV * NdotH;
+                if (denom > 0.0f) {
+                    weight = (Eigen::Vector3f::Constant(1.0f) - F) * D * G * std::abs(VdotH) / denom;
+                    weight = weight.cwiseProduct(albedo);
+                } else {
+                    weight = Eigen::Vector3f::Zero();
+                }
             }
         }
+        weight = weight.cwiseMin(4.0f);
+        if (bounces > 2) weight /= continueProb;
+        Eigen::Vector3f incoming = traceRay(buffer, newOrigin, newDir, bounces+1, rngState, maxBounces, globalIllumination, useLod, asyncLoad);
+
+        if (!doReflect && transmission > 0.0f && !metallic) {
+            incoming = incoming.cwiseProduct((-mat.absorption * intDist).array().exp().matrix());
+        }
+
+        return emitted + weight.cwiseProduct(incoming);
     }
     
     void clearNode(OctreeNode* node) {
@@ -2232,7 +2220,7 @@ private:
         return tMax >= std::max(0.0f, tMin);
     }
 
-    bool rayCubeIntersect(const Ray& ray, const RenderData* cube, float& t, PointType& normal, PointType& hitPoint) const {
+    bool rayCubeIntersect(const Ray& ray, const RenderData* cube, float& t, PointType& normal, PointType& hitPoint, float* tExit = nullptr) const {
         float t0x = (cube->boundsMin[0] - ray.origin[0]) * ray.invDir[0];
         float t1x = (cube->boundsMax[0] - ray.origin[0]) * ray.invDir[0];
         if (ray.invDir[0] < 0.0f) std::swap(t0x, t1x);
@@ -2241,15 +2229,14 @@ private:
         float t1y = (cube->boundsMax[1] - ray.origin[1]) * ray.invDir[1];
         if (ray.invDir[1] < 0.0f) std::swap(t0y, t1y);
 
-        float tMin = std::max(t0x, t0y);
-        float tMax = std::min(t1x, t1y);
-
         float t0z = (cube->boundsMin[2] - ray.origin[2]) * ray.invDir[2];
         float t1z = (cube->boundsMax[2] - ray.origin[2]) * ray.invDir[2];
         if (ray.invDir[2] < 0.0f) std::swap(t0z, t1z);
 
-        tMin = std::max(tMin, t0z);
-        tMax = std::min(tMax, t1z);
+        float tMin = std::max({t0x, t0y, t0z});
+        float tMax = std::min({t1x, t1y, t1z});
+
+        if (tExit) *tExit = tMax;
 
         if (tMax < std::max(0.0f, tMin) || tMax < 0.0f) {
             return false;
