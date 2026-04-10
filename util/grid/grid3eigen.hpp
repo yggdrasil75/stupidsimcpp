@@ -1957,16 +1957,15 @@ private:
             return globalIllumination ? skybox_.sampleVector(rayDir) : Eigen::Vector3f::Zero();
         }
 
-        auto obj = hit;
         
         PointType hitPoint;
         PointType normal;
         float t = 0.0f;
         Ray ray(rayOrig, rayDir);
-        rayCubeIntersect(ray, obj, t, normal, hitPoint);
+        rayCubeIntersect(ray, hit, t, normal, hitPoint);
         
-        Eigen::Vector3f objColor = obj->color;
-        Material objMat = obj->material;
+        Eigen::Vector3f objColor = hit->color;
+        Material objMat = hit->material;
 
         Eigen::Vector3f finalColor = globalIllumination ? skylight_ : Eigen::Vector3f::Zero();
         if (objMat.emittance > 0.0f) {
@@ -2211,50 +2210,6 @@ private:
         }
     }
 
-    void bitonic_sort_8(std::array<std::pair<int, float>, 8>& arr) const noexcept {
-        auto a0 = arr[0], a1 = arr[1], a2 = arr[2], a3 = arr[3];
-        auto a4 = arr[4], a5 = arr[5], a6 = arr[6], a7 = arr[7];
-        
-        if (a0.second > a1.second) std::swap(a0, a1);
-        if (a2.second < a3.second) std::swap(a2, a3);
-        if (a4.second > a5.second) std::swap(a4, a5);
-        if (a6.second < a7.second) std::swap(a6, a7);
-        
-        if (a0.second > a2.second) std::swap(a0, a2);
-        if (a1.second > a3.second) std::swap(a1, a3);
-        if (a0.second > a1.second) std::swap(a0, a1);
-        if (a2.second > a3.second) std::swap(a2, a3);
-        
-        if (a4.second < a6.second) std::swap(a4, a6);
-        if (a5.second < a7.second) std::swap(a5, a7);
-        if (a4.second < a5.second) std::swap(a4, a5);
-        if (a6.second < a7.second) std::swap(a6, a7);
-        
-        if (a0.second > a4.second) std::swap(a0, a4);
-        if (a1.second > a5.second) std::swap(a1, a5);
-        if (a2.second > a6.second) std::swap(a2, a6);
-        if (a3.second > a7.second) std::swap(a3, a7);
-        
-        if (a0.second > a2.second) std::swap(a0, a2);
-        if (a1.second > a3.second) std::swap(a1, a3);
-        if (a4.second > a6.second) std::swap(a4, a6);
-        if (a5.second > a7.second) std::swap(a5, a7);
-        
-        if (a0.second > a1.second) std::swap(a0, a1);
-        if (a2.second > a3.second) std::swap(a2, a3);
-        if (a4.second > a5.second) std::swap(a4, a5);
-        if (a6.second > a7.second) std::swap(a6, a7);
-        
-        arr[0] = a0;
-        arr[1] = a1;
-        arr[2] = a2;
-        arr[3] = a3;
-        arr[4] = a4;
-        arr[5] = a5;
-        arr[6] = a6;
-        arr[7] = a7;
-    }
-
     bool rayBoxIntersect(const Ray& ray, const BoundingBox& box, float& tMin, float& tMax) const {
         float tx1 = (box.first[0] - ray.origin[0]) * ray.invDir[0];
         float tx2 = (box.second[0] - ray.origin[0]) * ray.invDir[0];
@@ -2327,28 +2282,6 @@ private:
         normal = PointType::Zero();
         normal[minAxis] = sign;
         return true;
-    }
-
-    float randomValueNormalDistribution(uint32_t& state) {
-        std::mt19937 gen(state);
-        state = gen();
-        std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-        float θ = 2 * M_PI * dist(gen);
-        float ρ = sqrt(-2 * log(dist(gen)));
-        return ρ * cos(θ);
-    }
-
-    PointType randomInHemisphere(const PointType& normal, uint32_t& state) {
-        float x = randomValueNormalDistribution(state);
-        float y = randomValueNormalDistribution(state);
-        float z = randomValueNormalDistribution(state);
-        PointType randomDir(x, y, z);
-        randomDir.normalize();
-        
-        if (randomDir.dot(normal) < 0.0f) {
-            return -randomDir;
-        }
-        return randomDir;
     }
 
     void collectNodesByObjectIdRecursive(OctreeNode* node, int id,
