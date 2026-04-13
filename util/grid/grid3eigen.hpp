@@ -665,23 +665,23 @@ private:
         float size;
         Eigen::Vector3f color;
         float emittance;
+        Eigen::Vector3f boundsMin;
         float roughness;
+        Eigen::Vector3f boundsMax;
         float metallic;
         float transmission;
         float ior;
-        Eigen::Vector3f boundsMin;
         float padding1;
-        Eigen::Vector3f boundsMax;
         float padding2;
     };
 
     struct alignas(16) GPUCameraData {
         Eigen::Vector3f origin;
-        float padding1;
+        float lodMinDist;
         Eigen::Vector3f dir;
-        float padding2;
+        float invLodf;
         Eigen::Vector3f up;
-        float padding3;
+        float minVisibility;
         Eigen::Vector3f right;
         float maxDist;
         Eigen::Vector3f skylight;
@@ -693,12 +693,8 @@ private:
         int samples;
         int maxBounces;
         int useLod;
-        float lodMinDist;
-        float invLodf;
-        float minVisibility;
         float invFogRange;
         uint32_t frameCount;
-        float padding5;
     };
     
     struct VulkanContext {
@@ -1960,7 +1956,9 @@ private:
                   int bounces, uint32_t& rngState, int maxBounces, bool globalIllumination, bool useLod, bool asyncLoad = false) {
         if (bounces > maxBounces) return globalIllumination ? skylight_ : Eigen::Vector3f::Zero();
 
-        auto hit = voxelTraverse(buffer, rayOrig, rayDir, std::numeric_limits<float>::max(), useLod, asyncLoad);
+        Ray ray(rayOrig, rayDir);
+
+        auto hit = voxelTraverse(buffer, ray, std::numeric_limits<float>::max(), useLod, asyncLoad);
         if (!hit) {
             if (bounces == 0) return skybox_.sampleVector(rayDir);
             return globalIllumination ? skybox_.sampleVector(rayDir) : Eigen::Vector3f::Zero();
@@ -1969,7 +1967,6 @@ private:
         PointType hitPoint;
         PointType normal;
         float t = 0.0f;
-        Ray ray(rayOrig, rayDir);
         float texit = 0;
         rayCubeIntersect(ray, hit, t, normal, hitPoint, &texit);
 
@@ -2933,11 +2930,10 @@ public:
         return true;
     }
 
-    const RenderData* voxelTraverse(const RenderBuffer& buffer, const PointType& origin, const PointType& direction,
+    const RenderData* voxelTraverse(const RenderBuffer& buffer, const Ray& ray,
                                         float maxDist, bool enableLOD = false, bool asyncLoad = false) {
         const RenderData* hit = nullptr;
         if (buffer.nodes.empty()) return hit;
-        Ray ray(origin, direction);
         
         float tMin, tMax;
         BoundingBox rootBounds(buffer.nodes[0].boundsMin, buffer.nodes[0].boundsMax);
@@ -3258,9 +3254,8 @@ public:
         std::vector<GPUPBRRenderData> gpuPoints;
         gpuPoints.reserve(tl_buffer.points.size());
         for(const auto& p : tl_buffer.points) {
-            gpuPoints.push_back({p.position, p.size, p.color, p.material.emittance, 
-                                 p.material.roughness, p.material.metallic, p.material.transmission, p.material.ior,
-                                 p.boundsMin, 0, p.boundsMax, 0});
+            gpuPoints.push_back({p.position, p.size, p.color, p.material.emittance, p.boundsMin,
+                                 p.material.roughness, p.boundsMax, p.material.metallic, p.material.transmission, p.material.ior});
         }
 
         if(gpuNodes.empty()) gpuNodes.push_back(GPURenderNode{});
@@ -3272,10 +3267,10 @@ public:
         float invFogRange = 1.0f / std::max(0.001f, maxDistance_ - lodMinDistance_);
 
         GPUCameraData camData = {
-            cam.origin, 0, cam.direction.normalized(), 0, cam.up.normalized(), 0, cam.right(), maxDistance_,
+            cam.origin, lodMinDistance_, cam.direction.normalized(), invLodf, cam.up.normalized(), 0.1f, cam.right(), maxDistance_,
             skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
-            width, height, samplesPerPixel, maxBounces, useLod ? 1 : 0, lodMinDistance_, invLodf,
-            0.1f, invFogRange, frameCounter_++, globalIllumination ? 1.0f : 0.0f
+            width, height, samplesPerPixel, maxBounces, useLod ? 1 : 0, 
+            invFogRange, frameCounter_++
         };
 
         size_t outSize = width * height * 3 * sizeof(float);
@@ -3342,10 +3337,9 @@ public:
         float invFogRange = 1.0f / std::max(0.001f, maxDistance_ - lodMinDistance_);
 
         GPUCameraData camData = {
-            cam.origin, 0, cam.direction.normalized(), 0, cam.up.normalized(), 0, cam.right(), maxDistance_,
+            cam.origin, lodMinDistance_, cam.direction.normalized(), invLodf, cam.up.normalized(), 0.1f, cam.right(), maxDistance_,
             skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
-            width, height, 1, 1, 1, lodMinDistance_, invLodf,
-            0.1f, invFogRange, frameCounter_++, 0.0f
+            width, height, 1, 1, 1, invFogRange, frameCounter_++, 0.0f
         };
 
         size_t outSize = width * height * 3 * sizeof(float);
@@ -3484,102 +3478,6 @@ public:
         return hit;
     }
 
-    const RenderData* fastBypassVoxelTraverse(const RenderBuffer& buffer, const Ray& ray, float maxDist) {
-        const RenderData* hit = nullptr;
-        if (buffer.nodes.empty()) return hit;
-        float tMin, tMax;
-        BoundingBox rootBounds(buffer.nodes[0].boundsMin, buffer.nodes[0].boundsMax);
-        if (rayBoxIntersect(ray, rootBounds, tMin, tMax)) {
-            tMax = std::min(tMax, maxDist);
-            float currentMaxDist = maxDist;
-
-            struct StackItem {
-                uint32_t nodeIdx;
-                float tMin;
-                float tMax;
-            };
-            
-            StackItem stack[256];
-            int stackPtr = 0;
-            stack[stackPtr++] = {0, std::max(0.0f, tMin), tMax};
-
-            while(stackPtr > 0) {
-                StackItem current = stack[--stackPtr];
-                if (current.tMin > currentMaxDist) continue;
-
-                const RenderNode& node = buffer.nodes[current.nodeIdx];
-
-                if (!node.isLeaf && node.lodPoint != -1) {
-                    float dist = (node.center - ray.origin).norm();
-                    if (dist > lodMinDistance_ && (dist / node.nodeSize) > invLodf) {
-                        float t;
-                        PointType n, h;
-                        if (rayCubeIntersect(ray, &buffer.points[node.lodPoint], t, n, h)) {
-                            if (t >= 0 && t <= currentMaxDist) {
-                                hit = &buffer.points[node.lodPoint];
-                                currentMaxDist = t;
-                            }
-                        }
-                        continue;
-                    }
-                }
-
-                for (uint32_t i = 0; i < node.pointCount; ++i) {
-                    const RenderData& pt = buffer.points[node.firstPoint + i];
-                    float t;
-                    PointType n, h;
-                    if (rayCubeIntersect(ray, &pt, t, n, h)) {
-                        if (t >= 0 && t <= currentMaxDist && t <= current.tMax + 0.001f) {
-                            currentMaxDist = t;
-                            hit = &pt;
-                        }
-                    }
-                }
-
-                if (node.isLeaf || !node.isLoaded) continue;
-
-                float t0 = current.tMin;
-                float t1 = current.tMax;
-
-                Eigen::Vector3f ttt = (node.center - ray.origin).cwiseProduct(ray.invDir);
-                int currIdx = ((t0 >= ttt.x()) ? 1 : 0) | ((t0 >= ttt.y()) ? 2 : 0) | ((t0 >= ttt.z()) ? 4 : 0);
-                
-                struct ChildInterval {
-                    uint32_t nodeIdx;
-                    float tMin;
-                    float tMax;
-                };
-                ChildInterval children[4];
-                int childCount = 0;
-
-                while(t0 < t1 && t0 <= currentMaxDist) {
-                    Eigen::Vector3f next_t;
-                    next_t[0] = (currIdx & 1) ? tMax : ttt[0];
-                    next_t[1] = (currIdx & 2) ? tMax : ttt[1];
-                    next_t[2] = (currIdx & 4) ? tMax : ttt[2];
-
-                    float tNext = next_t.minCoeff();
-                    
-                    int physIdx = currIdx ^ ray.signMask;
-                    if (node.childMask & (1 << physIdx)) {
-                        int childOffset = countBits(node.childMask & ((1 << physIdx) - 1));
-                        children[childCount++] = {node.firstChild + childOffset, t0, tNext};
-                    }
-                    
-                    t0 = tNext;
-                    currIdx |= ((next_t[0] <= tNext) ? 1 : 0) | ((next_t[1] <= tNext) ? 2 : 0) | ((next_t[2] <= tNext) ? 4 : 0);
-                }
-
-                if (stackPtr + childCount > 256) continue;
-
-                for (int i = childCount - 1; i >= 0; --i) {
-                    stack[stackPtr++] = {children[i].nodeIdx, children[i].tMin, children[i].tMax};
-                }
-            }
-        }
-        return hit;
-    }
-
     frame fastRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB) {
         updateStreaming(cam);
         
@@ -3624,7 +3522,7 @@ public:
                 
                 const RenderData* hit = nullptr;
                 if (x % 10 == 0 && y % 10 == 0) hit = fastVoxelTraverse(shared_buffer, ray, maxDistance_);
-                else hit = fastBypassVoxelTraverse(shared_buffer, ray, maxDistance_);
+                else hit = fastVoxelTraverse(shared_buffer, ray, maxDistance_);
                 
                 if (hit != nullptr) {
                     float t = 0.0f;

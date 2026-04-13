@@ -133,9 +133,9 @@ int main() {
     const float fps = 30.0f;
     const float durationPerSegment = 1.0f;
     const int framesPerSegment = static_cast<int>(fps * durationPerSegment);
-    const int samples = 1000;
+    const int samples = 10;
     const int video_samples = 40;
-    const int bounces = 20;
+    const int bounces = 5;
 
     struct View {
         std::string name;
@@ -189,10 +189,12 @@ int main() {
         cam.direction = (target - view.origin).normalized();
         cam.up = view.up;
         
-        frame out = octree.renderFrameVulkan(cam, height, width, frame::colormap::RGB, samples, bounces, false);
-        // frame out = octree.renderFrame(cam, height, width, frame::colormap::RGB, samples, bounces, false, true);
-        
-        std::string filename = "output/slow/render_" + view.name + ".bmp";
+        frame out = octree.renderFrameVulkan(cam, height, width, frame::colormap::RGB, samples, bounces, false, true);
+        std::string filename = "output/slow/vulkanrender_" + view.name + ".bmp";
+        BMPWriter::saveBMP(filename, out);
+
+        out = octree.renderFrame(cam, height, width, frame::colormap::RGB, samples, bounces, false, true);
+        filename = "output/slow/cpurender_" + view.name + ".bmp";
         BMPWriter::saveBMP(filename, out);
     }
     
