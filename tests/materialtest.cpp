@@ -130,11 +130,12 @@ int main() {
     int width = 512;
     int height = 512;
     
-    const float fps = 10.0f;
+    const float fps = 30.0f;
     const float durationPerSegment = 1.0f;
     const int framesPerSegment = static_cast<int>(fps * durationPerSegment);
-    const int video_samples = 400;
-    const int video_bounces = 5;
+    const int samples = 10;
+    const int video_samples = 40;
+    const int bounces = 5;
 
     struct View {
         std::string name;
@@ -147,7 +148,7 @@ int main() {
         {"+X", Eigen::Vector3f( 6.8f,  0.0f,  1.0f), Eigen::Vector3f(0.0f, 0.0f, 1.0f)},
         {"+Y", Eigen::Vector3f( 0.0f,  6.8f,  1.0f), Eigen::Vector3f(0.0f, 0.0f, 1.0f)},
         {"-X", Eigen::Vector3f(-6.8f,  0.0f,  1.0f), Eigen::Vector3f(0.0f, 0.0f, 1.0f)},
-        {"+Z", Eigen::Vector3f( 0.0f,  0.0f,  7.3f), Eigen::Vector3f(0.0f, 1.0f, 0.0f)}
+        // {"+Z", Eigen::Vector3f( 0.0f,  0.0f,  7.3f), Eigen::Vector3f(0.0f, 1.0f, 0.0f)}
     };
 
     Eigen::Vector3f target(0.0f, 0.0f, 0.5f);
@@ -166,17 +167,32 @@ int main() {
         BMPWriter::saveBMP(filename, out);
     }
     
+    // for (const auto& view : views) {
+    //     std::cout << "\nRendering view from " << view.name << " direction (Medium 60s Pass)..." << std::endl;
+        
+    //     Camera cam;
+    //     cam.origin = view.origin;
+    //     cam.direction = (target - view.origin).normalized();
+    //     cam.up = view.up;
+        
+    //     frame out = octree.renderFrameTimed(cam, height, width, frame::colormap::RGB, 60, bounces, false, true);
+        
+    //     std::string filename = "output/medium/render_" + view.name + ".bmp";
+    //     BMPWriter::saveBMP(filename, out);
+    // }
+    
     for (const auto& view : views) {
-        std::cout << "\nRendering view from " << view.name << " direction (Medium 60s Pass)..." << std::endl;
+        std::cout << "\nRendering view from " << view.name << " direction (Slow "<< samples <<" Samples Pass)..." << std::endl;
         
         Camera cam;
         cam.origin = view.origin;
         cam.direction = (target - view.origin).normalized();
         cam.up = view.up;
         
-        frame out = octree.renderFrameTimed(cam, height, width, frame::colormap::RGB, 60, bounces, false, true);
+        frame out = octree.renderFrameVulkan(cam, height, width, frame::colormap::RGB, samples, bounces, false);
+        // frame out = octree.renderFrame(cam, height, width, frame::colormap::RGB, samples, bounces, false, true);
         
-        std::string filename = "output/medium/render_" + view.name + ".bmp";
+        std::string filename = "output/slow/render_" + view.name + ".bmp";
         BMPWriter::saveBMP(filename, out);
     }
     
@@ -209,8 +225,8 @@ int main() {
             
             std::cout << "Rendering video frame " << frameCounter << "/" << totalFrames << "..." << std::endl;
             
-            // frame out = octree.renderFrame(cam, height, width, frame::colormap::RGB, video_samples, video_bounces, false, true);
-            frame out = octree.renderFramefast(cam, height, width, frame::colormap::RGB, false, true);
+            frame out = octree.renderFrameVulkan(cam, height, width, frame::colormap::RGB, video_samples, bounces, false);
+            // frame out = octree.renderFramefast(cam, height, width, frame::colormap::RGB, false, true);
             
             videoFrames.push_back(std::move(out));
         }

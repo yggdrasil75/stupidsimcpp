@@ -124,7 +124,6 @@ bool rayCubeIntersect(Ray ray, GPUFastRenderData pt, out float t, out vec3 norma
     return true;
 }
 
-
 struct ChildHit {
     uint nodeIdx;
     float tMin;

@@ -734,9 +734,9 @@ private:
         VkDeviceMemory pbrPointMem = VK_NULL_HANDLE;
 
         size_t currentNodesCap = 0;
-        size_t  currentOutCap = 0;
+        size_t currentOutCap = 0;
         size_t currentFastPointsCap = 0;
-        size_t  currentPBRPointsCap = 0;
+        size_t currentPBRPointsCap = 0;
 
         bool initialized = false;
 
@@ -893,7 +893,7 @@ private:
             initialized = true;
         }
 
-        void updateCommonBuffers(const std::vector<GPURenderNode>& nodes, size_t outSize,GPUCameraData& camData) {
+        void updateCommonBuffers(const std::vector<GPURenderNode>& nodes, size_t outSize, GPUCameraData& camData) {
             size_t nodeSize = std::max((size_t)256, nodes.size() * sizeof(GPURenderNode));
             size_t uboSize = sizeof(GPUCameraData);
 
@@ -1948,6 +1948,14 @@ private:
         return (tangent * x + bitangent * y + n * z).normalized();
     }
 
+    inline float nextFloat(uint32_t& state) const {
+        if (state == 0) state = 123456789;
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        return (state & 0xFFFFFF) / 16777216.0f;
+    }
+
     Eigen::Vector3f traceRay(const RenderBuffer& buffer, const PointType& rayOrig, const PointType& rayDir,
                   int bounces, uint32_t& rngState, int maxBounces, bool globalIllumination, bool useLod, bool asyncLoad = false) {
         if (bounces > maxBounces) return globalIllumination ? skylight_ : Eigen::Vector3f::Zero();
@@ -1958,14 +1966,12 @@ private:
             return globalIllumination ? skybox_.sampleVector(rayDir) : Eigen::Vector3f::Zero();
         }
 
-        
         PointType hitPoint;
         PointType normal;
         float t = 0.0f;
         Ray ray(rayOrig, rayDir);
         float texit = 0;
         rayCubeIntersect(ray, hit, t, normal, hitPoint, &texit);
-        float intDist = texit - t;
 
         PointType offsetNormal = normal;
         bool entering = rayDir.dot(normal) < 0.0f;
@@ -1979,84 +1985,137 @@ private:
         float ior = mat.ior;
         Eigen::Vector3f emitted = albedo * mat.emittance;
 
-        float continueProb = std::min(0.95f, albedo.maxCoeff());
-        if (bounces > 2 && rand_r(&rngState) / float(RAND_MAX) > continueProb) return emitted;
         Eigen::Vector3f F0 = Eigen::Vector3f::Constant(0.04f);
         F0 = F0 * (1.0f - metallic) + albedo * metallic;
+
+        // Proper Russian Roulette based on maximum likely reflectance
+        float maxReflectance = std::max(albedo.maxCoeff(), F0.maxCoeff());
+        float continueProb = std::min(0.95f, std::max(0.1f, maxReflectance));
+        if (bounces > 2 && nextFloat(rngState) > continueProb) return emitted;
+
         PointType V = -rayDir;
-        float cosTheta = std::abs(normal.dot(V));
         float eta = entering ? (1.0f / ior) : ior;
 
-        Eigen::Vector3f F = F0 + (Eigen::Vector3f::Constant(1.0f) - F0) * std::pow(1.0f - cosTheta, 5.0f);
+        float alpha = std::max(1e-5f, roughness * roughness);
+        float alpha2 = alpha * alpha;
 
-        float alpha = roughness * roughness;
-        float r1 = rand_r(&rngState) / float(RAND_MAX);
-        float r2 = rand_r(&rngState) / float(RAND_MAX);
+        // Sample half-vector H using GGX Importance Sampling
+        float r1 = nextFloat(rngState);
+        float r2 = nextFloat(rngState);
         float phi = 2.0f * M_PI * r1;
-        float cosThetaM = std::sqrt((1.0f - r2) / (1.0f + (alpha*alpha - 1.0f) * r2));
-        float sinThetaM = std::sqrt(1.0f - cosThetaM*cosThetaM);
-        PointType H_local(sinThetaM * std::cos(phi), sinThetaM * std::sin(phi), cosThetaM);
+        float cosThetaM = std::sqrt(std::max(0.0f, (1.0f - r2) / (1.0f + (alpha2 - 1.0f) * r2)));
+        float sinThetaM = std::sqrt(std::max(0.0f, 1.0f - cosThetaM*cosThetaM));
+        
+        PointType up = std::abs(offsetNormal.z()) < 0.999f ? PointType(0,0,1) : PointType(1,0,0);
+        PointType tangent = up.cross(offsetNormal).normalized();
+        PointType bitangent = offsetNormal.cross(tangent);
+        PointType H = (tangent * sinThetaM * std::cos(phi) + bitangent * sinThetaM * std::sin(phi) + offsetNormal * cosThetaM).normalized();
 
-        PointType up = std::abs(normal.z()) < 0.999f ? PointType(0,0,1) : PointType(1,0,0);
-        PointType tangent = up.cross(normal).normalized();
-        PointType bitangent = normal.cross(tangent);
-        PointType H = (tangent * H_local.x() + bitangent * H_local.y() + normal * H_local.z()).normalized();
-        float VdotH = std::max(0.0f, V.dot(H));
-        float NdotV = std::max(0.0f, normal.dot(V));
-        float NdotH = std::max(0.0f, normal.dot(H));
-        float reflectProb = metallic > 0.5f ? 1.0f : (F.maxCoeff() * (1.0f - transmission) + transmission * 0.0f);
-        bool doReflect = (rand_r(&rngState) / float(RAND_MAX)) < reflectProb;
-        Eigen::Vector3f weight = Eigen::Vector3f::Ones();
+        float VdotH = V.dot(H);
+        if (VdotH < 0.0f) {
+            H = -H;
+            VdotH = -VdotH;
+        }
+
+        // Fresnel using Schlick
+        Eigen::Vector3f F = F0 + (Eigen::Vector3f::Constant(1.0f) - F0) * std::pow(1.0f - std::min(1.0f, VdotH), 5.0f);
+        
+        // Probability distribution for path branches
+        float probSpecular = F.mean();
+        float probT = (1.0f - metallic) * transmission;
+        float probDiffuse = (1.0f - metallic) * (1.0f - transmission);
+
+        float pSpec = probSpecular;
+        float pDiff = probDiffuse * (1.0f - pSpec);
+        float pTrans = probT * (1.0f - pSpec);
+        float sumP = pSpec + pDiff + pTrans;
+        if (sumP <= 1e-5f) {
+            pSpec = 1.0f; pDiff = 0.0f; pTrans = 0.0f;
+        } else {
+            pSpec /= sumP; pDiff /= sumP; pTrans /= sumP;
+        }
+
+        float r_type = nextFloat(rngState);
+
         PointType newDir;
         PointType newOrigin;
+        Eigen::Vector3f weight = Eigen::Vector3f::Zero();
+        bool isTransmission = false;
 
-        
+        auto smithG1 = [&](float cosT) {
+            float tanT2 = (1.0f - cosT*cosT) / std::max(1e-5f, cosT*cosT);
+            if (tanT2 <= 0.0f) return 1.0f;
+            return 2.0f / (1.0f + std::sqrt(1.0f + alpha2 * tanT2));
+        };
 
-        if (doReflect) {
+        float NdotV = std::max(1e-5f, offsetNormal.dot(V));
+
+        if (r_type < pSpec) {
             newDir = (2.0f * VdotH * H - V).normalized();
-            newOrigin = hitPoint + offsetNormal * EPSILON;
-            if (newDir.dot(normal) < 0.0f) newDir = -newDir;
-
-            float D = alpha*alpha / (M_PI * std::pow(cosThetaM*cosThetaM*(alpha*alpha-1.0f)+1.0f, 2.0f));
-            float G = 1.0f / (1.0f + (alpha * std::tan(std::acos(NdotV))) * 0.5f);
-            float denominator = 4.0f * NdotV * NdotH;
-            if (denominator > 0.0f) weight = F * D * G / denominator;
-            else weight = Eigen::Vector3f::Zero();
-
-            if (metallic > 0.0f) weight = weight.cwiseProduct(albedo);
-        } else {
-            float cosThetaT;
-            float sinThetaT2 = eta*eta * (1.0f - VdotH*VdotH);
-            if (sinThetaT2 >= 1.0f) {
-                newDir = (2.0f * VdotH * H - V).normalized();
-                newOrigin = hitPoint + offsetNormal * EPSILON;
-                weight = Eigen::Vector3f::Ones();
+            newOrigin = hitPoint + offsetNormal * 1e-4f;
+            
+            float NdotL = offsetNormal.dot(newDir);
+            float NdotH = std::max(1e-5f, offsetNormal.dot(H));
+            if (NdotL > 0.0f) {
+                float G = smithG1(NdotV) * smithG1(NdotL);
+                weight = F * (G * VdotH / (NdotV * NdotH * pSpec));
             } else {
-                cosThetaT = std::sqrt(1.0f - sinThetaT2);
-                newDir = (eta * VdotH - cosThetaT) * H - eta * V;
-                newDir.normalize();
-                newOrigin = hitPoint - offsetNormal * EPSILON;
-
-                float D = alpha*alpha / (M_PI * std::pow(cosThetaM*cosThetaM*(alpha*alpha-1.0f)+1.0f, 2.0f));
-                float G = 1.0f / (1.0f + (alpha * std::tan(std::acos(NdotV))) * 0.5f);
-                float denom = NdotV * NdotH;
-                if (denom > 0.0f) {
-                    weight = (Eigen::Vector3f::Constant(1.0f) - F) * D * G * std::abs(VdotH) / denom;
-                    weight = weight.cwiseProduct(albedo);
-                } else {
-                    weight = Eigen::Vector3f::Zero();
+                weight = Eigen::Vector3f::Zero();
+            }
+        } else if (r_type < pSpec + pDiff) {
+            // --- Diffuse Cosine-Hemisphere Reflection ---
+            float r3 = nextFloat(rngState);
+            float r4 = nextFloat(rngState);
+            float phiD = 2.0f * M_PI * r3;
+            float rD = std::sqrt(r4);
+            PointType L_local(rD * std::cos(phiD), rD * std::sin(phiD), std::sqrt(std::max(0.0f, 1.0f - r4)));
+            newDir = (tangent * L_local.x() + bitangent * L_local.y() + offsetNormal * L_local.z()).normalized();
+            newOrigin = hitPoint + offsetNormal * 1e-4f;
+            
+            // Weight automatically normalizes implicitly due to Lambertian's NdotL / PI PDF exactly matching cosine hemisphere distribution.
+            weight = albedo.cwiseProduct(Eigen::Vector3f::Constant(1.0f) - F) / pDiff;
+        } else {
+            // --- Microfacet Refraction Transmission ---
+            float sinThetaT2 = eta * eta * (1.0f - VdotH * VdotH);
+            if (sinThetaT2 >= 1.0f) {
+                // TIR - Total Internal Reflection behaves as a mirror
+                newDir = (2.0f * VdotH * H - V).normalized();
+                newOrigin = hitPoint + offsetNormal * 1e-4f;
+                float NdotL = offsetNormal.dot(newDir);
+                if (NdotL > 0.0f) {
+                    float G = smithG1(NdotV) * smithG1(NdotL);
+                    float NdotH = std::max(1e-5f, offsetNormal.dot(H));
+                    weight = Eigen::Vector3f::Constant(1.0f) * (G * std::abs(VdotH) / (NdotV * NdotH * pTrans));
                 }
+            } else {
+                // Typical Dielectric Refraction crossing medium 
+                float cosThetaT = std::sqrt(1.0f - sinThetaT2);
+                newDir = ((eta * VdotH - cosThetaT) * H - eta * V).normalized();
+                newOrigin = hitPoint - offsetNormal * 1e-4f;
+                
+                float NdotL = std::max(1e-5f, offsetNormal.dot(-newDir)); 
+                float G = smithG1(NdotV) * smithG1(NdotL);
+                float NdotH = std::max(1e-5f, offsetNormal.dot(H));
+                
+                weight = albedo.cwiseProduct(Eigen::Vector3f::Constant(1.0f) - F) * (G * std::abs(VdotH) / (NdotV * NdotH * pTrans));
+                isTransmission = true;
             }
         }
+
+        // Suppress massive specular firefly singularities
         weight = weight.cwiseMin(4.0f);
         if (bounces > 2) weight /= continueProb;
+        
         Eigen::Vector3f incoming = traceRay(buffer, newOrigin, newDir, bounces+1, rngState, maxBounces, globalIllumination, useLod, asyncLoad);
 
-        if (!doReflect && transmission > 0.0f && !metallic) {
-            incoming = incoming.cwiseProduct((-mat.absorption * intDist).array().exp().matrix());
+        Eigen::Vector3f totalRadiance = emitted + weight.cwiseProduct(incoming);
+        
+        // Accurate real-distance Beer's Law for volumetrics/colored transmission
+        if (!entering) {
+            totalRadiance = totalRadiance.cwiseProduct((-mat.absorption * t).array().exp().matrix());
         }
 
-        return emitted + weight.cwiseProduct(incoming);
+        return totalRadiance;
     }
     
     void clearNode(OctreeNode* node) {
@@ -3180,9 +3239,8 @@ public:
     }
 
 #ifdef VULKAN_SUPPORT
-    frame renderFrameVulkan(const Camera& cam, int height, int width,
-                frame::colormap colorformat = frame::colormap::RGB, int samplesPerPixel = 2,
-                int maxBounces = 4, bool useLod = true) {
+    frame renderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB, int samplesPerPixel = 2,
+                    int maxBounces = 4, bool globalIllumination = false, bool useLod = true) {
         updateStreaming(cam);
         optimize();
         thread_local RenderBuffer tl_buffer;
@@ -3196,11 +3254,13 @@ public:
             gpuNodes.push_back({n.boundsMin, 0, n.boundsMax, 0, n.center, n.nodeSize, (uint32_t)n.isLeaf,
                 (uint32_t)n.isLoaded, n.childMask, n.firstPoint, n.pointCount, n.lodPoint, n.firstChild, 0});
         }
+        
         std::vector<GPUPBRRenderData> gpuPoints;
         gpuPoints.reserve(tl_buffer.points.size());
         for(const auto& p : tl_buffer.points) {
-            gpuPoints.push_back({p.position, p.size, p.color, p.material.emittance, p.material.roughness,
-                p.material.metallic, p.material.transmission, p.material.ior, p.boundsMin, 0, p.boundsMax, 0});
+            gpuPoints.push_back({p.position, p.size, p.color, p.material.emittance, 
+                                 p.material.roughness, p.material.metallic, p.material.transmission, p.material.ior,
+                                 p.boundsMin, 0, p.boundsMax, 0});
         }
 
         if(gpuNodes.empty()) gpuNodes.push_back(GPURenderNode{});
@@ -3215,7 +3275,7 @@ public:
             cam.origin, 0, cam.direction.normalized(), 0, cam.up.normalized(), 0, cam.right(), maxDistance_,
             skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
             width, height, samplesPerPixel, maxBounces, useLod ? 1 : 0, lodMinDistance_, invLodf,
-            0.1f, invFogRange, frameCounter_++, 0.0f
+            0.1f, invFogRange, frameCounter_++, globalIllumination ? 1.0f : 0.0f
         };
 
         size_t outSize = width * height * 3 * sizeof(float);
