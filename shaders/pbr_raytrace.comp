@@ -127,7 +127,7 @@ vec3 traceRay(Ray initialRay) {
     Ray currentRay = initialRay;
     float p = 1.0;
 
-    for (int bounce = 0;bounce < cam.maxBounces; ++bounce) {
+    for (int bounce = 0; bounce < cam.maxBounces; ++bounce) {
         int hitIndex = -1;
         float t = 0.0;
         vec3 normal = vec3(0.0);
@@ -277,38 +277,53 @@ int voxelTraverse(Ray ray, out int hitIndex, out float outT, out vec3 outNormal)
     if (nodes.length() == 0 || !rayBoxIntersect(ray, nodes[0].boundsMin, nodes[0].boundsMax, tMin, tMax)) return 0;
     float currentMaxDist = cam.maxDist;
     tMax = min(tMax, currentMaxDist);
-    uint stackNodes[512];
-    float stackTMin[512];
-    float stackTMax[512];
-    int stackPtr = 1;
-    stackNodes[0] = 0;
-    stackTMin[0] = max(0.0, tMin);
-    stackTMax[0] = tMax;
+
+    uint stackNodes[256];
+    float stackTMin[256];
+    float stackTMax[256];
+    int stackPtr = 0;
+    stackNodes[stackPtr] = 0;
+    stackTMin[stackPtr] = max(0.0, tMin);
+    stackTMax[stackPtr] = tMax;
+    stackPtr++;
+
     int hitFound = 0;
-    while(stackPtr > 0) {
-        if (stackPtr >= 512) break;
+    while (stackPtr > 0) {
+        if (stackPtr >= 256) break;
         stackPtr--;
         uint nodeIdx = stackNodes[stackPtr];
         float t0 = stackTMin[stackPtr];
         float t1 = stackTMax[stackPtr];
         if (t0 > currentMaxDist) continue;
-        if (nodeIdx >= nodes.length()) return 0;
+        if (nodeIdx >= nodes.length()) continue;
         GPURenderNode node = nodes[nodeIdx];
+        bool useLOD = false;
         if (cam.useLod == 1 && node.lodPoint != -1) {
-            float dist = distance(node.center, ray.origin);
-            if (node.isLoaded == 0 || (dist > cam.lodMinDist && (dist / node.nodeSize) > cam.invLodf)) {
-                float t;
-                vec3 n;
-                if (rayCubeIntersect(ray, points[node.lodPoint], t, n)) {
-                    if (t >= 0.0 && t <= currentMaxDist) {
-                        currentMaxDist = t;
-                        outT = t;
-                        outNormal = n;
-                        hitIndex = node.lodPoint;
-                        hitFound = 1;
-                    }
-                } if (node.isLoaded == 0 || node.isLeaf == 0) continue;
+            if (node.isLoaded == 0) {
+                useLOD = true;
+            } else if (node.isLeaf == 0) {
+                float dist = distance(node.center, ray.origin);
+                if (dist > cam.lodMinDist && (dist / node.nodeSize) > cam.invLodf) {
+                    useLOD = true;
+                }
             }
+        }
+        if (useLOD) {
+            float t;
+            vec3 n;
+            if (rayCubeIntersect(ray, points[node.lodPoint], t, n)) {
+                if (t >= 0.0 && t <= currentMaxDist) {
+                    currentMaxDist = t;
+                    outT = t;
+                    outNormal = n;
+                    hitIndex = node.lodPoint;
+                    hitFound = 1;
+                }
+            }
+            continue;            
+        }
+        if (node.isLoaded == 0) {
+            continue;
         }
         for (uint i = 0; i < node.pointCount; ++i) {
             float t;
@@ -325,25 +340,44 @@ int voxelTraverse(Ray ray, out int hitIndex, out float outT, out vec3 outNormal)
                 }
             }
         }
-        if (node.isLeaf == 1 || node.isLoaded == 0) continue;
+        if (node.isLeaf == 1) continue;
         vec3 ttt = (node.center - ray.origin) * ray.invDir;
         int currIdx = ((t0 >= ttt.x) ? 1 : 0) | ((t0 >= ttt.y) ? 2 : 0) | ((t0 >= ttt.z) ? 4 : 0);
         int raySignMask = ray.signMask.x | (ray.signMask.y << 1) | (ray.signMask.z << 2);
+        uint childNodes[8];
+        float childTMin[8];
+        float childTMax[8];
+        int childCount = 0;
+        float next_tx;
+        float next_ty;
+        float next_tz;
         while(t0 < t1 && t0 <= currentMaxDist) {
-            vec3 next_t = vec3( (currIdx & 1) != 0 ? t1 : ttt.x, (currIdx & 2) != 0 ? t1 : ttt.y, (currIdx & 4) != 0 ? t1 : ttt.z );
-            float tNext = min(min(next_t.x, next_t.y), next_t.z);
-            if (tNext < 0.0004) tNext = 0.4;
+            next_tx = (currIdx & 1) != 0 ? t1 : ttt.x;
+            next_ty = (currIdx & 2) != 0 ? t1 : ttt.y;
+            next_tz = (currIdx & 4) != 0 ? t1 : ttt.z;
+            float tNext = min(min(next_tx, next_ty), next_tz);
             int physIdx = currIdx ^ raySignMask;
-            if ((node.childMask & (1 << physIdx)) != 0 && stackPtr < 512) {
+            if ((node.childMask & (1 << physIdx)) != 0) {
                 uint mask = node.childMask & ((1 << physIdx) - 1);
                 uint childOffset = bitCount(mask);
-                stackNodes[stackPtr] = node.firstChild + childOffset;
-                stackTMin[stackPtr] = t0;
-                stackTMax[stackPtr] = tNext;
-                stackPtr++;
+                if(childCount < 8) {
+                    childNodes[childCount] = node.firstChild + childOffset;
+                    childTMin[childCount] = t0;
+                    childTMax[childCount] = tNext;
+                    childCount++;
+                }
             }
             t0 = tNext;
-            currIdx |= ((next_t.x <= tNext) ? 1 : 0) | ((next_t.y <= tNext) ? 2 : 0) | ((next_t.z <= tNext) ? 4 : 0);
+            currIdx |= ((next_tx <= tNext) ? 1 : 0) | ((next_ty <= tNext) ? 2 : 0) | ((next_tz <= tNext) ? 4 : 0);
         }
-    } return hitFound;
+        if (stackPtr + childCount <= 256) {
+            for (int i = childCount - 1; i >= 0; --i) {
+                stackNodes[stackPtr] = childNodes[i];
+                stackTMin[stackPtr] = childTMin[i];
+                stackTMax[stackPtr] = childTMax[i];
+                stackPtr++;
+            }
+        }
+    }
+    return hitFound;
 }

@@ -133,9 +133,9 @@ int main() {
     const float fps = 30.0f;
     const float durationPerSegment = 1.0f;
     const int framesPerSegment = static_cast<int>(fps * durationPerSegment);
-    const int samples = 10;
+    const int samples = 1000;
     const int video_samples = 40;
-    const int bounces = 5;
+    const int bounces = 20;
 
     struct View {
         std::string name;
