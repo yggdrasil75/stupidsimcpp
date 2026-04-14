@@ -162,8 +162,11 @@ int main() {
         cam.up = view.up;
         
         frame out = octree.fastRenderFrame(cam, height, width, frame::colormap::RGB);
-        
         std::string filename = "output/fast/render_" + view.name + ".bmp";
+        BMPWriter::saveBMP(filename, out);
+        
+        out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
+        filename = "output/fast/vulkanrender_" + view.name + ".bmp";
         BMPWriter::saveBMP(filename, out);
     }
     

@@ -3421,7 +3421,7 @@ public:
         GPUCameraData camData = {
             cam.origin, lodMinDistance_, cam.direction.normalized(), invLodf, cam.up.normalized(), 0.1f, cam.right(), maxDistance_,
             skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
-            width, height, 1, 1, 1, invFogRange, frameCounter_++, 0.0f
+            width, height, 1, 1, invFogRange, frameCounter_++, 0, 0, 0, 0, 1, 0
         };
 
         size_t outSize = width * height * 3 * sizeof(float);
