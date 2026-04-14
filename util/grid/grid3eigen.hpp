@@ -692,11 +692,16 @@ private:
         float tanfovy;
         int width;
         int height;
-        int samples;
         int maxBounces;
         int useLod;
         float invFogRange;
         uint32_t frameCount;
+        int skyWidth;
+        int skyHeight;
+        int currentSampleOffset;
+        int dispatchSamples;
+        int globalIllumination;
+        int padding;
     };
     
     struct VulkanContext {
@@ -725,16 +730,19 @@ private:
         VkBuffer uboBuffer = VK_NULL_HANDLE;
         VkBuffer fastPointBuffer = VK_NULL_HANDLE;
         VkBuffer pbrPointBuffer = VK_NULL_HANDLE;
+        VkBuffer skyboxBuffer = VK_NULL_HANDLE;
         VkDeviceMemory nodeMem = VK_NULL_HANDLE;
         VkDeviceMemory outMem = VK_NULL_HANDLE;
         VkDeviceMemory uboMem = VK_NULL_HANDLE;
         VkDeviceMemory fastPointMem = VK_NULL_HANDLE;
         VkDeviceMemory pbrPointMem = VK_NULL_HANDLE;
+        VkDeviceMemory skyboxMem = VK_NULL_HANDLE;
 
         size_t currentNodesCap = 0;
         size_t currentOutCap = 0;
         size_t currentFastPointsCap = 0;
         size_t currentPBRPointsCap = 0;
+        size_t currentSkyboxCap = 0;
 
         bool initialized = false;
 
@@ -831,7 +839,7 @@ private:
             vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
 
             VkDescriptorPoolSize poolSizes[] = { 
-                {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 6},
+                {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8},
                 {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2}
             };
             VkDescriptorPoolCreateInfo poolCreateInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -840,15 +848,15 @@ private:
             poolCreateInfo.maxSets = 2;
             vkCreateDescriptorPool(device, &poolCreateInfo, nullptr, &descriptorPool);
 
-            VkDescriptorSetLayoutBinding bindings[4] = {};
-            for(int i=0; i<4; i++) {
+            VkDescriptorSetLayoutBinding bindings[5] = {};
+            for(int i=0; i<5; i++) {
                 bindings[i].binding = i;
                 bindings[i].descriptorType = i==3 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
                 bindings[i].descriptorCount = 1;
                 bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
             }
             VkDescriptorSetLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-            layoutInfo.bindingCount = 4;
+            layoutInfo.bindingCount = 5;
             layoutInfo.pBindings = bindings;
 
             vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &fastDescLayout);
@@ -926,6 +934,28 @@ private:
             vkUnmapMemory(device, uboMem);
         }
 
+        void updateCameraData(const GPUCameraData& camData) {
+            void* data;
+            vkMapMemory(device, uboMem, 0, sizeof(GPUCameraData), 0, &data);
+            memcpy(data, &camData, sizeof(GPUCameraData));
+            vkUnmapMemory(device, uboMem);
+        }
+
+        void updateSkyboxBuffer(const std::vector<Eigen::Vector4f>& skyData) {
+            size_t size = std::max((size_t)256, skyData.size() * sizeof(Eigen::Vector4f));
+            if(size > currentSkyboxCap) {
+                if(skyboxBuffer) { vkDestroyBuffer(device, skyboxBuffer, nullptr); vkFreeMemory(device, skyboxMem, nullptr); }
+                createBuffer(size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, skyboxBuffer, skyboxMem);
+                currentSkyboxCap = size;
+            }
+            void* data;
+            if(!skyData.empty()) {
+                vkMapMemory(device, skyboxMem, 0, size, 0, &data);
+                memcpy(data, skyData.data(), skyData.size() * sizeof(Eigen::Vector4f));
+                vkUnmapMemory(device, skyboxMem);
+            }
+        }
+
         void updateFastBuffers(const std::vector<GPUFastRenderData>& points) {
             size_t pointSize = std::max((size_t)256, points.size() * sizeof(GPUFastRenderData));
             if(pointSize > currentFastPointsCap) {
@@ -941,9 +971,15 @@ private:
                 vkUnmapMemory(device, fastPointMem);
             }
 
-            VkDescriptorBufferInfo bInfos[4] = { {nodeBuffer, 0, VK_WHOLE_SIZE}, {fastPointBuffer, 0, VK_WHOLE_SIZE}, {outBuffer, 0, VK_WHOLE_SIZE}, {uboBuffer, 0, VK_WHOLE_SIZE} };
-            VkWriteDescriptorSet writes[4] = {};
-            for(int i=0; i<4; i++) {
+            VkDescriptorBufferInfo bInfos[5] = { 
+                {nodeBuffer, 0, VK_WHOLE_SIZE}, 
+                {fastPointBuffer, 0, VK_WHOLE_SIZE}, 
+                {outBuffer, 0, VK_WHOLE_SIZE}, 
+                {uboBuffer, 0, VK_WHOLE_SIZE},
+                {skyboxBuffer, 0, VK_WHOLE_SIZE}
+            };
+            VkWriteDescriptorSet writes[5] = {};
+            for(int i=0; i<5; i++) {
                 writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
                 writes[i].dstSet = fastDescSet;
                 writes[i].dstBinding = i;
@@ -951,7 +987,7 @@ private:
                 writes[i].descriptorType = i==3 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
                 writes[i].pBufferInfo = &bInfos[i];
             }
-            vkUpdateDescriptorSets(device, 4, writes, 0, nullptr);
+            vkUpdateDescriptorSets(device, 5, writes, 0, nullptr);
         }
 
         void updatePBRBuffers(const std::vector<GPUPBRRenderData>& points) {
@@ -972,9 +1008,15 @@ private:
                 vkUnmapMemory(device, pbrPointMem);
             }
 
-            VkDescriptorBufferInfo bInfos[4] = { {nodeBuffer, 0, VK_WHOLE_SIZE}, {pbrPointBuffer, 0, VK_WHOLE_SIZE}, {outBuffer, 0, VK_WHOLE_SIZE}, {uboBuffer, 0, VK_WHOLE_SIZE} };
-            VkWriteDescriptorSet writes[4] = {};
-            for(int i=0; i<4; i++) {
+            VkDescriptorBufferInfo bInfos[5] = { 
+                {nodeBuffer, 0, VK_WHOLE_SIZE}, 
+                {pbrPointBuffer, 0, VK_WHOLE_SIZE}, 
+                {outBuffer, 0, VK_WHOLE_SIZE}, 
+                {uboBuffer, 0, VK_WHOLE_SIZE},
+                {skyboxBuffer, 0, VK_WHOLE_SIZE}
+            };
+            VkWriteDescriptorSet writes[5] = {};
+            for(int i=0; i<5; i++) {
                 writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
                 writes[i].dstSet = pbrDescSet;
                 writes[i].dstBinding = i;
@@ -982,7 +1024,7 @@ private:
                 writes[i].descriptorType = i==3 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
                 writes[i].pBufferInfo = &bInfos[i];
             }
-            vkUpdateDescriptorSets(device, 4, writes, 0, nullptr);
+            vkUpdateDescriptorSets(device, 5, writes, 0, nullptr);
         }
     } vkCtx;
 #endif
@@ -3268,36 +3310,69 @@ public:
         float tanHalfFov = tan(fovRad * 0.5f);
         float invFogRange = 1.0f / std::max(0.001f, maxDistance_ - lodMinDistance_);
 
+        size_t skyW = skybox_.skybox.getWidth();
+        size_t skyH = skybox_.skybox.getHeight();
+        if (skyW == 0 || skyH == 0) { skyW = 1; skyH = 1; }
+        std::vector<Eigen::Vector4f> skyData(skyW * skyH, Eigen::Vector4f(0,0,0,1));
+        if (skybox_.skybox.getWidth() > 0) {
+            for (size_t y = 0; y < skyH; ++y) {
+                float v = (static_cast<float>(y) + 0.5f) / skyH;
+                for (size_t x = 0; x < skyW; ++x) {
+                    float u = (static_cast<float>(x) + 0.5f) / skyW;
+                    PointType skyDir = skybox_.uvToDir(u, v);
+                    Eigen::Vector3f color = skybox_.sampleVector(skyDir);
+                    skyData[y * skyW + x] = Eigen::Vector4f(color.x(), color.y(), color.z(), 1.0f);
+                }
+            }
+        }
+
         GPUCameraData camData = {
             cam.origin, lodMinDistance_, cam.direction.normalized(), invLodf, cam.up.normalized(), 0.1f, cam.right(), maxDistance_,
             skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
-            width, height, samplesPerPixel, maxBounces, useLod ? 1 : 0, 
-            invFogRange, frameCounter_++
+            width, height, maxBounces, useLod ? 1 : 0, invFogRange, frameCounter_,
+            (int)skyW, (int)skyH, 0, 0, globalIllumination ? 1 : 0, 0
         };
 
         size_t outSize = width * height * 3 * sizeof(float);
         vkCtx.updateCommonBuffers(gpuNodes, outSize, camData);
+        vkCtx.updateSkyboxBuffer(skyData);
         vkCtx.updatePBRBuffers(gpuPoints);
 
-        VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-        vkBeginCommandBuffer(vkCtx.commandBuffer, &beginInfo);
-        vkCmdBindPipeline(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.pbrPipeline);
-        vkCmdBindDescriptorSets(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.pbrPipelineLayout, 0, 1, &vkCtx.pbrDescSet, 0, nullptr);
+        // Tile submissions over sample offsets to avoid TDR and accumulate progressively
+        int maxSamplesPerDispatch = 4;
+        int currentSampleOffset = 0;
         
-        vkCmdDispatch(vkCtx.commandBuffer, (width + 7) / 8, (height + 7) / 8, 1);
-        vkEndCommandBuffer(vkCtx.commandBuffer);
+        while (currentSampleOffset < samplesPerPixel) {
+            int dispatchSamples = std::min(maxSamplesPerDispatch, samplesPerPixel - currentSampleOffset);
+            camData.currentSampleOffset = currentSampleOffset;
+            camData.dispatchSamples = dispatchSamples;
+            
+            vkCtx.updateCameraData(camData);
 
-        VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-        submitInfo.commandBufferCount = 1;
-        submitInfo.pCommandBuffers = &vkCtx.commandBuffer;
+            VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+            vkBeginCommandBuffer(vkCtx.commandBuffer, &beginInfo);
+            vkCmdBindPipeline(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.pbrPipeline);
+            vkCmdBindDescriptorSets(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.pbrPipelineLayout, 0, 1, &vkCtx.pbrDescSet, 0, nullptr);
+            
+            vkCmdDispatch(vkCtx.commandBuffer, (width + 7) / 8, (height + 7) / 8, 1);
+            vkEndCommandBuffer(vkCtx.commandBuffer);
 
-        VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-        VkFence fence;
-        vkCreateFence(vkCtx.device, &fenceInfo, nullptr, &fence);
+            VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+            submitInfo.commandBufferCount = 1;
+            submitInfo.pCommandBuffers = &vkCtx.commandBuffer;
 
-        vkQueueSubmit(vkCtx.queue, 1, &submitInfo, fence);
-        vkWaitForFences(vkCtx.device, 1, &fence, VK_TRUE, UINT64_MAX);
-        vkDestroyFence(vkCtx.device, fence, nullptr);
+            VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+            VkFence fence;
+            vkCreateFence(vkCtx.device, &fenceInfo, nullptr, &fence);
+
+            vkQueueSubmit(vkCtx.queue, 1, &submitInfo, fence);
+            vkWaitForFences(vkCtx.device, 1, &fence, VK_TRUE, UINT64_MAX);
+            vkDestroyFence(vkCtx.device, fence, nullptr);
+            
+            currentSampleOffset += dispatchSamples;
+        }
+
+        frameCounter_++;
 
         frame outFrame(width, height, colorformat);
         std::vector<float> colorBuffer(width * height * 3);
@@ -3305,6 +3380,11 @@ public:
         vkMapMemory(vkCtx.device, vkCtx.outMem, 0, outSize, 0, &mappedData);
         memcpy(colorBuffer.data(), mappedData, outSize);
         vkUnmapMemory(vkCtx.device, vkCtx.outMem);
+
+        for (size_t i = 0; i < colorBuffer.size(); ++i) {
+            colorBuffer[i] /= samplesPerPixel;
+            colorBuffer[i] = std::clamp(colorBuffer[i], 0.0f, 1.0f);
+        }
 
         outFrame.setData(colorBuffer, frame::colormap::RGB);
         return outFrame;
