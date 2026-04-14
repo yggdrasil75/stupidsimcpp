@@ -669,10 +669,12 @@ private:
         float roughness;
         Eigen::Vector3f boundsMax;
         float metallic;
+        Eigen::Vector3f absorption;
         float transmission;
         float ior;
         float padding1;
         float padding2;
+        float padding3;
     };
 
     struct alignas(16) GPUCameraData {
@@ -3255,7 +3257,7 @@ public:
         gpuPoints.reserve(tl_buffer.points.size());
         for(const auto& p : tl_buffer.points) {
             gpuPoints.push_back({p.position, p.size, p.color, p.material.emittance, p.boundsMin,
-                                 p.material.roughness, p.boundsMax, p.material.metallic, p.material.transmission, p.material.ior});
+                                 p.material.roughness, p.boundsMax, p.material.metallic, p.material.absorption, p.material.transmission, p.material.ior});
         }
 
         if(gpuNodes.empty()) gpuNodes.push_back(GPURenderNode{});
