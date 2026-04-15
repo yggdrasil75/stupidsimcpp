@@ -124,13 +124,13 @@ int main() {
     octree.printStats();
 
     // 3. Setup rendering loop
-    int width = 1024;
-    int height = 1024;
+    int width = 512;
+    int height = 512;
     
     const float fps = 30.0f;
     const float durationPerSegment = 1.0f;
     const int framesPerSegment = static_cast<int>(fps * durationPerSegment);
-    const int samples = 50;
+    const int samples = 10;
     const int video_samples = 40;
     const int bounces = 5;
 
@@ -246,5 +246,6 @@ int main() {
     std::cout << "\nRender complete!" << std::endl;
 
     std::cout << "\nAll renders complete!" << std::endl;
+    FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
     return 0;
 }

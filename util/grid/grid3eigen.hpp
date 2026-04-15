@@ -57,6 +57,7 @@ static constexpr uint8_t DIRTY_BIT = 1 << 2;
 static constexpr uint8_t LOADQUEUED = 1 << 3;
 static constexpr uint8_t SAVEDQUEUED = 1 << 4;
 static constexpr uint8_t KEEPLOADED_BIT = 1 << 5;
+static constexpr uint8_t BIGNODE_BIT = 1 << 6;
 
 template<typename> struct is_shared_ptr : std::false_type {};
 template<typename T> struct is_shared_ptr<std::shared_ptr<T>> : std::true_type {};
@@ -174,7 +175,7 @@ public:
     struct OctreeNode {
         BoundingBox bounds;
         std::vector<std::shared_ptr<NodeData>> points;
-        std::array<std::unique_ptr<OctreeNode>, 8> children;
+        std::vector<std::unique_ptr<OctreeNode>> children;
         PointType center;
         float nodeSize;
         std::atomic<uint8_t> flags;
@@ -182,22 +183,24 @@ public:
         mutable std::shared_ptr<NodeData> lodData;
         mutable std::shared_mutex nodeMutex;
 
-        OctreeNode(const PointType& min, const PointType& max) : bounds(min,max), flags(0), lodData(nullptr) {
+        OctreeNode(const PointType& min, const PointType& max, bool bigNode = false) : bounds(min,max), flags(0), lodData(nullptr) {
             setLeaf(true);
             setLoaded(true);
             setDirty(true);
             setLoadQueued(false);
             setSaveQueued(false);
             setKeepLoaded(false);
-            for (std::unique_ptr<OctreeNode>& child : children) {
+            setBigNode(bigNode);
+            children.resize(isBigNode() ? 512 : 8);
+            for (auto& child : children) {
                 child = nullptr;
             }
-            center = (bounds.first + bounds.second) * 0.5;
+            center = (bounds.first + bounds.second) * 0.5f;
             nodeSize = (bounds.second - bounds.first).norm();
         }
 
         std::unique_ptr<OctreeNode> clone() const {
-            auto newNode = std::make_unique<OctreeNode>(bounds.first, bounds.second);
+            auto newNode = std::make_unique<OctreeNode>(bounds.first, bounds.second, isBigNode());
             newNode->flags.store(flags.load(std::memory_order_relaxed), std::memory_order_relaxed);
             
             newNode->points = points; 
@@ -206,7 +209,7 @@ public:
             newNode->lodData = lodData;
             
             if (!isLeaf()) {
-                for (int i = 0; i < 8; ++i) {
+                for (size_t i = 0; i < children.size(); ++i) {
                     if (children[i]) {
                         newNode->children[i] = children[i]->clone();
                     }
@@ -234,6 +237,10 @@ public:
             return flags.load(std::memory_order_relaxed) & KEEPLOADED_BIT;
         }
 
+        bool isBigNode() const {
+            return flags.load(std::memory_order_relaxed) & BIGNODE_BIT;
+        }
+
         void setLeaf(bool v) {
             if (v) flags.fetch_or(LEAF_BIT, std::memory_order_relaxed);
             else flags.fetch_and(~LEAF_BIT, std::memory_order_relaxed);
@@ -259,6 +266,11 @@ public:
             else flags.fetch_and(~KEEPLOADED_BIT, std::memory_order_relaxed);
         }
 
+        void setBigNode(bool v) {
+            if (v) flags.fetch_or(BIGNODE_BIT, std::memory_order_relaxed);
+            else flags.fetch_and(~BIGNODE_BIT, std::memory_order_relaxed);
+        }
+
         bool contains(const PointType& point) const {
             return (point[0] >= bounds.first[0] && point[0] <= bounds.second[0] &&
                     point[1] >= bounds.first[1] && point[1] <= bounds.second[1] &&
@@ -268,7 +280,7 @@ public:
         bool isEmpty() const {
             if (!points.empty()) return false;
             if (!isLeaf()) {
-                for (int i = 0; i < 8; ++i) {
+                for (size_t i = 0; i < children.size(); ++i) {
                     if (children[i] && !children[i]->isEmpty()) return false;
                 }
             }
@@ -611,7 +623,8 @@ private:
         float nodeSize;
         bool isLeaf;
         bool isLoaded;
-        uint8_t childMask;
+        bool isBigNode;
+        uint32_t childMask[16];
         
         uint32_t firstPoint;
         uint32_t pointCount;
@@ -641,12 +654,13 @@ private:
         float nodeSize;
         uint32_t isLeaf;
         uint32_t isLoaded;
-        uint32_t childMask;
+        uint32_t isBigNode;
         uint32_t firstPoint;
         uint32_t pointCount;
         int32_t  lodPoint;
         uint32_t firstChild;
         uint32_t padding3;
+        uint32_t childMask[16];
     };
 
     struct alignas(16) GPUFastRenderData {
@@ -1091,25 +1105,24 @@ private:
             buffer.points.push_back(ld);
         }
         
-        rnode.childMask = 0;
+        memset(rnode.childMask, 0, sizeof(rnode.childMask));
         rnode.firstChild = 0;
         
         if (!node->isLeaf() && isLoaded) {
-            uint8_t mask = 0;
             int childCount = 0;
-            for (int i = 0; i < 8; ++i) {
+            size_t totalChildren = node->children.size();
+            for (size_t i = 0; i < totalChildren; ++i) {
                 if (node->children[i]) {
-                    mask |= (1 << i);
+                    rnode.childMask[i / 32] |= (1u << (i % 32));
                     childCount++;
                 }
             }
-            rnode.childMask = mask;
             if (childCount > 0) {
                 rnode.firstChild = static_cast<uint32_t>(buffer.nodes.size());
                 buffer.nodes.resize(buffer.nodes.size() + childCount);
                 int cidx = 0;
-                for (int i = 0; i < 8; ++i) {
-                    if (mask & (1 << i)) {
+                for (size_t i = 0; i < totalChildren; ++i) {
+                    if (rnode.childMask[i / 32] & (1u << (i % 32))) {
                         buildRenderNodeAt(node->children[i].get(), buffer, rnode.firstChild + cidx);
                         cidx++;
                     }
@@ -2044,30 +2057,90 @@ private:
         }
     }
 
-    void optimizeRecursive(OctreeNode* node) {
-        if (!node) return;
-        if (!node->isLoaded()) return; 
+    bool squashTo8(OctreeNode* node) {
+        if (node->isBigNode() || !node->isLoaded() || node->isLeaf()) return false;
 
-        if (node->isLeaf()) {
-            return;
+        std::shared_lock<std::shared_mutex> readLock(node->nodeMutex);
+        for (int i = 0; i < 8; ++i) {
+            auto& b = node->children[i];
+            if (b) {
+                std::shared_lock<std::shared_mutex> lockB(b->nodeMutex);
+                if (!b->isLoaded() || b->isBigNode()) return false;
+                
+                for (int j = 0; j < 8; ++j) {
+                    auto& c = b->children[j];
+                    if (c) {
+                        std::shared_lock<std::shared_mutex> lockC(c->nodeMutex);
+                        if (!c->isLoaded() || c->isBigNode()) return false;
+                    }
+                }
+            }
         }
+        readLock.unlock();
 
-        std::array<OctreeNode*, 8> safeChildren = {nullptr};
-        {
-            std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
-            for (int i = 0; i < 8; ++i) safeChildren[i] = node->children[i].get();
-        }
+        std::unique_lock<std::shared_mutex> writeLock(node->nodeMutex);
+        std::vector<std::unique_ptr<OctreeNode>> newChildren(512);
+        std::vector<std::shared_ptr<NodeData>> rescuedPoints;
 
         for (int i = 0; i < 8; ++i) {
-            if (safeChildren[i]) {
-                optimizeRecursive(safeChildren[i]);
+            auto& b = node->children[i];
+            if (!b) continue;
+            
+            rescuedPoints.insert(rescuedPoints.end(), b->points.begin(), b->points.end());
+
+            for (int j = 0; j < 8; ++j) {
+                auto& c = b->children[j];
+                if (!c) continue;
+                
+                rescuedPoints.insert(rescuedPoints.end(), c->points.begin(), c->points.end());
+
+                for (int k = 0; k < 8; ++k) {
+                    auto& d = c->children[k];
+                    if (!d) continue;
+
+                    int cx = (i % 2) * 4 + (j % 2) * 2 + (k % 2);
+                    int cy = ((i / 2) % 2) * 4 + ((j / 2) % 2) * 2 + ((k / 2) % 2);
+                    int cz = (i / 4) * 4 + (j / 4) * 2 + (k / 4);
+                    int idx8 = cx + cy * 8 + cz * 64;
+
+                    newChildren[idx8] = std::move(d);
+                }
             }
+        }
+
+        if (!rescuedPoints.empty()) {
+            node->points.insert(node->points.end(), rescuedPoints.begin(), rescuedPoints.end());
+        }
+
+        node->children = std::move(newChildren);
+        node->setBigNode(true);
+        node->setDirty(true);
+        node->lodData = nullptr; 
+        
+        return true;
+    }
+
+    void optimizeRecursive(OctreeNode* node) {
+        if (!node) return;
+        if (!node->isLoaded() || node->isLeaf()) return; 
+
+        squashTo8(node); 
+
+        size_t totalChildren = node->children.size();
+        std::vector<OctreeNode*> safeChildren(totalChildren, nullptr);
+        {
+            std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
+            for (size_t i = 0; i < totalChildren; ++i) safeChildren[i] = node->children[i].get();
+        }
+
+        for (size_t i = 0; i < totalChildren; ++i) {
+            if (safeChildren[i]) optimizeRecursive(safeChildren[i]);
         }
 
         bool childrenAreLeaves = true;
         {
             std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
-            for (int i = 0; i < 8; ++i) {
+            for (size_t i = 0; i < totalChildren; ++i) {
                 if (node->children[i] && !node->children[i]->isLeaf()) {
                     childrenAreLeaves = false;
                     break;
@@ -2078,7 +2151,7 @@ private:
         if (childrenAreLeaves) {
             std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
             bool stillLeaves = true;
-            for (int i = 0; i < 8; ++i) {
+            for (size_t i = 0; i < totalChildren; ++i) {
                 if (node->children[i] && !node->children[i]->isLeaf()) {
                     stillLeaves = false;
                     break;
@@ -2087,28 +2160,23 @@ private:
             
             if (stillLeaves) {
                 std::vector<std::shared_ptr<NodeData>> allPoints = node->points;
-                for (int i = 0; i < 8; ++i) {
+                for (size_t i = 0; i < totalChildren; ++i) {
                     if (node->children[i]) {
                         std::shared_lock<std::shared_mutex> childLock(node->children[i]->nodeMutex);
                         allPoints.insert(allPoints.end(), node->children[i]->points.begin(), node->children[i]->points.end());
                     }
                 }
 
-                std::sort(allPoints.begin(), allPoints.end(), [](const std::shared_ptr<NodeData>& a, const std::shared_ptr<NodeData>& b) {
-                    return a.get() < b.get();
-                });
-                allPoints.erase(std::unique(allPoints.begin(), allPoints.end(), [](const std::shared_ptr<NodeData>& a, const std::shared_ptr<NodeData>& b) {
-                    return a.get() == b.get();
-                }), allPoints.end());
+                std::sort(allPoints.begin(), allPoints.end());
+                allPoints.erase(std::unique(allPoints.begin(), allPoints.end()), allPoints.end());
 
                 if (allPoints.size() <= maxPointsPerNode) {
                     node->points = std::move(allPoints);
-                    for (int i = 0; i < 8; ++i) {
+                    for (size_t i = 0; i < totalChildren; ++i) {
                         node->children[i].reset(nullptr);
                     }
                     node->setLeaf(true);
                     node->setDirty(true);
-                    
                     node->lodData = nullptr;
                 }
             }
@@ -2296,28 +2364,76 @@ private:
 
         if (node->isLeaf()) return hitSomething;
 
-        Eigen::Vector3f ttt = (node->center - ray.origin).cwiseProduct(ray.invDir);
-        int currIdx = ((tMin >= ttt.x()) ? 1 : 0) | ((tMin >= ttt.y()) ? 2 : 0) | ((tMin >= ttt.z()) ? 4 : 0);
+        if (!node->isBigNode()) {
+            float t0 = tMin;
+            float t1 = tMax;
 
-        while(tMin < tMax && tMin <= maxDist) {
-            Eigen::Vector3f next_t;
-            next_t[0] = (currIdx & 1) ? tMax : ttt[0];
-            next_t[1] = (currIdx & 2) ? tMax : ttt[1];
-            next_t[2] = (currIdx & 4) ? tMax : ttt[2];
+            Eigen::Vector3f ttt = (node->center - ray.origin).cwiseProduct(ray.invDir);
+            int currIdx = ((t0 >= ttt.x()) ? 1 : 0) | ((t0 >= ttt.y()) ? 2 : 0) | ((t0 >= ttt.z()) ? 4 : 0);
 
-            float tNext = next_t.minCoeff();
-            int physIdx = currIdx ^ ray.signMask;
+            while(t0 < t1 && t0 <= maxDist) {
+                Eigen::Vector3f next_t;
+                next_t[0] = (currIdx & 1) ? t1 : ttt[0];
+                next_t[1] = (currIdx & 2) ? t1 : ttt[1];
+                next_t[2] = (currIdx & 4) ? t1 : ttt[2];
 
-            if (node->children[physIdx]) {
-                if (raycastRecursive(node->children[physIdx].get(), ray, tMin, tNext, maxDist, hit, ignoreNode)) {
-                    hitSomething = true;
+                float tNext = next_t.minCoeff();
+                int physIdx = currIdx ^ ray.signMask;
+
+                if (node->children[physIdx]) {
+                    if (raycastRecursive(node->children[physIdx].get(), ray, t0, tNext, maxDist, hit, ignoreNode)) {
+                        hitSomething = true;
+                    }
                 }
-            }
 
-            tMin = tNext;
-            currIdx |= ((next_t[0] <= tNext) ? 1 : 0) | ((next_t[1] <= tNext) ? 2 : 0) | ((next_t[2] <= tNext) ? 4 : 0);
+                t0 = tNext;
+                currIdx |= ((next_t[0] <= tNext) ? 1 : 0) | ((next_t[1] <= tNext) ? 2 : 0) | ((next_t[2] <= tNext) ? 4 : 0);
+            }
+        } else {
+            int N = 8;
+            PointType cellSize = (node->bounds.second - node->bounds.first) / static_cast<float>(N);
+            
+            PointType enterPoint = ray.origin + ray.dir * std::max(0.0f, tMin);
+            enterPoint = enterPoint.cwiseMax(node->bounds.first).cwiseMin(node->bounds.second);
+            
+            int cx = std::clamp(static_cast<int>((enterPoint.x() - node->bounds.first.x()) / cellSize.x()), 0, N - 1);
+            int cy = std::clamp(static_cast<int>((enterPoint.y() - node->bounds.first.y()) / cellSize.y()), 0, N - 1);
+            int cz = std::clamp(static_cast<int>((enterPoint.z() - node->bounds.first.z()) / cellSize.z()), 0, N - 1);
+            
+            PointType tDelta = (cellSize.cwiseProduct(ray.invDir)).cwiseAbs();
+            PointType tNext;
+            int stepX = ray.dir.x() > 0 ? 1 : (ray.dir.x() < 0 ? -1 : 1);
+            int stepY = ray.dir.y() > 0 ? 1 : (ray.dir.y() < 0 ? -1 : 1);
+            int stepZ = ray.dir.z() > 0 ? 1 : (ray.dir.z() < 0 ? -1 : 1);
+
+            tNext.x() = (node->bounds.first.x() + (stepX > 0 ? cx + 1 : cx) * cellSize.x() - ray.origin.x()) * ray.invDir.x();
+            tNext.y() = (node->bounds.first.y() + (stepY > 0 ? cy + 1 : cy) * cellSize.y() - ray.origin.y()) * ray.invDir.y();
+            tNext.z() = (node->bounds.first.z() + (stepZ > 0 ? cz + 1 : cz) * cellSize.z() - ray.origin.z()) * ray.invDir.z();
+
+            float currentT = tMin;
+
+            for (int stepIdx = 0; stepIdx < 3 * N; ++stepIdx) {
+                if (cx < 0 || cx >= N || cy < 0 || cy >= N || cz < 0 || cz >= N) break;
+
+                int childIdx = cx + cy * N + cz * N * N;
+                float nextT = std::min({tNext.x(), tNext.y(), tNext.z()});
+
+                if (node->children[childIdx]) {
+                    if (raycastRecursive(node->children[childIdx].get(), ray, currentT, std::min(nextT, tMax), maxDist, hit, ignoreNode)) {
+                        hitSomething = true;
+                    }
+                }
+
+                if (tNext.x() < tNext.y()) {
+                    if (tNext.x() < tNext.z()) { currentT = tNext.x(); cx += stepX; tNext.x() += tDelta.x(); } 
+                    else { currentT = tNext.z(); cz += stepZ; tNext.z() += tDelta.z(); }
+                } else {
+                    if (tNext.y() < tNext.z()) { currentT = tNext.y(); cy += stepY; tNext.y() += tDelta.y(); } 
+                    else { currentT = tNext.z(); cz += stepZ; tNext.z() += tDelta.z(); }
+                }
+                if (currentT > tMax || currentT > maxDist) break;
+            }
         }
-        
         return hitSomething;
     }
 
@@ -2952,8 +3068,23 @@ public:
         std::vector<GPURenderNode> gpuNodes;
         gpuNodes.reserve(tl_buffer.nodes.size());
         for(const auto& n : tl_buffer.nodes) {
-            gpuNodes.push_back({n.boundsMin, 0, n.boundsMax, 0, n.center, n.nodeSize, (uint32_t)n.isLeaf,
-                (uint32_t)n.isLoaded, n.childMask, n.firstPoint, n.pointCount, n.lodPoint, n.firstChild, 0});
+            GPURenderNode gpu_node;
+            gpu_node.boundsMin = n.boundsMin;
+            gpu_node.padding1 = 0;
+            gpu_node.boundsMax = n.boundsMax;
+            gpu_node.padding2 = 0;
+            gpu_node.center = n.center;
+            gpu_node.nodeSize = n.nodeSize;
+            gpu_node.isLeaf = static_cast<uint32_t>(n.isLeaf);
+            gpu_node.isLoaded = static_cast<uint32_t>(n.isLoaded);
+            gpu_node.isBigNode = static_cast<uint32_t>(n.isBigNode);
+            gpu_node.firstPoint = n.firstPoint;
+            gpu_node.pointCount = n.pointCount;
+            gpu_node.lodPoint = n.lodPoint;
+            gpu_node.firstChild = n.firstChild;
+            gpu_node.padding3 = 0;
+            std::memcpy(gpu_node.childMask, n.childMask, sizeof(n.childMask));
+            gpuNodes.push_back(gpu_node);
         }
         
         std::vector<GPUPBRRenderData> gpuPoints;
@@ -3108,8 +3239,23 @@ public:
         std::vector<GPURenderNode> gpuNodes;
         gpuNodes.reserve(tl_buffer.nodes.size());
         for(const auto& n : tl_buffer.nodes) {
-            gpuNodes.push_back({n.boundsMin, 0, n.boundsMax, 0, n.center, n.nodeSize, (uint32_t)n.isLeaf,
-                (uint32_t)n.isLoaded, n.childMask, n.firstPoint, n.pointCount, n.lodPoint, n.firstChild, 0});
+            GPURenderNode gpu_node;
+            gpu_node.boundsMin = n.boundsMin;
+            gpu_node.padding1 = 0;
+            gpu_node.boundsMax = n.boundsMax;
+            gpu_node.padding2 = 0;
+            gpu_node.center = n.center;
+            gpu_node.nodeSize = n.nodeSize;
+            gpu_node.isLeaf = static_cast<uint32_t>(n.isLeaf);
+            gpu_node.isLoaded = static_cast<uint32_t>(n.isLoaded);
+            gpu_node.isBigNode = static_cast<uint32_t>(n.isBigNode);
+            gpu_node.firstPoint = n.firstPoint;
+            gpu_node.pointCount = n.pointCount;
+            gpu_node.lodPoint = n.lodPoint;
+            gpu_node.firstChild = n.firstChild;
+            gpu_node.padding3 = 0;
+            std::memcpy(gpu_node.childMask, n.childMask, sizeof(n.childMask));
+            gpuNodes.push_back(gpu_node);
         }
         std::vector<GPUFastRenderData> gpuPoints;
         gpuPoints.reserve(tl_buffer.points.size());
@@ -3228,39 +3374,92 @@ public:
                 float t0 = current.tMin;
                 float t1 = current.tMax;
 
-                Eigen::Vector3f ttt = (node.center - ray.origin).cwiseProduct(ray.invDir);
-                int currIdx = ((t0 >= ttt.x()) ? 1 : 0) | ((t0 >= ttt.y()) ? 2 : 0) | ((t0 >= ttt.z()) ? 4 : 0);
-                
-                struct ChildInterval {
-                    uint32_t nodeIdx;
-                    float tMin;
-                    float tMax;
-                };
-                ChildInterval children[4];
-                int childCount = 0;
-
-                while(t0 < t1 && t0 <= currentMaxDist) {
-                    Eigen::Vector3f next_t;
-                    next_t[0] = (currIdx & 1) ? t1 : ttt[0];
-                    next_t[1] = (currIdx & 2) ? t1 : ttt[1];
-                    next_t[2] = (currIdx & 4) ? t1 : ttt[2];
-
-                    float tNext = next_t.minCoeff();
+                if (!node.isBigNode) {
+                    Eigen::Vector3f ttt = (node.center - ray.origin).cwiseProduct(ray.invDir);
+                    int currIdx = ((t0 >= ttt.x()) ? 1 : 0) | ((t0 >= ttt.y()) ? 2 : 0) | ((t0 >= ttt.z()) ? 4 : 0);
                     
-                    int physIdx = currIdx ^ ray.signMask;
-                    if (node.childMask & (1 << physIdx)) {
-                        int childOffset = countBits(node.childMask & ((1 << physIdx) - 1));
-                        children[childCount++] = {node.firstChild + childOffset, t0, tNext};
+                    struct ChildInterval { uint32_t nodeIdx; float tMin; float tMax; };
+                    ChildInterval children[4];
+                    int childCount = 0;
+
+                    while(t0 < t1 && t0 <= currentMaxDist) {
+                        Eigen::Vector3f next_t;
+                        next_t[0] = (currIdx & 1) ? t1 : ttt[0];
+                        next_t[1] = (currIdx & 2) ? t1 : ttt[1];
+                        next_t[2] = (currIdx & 4) ? t1 : ttt[2];
+
+                        float tNext = next_t.minCoeff();
+                        int physIdx = currIdx ^ ray.signMask;
+                        
+                        if (node.childMask[0] & (1u << physIdx)) {
+                            int childOffset = countBits(node.childMask[0] & ((1u << physIdx) - 1));
+                            children[childCount++] = {node.firstChild + childOffset, t0, tNext};
+                        }
+                        
+                        t0 = tNext;
+                        currIdx |= ((next_t[0] <= tNext) ? 1 : 0) | ((next_t[1] <= tNext) ? 2 : 0) | ((next_t[2] <= tNext) ? 4 : 0);
                     }
+
+                    if (stackPtr + childCount > 256) continue;
+                    for (int i = childCount - 1; i >= 0; --i) {
+                        stack[stackPtr++] = {children[i].nodeIdx, children[i].tMin, children[i].tMax};
+                    }
+                } else {
+                    int N = 8;
+                    PointType cellSize = (node.boundsMax - node.boundsMin) / static_cast<float>(N);
                     
-                    t0 = tNext;
-                    currIdx |= ((next_t[0] <= tNext) ? 1 : 0) | ((next_t[1] <= tNext) ? 2 : 0) | ((next_t[2] <= tNext) ? 4 : 0);
-                }
+                    PointType enterPoint = ray.origin + ray.dir * std::max(0.0f, t0);
+                    enterPoint = enterPoint.cwiseMax(node.boundsMin).cwiseMin(node.boundsMax);
+                    
+                    int cx = std::clamp(static_cast<int>((enterPoint.x() - node.boundsMin.x()) / cellSize.x()), 0, N - 1);
+                    int cy = std::clamp(static_cast<int>((enterPoint.y() - node.boundsMin.y()) / cellSize.y()), 0, N - 1);
+                    int cz = std::clamp(static_cast<int>((enterPoint.z() - node.boundsMin.z()) / cellSize.z()), 0, N - 1);
+                    
+                    PointType tDelta = (cellSize.cwiseProduct(ray.invDir)).cwiseAbs();
+                    PointType tNext;
+                    int stepX = ray.dir.x() > 0 ? 1 : (ray.dir.x() < 0 ? -1 : 1);
+                    int stepY = ray.dir.y() > 0 ? 1 : (ray.dir.y() < 0 ? -1 : 1);
+                    int stepZ = ray.dir.z() > 0 ? 1 : (ray.dir.z() < 0 ? -1 : 1);
 
-                if (stackPtr + childCount > 256) continue;
+                    tNext.x() = (node.boundsMin.x() + (stepX > 0 ? cx + 1 : cx) * cellSize.x() - ray.origin.x()) * ray.invDir.x();
+                    tNext.y() = (node.boundsMin.y() + (stepY > 0 ? cy + 1 : cy) * cellSize.y() - ray.origin.y()) * ray.invDir.y();
+                    tNext.z() = (node.boundsMin.z() + (stepZ > 0 ? cz + 1 : cz) * cellSize.z() - ray.origin.z()) * ray.invDir.z();
 
-                for (int i = childCount - 1; i >= 0; --i) {
-                    stack[stackPtr++] = {children[i].nodeIdx, children[i].tMin, children[i].tMax};
+                    struct ChildInterval { uint32_t nodeIdx; float tMin; float tMax; };
+                    ChildInterval children[24];
+                    int childCount = 0;
+                    float currentT = t0;
+
+                    for (int stepIdx = 0; stepIdx < 3 * N; ++stepIdx) {
+                        if (cx < 0 || cx >= N || cy < 0 || cy >= N || cz < 0 || cz >= N) break;
+
+                        int childIdx = cx + cy * N + cz * N * N;
+                        int maskIdx = childIdx / 32;
+                        int bitIdx = childIdx % 32;
+
+                        if (node.childMask[maskIdx] & (1u << bitIdx)) {
+                            uint32_t offset = 0;
+                            for (int m = 0; m < maskIdx; ++m) offset += countBits(node.childMask[m]);
+                            offset += countBits(node.childMask[maskIdx] & ((1u << bitIdx) - 1));
+                            
+                            float nextT = std::min({tNext.x(), tNext.y(), tNext.z()});
+                            children[childCount++] = {node.firstChild + offset, currentT, std::min(nextT, t1)};
+                        }
+
+                        if (tNext.x() < tNext.y()) {
+                            if (tNext.x() < tNext.z()) { currentT = tNext.x(); cx += stepX; tNext.x() += tDelta.x(); } 
+                            else { currentT = tNext.z(); cz += stepZ; tNext.z() += tDelta.z(); }
+                        } else {
+                            if (tNext.y() < tNext.z()) { currentT = tNext.y(); cy += stepY; tNext.y() += tDelta.y(); } 
+                            else { currentT = tNext.z(); cz += stepZ; tNext.z() += tDelta.z(); }
+                        }
+                        if (currentT > t1 || currentT > currentMaxDist) break;
+                    }
+
+                    if (stackPtr + childCount > 256) continue;
+                    for (int i = childCount - 1; i >= 0; --i) {
+                        stack[stackPtr++] = {children[i].nodeIdx, children[i].tMin, children[i].tMax};
+                    }
                 }
             }
         }
@@ -3429,6 +3628,7 @@ public:
     }
 
     void optimize() {
+        TIME_FUNCTION;
         if (root_) {
             optimizeRecursive(root_.get());
             generateLODs();
