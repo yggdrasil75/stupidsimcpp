@@ -701,6 +701,8 @@ private:
         int currentSampleOffset;
         int dispatchSamples;
         int globalIllumination;
+        uint32_t nodeCount;
+        uint32_t pointCount;
         int padding;
     };
     
@@ -1995,169 +1997,6 @@ private:
         state ^= state << 5;
         return (state & 0xFFFFFF) / 16777216.0f;
     }
-
-    Eigen::Vector3f traceRay(const RenderBuffer& buffer, const PointType& rayOrig, const PointType& rayDir,
-                  int bounces, uint32_t& rngState, int maxBounces, bool globalIllumination, bool useLod, bool asyncLoad = false) {
-        if (bounces > maxBounces) return globalIllumination ? skylight_ : Eigen::Vector3f::Zero();
-
-        Ray ray(rayOrig, rayDir);
-
-        auto hit = voxelTraverse(buffer, ray, std::numeric_limits<float>::max(), useLod, asyncLoad);
-        if (!hit) {
-            if (bounces == 0) return skybox_.sampleVector(rayDir);
-            return globalIllumination ? skybox_.sampleVector(rayDir) : Eigen::Vector3f::Zero();
-        }
-
-        PointType hitPoint;
-        PointType normal;
-        float t = 0.0f;
-        float texit = 0;
-        rayCubeIntersect(ray, hit, t, normal, hitPoint, &texit);
-
-        PointType offsetNormal = normal;
-        bool entering = rayDir.dot(normal) < 0.0f;
-        if (!entering) offsetNormal = -normal;
-
-        Eigen::Vector3f albedo = hit->color;
-        Material mat = hit->material;
-        float roughness = mat.roughness;
-        float metallic = mat.metallic;
-        float transmission = mat.transmission;
-        float ior = mat.ior;
-        Eigen::Vector3f emitted = albedo * mat.emittance;
-
-        Eigen::Vector3f F0 = Eigen::Vector3f::Constant(0.04f);
-        F0 = F0 * (1.0f - metallic) + albedo * metallic;
-
-        // Proper Russian Roulette based on maximum likely reflectance
-        float maxReflectance = std::max(albedo.maxCoeff(), F0.maxCoeff());
-        float continueProb = std::min(0.95f, std::max(0.1f, maxReflectance));
-        if (bounces > 2 && nextFloat(rngState) > continueProb) return emitted;
-
-        PointType V = -rayDir;
-        float eta = entering ? (1.0f / ior) : ior;
-
-        float alpha = std::max(1e-5f, roughness * roughness);
-        float alpha2 = alpha * alpha;
-
-        // Sample half-vector H using GGX Importance Sampling
-        float r1 = nextFloat(rngState);
-        float r2 = nextFloat(rngState);
-        float phi = 2.0f * M_PI * r1;
-        float cosThetaM = std::sqrt(std::max(0.0f, (1.0f - r2) / (1.0f + (alpha2 - 1.0f) * r2)));
-        float sinThetaM = std::sqrt(std::max(0.0f, 1.0f - cosThetaM*cosThetaM));
-        
-        PointType up = std::abs(offsetNormal.z()) < 0.999f ? PointType(0,0,1) : PointType(1,0,0);
-        PointType tangent = up.cross(offsetNormal).normalized();
-        PointType bitangent = offsetNormal.cross(tangent);
-        PointType H = (tangent * sinThetaM * std::cos(phi) + bitangent * sinThetaM * std::sin(phi) + offsetNormal * cosThetaM).normalized();
-
-        float VdotH = V.dot(H);
-        if (VdotH < 0.0f) {
-            H = -H;
-            VdotH = -VdotH;
-        }
-
-        // Fresnel using Schlick
-        Eigen::Vector3f F = F0 + (Eigen::Vector3f::Constant(1.0f) - F0) * std::pow(1.0f - std::min(1.0f, VdotH), 5.0f);
-        
-        // Probability distribution for path branches
-        float probSpecular = F.mean();
-        float probT = (1.0f - metallic) * transmission;
-        float probDiffuse = (1.0f - metallic) * (1.0f - transmission);
-
-        float pSpec = probSpecular;
-        float pDiff = probDiffuse * (1.0f - pSpec);
-        float pTrans = probT * (1.0f - pSpec);
-        float sumP = pSpec + pDiff + pTrans;
-        if (sumP <= 1e-5f) {
-            pSpec = 1.0f; pDiff = 0.0f; pTrans = 0.0f;
-        } else {
-            pSpec /= sumP; pDiff /= sumP; pTrans /= sumP;
-        }
-
-        float r_type = nextFloat(rngState);
-
-        PointType newDir;
-        PointType newOrigin;
-        Eigen::Vector3f weight = Eigen::Vector3f::Zero();
-        bool isTransmission = false;
-
-        auto smithG1 = [&](float cosT) {
-            float tanT2 = (1.0f - cosT*cosT) / std::max(1e-5f, cosT*cosT);
-            if (tanT2 <= 0.0f) return 1.0f;
-            return 2.0f / (1.0f + std::sqrt(1.0f + alpha2 * tanT2));
-        };
-
-        float NdotV = std::max(1e-5f, offsetNormal.dot(V));
-
-        if (r_type < pSpec) {
-            newDir = (2.0f * VdotH * H - V).normalized();
-            newOrigin = hitPoint + offsetNormal * 1e-4f;
-            
-            float NdotL = offsetNormal.dot(newDir);
-            float NdotH = std::max(1e-5f, offsetNormal.dot(H));
-            if (NdotL > 0.0f) {
-                float G = smithG1(NdotV) * smithG1(NdotL);
-                weight = F * (G * VdotH / (NdotV * NdotH * pSpec));
-            } else {
-                weight = Eigen::Vector3f::Zero();
-            }
-        } else if (r_type < pSpec + pDiff) {
-            // --- Diffuse Cosine-Hemisphere Reflection ---
-            float r3 = nextFloat(rngState);
-            float r4 = nextFloat(rngState);
-            float phiD = 2.0f * M_PI * r3;
-            float rD = std::sqrt(r4);
-            PointType L_local(rD * std::cos(phiD), rD * std::sin(phiD), std::sqrt(std::max(0.0f, 1.0f - r4)));
-            newDir = (tangent * L_local.x() + bitangent * L_local.y() + offsetNormal * L_local.z()).normalized();
-            newOrigin = hitPoint + offsetNormal * 1e-4f;
-            
-            // Weight automatically normalizes implicitly due to Lambertian's NdotL / PI PDF exactly matching cosine hemisphere distribution.
-            weight = albedo.cwiseProduct(Eigen::Vector3f::Constant(1.0f) - F) / pDiff;
-        } else {
-            // --- Microfacet Refraction Transmission ---
-            float sinThetaT2 = eta * eta * (1.0f - VdotH * VdotH);
-            if (sinThetaT2 >= 1.0f) {
-                // TIR - Total Internal Reflection behaves as a mirror
-                newDir = (2.0f * VdotH * H - V).normalized();
-                newOrigin = hitPoint + offsetNormal * 1e-4f;
-                float NdotL = offsetNormal.dot(newDir);
-                if (NdotL > 0.0f) {
-                    float G = smithG1(NdotV) * smithG1(NdotL);
-                    float NdotH = std::max(1e-5f, offsetNormal.dot(H));
-                    weight = Eigen::Vector3f::Constant(1.0f) * (G * std::abs(VdotH) / (NdotV * NdotH * pTrans));
-                }
-            } else {
-                // Typical Dielectric Refraction crossing medium 
-                float cosThetaT = std::sqrt(1.0f - sinThetaT2);
-                newDir = ((eta * VdotH - cosThetaT) * H - eta * V).normalized();
-                newOrigin = hitPoint - offsetNormal * 1e-4f;
-                
-                float NdotL = std::max(1e-5f, offsetNormal.dot(-newDir)); 
-                float G = smithG1(NdotV) * smithG1(NdotL);
-                float NdotH = std::max(1e-5f, offsetNormal.dot(H));
-                
-                weight = albedo.cwiseProduct(Eigen::Vector3f::Constant(1.0f) - F) * (G * std::abs(VdotH) / (NdotV * NdotH * pTrans));
-                isTransmission = true;
-            }
-        }
-
-        // Suppress massive specular firefly singularities
-        weight = weight.cwiseMin(4.0f);
-        if (bounces > 2) weight /= continueProb;
-        
-        Eigen::Vector3f incoming = traceRay(buffer, newOrigin, newDir, bounces+1, rngState, maxBounces, globalIllumination, useLod, asyncLoad);
-
-        Eigen::Vector3f totalRadiance = emitted + weight.cwiseProduct(incoming);
-        
-        // Accurate real-distance Beer's Law for volumetrics/colored transmission
-        if (!entering) {
-            totalRadiance = totalRadiance.cwiseProduct((-mat.absorption * t).array().exp().matrix());
-        }
-
-        return totalRadiance;
-    }
     
     void clearNode(OctreeNode* node) {
         if (!node) return;
@@ -2636,9 +2475,9 @@ public:
 
     bool set(const T& data, const PointType& pos, bool visible, Eigen::Vector3f color, float size = 0.01f, bool active = true,
              int objectId = -1, float emittance = 0.0f, float roughness = 1.0f, 
-             float metallic = 0.0f, float transmission = 0.0f, float ior = 1.45f) {
+             float metallic = 0.0f, float transmission = 0.0f, float ior = 1.45f, Eigen::Vector3f absorp = Eigen::Vector3f::Zero()) {
         
-        Material mat(emittance, roughness, metallic, transmission, ior);
+        Material mat(emittance, roughness, metallic, transmission, ior, absorp);
         auto pointData = std::make_shared<NodeData>(data, pos, visible, color, size, active, objectId, mat);
         
         ensureBounds(pointData->getCubeBounds());
@@ -2974,127 +2813,6 @@ public:
         return true;
     }
 
-    const RenderData* voxelTraverse(const RenderBuffer& buffer, const Ray& ray,
-                                        float maxDist, bool enableLOD = false, bool asyncLoad = false) {
-        const RenderData* hit = nullptr;
-        if (buffer.nodes.empty()) return hit;
-        
-        float tMin, tMax;
-        BoundingBox rootBounds(buffer.nodes[0].boundsMin, buffer.nodes[0].boundsMax);
-        if (rayBoxIntersect(ray, rootBounds, tMin, tMax)) {
-            tMax = std::min(tMax, maxDist);
-            float currentMaxDist = maxDist;
-            
-            struct StackItem {
-                uint32_t nodeIdx;
-                float tMin;
-                float tMax;
-            };
-            
-            StackItem stack[256];
-            int stackPtr = 0;
-            stack[stackPtr++] = {0, std::max(0.0f, tMin), tMax};
-
-            while(stackPtr > 0) {
-                StackItem current = stack[--stackPtr];
-                if (current.tMin > currentMaxDist) continue;
-                
-                const RenderNode& node = buffer.nodes[current.nodeIdx];
-
-                if (!node.isLoaded) {
-                    if (asyncLoad && node.originalNode) {
-                        ensureLoaded(node.originalNode, asyncLoad);
-                    }
-                    if (enableLOD && node.lodPoint != -1) {
-                        float dist = (node.center - ray.origin).norm();
-                        float ratio = dist / node.nodeSize;
-                        if (dist > lodMinDistance_ && ratio > invLodf) {
-                            float t;
-                            PointType n, h;
-                            if (rayCubeIntersect(ray, &buffer.points[node.lodPoint], t, n, h)) {
-                                if (t >= 0 && t <= currentMaxDist) {
-                                    hit = &buffer.points[node.lodPoint];
-                                    currentMaxDist = t;
-                                }
-                            }
-                        }
-                    }
-                    continue;
-                }
-
-                if (enableLOD && !node.isLeaf) {
-                    float dist = (node.center - ray.origin).norm();
-                    float ratio = dist / node.nodeSize;
-                    if (dist > lodMinDistance_ && ratio > invLodf && node.lodPoint != -1) {
-                        float t;
-                        PointType n, h;
-                        if (rayCubeIntersect(ray, &buffer.points[node.lodPoint], t, n, h)) {
-                            if (t >= 0 && t <= currentMaxDist) {
-                                hit = &buffer.points[node.lodPoint];
-                                currentMaxDist = t;
-                            }
-                        }
-                        continue;
-                    }
-                }
-
-                for (uint32_t i = 0; i < node.pointCount; ++i) {
-                    const RenderData& pt = buffer.points[node.firstPoint + i];
-                    float t;
-                    PointType normal, hitPoint;
-                    if (rayCubeIntersect(ray, &pt, t, normal, hitPoint)) {
-                        if (t >= 0 && t <= currentMaxDist && t <= current.tMax + 0.001f) {
-                            currentMaxDist = t;
-                            hit = &pt;
-                        }
-                    }
-                }
-
-                if (node.isLeaf) continue;
-
-                float t0 = current.tMin;
-                float t1 = current.tMax;
-
-                Eigen::Vector3f ttt = (node.center - ray.origin).cwiseProduct(ray.invDir);
-                int currIdx = ((t0 >= ttt.x()) ? 1 : 0) | ((t0 >= ttt.y()) ? 2 : 0) | ((t0 >= ttt.z()) ? 4 : 0);
-
-                struct ChildInterval {
-                    uint32_t nodeIdx;
-                    float tMin;
-                    float tMax;
-                };
-                ChildInterval children[4];
-                int childCount = 0;
-
-                while(t0 < t1 && t0 <= currentMaxDist) {
-                    Eigen::Vector3f next_t;
-                    next_t[0] = (currIdx & 1) ? t1 : ttt[0];
-                    next_t[1] = (currIdx & 2) ? t1 : ttt[1];
-                    next_t[2] = (currIdx & 4) ? t1 : ttt[2];
-
-                    float tNext = next_t.minCoeff();
-
-                    int physIdx = currIdx ^ ray.signMask;
-
-                    if (node.childMask & (1 << physIdx)) {
-                        int childOffset = countBits(node.childMask & ((1 << physIdx) - 1));
-                        children[childCount++] = {node.firstChild + childOffset, t0, tNext};
-                    }
-
-                    t0 = tNext;
-                    currIdx |= ((next_t[0] <= tNext) ? 1 : 0) | ((next_t[1] <= tNext) ? 2 : 0) | ((next_t[2] <= tNext) ? 4 : 0);
-                }
-
-                if (stackPtr + childCount > 256) continue;
-
-                for (int i = childCount - 1; i >= 0; --i) {
-                    stack[stackPtr++] = {children[i].nodeIdx, children[i].tMin, children[i].tMax};
-                }
-            }
-        }
-        return hit;
-    }
-
     bool raycast(const PointType& origin, const PointType& direction, float maxDist, RayHit& hit,
                  const std::shared_ptr<NodeData>& ignoreNode = nullptr) {
         if (!root_) return false;
@@ -3221,63 +2939,6 @@ public:
         return hitSomething;
     }
 
-    frame renderFrame(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB, int samplesPerPixel = 2,
-                    int maxBounces = 4, bool globalIllumination = false, bool useLod = true) {
-        updateStreaming(cam);
-        optimize();
-        thread_local RenderBuffer tl_buffer;
-        buildRender(tl_buffer);
-        const RenderBuffer& shared_buffer = tl_buffer;
-
-        PointType origin = cam.origin;
-        PointType dir = cam.direction.normalized();
-        PointType up = cam.up.normalized();
-        PointType right = cam.right();
-        
-        frame outFrame(width, height, colorformat);
-        std::vector<float> colorBuffer;
-        int channels = 3;
-        colorBuffer.resize(width * height * channels);
-
-        float aspect = static_cast<float>(width) / height;
-        float fovRad = cam.fovRad();
-        float tanHalfFov = tan(fovRad * 0.5f);
-        float tanfovy = tanHalfFov;
-        float tanfovx = tanHalfFov * aspect;
-
-        #pragma omp parallel for schedule(dynamic) collapse(2)
-        for (int y = 0; y < height; ++y) {
-            for (int x = 0; x < width; ++x) {
-                int pidx = (y * width + x);
-                uint32_t seed = pidx * 1973 + 9277;
-                int idx = pidx * channels;
-
-                float px = (2.0f * (x + 0.5f) / width - 1.0f) * tanfovx;
-                float py = (1.0f - 2.0f * (y + 0.5f) / height) * tanfovy;
-                
-                PointType rayDir = dir + (right * px) + (up * py);
-                rayDir.normalize();
-
-                Eigen::Vector3f accumulatedColor(0.0f, 0.0f, 0.0f);
-                
-                for(int s = 0; s < samplesPerPixel; ++s) {
-                    accumulatedColor += traceRay(shared_buffer, origin, rayDir, 0, seed, maxBounces, globalIllumination, useLod, false);
-                }
-                
-                Eigen::Vector3f color = accumulatedColor / static_cast<float>(samplesPerPixel);
-                
-                color = color.cwiseMax(0.0f).cwiseMin(1.0f);
-
-                colorBuffer[idx    ] = color[0];
-                colorBuffer[idx + 1] = color[1];
-                colorBuffer[idx + 2] = color[2];
-            }
-        }
-        
-        outFrame.setData(colorBuffer, frame::colormap::RGB);
-        return outFrame;
-    }
-
 #ifdef VULKAN_SUPPORT
     frame renderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB, int samplesPerPixel = 2,
                     int maxBounces = 4, bool globalIllumination = false, bool useLod = true) {
@@ -3330,10 +2991,12 @@ public:
             cam.origin, lodMinDistance_, cam.direction.normalized(), invLodf, cam.up.normalized(), 0.1f, cam.right(), maxDistance_,
             skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
             width, height, maxBounces, useLod ? 1 : 0, invFogRange, frameCounter_,
-            (int)skyW, (int)skyH, 0, 0, globalIllumination ? 1 : 0, 0
+            (int)skyW, (int)skyH, 0, 0, globalIllumination ? 1 : 0, 
+            (uint32_t)gpuNodes.size(), (uint32_t)gpuPoints.size(), 0
         };
 
-        size_t outSize = width * height * 3 * sizeof(float);
+
+        size_t outSize = width * height * 4 * sizeof(float);
         vkCtx.updateCommonBuffers(gpuNodes, outSize, camData);
         vkCtx.updateSkyboxBuffer(skyData);
         vkCtx.updatePBRBuffers(gpuPoints);
@@ -3374,16 +3037,60 @@ public:
 
         frameCounter_++;
 
-        frame outFrame(width, height, colorformat);
-        std::vector<float> colorBuffer(width * height * 3);
+        std::vector<float> rawBuffer(width * height * 4);
         void* mappedData;
         vkMapMemory(vkCtx.device, vkCtx.outMem, 0, outSize, 0, &mappedData);
-        memcpy(colorBuffer.data(), mappedData, outSize);
+        memcpy(rawBuffer.data(), mappedData, outSize);
         vkUnmapMemory(vkCtx.device, vkCtx.outMem);
 
-        for (size_t i = 0; i < colorBuffer.size(); ++i) {
-            colorBuffer[i] /= samplesPerPixel;
-            colorBuffer[i] = std::clamp(colorBuffer[i], 0.0f, 1.0f);
+        for (size_t i = 0; i < rawBuffer.size(); ++i) {
+            rawBuffer[i] /= samplesPerPixel;
+        }
+        
+
+        frame outFrame(width, height, colorformat);
+        std::vector<float> colorBuffer(width * height * 3);
+        
+        const int radius = 3;
+        const float spatialSigma = 2.0f;
+        const float depthSigma = 1.0f;
+        
+        #pragma omp parallel for schedule(dynamic) collapse(2)
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                float sumWeights = 0.0f;
+                float sumR = 0.0f, sumG = 0.0f, sumB = 0.0f;
+                
+                int centerIdx = (y * width + x) * 4;
+                float centerDepth = rawBuffer[centerIdx + 3];
+
+                for (int dy = -radius; dy <= radius; ++dy) {
+                    for (int dx = -radius; dx <= radius; ++dx) {
+                        int nx = std::clamp(x + dx, 0, width - 1);
+                        int ny = std::clamp(y + dy, 0, height - 1);
+                        int nIdx = (ny * width + nx) * 4;
+                        
+                        float nDepth = rawBuffer[nIdx + 3];
+                        
+                        float spatialDistSq = static_cast<float>(dx*dx + dy*dy);
+                        float spatialWeight = std::exp(-spatialDistSq / (2.0f * spatialSigma * spatialSigma));
+                        
+                        float depthDiff = nDepth - centerDepth;
+                        float depthWeight = std::exp(-(depthDiff * depthDiff) / (2.0f * depthSigma * depthSigma));
+                        
+                        float weight = spatialWeight * depthWeight;
+                        sumWeights += weight;
+                        sumR += rawBuffer[nIdx] * weight;
+                        sumG += rawBuffer[nIdx + 1] * weight;
+                        sumB += rawBuffer[nIdx + 2] * weight;
+                    }
+                }
+                
+                int outIdx = (y * width + x) * 3;
+                colorBuffer[outIdx]     = std::clamp(sumR / sumWeights, 0.0f, 1.0f);
+                colorBuffer[outIdx + 1] = std::clamp(sumG / sumWeights, 0.0f, 1.0f);
+                colorBuffer[outIdx + 2] = std::clamp(sumB / sumWeights, 0.0f, 1.0f);
+            }
         }
 
         outFrame.setData(colorBuffer, frame::colormap::RGB);
@@ -3636,155 +3343,6 @@ public:
             }
         }
         
-        outFrame.setData(colorBuffer, frame::colormap::RGB);
-        return outFrame;
-    }
-
-    frame renderFrameTimed(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB, 
-                           double maxTimeSeconds = 0.16, int maxBounces = 4, bool globalIllumination = false, bool useLod = true) {
-        updateStreaming(cam);
-        auto startTime = std::chrono::high_resolution_clock::now();
-        
-        thread_local RenderBuffer tl_buffer;
-        buildRender(tl_buffer);
-        const RenderBuffer& shared_buffer = tl_buffer;
-
-        PointType origin = cam.origin;
-        PointType dir = cam.direction.normalized();
-        PointType up = cam.up.normalized();
-        PointType right = cam.right();
-        
-        frame outFrame(width, height, colorformat);
-        std::vector<float> colorBuffer(width * height * 3, 0.0f);
-        std::vector<Eigen::Vector3f> accumColor(width * height, Eigen::Vector3f::Zero());
-        std::vector<int> sampleCount(width * height, 0);
-
-        const float aspect = static_cast<float>(width) / height;
-        const float fovRad = cam.fovRad();
-        const float tanHalfFov = std::tan(fovRad * 0.5f);
-        const float tanfovy = tanHalfFov;
-        const float tanfovx = tanHalfFov * aspect;
-        
-        const PointType globalLightDir = (-cam.direction * 0.2f).normalized();
-        const float fogStart = 1000.0f;
-        const float minVisibility = 0.2f; 
-        
-        #pragma omp parallel for schedule(dynamic, 128) collapse(2)
-        for (int y = 0; y < height; ++y) {
-            for (int x = 0; x < width; ++x) {
-                int pidx = (y * width + x);
-
-                float px = (2.0f * (x + 0.5f) / width - 1.0f) * tanfovx;
-                float py = (1.0f - 2.0f * (y + 0.5f) / height) * tanfovy;
-                
-                PointType rayDir = dir + (right * px) + (up * py);
-                rayDir.normalize();
-
-                Eigen::Vector3f color = skybox_.sampleVector(rayDir);
-                Ray ray(origin, rayDir);
-                auto hit = fastVoxelTraverse(shared_buffer, ray, maxDistance_);
-                if (hit != nullptr) {
-                    float t = 0.0f;
-                    PointType normal, hitPoint;
-
-                    rayCubeIntersect(ray, hit, t, normal, hitPoint);
-                    color = hit->color;
-                    Material objMat = hit->material;
-                    
-                    if (objMat.emittance > 0.0f) {
-                        color = color * objMat.emittance;
-                    } else {
-                        float diffuse = std::max(0.0f, normal.dot(globalLightDir));
-                        float ambient = 0.35f;
-                        float intensity = std::min(1.0f, ambient + diffuse * 0.65f);
-                        color = color * intensity;
-                    }
-                    
-                    float fogFactor = std::clamp((maxDistance_ - t) / (maxDistance_ - fogStart), minVisibility, 1.0f);
-                    color = color * fogFactor + skybox_.sampleVector(rayDir) * (1.0f - fogFactor);
-                }
-                
-                accumColor[pidx] = color;
-                sampleCount[pidx] = 1;
-            }
-        }
-
-        auto now = std::chrono::high_resolution_clock::now();
-        std::chrono::duration<double> elapsed = now - startTime;
-
-        if (elapsed.count() < maxTimeSeconds) {
-            std::atomic<bool> timeUp(false);
-            std::atomic<uint64_t> counter(0);
-            uint64_t totalPixels = static_cast<uint64_t>(width) * height;
-
-            std::vector<uint64_t> pixelIndices(totalPixels);
-            std::iota(pixelIndices.begin(), pixelIndices.end(), 0); 
-            
-            std::random_device rd;
-            std::mt19937 g(rd());
-            std::shuffle(pixelIndices.begin(), pixelIndices.end(), g);
-
-            #pragma omp parallel
-            {
-                uint32_t localSeed = omp_get_thread_num() * 1973 + 9277;
-                int chunkSize = 64;
-                
-                while (!timeUp.load(std::memory_order_relaxed)) {
-                    uint64_t startIdx = counter.fetch_add(chunkSize, std::memory_order_relaxed);
-                    
-                    if (omp_get_thread_num() == 0) {
-                        auto checkTime = std::chrono::high_resolution_clock::now();
-                        std::chrono::duration<double> checkElapsed = checkTime - startTime;
-                        if (checkElapsed.count() >= maxTimeSeconds) {
-                            timeUp.store(true, std::memory_order_relaxed);
-                            break;
-                        }
-                    }
-
-                    if (timeUp.load(std::memory_order_relaxed)) break;
-
-                    for (int i = 0; i < chunkSize; ++i) {
-                        uint64_t currentOffset = startIdx + i;
-                        uint64_t pidx = pixelIndices[currentOffset % totalPixels];
-                        
-                        int y = pidx / width;
-                        int x = pidx % width;
-
-                        float px = (2.0f * (x + 0.5f) / width - 1.0f) * tanfovx;
-                        float py = (1.0f - 2.0f * (y + 0.5f) / height) * tanfovy;
-                        
-                        PointType rayDir = dir + (right * px) + (up * py);
-                        rayDir.normalize();
-
-                        uint32_t pass = currentOffset / totalPixels;
-                        uint32_t seed = pidx * 1973 + pass * 12345 + localSeed;
-
-                        Eigen::Vector3f pbrColor = traceRay(shared_buffer, origin, rayDir, 0, seed, maxBounces, globalIllumination, useLod, true);
-                        
-                        accumColor[pidx] += pbrColor;
-                        sampleCount[pidx] += 1;
-                    }
-                }
-            }
-        }
-
-        #pragma omp parallel for schedule(static)
-        for (int pidx = 0; pidx < width * height; ++pidx) {
-            Eigen::Vector3f finalColor = accumColor[pidx];
-            int count = sampleCount[pidx];
-            
-            if (count > 0) {
-                finalColor /= static_cast<float>(count);
-            }
-            
-            finalColor = finalColor.cwiseMax(0.0f).cwiseMin(1.0f);
-            
-            int idx = pidx * 3;
-            colorBuffer[idx]     = finalColor[0];
-            colorBuffer[idx + 1] = finalColor[1];
-            colorBuffer[idx + 2] = finalColor[2];
-        }
-
         outFrame.setData(colorBuffer, frame::colormap::RGB);
         return outFrame;
     }
