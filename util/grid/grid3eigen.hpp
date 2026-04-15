@@ -1879,9 +1879,15 @@ private:
         }
 
         if (!node->isLeaf()) {
-            int octant = getOctant(pos, node->center);
-            if (node->children[octant]) {
-                return findRecursive(node->children[octant].get(), pos, tolerance);
+            if (node->isBigNode()) {
+                for (auto child : node->children) {
+                    return findRecursive(child.get(), pos, tolerance);
+                }
+            } else {
+                int octant = getOctant(pos, node->center);
+                if (node->children[octant]) {
+                    return findRecursive(node->children[octant].get(), pos, tolerance);
+                }
             }
         }
         return nullptr;
