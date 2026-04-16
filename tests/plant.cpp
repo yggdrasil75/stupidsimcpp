@@ -559,9 +559,9 @@ private:
         
         if (slowRender) {
             // #ifdef VULKAN_SUPPORT
-            // currentPreviewFrame = sim.grid.renderFrameVulkan(cam, outHeight, outWidth, frame::colormap::RGB, 3, reflectCount, useLod);
+            currentPreviewFrame = sim.grid.renderFrameVulkan(cam, outHeight, outWidth, frame::colormap::RGB, 3, reflectCount, useLod);
             // #else
-            currentPreviewFrame = sim.grid.renderFrame(cam, outHeight, outWidth, frame::colormap::RGB, 3, reflectCount, globalIllumination, useLod);
+            // currentPreviewFrame = sim.grid.renderFrame(cam, outHeight, outWidth, frame::colormap::RGB, 3, reflectCount, globalIllumination, useLod);
             // #endif
         } else {
             #ifdef VULKAN_SUPPORT

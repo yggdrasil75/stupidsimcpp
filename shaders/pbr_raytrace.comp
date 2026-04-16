@@ -16,13 +16,12 @@ struct GPURenderNode {
     float nodeSize;
     uint isLeaf;
     uint isLoaded;
-    uint isBigNode;
+    uint childMask;
     uint firstPoint;
     uint pointCount;
     int  lodPoint;
     uint firstChild;
     uint padding3;
-    uint childMask[16];
 };
 
 struct GPUPBRRenderData {
@@ -495,103 +494,42 @@ int voxelTraverse(Ray ray, out int hitIndex, out float outT, out vec3 outNormal,
         }
         if (node.isLeaf == 1) continue;
 
-        if (node.isBigNode == 0) {
-            vec3 ttt = (node.center - ray.origin) * ray.invDir;
-            int currIdx = ((t0 >= ttt.x) ? 1 : 0) | ((t0 >= ttt.y) ? 2 : 0) | ((t0 >= ttt.z) ? 4 : 0);
-            int raySignMask = ray.signMask.x | (ray.signMask.y << 1) | (ray.signMask.z << 2);
-            uint childNodes[4];
-            float childTMin[4];
-            float childTMax[4];
-            int childCount = 0;
-            float next_tx, next_ty, next_tz;
-
-            while(t0 < t1 && t0 <= currentMaxDist) {
-                next_tx = (currIdx & 1) != 0 ? t1 : ttt.x;
-                next_ty = (currIdx & 2) != 0 ? t1 : ttt.y;
-                next_tz = (currIdx & 4) != 0 ? t1 : ttt.z;
-                float tNext = min(min(next_tx, next_ty), next_tz);
-                if (isnan(tNext) || isinf(tNext)) break;
-
-                int physIdx = currIdx ^ raySignMask;
-                if ((node.childMask[0] & (1u << physIdx)) != 0) {
-                    uint mask = node.childMask[0] & ((1u << physIdx) - 1u);
-                    uint childOffset = bitCount(mask);
-                    if(childCount < 4) {
-                        childNodes[childCount] = node.firstChild + childOffset;
-                        childTMin[childCount] = t0;
-                        childTMax[childCount] = tNext;
-                        childCount++;
-                    }
-                }
-                t0 = tNext;
-                currIdx |= ((next_tx <= tNext) ? 1 : 0) | ((next_ty <= tNext) ? 2 : 0) | ((next_tz <= tNext) ? 4 : 0);
-            }
-            if (stackPtr + childCount > 256) continue;
-            for (int i = childCount - 1; i >= 0; --i) {
-                sharedStackNodes[localId][stackPtr] = childNodes[i];
-                sharedStackTMin[localId][stackPtr] = childTMin[i];
-                sharedStackTMax[localId][stackPtr] = childTMax[i];
-                stackPtr++;
-            }
-        } else {
-            float N = 8.0;
-            vec3 cellSize = (node.boundsMax - node.boundsMin) / N;
-            
-            vec3 enterPoint = ray.origin + ray.dir * max(0.0, t0);
-            enterPoint = clamp(enterPoint, node.boundsMin, node.boundsMax);
-            
-            ivec3 c = ivec3(clamp((enterPoint - node.boundsMin) / cellSize, vec3(0.0), vec3(N - 1.0)));
-            vec3 tDelta = abs(cellSize * ray.invDir);
-            ivec3 stepDir = ivec3(sign(ray.dir));
-            stepDir += ivec3(stepDir.x == 0 ? 1 : 0, stepDir.y == 0 ? 1 : 0, stepDir.z == 0 ? 1 : 0);
-            
-            vec3 tNext;
-            tNext.x = (node.boundsMin.x + float(stepDir.x > 0 ? c.x + 1 : c.x) * cellSize.x - ray.origin.x) * ray.invDir.x;
-            tNext.y = (node.boundsMin.y + float(stepDir.y > 0 ? c.y + 1 : c.y) * cellSize.y - ray.origin.y) * ray.invDir.y;
-            tNext.z = (node.boundsMin.z + float(stepDir.z > 0 ? c.z + 1 : c.z) * cellSize.z - ray.origin.z) * ray.invDir.z;
-
-            uint childNodes[24];
-            float childTMin[24];
-            float childTMax[24];
-            int childCount = 0;
-            float currentT = t0;
-
-            for (int stepIdx = 0; stepIdx < 24; ++stepIdx) {
-                if (c.x < 0 || c.x >= 8 || c.y < 0 || c.y >= 8 || c.z < 0 || c.z >= 8) break;
-
-                int childIdx = c.x + c.y * 8 + c.z * 64;
-                int maskIdx = childIdx / 32;
-                int bitIdx = childIdx % 32;
-
-                if ((node.childMask[maskIdx] & (1u << bitIdx)) != 0) {
-                    uint offset = 0;
-                    for (int m = 0; m < maskIdx; ++m) offset += bitCount(node.childMask[m]);
-                    offset += bitCount(node.childMask[maskIdx] & ((1u << bitIdx) - 1u));
-                    
-                    float nextT = min(min(tNext.x, tNext.y), tNext.z);
-                    childNodes[childCount] = node.firstChild + offset;
-                    childTMin[childCount] = currentT;
-                    childTMax[childCount] = min(nextT, t1);
+        vec3 ttt = (node.center - ray.origin) * ray.invDir;
+        int currIdx = ((t0 >= ttt.x) ? 1 : 0) | ((t0 >= ttt.y) ? 2 : 0) | ((t0 >= ttt.z) ? 4 : 0);
+        int raySignMask = ray.signMask.x | (ray.signMask.y << 1) | (ray.signMask.z << 2);
+        uint childNodes[4];
+        float childTMin[4];
+        float childTMax[4];
+        int childCount = 0;
+        float next_tx;
+        float next_ty;
+        float next_tz;
+        while(t0 < t1 && t0 <= currentMaxDist) {
+            next_tx = (currIdx & 1) != 0 ? t1 : ttt.x;
+            next_ty = (currIdx & 2) != 0 ? t1 : ttt.y;
+            next_tz = (currIdx & 4) != 0 ? t1 : ttt.z;
+            float tNext = min(min(next_tx, next_ty), next_tz);
+            if (isnan(tNext) || isinf(tNext)) break;
+            int physIdx = currIdx ^ raySignMask;
+            if ((node.childMask & (1 << physIdx)) != 0) {
+                uint mask = node.childMask & ((1 << physIdx) - 1);
+                uint childOffset = bitCount(mask);
+                if(childCount < 4) {
+                    childNodes[childCount] = node.firstChild + childOffset;
+                    childTMin[childCount] = t0;
+                    childTMax[childCount] = tNext;
                     childCount++;
                 }
-
-                if (tNext.x < tNext.y) {
-                    if (tNext.x < tNext.z) { currentT = tNext.x; c.x += stepDir.x; tNext.x += tDelta.x; } 
-                    else { currentT = tNext.z; c.z += stepDir.z; tNext.z += tDelta.z; }
-                } else {
-                    if (tNext.y < tNext.z) { currentT = tNext.y; c.y += stepDir.y; tNext.y += tDelta.y; } 
-                    else { currentT = tNext.z; c.z += stepDir.z; tNext.z += tDelta.z; }
-                }
-                if (currentT > t1 || currentT > currentMaxDist) break;
             }
-
-            if (stackPtr + childCount > 256) continue;
-            for (int i = childCount - 1; i >= 0; --i) {
-                sharedStackNodes[localId][stackPtr] = childNodes[i];
-                sharedStackTMin[localId][stackPtr] = childTMin[i];
-                sharedStackTMax[localId][stackPtr] = childTMax[i];
-                stackPtr++;
-            }
+            t0 = tNext;
+            currIdx |= ((next_tx <= tNext) ? 1 : 0) | ((next_ty <= tNext) ? 2 : 0) | ((next_tz <= tNext) ? 4 : 0);
+        }
+        if (stackPtr + childCount > 256) continue;
+        for (int i = childCount - 1; i >= 0; --i) {
+            sharedStackNodes[localId][stackPtr] = childNodes[i];
+            sharedStackTMin[localId][stackPtr] = childTMin[i];
+            sharedStackTMax[localId][stackPtr] = childTMax[i];
+            stackPtr++;
         }
     }
     return hitFound;

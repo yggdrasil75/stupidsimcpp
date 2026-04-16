@@ -752,7 +752,7 @@ public:
                 for (float y = surfaceY; y < config.waterLevel; y += vSize) {
                     auto water = std::make_shared<WaterParticle>();
                     water->anchored = true;
-                    grid.queuedset(water, v3(x, y + vSize, z), true, v3(0.1f, 0.4f, 0.8f), vSize, true, 3);
+                    grid.queuedset(water, v3(x, y + vSize, z), true, v3(0.1f, 0.4f, 0.8f), vSize, true, 3, 0.0, 0.0, 0.0, 0.5, 2.45, v3(0.8f, 0.4f, 0.1f));
                 }
             }
         }
