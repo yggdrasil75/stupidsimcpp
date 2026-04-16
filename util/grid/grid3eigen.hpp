@@ -2492,7 +2492,7 @@ public:
     void queuedset(const T& data, const PointType& pos, bool visible, Eigen::Vector3f color, float size = 0.01f, bool active = true,
              int objectId = -1, float emittance = 0.0f, float roughness = 1.0f, float metallic = 0.0f, float transmission = 0.0f,
              float ior = 1.45f, Eigen::Vector3f absorp = Eigen::Vector3f::Zero()) {
-        enqueueTask([this, data, pos, visible, color, size, active, objectId, emittance, roughness, metallic, transmission, ior]() {
+        enqueueTask([this, data, pos, visible, color, size, active, objectId, emittance, roughness, metallic, transmission, ior, absorp]() {
             Material mat(emittance, roughness, metallic, transmission, ior, absorp);
             auto pointData = std::make_shared<NodeData>(data, pos, visible, color, size, active, objectId, mat);
             
