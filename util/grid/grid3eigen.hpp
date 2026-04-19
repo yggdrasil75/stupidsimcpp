@@ -602,6 +602,7 @@ private:
         Material material;
         PointType boundsMin;
         PointType boundsMax;
+        int objectId;
     };
 
     struct RenderNode {
@@ -655,7 +656,7 @@ private:
         Eigen::Vector3f color;
         float emittance;
         Eigen::Vector3f boundsMin;
-        float padding1;
+        int objectId;
         Eigen::Vector3f boundsMax;
         float padding2;
     };
@@ -672,7 +673,7 @@ private:
         Eigen::Vector3f absorption;
         float transmission;
         float ior;
-        float padding1;
+        int objectId;
         float padding2;
         float padding3;
     };
@@ -703,7 +704,10 @@ private:
         int globalIllumination;
         uint32_t nodeCount;
         uint32_t pointCount;
-        int padding;
+        int tileOffsetX;
+        int tileOffsetY;
+        int padding1;
+        int padding2;
     };
     
     struct VulkanContext {
@@ -807,7 +811,7 @@ private:
             vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
             std::vector<VkPhysicalDevice> devices(deviceCount);
             vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data());
-            physicalDevice = devices[0];
+            physicalDevice = devices[1];
 
             uint32_t queueFamilyCount = 0;
             vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
@@ -1072,6 +1076,7 @@ private:
                 BoundingBox bb = pt->getCubeBounds();
                 rd.boundsMin = bb.first;
                 rd.boundsMax = bb.second;
+                rd.objectId = pt->objectId;
                 buffer.points.push_back(rd);
             }
         }
@@ -1087,6 +1092,7 @@ private:
             BoundingBox bb = node->lodData->getCubeBounds();
             ld.boundsMin = bb.first;
             ld.boundsMax = bb.second;
+            ld.objectId = node->lodData->objectId; 
             rnode.lodPoint = static_cast<int32_t>(buffer.points.size());
             buffer.points.push_back(ld);
         }
@@ -2232,7 +2238,7 @@ private:
         }
     }
 
-    void collectNodesByObjectId(OctreeNode* node, int id, std::vector<std::shared_ptr<NodeData>>& results) const {
+    void collectNodesByObjectId(OctreeNode* node, int id, std::vector<std::shared_ptr<NodeData>>& results) {
         std::unordered_set<std::shared_ptr<NodeData>> seen;
         collectNodesByObjectIdRecursive(node, id, results, seen);
     }
@@ -2942,6 +2948,7 @@ public:
 #ifdef VULKAN_SUPPORT
     frame renderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB, int samplesPerPixel = 2,
                     int maxBounces = 4, bool globalIllumination = false, bool useLod = true) {
+        TIME_FUNCTION;
         updateStreaming(cam);
         optimize();
         thread_local RenderBuffer tl_buffer;
@@ -2960,7 +2967,8 @@ public:
         gpuPoints.reserve(tl_buffer.points.size());
         for(const auto& p : tl_buffer.points) {
             gpuPoints.push_back({p.position, p.size, p.color, p.material.emittance, p.boundsMin,
-                                 p.material.roughness, p.boundsMax, p.material.metallic, p.material.absorption, p.material.transmission, p.material.ior});
+                                 p.material.roughness, p.boundsMax, p.material.metallic,
+                                 p.material.absorption, p.material.transmission, p.material.ior, p.objectId, 0.0f, 0.0f});
         }
 
         if(gpuNodes.empty()) gpuNodes.push_back(GPURenderNode{});
@@ -2992,61 +3000,81 @@ public:
             skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
             width, height, maxBounces, useLod ? 1 : 0, invFogRange, frameCounter_,
             (int)skyW, (int)skyH, 0, 0, globalIllumination ? 1 : 0, 
-            (uint32_t)gpuNodes.size(), (uint32_t)gpuPoints.size(), 0
+            (uint32_t)gpuNodes.size(), (uint32_t)gpuPoints.size(), 0, 0, 0, 0
         };
 
 
-        size_t outSize = width * height * 4 * sizeof(float);
+        size_t outSize = width * height * 5 * sizeof(float);
         vkCtx.updateCommonBuffers(gpuNodes, outSize, camData);
         vkCtx.updateSkyboxBuffer(skyData);
         vkCtx.updatePBRBuffers(gpuPoints);
 
-        // Tile submissions over sample offsets to avoid TDR and accumulate progressively
-        int maxSamplesPerDispatch = 4;
         int currentSampleOffset = 0;
         
+        const long long maxWorkloadBudget = 262144; 
+        const long long pixelsInFrame = (long long)width * height;
+
         while (currentSampleOffset < samplesPerPixel) {
-            int dispatchSamples = std::min(maxSamplesPerDispatch, samplesPerPixel - currentSampleOffset);
+            int samplesInBatch = std::max(1, (int)(maxWorkloadBudget / pixelsInFrame));
+            samplesInBatch = std::min(samplesInBatch, samplesPerPixel - currentSampleOffset);
+            
             camData.currentSampleOffset = currentSampleOffset;
-            camData.dispatchSamples = dispatchSamples;
+            camData.dispatchSamples = samplesInBatch;
+
+            int tileW = 256;
+            int tileH = 256;
+
+            for (int y = 0; y < height; y += tileH) {
+                for (int x = 0; x < width; x += tileW) {
+                    int drawW = std::min(tileW, width - x);
+                    int drawH = std::min(tileH, height - y);
+
+                    camData.tileOffsetX = x;
+                    camData.tileOffsetY = y;
+                    
+                    // Update camera for this specific tile/sample batch
+                    vkCtx.updateCameraData(camData);
+
+                    VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+                    vkBeginCommandBuffer(vkCtx.commandBuffer, &beginInfo);
+                    vkCmdBindPipeline(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.pbrPipeline);
+                    vkCmdBindDescriptorSets(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.pbrPipelineLayout, 0, 1, &vkCtx.pbrDescSet, 0, nullptr);
+                    
+                    // Dispatch only for the tile size
+                    vkCmdDispatch(vkCtx.commandBuffer, (drawW + 7) / 8, (drawH + 7) / 8, 1);
+                    vkEndCommandBuffer(vkCtx.commandBuffer);
+
+                    VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+                    submitInfo.commandBufferCount = 1;
+                    submitInfo.pCommandBuffers = &vkCtx.commandBuffer;
+
+                    VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+                    VkFence fence;
+                    vkCreateFence(vkCtx.device, &fenceInfo, nullptr, &fence);
+
+                    vkQueueSubmit(vkCtx.queue, 1, &submitInfo, fence);
+                    vkWaitForFences(vkCtx.device, 1, &fence, VK_TRUE, UINT64_MAX);
+                    vkDestroyFence(vkCtx.device, fence, nullptr);
+                }
+            }
             
-            vkCtx.updateCameraData(camData);
-
-            VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-            vkBeginCommandBuffer(vkCtx.commandBuffer, &beginInfo);
-            vkCmdBindPipeline(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.pbrPipeline);
-            vkCmdBindDescriptorSets(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.pbrPipelineLayout, 0, 1, &vkCtx.pbrDescSet, 0, nullptr);
-            
-            vkCmdDispatch(vkCtx.commandBuffer, (width + 7) / 8, (height + 7) / 8, 1);
-            vkEndCommandBuffer(vkCtx.commandBuffer);
-
-            VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-            submitInfo.commandBufferCount = 1;
-            submitInfo.pCommandBuffers = &vkCtx.commandBuffer;
-
-            VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-            VkFence fence;
-            vkCreateFence(vkCtx.device, &fenceInfo, nullptr, &fence);
-
-            vkQueueSubmit(vkCtx.queue, 1, &submitInfo, fence);
-            vkWaitForFences(vkCtx.device, 1, &fence, VK_TRUE, UINT64_MAX);
-            vkDestroyFence(vkCtx.device, fence, nullptr);
-            
-            currentSampleOffset += dispatchSamples;
+            currentSampleOffset += samplesInBatch;
         }
 
         frameCounter_++;
 
-        std::vector<float> rawBuffer(width * height * 4);
+        std::vector<float> rawBuffer(width * height * 5);
         void* mappedData;
         vkMapMemory(vkCtx.device, vkCtx.outMem, 0, outSize, 0, &mappedData);
         memcpy(rawBuffer.data(), mappedData, outSize);
         vkUnmapMemory(vkCtx.device, vkCtx.outMem);
 
-        for (size_t i = 0; i < rawBuffer.size(); ++i) {
+        for (size_t i = 0; i < rawBuffer.size(); i += 5) {
             rawBuffer[i] /= samplesPerPixel;
+            rawBuffer[i+1] /= samplesPerPixel;
+            rawBuffer[i+2] /= samplesPerPixel;
+            rawBuffer[i+3] /= samplesPerPixel; 
         }
-        
 
         frame outFrame(width, height, colorformat);
         std::vector<float> colorBuffer(width * height * 3);
@@ -3061,16 +3089,18 @@ public:
                 float sumWeights = 0.0f;
                 float sumR = 0.0f, sumG = 0.0f, sumB = 0.0f;
                 
-                int centerIdx = (y * width + x) * 4;
+                int centerIdx = (y * width + x) * 5;
                 float centerDepth = rawBuffer[centerIdx + 3];
+                int centerObj = static_cast<int>(rawBuffer[centerIdx + 4]);
 
                 for (int dy = -radius; dy <= radius; ++dy) {
                     for (int dx = -radius; dx <= radius; ++dx) {
                         int nx = std::clamp(x + dx, 0, width - 1);
                         int ny = std::clamp(y + dy, 0, height - 1);
-                        int nIdx = (ny * width + nx) * 4;
+                        int nIdx = (ny * width + nx) * 5;
                         
                         float nDepth = rawBuffer[nIdx + 3];
+                        int nObj = static_cast<int>(rawBuffer[nIdx + 4]);
                         
                         float spatialDistSq = static_cast<float>(dx*dx + dy*dy);
                         float spatialWeight = std::exp(-spatialDistSq / (2.0f * spatialSigma * spatialSigma));
@@ -3078,7 +3108,9 @@ public:
                         float depthDiff = nDepth - centerDepth;
                         float depthWeight = std::exp(-(depthDiff * depthDiff) / (2.0f * depthSigma * depthSigma));
                         
-                        float weight = spatialWeight * depthWeight;
+                        float objWeight = (centerObj == nObj) ? 1.0f : 0.05f; 
+
+                        float weight = spatialWeight * depthWeight * objWeight;
                         sumWeights += weight;
                         sumR += rawBuffer[nIdx] * weight;
                         sumG += rawBuffer[nIdx + 1] * weight;
@@ -3098,6 +3130,7 @@ public:
     }
 
     frame fastRenderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB) {
+        TIME_FUNCTION;
         updateStreaming(cam);
         optimize();
         thread_local RenderBuffer tl_buffer;
@@ -3114,7 +3147,8 @@ public:
         std::vector<GPUFastRenderData> gpuPoints;
         gpuPoints.reserve(tl_buffer.points.size());
         for(const auto& p : tl_buffer.points) {
-            gpuPoints.push_back({p.position, p.size, p.color, p.material.emittance, p.boundsMin, 0, p.boundsMax, 0});
+            gpuPoints.push_back({p.position, p.size, p.color, p.material.emittance, p.boundsMin, p.objectId,
+               p.boundsMax, 0});
         }
 
         if(gpuNodes.empty()) gpuNodes.push_back(GPURenderNode{});
@@ -3128,10 +3162,10 @@ public:
         GPUCameraData camData = {
             cam.origin, lodMinDistance_, cam.direction.normalized(), invLodf, cam.up.normalized(), 0.1f, cam.right(), maxDistance_,
             skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
-            width, height, 1, 1, invFogRange, frameCounter_++, 0, 0, 0, 0, 1, 0
+            width, height, 1, 1, invFogRange, frameCounter_++, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0
         };
 
-        size_t outSize = width * height * 3 * sizeof(float);
+        size_t outSize = width * height * 5 * sizeof(float);
         vkCtx.updateCommonBuffers(gpuNodes, outSize, camData);
         vkCtx.updateFastBuffers(gpuPoints);
 
@@ -3157,10 +3191,261 @@ public:
 
         frame outFrame(width, height, colorformat);
         std::vector<float> colorBuffer(width * height * 3);
+        
+        std::vector<float> rawBuffer(width * height * 5);
         void* mappedData;
         vkMapMemory(vkCtx.device, vkCtx.outMem, 0, outSize, 0, &mappedData);
-        memcpy(colorBuffer.data(), mappedData, outSize);
+        memcpy(rawBuffer.data(), mappedData, outSize);
         vkUnmapMemory(vkCtx.device, vkCtx.outMem);
+
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                int outIdx = (y * width + x) * 3;
+                int inIdx = (y * width + x) * 5;
+                colorBuffer[outIdx]     = std::clamp(rawBuffer[inIdx], 0.0f, 1.0f);
+                colorBuffer[outIdx + 1] = std::clamp(rawBuffer[inIdx + 1], 0.0f, 1.0f);
+                colorBuffer[outIdx + 2] = std::clamp(rawBuffer[inIdx + 2], 0.0f, 1.0f);
+            }
+        }
+
+        outFrame.setData(colorBuffer, frame::colormap::RGB);
+        return outFrame;
+    }
+
+    frame blendedRenderFrameVulkan(const Camera& cam, int height, int width, float pbrScale = 0.5f,
+                    frame::colormap colorformat = frame::colormap::RGB, int samplesPerPixel = 1,
+                    int maxBounces = 4, bool globalIllumination = false, bool useLod = true) {
+        TIME_FUNCTION;
+        updateStreaming(cam);
+        optimize();
+        thread_local RenderBuffer tl_buffer;
+        buildRender(tl_buffer);
+        
+        vkCtx.init();
+
+        std::vector<GPURenderNode> gpuNodes;
+        gpuNodes.reserve(tl_buffer.nodes.size());
+        for(const auto& n : tl_buffer.nodes) {
+            gpuNodes.push_back({n.boundsMin, 0, n.boundsMax, 0, n.center, n.nodeSize, (uint32_t)n.isLeaf,
+                (uint32_t)n.isLoaded, n.childMask, n.firstPoint, n.pointCount, n.lodPoint, n.firstChild, 0});
+        }
+        
+        std::vector<GPUPBRRenderData> gpuPBRPoints;
+        gpuPBRPoints.reserve(tl_buffer.points.size());
+        std::vector<GPUFastRenderData> gpuFastPoints;
+        gpuFastPoints.reserve(tl_buffer.points.size());
+
+        for(const auto& p : tl_buffer.points) {
+            gpuPBRPoints.push_back({p.position, p.size, p.color, p.material.emittance, p.boundsMin,
+                                 p.material.roughness, p.boundsMax, p.material.metallic, p.material.absorption, p.material.transmission, p.material.ior, p.objectId, 0.0f, 0.0f});
+            gpuFastPoints.push_back({p.position, p.size, p.color, p.material.emittance, p.boundsMin, p.objectId, p.boundsMax, 0.0f});
+        }
+
+        if(gpuNodes.empty()) gpuNodes.push_back(GPURenderNode{});
+        if(gpuPBRPoints.empty()) gpuPBRPoints.push_back(GPUPBRRenderData{});
+        if(gpuFastPoints.empty()) gpuFastPoints.push_back(GPUFastRenderData{});
+
+        float aspect = static_cast<float>(width) / height;
+        float fovRad = cam.fovRad();
+        float tanHalfFov = tan(fovRad * 0.5f);
+        float invFogRange = 1.0f / std::max(0.001f, maxDistance_ - lodMinDistance_);
+
+        size_t skyW = skybox_.skybox.getWidth();
+        size_t skyH = skybox_.skybox.getHeight();
+        if (skyW == 0 || skyH == 0) { skyW = 1; skyH = 1; }
+        std::vector<Eigen::Vector4f> skyData(skyW * skyH, Eigen::Vector4f(0,0,0,1));
+        if (skybox_.skybox.getWidth() > 0) {
+            for (size_t y = 0; y < skyH; ++y) {
+                float v = (static_cast<float>(y) + 0.5f) / skyH;
+                for (size_t x = 0; x < skyW; ++x) {
+                    float u = (static_cast<float>(x) + 0.5f) / skyW;
+                    PointType skyDir = skybox_.uvToDir(u, v);
+                    Eigen::Vector3f color = skybox_.sampleVector(skyDir);
+                    skyData[y * skyW + x] = Eigen::Vector4f(color.x(), color.y(), color.z(), 1.0f);
+                }
+            }
+        }
+        vkCtx.updateSkyboxBuffer(skyData);
+
+        int lowW = std::max(1, static_cast<int>(width * pbrScale));
+        int lowH = std::max(1, static_cast<int>(height * pbrScale));
+
+        GPUCameraData pbrCamData = {
+            cam.origin, lodMinDistance_, cam.direction.normalized(), invLodf, cam.up.normalized(), 0.1f, cam.right(), maxDistance_,
+            skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
+            lowW, lowH, maxBounces, useLod ? 1 : 0, invFogRange, frameCounter_,
+            (int)skyW, (int)skyH, 0, 0, globalIllumination ? 1 : 0, 
+            (uint32_t)gpuNodes.size(), (uint32_t)gpuPBRPoints.size(), 0, 0, 0, 0
+        };
+
+        size_t pbrOutSize = lowW * lowH * 5 * sizeof(float);
+        vkCtx.updateCommonBuffers(gpuNodes, pbrOutSize, pbrCamData);
+        vkCtx.updatePBRBuffers(gpuPBRPoints);
+
+        int currentSampleOffset = 0;
+        const long long maxWorkloadBudget = 131072; 
+        const long long pixelsInFrame = (long long)lowW * lowH;
+
+        while (currentSampleOffset < samplesPerPixel) {
+            int samplesInBatch = std::max(1, (int)(maxWorkloadBudget / pixelsInFrame));
+            samplesInBatch = std::min(samplesInBatch, samplesPerPixel - currentSampleOffset);
+            pbrCamData.currentSampleOffset = currentSampleOffset;
+            pbrCamData.dispatchSamples = samplesInBatch;
+
+            int tileW = 256; int tileH = 256;
+            for (int y = 0; y < lowH; y += tileH) {
+                for (int x = 0; x < lowW; x += tileW) {
+                    int drawW = std::min(tileW, lowW - x);
+                    int drawH = std::min(tileH, lowH - y);
+                    pbrCamData.tileOffsetX = x;
+                    pbrCamData.tileOffsetY = y;
+                    vkCtx.updateCameraData(pbrCamData);
+
+                    VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+                    vkBeginCommandBuffer(vkCtx.commandBuffer, &beginInfo);
+                    vkCmdBindPipeline(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.pbrPipeline);
+                    vkCmdBindDescriptorSets(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.pbrPipelineLayout, 0, 1, &vkCtx.pbrDescSet, 0, nullptr);
+                    
+                    vkCmdDispatch(vkCtx.commandBuffer, (drawW + 7) / 8, (drawH + 7) / 8, 1);
+                    vkEndCommandBuffer(vkCtx.commandBuffer);
+
+                    VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+                    submitInfo.commandBufferCount = 1;
+                    submitInfo.pCommandBuffers = &vkCtx.commandBuffer;
+
+                    VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+                    VkFence fence;
+                    vkCreateFence(vkCtx.device, &fenceInfo, nullptr, &fence);
+
+                    vkQueueSubmit(vkCtx.queue, 1, &submitInfo, fence);
+                    vkWaitForFences(vkCtx.device, 1, &fence, VK_TRUE, UINT64_MAX);
+                    vkDestroyFence(vkCtx.device, fence, nullptr);
+                }
+            }
+            currentSampleOffset += samplesInBatch;
+        }
+
+        std::vector<float> pbrRaw(lowW * lowH * 5);
+        void* mappedData;
+        vkMapMemory(vkCtx.device, vkCtx.outMem, 0, pbrOutSize, 0, &mappedData);
+        memcpy(pbrRaw.data(), mappedData, pbrOutSize);
+        vkUnmapMemory(vkCtx.device, vkCtx.outMem);
+
+        for (size_t i = 0; i < pbrRaw.size(); i += 5) {
+            pbrRaw[i] /= samplesPerPixel;
+            pbrRaw[i+1] /= samplesPerPixel;
+            pbrRaw[i+2] /= samplesPerPixel;
+            pbrRaw[i+3] /= samplesPerPixel;
+        }
+
+        GPUCameraData fastCamData = {
+            cam.origin, lodMinDistance_, cam.direction.normalized(), invLodf, cam.up.normalized(), 0.1f, cam.right(), maxDistance_,
+            skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
+            width, height, 1, useLod ? 1 : 0, invFogRange, frameCounter_++, 0, 0, 0, 1, 0, 
+            (uint32_t)gpuNodes.size(), (uint32_t)gpuFastPoints.size(), 0, 0, 0
+        };
+
+        size_t fastOutSize = width * height * 5 * sizeof(float);
+        vkCtx.updateCommonBuffers(gpuNodes, fastOutSize, fastCamData);
+        vkCtx.updateFastBuffers(gpuFastPoints);
+
+        int tileW = 256; int tileH = 256;
+        for (int y = 0; y < height; y += tileH) {
+            for (int x = 0; x < width; x += tileW) {
+                int drawW = std::min(tileW, width - x);
+                int drawH = std::min(tileH, height - y);
+                fastCamData.tileOffsetX = x;
+                fastCamData.tileOffsetY = y;
+                vkCtx.updateCameraData(fastCamData);
+
+                VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+                vkBeginCommandBuffer(vkCtx.commandBuffer, &beginInfo);
+                vkCmdBindPipeline(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.fastPipeline);
+                vkCmdBindDescriptorSets(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.fastPipelineLayout, 0, 1, &vkCtx.fastDescSet, 0, nullptr);
+                vkCmdDispatch(vkCtx.commandBuffer, (drawW + 7) / 8, (drawH + 7) / 8, 1);
+                vkEndCommandBuffer(vkCtx.commandBuffer);
+
+                VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+                submitInfo.commandBufferCount = 1;
+                submitInfo.pCommandBuffers = &vkCtx.commandBuffer;
+
+                VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+                VkFence fence;
+                vkCreateFence(vkCtx.device, &fenceInfo, nullptr, &fence);
+                vkQueueSubmit(vkCtx.queue, 1, &submitInfo, fence);
+                vkWaitForFences(vkCtx.device, 1, &fence, VK_TRUE, UINT64_MAX);
+                vkDestroyFence(vkCtx.device, fence, nullptr);
+            }
+        }
+
+        std::vector<float> fastRaw(width * height * 5);
+        vkMapMemory(vkCtx.device, vkCtx.outMem, 0, fastOutSize, 0, &mappedData);
+        memcpy(fastRaw.data(), mappedData, fastOutSize);
+        vkUnmapMemory(vkCtx.device, vkCtx.outMem);
+
+        frame outFrame(width, height, colorformat);
+        std::vector<float> colorBuffer(width * height * 3);
+        
+        const int radius = 2; // Joint Bilateral Neighborhood search
+        const float spatialSigma = 1.5f;
+        const float depthSigma = 0.5f;
+        
+        #pragma omp parallel for schedule(dynamic) collapse(2)
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                int fastIdx = (y * width + x) * 5;
+                float fastR = fastRaw[fastIdx];
+                float fastG = fastRaw[fastIdx + 1];
+                float fastB = fastRaw[fastIdx + 2];
+                float fastDepth = fastRaw[fastIdx + 3];
+                int fastObj = static_cast<int>(fastRaw[fastIdx + 4]);
+
+                int center_lx = static_cast<int>(std::round(x * pbrScale));
+                int center_ly = static_cast<int>(std::round(y * pbrScale));
+
+                float sumWeights = 0.0f;
+                float sumR = 0.0f, sumG = 0.0f, sumB = 0.0f;
+
+                for (int dy = -radius; dy <= radius; ++dy) {
+                    for (int dx = -radius; dx <= radius; ++dx) {
+                        int nx = std::clamp(center_lx + dx, 0, lowW - 1);
+                        int ny = std::clamp(center_ly + dy, 0, lowH - 1);
+                        int pbrIdx = (ny * lowW + nx) * 5;
+
+                        float pbrDepth = pbrRaw[pbrIdx + 3];
+                        int pbrObj = static_cast<int>(pbrRaw[pbrIdx + 4]);
+
+                        float sDistSq = static_cast<float>(dx*dx + dy*dy);
+                        float spatialWeight = std::exp(-sDistSq / (2.0f * spatialSigma * spatialSigma));
+
+                        float depthDiff = fastDepth - pbrDepth;
+                        // Forbid penalizing extreme background distances matching
+                        if (fastDepth > 999000.0f && pbrDepth > 999000.0f) depthDiff = 0.0f;
+                        float depthWeight = std::exp(-(depthDiff * depthDiff) / (2.0f * depthSigma * depthSigma));
+
+                        // Hard check on object IDs to prevent blending PBR lighting across edge boundaries!
+                        float objWeight = (fastObj == pbrObj && fastObj != -1) ? 1.0f : ((fastObj == pbrObj) ? 1.0f : 0.005f);
+
+                        float weight = spatialWeight * depthWeight * objWeight;
+                        sumWeights += weight;
+                        sumR += pbrRaw[pbrIdx] * weight;
+                        sumG += pbrRaw[pbrIdx + 1] * weight;
+                        sumB += pbrRaw[pbrIdx + 2] * weight;
+                    }
+                }
+                
+                int outIdx = (y * width + x) * 3;
+                if (sumWeights > 0.05f) { // Safely apply upscaled lighting
+                    colorBuffer[outIdx]     = std::clamp(sumR / sumWeights, 0.0f, 1.0f);
+                    colorBuffer[outIdx + 1] = std::clamp(sumG / sumWeights, 0.0f, 1.0f);
+                    colorBuffer[outIdx + 2] = std::clamp(sumB / sumWeights, 0.0f, 1.0f);
+                } else { // Edges where low res PBR missed a high res Fast pixel due to resolution mismatch
+                    colorBuffer[outIdx]     = std::clamp(fastR, 0.0f, 1.0f);
+                    colorBuffer[outIdx + 1] = std::clamp(fastG, 0.0f, 1.0f);
+                    colorBuffer[outIdx + 2] = std::clamp(fastB, 0.0f, 1.0f);
+                }
+            }
+        }
 
         outFrame.setData(colorBuffer, frame::colormap::RGB);
         return outFrame;
@@ -3268,6 +3553,7 @@ public:
     }
 
     frame fastRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB) {
+        TIME_FUNCTION;
         updateStreaming(cam);
         
         thread_local RenderBuffer tl_buffer;

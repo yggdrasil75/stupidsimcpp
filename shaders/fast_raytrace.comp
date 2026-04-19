@@ -2,9 +2,12 @@
 layout(local_size_x = 8, local_size_y = 8) in;
 
 struct GPURenderNode {
-    vec3 boundsMin; float padding1;
-    vec3 boundsMax; float padding2;
-    vec3 center;    float nodeSize;
+    vec3 boundsMin;
+    float padding1;
+    vec3 boundsMax;
+    float padding2;
+    vec3 center;
+    float nodeSize;
     uint isLeaf;
     uint isLoaded;
     uint childMask;
@@ -21,7 +24,7 @@ struct GPUFastRenderData {
     vec3 color;
     float emittance;
     vec3 boundsMin;
-    float padding1;
+    float objectId;
     vec3 boundsMax;
     float padding2;
 };
@@ -32,11 +35,11 @@ layout(std430, binding = 2) writeonly buffer OutputBuffer { float pixels[]; };
 
 layout(binding = 3) uniform CameraData {
     vec3 origin;
-    float padding1;
+    float lodMinDist;
     vec3 dir;
-    float padding2;
+    float invLodf;
     vec3 up;
-    float padding3;
+    float minVisibility;
     vec3 right;
     float maxDist;
     vec3 skylight;
@@ -45,21 +48,34 @@ layout(binding = 3) uniform CameraData {
     float tanfovy;
     int width;
     int height;
-    int samples;
     int maxBounces;
     int useLod;
-    float lodMinDist;
-    float invLodf;
-    float minVisibility;
     float invFogRange;
     uint frameCount;
-    float padding5;
+    int skyWidth;
+    int skyHeight;
+    int currentSampleOffset;
+    int dispatchSamples;
+    int globalIllumination;
+    uint nodeCount;
+    uint pointCount;
+    int tileOffsetX;
+    int tileOffsetY;
+    int padding;
 } cam;
 
-struct Ray { vec3 origin; vec3 dir; vec3 invDir; ivec3 signMask; };
+struct Ray {
+    vec3 origin;
+    vec3 dir;
+    vec3 invDir;
+    ivec3 signMask;
+};
 
 Ray makeRay(vec3 o, vec3 d) {
-    Ray r; r.origin = o; r.dir = d; r.invDir = 1.0 / d;
+    Ray r;
+    r.origin = o;
+    r.dir = d;
+    r.invDir = 1.0 / d;
     r.signMask = ivec3(r.invDir.x < 0 ? 1 : 0, r.invDir.y < 0 ? 1 : 0, r.invDir.z < 0 ? 1 : 0);
     return r;
 }
@@ -247,12 +263,13 @@ int voxelTraverse(Ray ray, out int hitIndex, out float outT, out vec3 outNormal)
 }
 
 void main() {
-    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 localCoord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 coord = localCoord + ivec2(cam.tileOffsetX, cam.tileOffsetY);
     if (coord.x >= cam.width || coord.y >= cam.height) return;
 
     float px = (2.0 * (float(coord.x) + 0.5) / float(cam.width) - 1.0) * cam.tanfovx;
     float py = (1.0 - 2.0 * (float(coord.y) + 0.5) / float(cam.height)) * cam.tanfovy;
-        vec3 rayDir = normalize(cam.dir + cam.right * px + cam.up * py);
+    vec3 rayDir = normalize(cam.dir + cam.right * px + cam.up * py);
     Ray ray = makeRay(cam.origin, rayDir);
 
     vec3 finalColor = cam.bgColor;
@@ -261,6 +278,9 @@ void main() {
     float t;
     vec3 normal;
     int hitResult = voxelTraverse(ray, hitIndex, t, normal);
+
+    float depthOut = 1e30;
+    float objIdOut = -1.0;
 
     if (hitResult == 1) {
         GPUFastRenderData hitData = points[hitIndex];
@@ -278,11 +298,16 @@ void main() {
         float fogT = clamp((t - cam.lodMinDist) * cam.invFogRange, 0.0, 1.0);
         float fogFactor = mix(1.0, cam.minVisibility, fogT);
         finalColor = mix(cam.bgColor, surfaceColor, fogFactor);
+        
+        depthOut = t;
+        objIdOut = float(hitData.objectId);
     }
     
     finalColor = clamp(finalColor, 0.0, 1.0);
-    uint idx = (coord.y * cam.width + coord.x) * 3;
+    uint idx = (coord.y * cam.width + coord.x) * 5;
     pixels[idx]     = finalColor.r;
     pixels[idx + 1] = finalColor.g;
     pixels[idx + 2] = finalColor.b;
+    pixels[idx + 3] = depthOut;
+    pixels[idx + 4] = objIdOut;
 }
