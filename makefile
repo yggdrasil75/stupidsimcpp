@@ -8,7 +8,8 @@ SHADER_DIR := ./shaders
 
 # Compiler and flags
 CXX := g++
-BASE_CXXFLAGS = -std=c++23 -O3 -fopenmp -march=native -I$(IMGUI_DIR) -I$(IMGUI_DIR)/backends -I$(STB_DIR) -g
+BASE_CXXFLAGS = -std=c++23 -O3 -fopenmp -march=native -I$(IMGUI_DIR) -I$(IMGUI_DIR)/backends -I$(STB_DIR) 
+# BASE_CXXFLAGS += -g
 BASE_CXXFLAGS += `pkg-config --cflags glfw3`
 
 LINUX_GL_LIBS = -lGL -ltbb -lvulkan
@@ -37,8 +38,8 @@ endif
 CXXFLAGS = $(BASE_CXXFLAGS) $(SIMD_CXXFLAGS) 
 
 # Source files
-SRC := $(SRC_DIR)/ptest.cpp
-#SRC := $(SRC_DIR)/materialtest.cpp
+# SRC := $(SRC_DIR)/ptest.cpp
+SRC := $(SRC_DIR)/materialtest.cpp
 #SRC := $(SRC_DIR)/g2chromatic2.cpp
 SRC += $(IMGUI_DIR)/imgui.cpp $(IMGUI_DIR)/imgui_demo.cpp $(IMGUI_DIR)/imgui_draw.cpp $(IMGUI_DIR)/imgui_tables.cpp $(IMGUI_DIR)/imgui_widgets.cpp
 SRC += $(IMGUI_DIR)/backends/imgui_impl_glfw.cpp $(IMGUI_DIR)/backends/imgui_impl_opengl3.cpp

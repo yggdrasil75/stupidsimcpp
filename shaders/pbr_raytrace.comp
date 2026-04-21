@@ -193,7 +193,7 @@ vec3 sampleSkybox(vec3 d) {
     return skyPixels[idx].rgb;
 }
 
-int voxelTraverse(Ray ray, out int hitIndex, out float outT, out vec3 outNormal, out vec3 outHitPoint);
+int voxelTraverse(Ray ray, out int hitIndex, out float outT, out vec3 outNormal, out vec3 outHitPoint, inout float maxDist);
 
 float smith(float cost, float alpha2) {
     float cost2 = cost * cost;
@@ -223,6 +223,8 @@ vec3 hemisphereSample(vec3 n, inout uint state) {
 
 vec3 traceRay(Ray initialRay, inout uint state, out float primaryDepth, out int primaryObjId) {
     if (isInvalid(initialRay.origin) || isInvalid(initialRay.dir)) return vec3(0.0, 1.0, 0.0);
+    
+    float remainingMaxDist = cam.maxDist;
 
     vec3 finalColor = vec3(0.0);
     vec3 throughput = vec3(1.0);
@@ -238,12 +240,17 @@ vec3 traceRay(Ray initialRay, inout uint state, out float primaryDepth, out int 
         if (isInvalid(throughput) || isInvalid(finalColor) || isInvalid(origin) || isInvalid(direction)) {
             return vec3(0.0, 1.0, 0.0);
         }
+        
+        if (remainingMaxDist <= 0.0) break;
+
         Ray cray = makeRay(origin, direction);
         int hitIndex = -1;
         float t = 0.0;
         vec3 normal = vec3(0.0);
         vec3 hitPoint = vec3(0.0);
-        int hitResult = voxelTraverse(cray, hitIndex, t, normal, hitPoint);
+        
+        float segmentMaxDist = remainingMaxDist;
+        int hitResult = voxelTraverse(cray, hitIndex, t, normal, hitPoint, segmentMaxDist);
         
         if (bounce == 0) {
             if (hitResult == 1) {
@@ -266,6 +273,9 @@ vec3 traceRay(Ray initialRay, inout uint state, out float primaryDepth, out int 
             break;
         }
         if (hitIndex < 0 || hitIndex >= points.length()) break;
+        
+        remainingMaxDist -= t;
+
         GPUPBRRenderData hitData = points[hitIndex];
         float tExit = -2.0;
         rayCubeIntersect(cray, hitData, t, normal, hitPoint, tExit);
@@ -279,33 +289,37 @@ vec3 traceRay(Ray initialRay, inout uint state, out float primaryDepth, out int 
         float metallic = hitData.metallic;
         float transmission = hitData.transmission;
         float ior = hitData.ior;
+        int objectId = hitData.objectId;
 
         if (entering == 0) throughput = throughput * exp(-hitData.absorption * t);
         if (entering == 0) { 
             Ray lookaheadRay = makeRay(hitPoint + normal * DIST_EPSILON, direction);
-            int nextHitIdx; float nextT; vec3 nextNorm; vec3 nextHP;
+            int nextHitIdx;
+            float nextT;
+            vec3 nextNorm;
+            vec3 nextHP;
             
-            if (voxelTraverse(lookaheadRay, nextHitIdx, nextT, nextNorm, nextHP) == 1 
+            float lookaheadMaxDist = remainingMaxDist;
+            if (voxelTraverse(lookaheadRay, nextHitIdx, nextT, nextNorm, nextHP, lookaheadMaxDist) == 1 
                 && nextHitIdx != hitIndex && nextT <= GAP_EPSILON && nextHitIdx >= 0 && nextHitIdx < points.length()) {
-                
                 GPUPBRRenderData nextData = points[nextHitIdx];
                 bool sameMaterial = (abs(nextData.ior - ior) < 0.01) && 
                                     (distance(nextData.color, albedo) < 0.05) &&
                                     (abs(nextData.transmission - transmission) < 0.05);
-
                 if (sameMaterial && contiguousSteps < 8) {
                     origin = nextHP + direction * DIST_EPSILON;
+                    remainingMaxDist -= nextT; // subtract lookahead distance
                     contiguousSteps++;
-                    continue; 
+                    continue;
                 }
             }
         }
+        
         vec3 emitted = albedo * hitData.emittance;
         finalColor += throughput * emitted;
         vec3 F0 = mix(vec3(0.04), albedo, metallic);
 
-        //float maxReflectance = max(max(max(albedo.x, albedo.y), albedo.z), max(max(F0.x, F0.y), F0.z));
-        float continueProb; // = clamp(maxReflectance, 0.1, 0.95);
+        float continueProb;
         if (bounce > 2) {
             continueProb = max(throughput.x, max(throughput.y, throughput.z));
             continueProb = clamp(continueProb, 0.1, 0.95); 
@@ -323,7 +337,6 @@ vec3 traceRay(Ray initialRay, inout uint state, out float primaryDepth, out int 
         float phi = 2.0 * PI * r1;
         float cosThetaM = sqrt(max(0.0, (1.0 - r2) / (1.0 + (alpha2 - 1.0) * r2)));
         float sinThetaM = sqrt(max(0.0, 1.0 - cosThetaM * cosThetaM));
-
         vec3 up = abs(offsetNorm.z) < 0.999 ? vec3(0, 0, 1) : vec3(1, 0, 0);
         vec3 tangent = normalize(cross(up, offsetNorm));
         vec3 bitangent = cross(offsetNorm, tangent);
@@ -340,6 +353,7 @@ vec3 traceRay(Ray initialRay, inout uint state, out float primaryDepth, out int 
         float probSpec = (F.x + F.y + F.z) * 0.333333; 
         float probT = (1.0 - metallic) * transmission;
         float probDiffuse = (1.0 - metallic) * (1.0 - transmission);
+        
         float pspec = probSpec;
         float pdiff = probDiffuse * (1.0 - pspec);
         float pTrans = probT * (1.0 - pspec);
@@ -445,10 +459,10 @@ void checkAndUpdateHit(Ray ray, int ptIdx, float ptT, vec3 ptN, vec3 ptHP, inout
     }
 }
 
-int voxelTraverse(Ray ray, out int hitIndex, out float outT, out vec3 outNormal, out vec3 outHitPoint) {
+int voxelTraverse(Ray ray, out int hitIndex, out float outT, out vec3 outNormal, out vec3 outHitPoint, inout float currentMaxDist) {
     float tMin, tMax;
     if (nodes.length() == 0 || !rayBoxIntersect(ray, nodes[0].boundsMin, nodes[0].boundsMax, tMin, tMax)) return 0;
-    float currentMaxDist = cam.maxDist;
+    
     tMax = min(tMax, currentMaxDist);
     uint stackNodes[32];
     float stackTMin[32];

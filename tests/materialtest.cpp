@@ -131,7 +131,7 @@ int main() {
     const float fps = 30.0f;
     const float durationPerSegment = 10.0f;
     const int framesPerSegment = static_cast<int>(fps * durationPerSegment);
-    const int samples = 10;
+    const int samples = 100;
     const int blendedsamples = 100;
     const float blendedfactor = 0.5;
     const int video_samples = 50;
@@ -153,23 +153,23 @@ int main() {
 
     Eigen::Vector3f target(0.0f, 0.0f, 0.5f);
 
-    // for (const auto& view : views) {
-    //     std::cout << "\nRendering view from " << view.name << " direction (Fast Pass)..." << std::endl;
+    for (const auto& view : views) {
+        std::cout << "\nRendering view from " << view.name << " direction (Fast Pass)..." << std::endl;
         
-    //     Camera cam;
-    //     cam.origin = view.origin;
-    //     cam.direction = (target - view.origin).normalized();
-    //     cam.up = view.up;
+        Camera cam;
+        cam.origin = view.origin;
+        cam.direction = (target - view.origin).normalized();
+        cam.up = view.up;
         
-    //     frame out = octree.fastRenderFrame(cam, height, width, frame::colormap::RGB);
-    //     std::string filename = "output/fast_cpurender_" + view.name + ".bmp";
-    //     BMPWriter::saveBMP(filename, out);
+        frame out = octree.fastRenderFrame(cam, height, width, frame::colormap::RGB);
+        std::string filename = "output/fast_cpurender_" + view.name + ".bmp";
+        BMPWriter::saveBMP(filename, out);
         
-    //     out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
-    //     filename = "output/fast_vulkanrender_" + view.name + ".bmp";
-    //     BMPWriter::saveBMP(filename, out);
-    // }
-    // FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
+        out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
+        filename = "output/fast_vulkanrender_" + view.name + ".bmp";
+        BMPWriter::saveBMP(filename, out);
+    }
+    FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
 
     for (const auto& view : views) {
         std::cout << "\nRendering view from " << view.name << " direction (Slow "<< samples <<" Samples Pass)..." << std::endl;

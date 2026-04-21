@@ -811,7 +811,7 @@ private:
             vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
             std::vector<VkPhysicalDevice> devices(deviceCount);
             vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data());
-            physicalDevice = devices[1];
+            physicalDevice = devices[0]; //need to set a flag for this at some point.
 
             uint32_t queueFamilyCount = 0;
             vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
@@ -3079,7 +3079,7 @@ public:
         frame outFrame(width, height, colorformat);
         std::vector<float> colorBuffer(width * height * 3);
         
-        const int radius = 1;
+        const int radius = 2;
         const float spatialSigma = 2.0f;
         const float depthSigma = 1.0f;
         
@@ -3283,7 +3283,7 @@ public:
         vkCtx.updatePBRBuffers(gpuPBRPoints);
 
         int currentSampleOffset = 0;
-        const long long maxWorkloadBudget = 131072; 
+        const long long maxWorkloadBudget = 65536; 
         const long long pixelsInFrame = (long long)lowW * lowH;
 
         while (currentSampleOffset < samplesPerPixel) {

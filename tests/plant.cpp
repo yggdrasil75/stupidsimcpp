@@ -31,6 +31,7 @@ private:
     float deltaTime = 0.016f;
     int simulationSpeed = 1;
     int reflectCount = 2;
+    int spp = 5;
     float maxDist = 200.0f;
     bool keyStates[GLFW_KEY_LAST + 1] = {false};
 
@@ -225,7 +226,8 @@ private:
             ImGui::Checkbox("High Quality Render (Slower)", &slowRender);
             if (slowRender) {
                 ImGui::Checkbox("Global Illumination", &globalIllumination);
-                ImGui::DragInt("Bounces", &reflectCount, 1, 0, 8);
+                ImGui::DragInt("Bounces", &reflectCount, 1, 1, 8);
+                ImGui::DragInt("Samples Per Pixel", &spp, 1, 2, 128);
             }
             
             ImGui::Separator();
@@ -559,7 +561,7 @@ private:
         
         if (slowRender) {
             // #ifdef VULKAN_SUPPORT
-            currentPreviewFrame = sim.grid.renderFrameVulkan(cam, outHeight, outWidth, frame::colormap::RGB, 3, reflectCount, useLod);
+            currentPreviewFrame = sim.grid.renderFrameVulkan(cam, outHeight, outWidth, frame::colormap::RGB, 10, reflectCount, useLod);
             // #else
             // currentPreviewFrame = sim.grid.renderFrame(cam, outHeight, outWidth, frame::colormap::RGB, 3, reflectCount, globalIllumination, useLod);
             // #endif
