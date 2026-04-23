@@ -8,6 +8,7 @@
 #include "../eigen/Eigen/Dense" 
 #include "../util/grid/camera.hpp"
 #include "../util/grid/grid3eigen.hpp"
+#include "../util/grid/grid3render.cpp"
 #include "../util/output/frame.hpp"
 #include "../util/output/bmpwriter.hpp"
 #include "../util/output/aviwriter.hpp"
@@ -15,7 +16,7 @@
 #include "../util/timing_decorator.cpp"
 
 // Helper function to create a solid volume of voxels with material properties
-void createBox(Octree<int>& octree, const Eigen::Vector3f& center, const Eigen::Vector3f& size, const Eigen::Vector3f& albedo, float emission = 0.0f,
+void createBox(Grid::Octree<int>& octree, const Eigen::Vector3f& center, const Eigen::Vector3f& size, const Eigen::Vector3f& albedo, float emission = 0.0f,
                float roughness = 0.8f, float metallic = 0.0f, float transmission = 0.0f, float ior = 1.45f,const Eigen::Vector3f& absorp = Eigen::Vector3f::Zero(), int oid = 0) {
     float step = 0.1f; // Voxel spacing
     Eigen::Vector3f halfSize = size / 2.0f;
@@ -35,7 +36,7 @@ void createBox(Octree<int>& octree, const Eigen::Vector3f& center, const Eigen::
 }
 
 // Helper function to create a checkerboard pattern volume
-void createCheckerBox(Octree<int>& octree, const Eigen::Vector3f& center, const Eigen::Vector3f& size, 
+void createCheckerBox(Grid::Octree<int>& octree, const Eigen::Vector3f& center, const Eigen::Vector3f& size, 
                       const Eigen::Vector3f& color1, const Eigen::Vector3f& color2, float checkerSize) {
     float step = 0.1f;
     Eigen::Vector3f halfSize = size / 2.0f;
@@ -63,12 +64,12 @@ void createCheckerBox(Octree<int>& octree, const Eigen::Vector3f& center, const 
 }
 
 int main() {
-    std::cout << "Initializing Octree..." << std::endl;
+    std::cout << "Initializing Grid::Octree..." << std::endl;
 
-    // 1. Initialize Octree bounds
+    // 1. Initialize Grid::Octree bounds
     Eigen::Vector3f minBound(-10.0f, -10.0f, -10.0f);
     Eigen::Vector3f maxBound(10.0f, 10.0f, 10.0f);
-    Octree<int> octree(minBound, maxBound, 8, 16);
+    Grid::Octree<int> octree(minBound, maxBound, 8, 16);
     
     // Set a dark background to emphasize the PBR light emission
     octree.setBackgroundColor(Eigen::Vector3f(0.02f, 0.02f, 0.02f));
@@ -125,13 +126,13 @@ int main() {
     octree.setMaxDistance(4096);
 
     // 3. Setup rendering loop
-    int width = 1920;
-    int height = 1080;
+    int width = 512;
+    int height = 512;
     
     const float fps = 30.0f;
     const float durationPerSegment = 10.0f;
     const int framesPerSegment = static_cast<int>(fps * durationPerSegment);
-    const int samples = 100;
+    const int samples = 10;
     const int blendedsamples = 100;
     const float blendedfactor = 0.5;
     const int video_samples = 50;
@@ -199,33 +200,33 @@ int main() {
     std::cout << "\nStarting video render..." << std::endl;
     std::cout << "Total frames to render: " << totalFrames << std::endl;
 
-    for (size_t i = 0; i < views.size(); ++i) {
-        const View& startView = views[i];
-        const View& endView = views[(i + 1) % views.size()]; // Loop back to the first view at the end
+    // for (size_t i = 0; i < views.size(); ++i) {
+    //     const View& startView = views[i];
+    //     const View& endView = views[(i + 1) % views.size()]; // Loop back to the first view at the end
 
-        std::cout << "\nAnimating segment: " << startView.name << " -> " << endView.name << std::endl;
+    //     std::cout << "\nAnimating segment: " << startView.name << " -> " << endView.name << std::endl;
 
-        for (int j = 0; j < framesPerSegment; ++j) {
-            frameCounter++;
-            float t = static_cast<float>(j) / static_cast<float>(framesPerSegment);
+    //     for (int j = 0; j < framesPerSegment; ++j) {
+    //         frameCounter++;
+    //         float t = static_cast<float>(j) / static_cast<float>(framesPerSegment);
 
-            Eigen::Vector3f currentOrigin = startView.origin * (1.0f - t) + endView.origin * t;
+    //         Eigen::Vector3f currentOrigin = startView.origin * (1.0f - t) + endView.origin * t;
             
-            Eigen::Vector3f currentUp = (startView.up * (1.0f - t) + endView.up * t).normalized();
+    //         Eigen::Vector3f currentUp = (startView.up * (1.0f - t) + endView.up * t).normalized();
             
-            Camera cam;
-            cam.origin = currentOrigin;
-            cam.up = currentUp;
-            cam.direction = (target - cam.origin).normalized();
+    //         Camera cam;
+    //         cam.origin = currentOrigin;
+    //         cam.up = currentUp;
+    //         cam.direction = (target - cam.origin).normalized();
             
-            std::cout << "Rendering video frame " << frameCounter << "/" << totalFrames << "..." << std::endl;
+    //         std::cout << "Rendering video frame " << frameCounter << "/" << totalFrames << "..." << std::endl;
             
-            frame out = octree.blendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, video_samples, bounces, false);
-            // frame out = octree.renderFramefast(cam, height, width, frame::colormap::RGB, false, true);
+    //         frame out = octree.blendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, video_samples, bounces, false);
+    //         // frame out = octree.renderFramefast(cam, height, width, frame::colormap::RGB, false, true);
             
-            videoFrames.push_back(std::move(out));
-        }
-    }
+    //         videoFrames.push_back(std::move(out));
+    //     }
+    // }
 
     std::cout << "\nAll frames rendered. Saving video file..." << std::endl;
     std::string videoFilename = "output/material_test_video.avi";

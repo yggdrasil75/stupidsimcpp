@@ -5,11 +5,12 @@ IMGUI_DIR = ./imgui
 OBJ_DIR := $(BIN_DIR)/obj
 STB_DIR := ./stb
 SHADER_DIR := ./shaders
+GRID_DIR := ./util/grid
 
 # Compiler and flags
 CXX := g++
 BASE_CXXFLAGS = -std=c++23 -O3 -fopenmp -march=native -I$(IMGUI_DIR) -I$(IMGUI_DIR)/backends -I$(STB_DIR) 
-# BASE_CXXFLAGS += -g
+BASE_CXXFLAGS += -g
 BASE_CXXFLAGS += `pkg-config --cflags glfw3`
 
 LINUX_GL_LIBS = -lGL -ltbb -lvulkan
@@ -44,6 +45,7 @@ SRC := $(SRC_DIR)/materialtest.cpp
 SRC += $(IMGUI_DIR)/imgui.cpp $(IMGUI_DIR)/imgui_demo.cpp $(IMGUI_DIR)/imgui_draw.cpp $(IMGUI_DIR)/imgui_tables.cpp $(IMGUI_DIR)/imgui_widgets.cpp
 SRC += $(IMGUI_DIR)/backends/imgui_impl_glfw.cpp $(IMGUI_DIR)/backends/imgui_impl_opengl3.cpp
 SRC += $(SRC_DIR)/stb_image.cpp
+SRC += $(GRID_DIR)/grid3render.cpp
 OBJS = $(addprefix $(OBJ_DIR)/, $(addsuffix .o, $(basename $(notdir $(SRC)))))
 UNAME_S := $(shell uname -s)
 EXE := $(BIN_DIR)/g2gradc
@@ -68,6 +70,9 @@ $(OBJ_DIR)/%.o: $(IMGUI_DIR)/backends/%.cpp
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 $(OBJ_DIR)/%.o: $(STB_DIR)/%.cpp
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+	
+$(OBJ_DIR)/%.o: $(GRID_DIR)/%.cpp
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 all: $(EXE) $(SHADER_SPVS)
