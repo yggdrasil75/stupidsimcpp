@@ -286,10 +286,17 @@ frame Octree<T, IndexType, StoragePath>::renderFrameVulkan(const Camera& cam, in
         gpuNodes.push_back({n.boundsMin, 0, n.boundsMax, 0, n.center, n.nodeSize, (uint32_t)n.isLeaf,
             (uint32_t)n.isLoaded, n.childMask, n.firstPoint, n.pointCount, n.lodPoint, n.firstChild, 0});
     }
-    
+
+    std::vector<bool> isLodPoint(tl_buffer.points.size(), false);
+    for(const auto& n : tl_buffer.nodes) {
+        if(n.lodPoint != -1) isLodPoint[n.lodPoint] = true;
+    }
+
     std::vector<GPUPBRRenderData> gpuPoints;
     gpuPoints.reserve(tl_buffer.points.size());
-    for(const auto& p : tl_buffer.points) {
+    for(size_t i = 0; i < tl_buffer.points.size(); ++i) {
+        if(isLodPoint[i]) continue;
+        const auto& p = tl_buffer.points[i];
         gpuPoints.push_back({p.position, p.size, p.color, p.material.emittance, p.boundsMin,
                                 p.material.roughness, p.boundsMax, p.material.metallic,
                                 p.material.absorption, p.material.transmission, p.material.ior, p.objectId, 0.0f, 0.0f});
@@ -469,15 +476,39 @@ frame Octree<T, IndexType, StoragePath>::fastRenderFrameVulkan(const Camera& cam
         gpuNodes.push_back({n.boundsMin, 0, n.boundsMax, 0, n.center, n.nodeSize, (uint32_t)n.isLeaf,
             (uint32_t)n.isLoaded, n.childMask, n.firstPoint, n.pointCount, n.lodPoint, n.firstChild, 0});
     }
+    
+    std::vector<bool> isLodPoint(tl_buffer.points.size(), false);
+    for(const auto& n : tl_buffer.nodes) {
+        if(n.lodPoint != -1) isLodPoint[n.lodPoint] = true;
+    }
+
     std::vector<GPUFastRenderData> gpuPoints;
     gpuPoints.reserve(tl_buffer.points.size());
-    for(const auto& p : tl_buffer.points) {
+    for(size_t i = 0; i < tl_buffer.points.size(); ++i) {
+        if(isLodPoint[i]) continue;
+        const auto& p = tl_buffer.points[i];
         gpuPoints.push_back({p.position, p.size, p.color, p.material.emittance, p.boundsMin, p.objectId,
-            p.boundsMax, 0});
+            p.boundsMax, 0.0f});
     }
 
     if(gpuNodes.empty()) gpuNodes.push_back(GPURenderNode{});
     if(gpuPoints.empty()) gpuPoints.push_back(GPUFastRenderData{});
+
+    size_t skyW = skybox_.skybox.getWidth();
+    size_t skyH = skybox_.skybox.getHeight();
+    if (skyW == 0 || skyH == 0) { skyW = 1; skyH = 1; }
+    std::vector<Eigen::Vector4f> skyData(skyW * skyH, Eigen::Vector4f(0,0,0,1));
+    if (skybox_.skybox.getWidth() > 0) {
+        for (size_t y = 0; y < skyH; ++y) {
+            float v = (static_cast<float>(y) + 0.5f) / skyH;
+            for (size_t x = 0; x < skyW; ++x) {
+                float u = (static_cast<float>(x) + 0.5f) / skyW;
+                PointType skyDir = skybox_.uvToDir(u, v);
+                Eigen::Vector3f color = skybox_.sampleVector(skyDir);
+                skyData[y * skyW + x] = Eigen::Vector4f(color.x(), color.y(), color.z(), 1.0f);
+            }
+        }
+    }
 
     float aspect = static_cast<float>(width) / height;
     float fovRad = cam.fovRad();
@@ -487,11 +518,13 @@ frame Octree<T, IndexType, StoragePath>::fastRenderFrameVulkan(const Camera& cam
     GPUCameraData camData = {
         cam.origin, lodMinDistance_, cam.direction.normalized(), invLodf, cam.up.normalized(), 0.1f, cam.right(), maxDistance_,
         skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
-        width, height, 1, 1, invFogRange, frameCounter_++, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0
+        width, height, 1, 1, invFogRange, frameCounter_++, (int)skyW, (int)skyH, 0, 1, 0, 
+        (uint32_t)gpuNodes.size(), (uint32_t)gpuPoints.size(), 0, 0, 0, 0
     };
 
     size_t outSize = width * height * 5 * sizeof(float);
     vkCtx.updateCommonBuffers(gpuNodes, outSize, camData);
+    vkCtx.updateSkyboxBuffer(skyData);
     vkCtx.updateFastBuffers(gpuPoints);
 
     VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -555,12 +588,19 @@ frame Octree<T, IndexType, StoragePath>::blendedRenderFrameVulkan(const Camera& 
             (uint32_t)n.isLoaded, n.childMask, n.firstPoint, n.pointCount, n.lodPoint, n.firstChild, 0});
     }
     
+    std::vector<bool> isLodPoint(tl_buffer.points.size(), false);
+    for(const auto& n : tl_buffer.nodes) {
+        if(n.lodPoint != -1) isLodPoint[n.lodPoint] = true;
+    }
+
     std::vector<GPUPBRRenderData> gpuPBRPoints;
     gpuPBRPoints.reserve(tl_buffer.points.size());
     std::vector<GPUFastRenderData> gpuFastPoints;
     gpuFastPoints.reserve(tl_buffer.points.size());
 
-    for(const auto& p : tl_buffer.points) {
+    for(size_t i = 0; i < tl_buffer.points.size(); ++i) {
+        if(isLodPoint[i]) continue;
+        const auto& p = tl_buffer.points[i];
         gpuPBRPoints.push_back({p.position, p.size, p.color, p.material.emittance, p.boundsMin,
                                 p.material.roughness, p.boundsMax, p.material.metallic, p.material.absorption, p.material.transmission, p.material.ior, p.objectId, 0.0f, 0.0f});
         gpuFastPoints.push_back({p.position, p.size, p.color, p.material.emittance, p.boundsMin, p.objectId, p.boundsMax, 0.0f});
@@ -666,8 +706,8 @@ frame Octree<T, IndexType, StoragePath>::blendedRenderFrameVulkan(const Camera& 
     GPUCameraData fastCamData = {
         cam.origin, lodMinDistance_, cam.direction.normalized(), invLodf, cam.up.normalized(), 0.1f, cam.right(), maxDistance_,
         skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
-        width, height, 1, useLod ? 1 : 0, invFogRange, frameCounter_++, 0, 0, 0, 1, 0, 
-        (uint32_t)gpuNodes.size(), (uint32_t)gpuFastPoints.size(), 0, 0, 0
+        width, height, 1, useLod ? 1 : 0, invFogRange, frameCounter_++, (int)skyW, (int)skyH, 0, 1, 0, 
+        (uint32_t)gpuNodes.size(), (uint32_t)gpuFastPoints.size(), 0, 0, 0, 0
     };
 
     size_t fastOutSize = width * height * 5 * sizeof(float);

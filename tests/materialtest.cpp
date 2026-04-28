@@ -200,33 +200,33 @@ int main() {
     std::cout << "\nStarting video render..." << std::endl;
     std::cout << "Total frames to render: " << totalFrames << std::endl;
 
-    // for (size_t i = 0; i < views.size(); ++i) {
-    //     const View& startView = views[i];
-    //     const View& endView = views[(i + 1) % views.size()]; // Loop back to the first view at the end
+    for (size_t i = 0; i < views.size(); ++i) {
+        const View& startView = views[i];
+        const View& endView = views[(i + 1) % views.size()]; // Loop back to the first view at the end
 
-    //     std::cout << "\nAnimating segment: " << startView.name << " -> " << endView.name << std::endl;
+        std::cout << "\nAnimating segment: " << startView.name << " -> " << endView.name << std::endl;
 
-    //     for (int j = 0; j < framesPerSegment; ++j) {
-    //         frameCounter++;
-    //         float t = static_cast<float>(j) / static_cast<float>(framesPerSegment);
+        for (int j = 0; j < framesPerSegment; ++j) {
+            frameCounter++;
+            float t = static_cast<float>(j) / static_cast<float>(framesPerSegment);
 
-    //         Eigen::Vector3f currentOrigin = startView.origin * (1.0f - t) + endView.origin * t;
+            Eigen::Vector3f currentOrigin = startView.origin * (1.0f - t) + endView.origin * t;
             
-    //         Eigen::Vector3f currentUp = (startView.up * (1.0f - t) + endView.up * t).normalized();
+            Eigen::Vector3f currentUp = (startView.up * (1.0f - t) + endView.up * t).normalized();
             
-    //         Camera cam;
-    //         cam.origin = currentOrigin;
-    //         cam.up = currentUp;
-    //         cam.direction = (target - cam.origin).normalized();
+            Camera cam;
+            cam.origin = currentOrigin;
+            cam.up = currentUp;
+            cam.direction = (target - cam.origin).normalized();
             
-    //         std::cout << "Rendering video frame " << frameCounter << "/" << totalFrames << "..." << std::endl;
+            std::cout << "Rendering video frame " << frameCounter << "/" << totalFrames << "..." << std::endl;
             
-    //         frame out = octree.blendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, video_samples, bounces, false);
-    //         // frame out = octree.renderFramefast(cam, height, width, frame::colormap::RGB, false, true);
+            frame out = octree.blendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, video_samples, bounces, false);
+            // frame out = octree.renderFramefast(cam, height, width, frame::colormap::RGB, false, true);
             
-    //         videoFrames.push_back(std::move(out));
-    //     }
-    // }
+            videoFrames.push_back(std::move(out));
+        }
+    }
 
     std::cout << "\nAll frames rendered. Saving video file..." << std::endl;
     std::string videoFilename = "output/material_test_video.avi";

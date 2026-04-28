@@ -52,7 +52,7 @@ EXE := $(BIN_DIR)/g2gradc
 
 GLSLC := glslc
 
-SHADER_SRCS := $(SHADER_DIR)/fast_raytrace.comp $(SHADER_DIR)/pbr_raytrace.comp
+SHADER_SRCS := $(SHADER_DIR)/fast_raytrace.comp $(SHADER_DIR)/pbr_raytrace.comp $(SHADER_DIR)/fast_raytrace_hw.comp $(SHADER_DIR)/pbr_raytrace_hw.comp
 SHADER_SPVS := $(patsubst $(SHADER_DIR)/%.comp,$(BIN_DIR)/%.spv,$(SHADER_SRCS))
 
 $(shell mkdir -p $(OBJ_DIR))
