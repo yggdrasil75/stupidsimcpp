@@ -269,6 +269,23 @@ frame Octree<T, IndexType, StoragePath>::fastRenderFrame(const Camera& cam, int 
 }
 
 #ifdef VULKAN_SUPPORT
+
+static inline uint32_t packRGB8(const Eigen::Vector3f& c) {
+    uint32_t r = static_cast<uint32_t>(std::clamp(c.x(), 0.0f, 1.0f) * 255.0f);
+    uint32_t g = static_cast<uint32_t>(std::clamp(c.y(), 0.0f, 1.0f) * 255.0f);
+    uint32_t b = static_cast<uint32_t>(std::clamp(c.z(), 0.0f, 1.0f) * 255.0f);
+    return r | (g << 8) | (b << 16);
+}
+
+static inline uint32_t packMaterialProps(float roughness, float metallic, float transmission, float ior) {
+    uint32_t r8 = static_cast<uint32_t>(std::clamp(roughness, 0.0f, 1.0f) * 255.0f);
+    uint32_t m8 = static_cast<uint32_t>(std::clamp(metallic, 0.0f, 1.0f) * 255.0f);
+    uint32_t t8 = static_cast<uint32_t>(std::clamp(transmission, 0.0f, 1.0f) * 255.0f);
+    float mappedIor = (std::clamp(ior, 1.0f, 2.5f) - 1.0f) / 1.5f;
+    uint32_t i8 = static_cast<uint32_t>(std::clamp(mappedIor, 0.0f, 1.0f) * 255.0f);
+    return r8 | (m8 << 8) | (t8 << 16) | (i8 << 24);
+}
+
 template<typename T, typename IndexType, GridStoragePath StoragePath>
 frame Octree<T, IndexType, StoragePath>::renderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat, int samplesPerPixel,
                 int maxBounces, bool globalIllumination, bool useLod) {
@@ -298,9 +315,13 @@ frame Octree<T, IndexType, StoragePath>::renderFrameVulkan(const Camera& cam, in
     for(size_t i = 0; i < tl_buffer.points.size(); ++i) {
         if(isLodPoint[i]) continue;
         const auto& p = tl_buffer.points[i];
-        gpuPoints.push_back({p.position, p.size, p.color, p.material.emittance, p.boundsMin,
-                                p.material.roughness, p.boundsMax, p.material.metallic,
-                                p.material.absorption, p.material.transmission, p.material.ior, p.objectId, 0.0f, 0.0f});
+        
+        gpuPoints.push_back({
+            p.position, p.size, packRGB8(p.color), p.material.emittance, 
+            packMaterialProps(p.material.roughness, p.material.metallic, p.material.transmission, p.material.ior),
+            packRGB8(p.material.absorption), p.objectId, 0, 0, 0
+        });
+
         if (p.material.emittance > 0.0f) {
             gpuLights.push_back(gpuPoints.size() - 1);
         }
@@ -495,8 +516,9 @@ frame Octree<T, IndexType, StoragePath>::fastRenderFrameVulkan(const Camera& cam
     for(size_t i = 0; i < tl_buffer.points.size(); ++i) {
         if(isLodPoint[i]) continue;
         const auto& p = tl_buffer.points[i];
-        gpuPoints.push_back({p.position, p.size, p.color, p.material.emittance, p.boundsMin, p.objectId,
-            p.boundsMax, 0.0f});
+        
+        gpuPoints.push_back({p.position, p.size, packRGB8(p.color), p.material.emittance, p.objectId, 0});
+        
         if (p.material.emittance > 0.0f) {
             gpuLights.push_back(gpuPoints.size() - 1);
         }
@@ -616,9 +638,16 @@ frame Octree<T, IndexType, StoragePath>::blendedRenderFrameVulkan(const Camera& 
     for(size_t i = 0; i < tl_buffer.points.size(); ++i) {
         if(isLodPoint[i]) continue;
         const auto& p = tl_buffer.points[i];
-        gpuPBRPoints.push_back({p.position, p.size, p.color, p.material.emittance, p.boundsMin,
-                                p.material.roughness, p.boundsMax, p.material.metallic, p.material.absorption, p.material.transmission, p.material.ior, p.objectId, 0.0f, 0.0f});
-        gpuFastPoints.push_back({p.position, p.size, p.color, p.material.emittance, p.boundsMin, p.objectId, p.boundsMax, 0.0f});
+        
+        gpuPBRPoints.push_back({
+            p.position, p.size, packRGB8(p.color), p.material.emittance, 
+            packMaterialProps(p.material.roughness, p.material.metallic, p.material.transmission, p.material.ior),
+            packRGB8(p.material.absorption), p.objectId, 0, 0, 0
+        });
+        gpuFastPoints.push_back({
+            p.position, p.size, packRGB8(p.color), p.material.emittance, p.objectId, 0
+        });
+
         if (p.material.emittance > 0.0f) {
             gpuLights.push_back(gpuPBRPoints.size() - 1);
         }

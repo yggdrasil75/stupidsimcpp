@@ -27,18 +27,14 @@ struct GPURenderNode {
 struct GPUPBRRenderData {
     vec3 position;
     float size;
-    vec3 color;
+    uint color;
     float emittance;
-    vec3 boundsMin;
-    float roughness;
-    vec3 boundsMax;
-    float metallic;
-    vec3 absorption;
-    float transmission;
-    float ior;
+    uint materialProps;
+    uint absorption;
     int objectId;
-    float padding2;
-    float padding3;
+    uint padding1;
+    uint padding2;
+    uint padding3;
 };
 
 layout(std430, binding = 0) readonly buffer NodeBuffer { GPURenderNode nodes[]; };
@@ -79,6 +75,17 @@ layout(binding = 3) uniform CameraData {
 
 layout(std430, binding = 4) readonly buffer SkyboxBuffer { vec4 skyPixels[]; };
 layout(std430, binding = 5) readonly buffer LightBuffer { uint emissiveIndices[]; };
+
+vec3 unpackRGB8(uint c) {
+    return vec3(float(c & 0xFF) / 255.0, float((c >> 8) & 0xFF) / 255.0, float((c >> 16) & 0xFF) / 255.0);
+}
+
+void unpackMaterial(uint m, out float roughness, out float metallic, out float transmission, out float ior) {
+    roughness = float(m & 0xFF) / 255.0;
+    metallic = float((m >> 8) & 0xFF) / 255.0;
+    transmission = float((m >> 16) & 0xFF) / 255.0;
+    ior = (float((m >> 24) & 0xFF) / 255.0) * 1.5 + 1.0;
+}
 
 bool isInvalid(float v) { return isnan(v) || isinf(v); }
 bool isInvalid(vec3 v) { return any(isnan(v)) || any(isinf(v)); }
@@ -151,9 +158,12 @@ bool rayBoxIntersect(Ray ray, vec3 bMin, vec3 bMax, out float tMin, out float tM
 }
 
 bool rayCubeIntersect(Ray ray, GPUPBRRenderData pt, out float t, out vec3 normal, out vec3 hitPoint, inout float tExit) {
+    vec3 bMin = pt.position - pt.size * 0.5;
+    vec3 bMax = pt.position + pt.size * 0.5;
+
     float tMin, tMax;
-    vec3 t0 = (pt.boundsMin - ray.origin) * ray.invDir;
-    vec3 t1 = (pt.boundsMax - ray.origin) * ray.invDir;
+    vec3 t0 = (bMin - ray.origin) * ray.invDir;
+    vec3 t1 = (bMax - ray.origin) * ray.invDir;
     
     vec3 tmin3 = min(t0, t1);
     vec3 tmax3 = max(t0, t1);
@@ -166,8 +176,8 @@ bool rayCubeIntersect(Ray ray, GPUPBRRenderData pt, out float t, out vec3 normal
     
     t = tMin < 0.0 ? tMax : tMin;
     hitPoint = ray.origin + ray.dir * t;
-    vec3 dMin = abs(hitPoint - pt.boundsMin);
-    vec3 dMax = abs(hitPoint - pt.boundsMax);
+    vec3 dMin = abs(hitPoint - bMin);
+    vec3 dMax = abs(hitPoint - bMax);
     vec3 minmin = min(dMin, dMax);
     float mind = min(min(minmin.x, minmin.y), minmin.z);
     
@@ -287,14 +297,12 @@ vec3 traceRay(Ray initialRay, inout uint state, out float primaryDepth, out int 
         int entering = 0;
         if (dot(direction, normal) < 0.0) entering = 1;
         if (entering == 0) offsetNorm = -normal;
-        vec3 albedo = hitData.color;
-        float roughness = hitData.roughness;
-        float metallic = hitData.metallic;
-        float transmission = hitData.transmission;
-        float ior = hitData.ior;
-        int objectId = hitData.objectId;
+        vec3 albedo = unpackRGB8(hitData.color);
+        float roughness, metallic, transmission, ior;
+        unpackMaterial(hitData.materialProps, roughness, metallic, transmission, ior);
+        vec3 absorption = unpackRGB8(hitData.absorption);
 
-        if (entering == 0) throughput = throughput * exp(-hitData.absorption * t);
+        if (entering == 0) throughput = throughput * exp(-absorption * t);
         if (entering == 0) { 
             Ray lookaheadRay = makeRay(hitPoint + normal * DIST_EPSILON, direction);
             int nextHitIdx;
@@ -306,9 +314,12 @@ vec3 traceRay(Ray initialRay, inout uint state, out float primaryDepth, out int 
             if (voxelTraverse(lookaheadRay, nextHitIdx, nextT, nextNorm, nextHP, lookaheadMaxDist) == 1 
                 && nextHitIdx != hitIndex && nextT <= GAP_EPSILON && nextHitIdx >= 0 && nextHitIdx < points.length()) {
                 GPUPBRRenderData nextData = points[nextHitIdx];
-                bool sameMaterial = (abs(nextData.ior - ior) < 0.01) && 
-                                    (distance(nextData.color, albedo) < 0.05) &&
-                                    (abs(nextData.transmission - transmission) < 0.05);
+                float nextRoughness, nextMetallic, nextTransmission, nextIor;
+                unpackMaterial(nextData.materialProps, nextRoughness, nextMetallic, nextTransmission, nextIor);
+                vec3 nextAlbedo = unpackRGB8(nextData.color);
+                bool sameMaterial = (abs(nextIor - ior) < 0.01) && 
+                                    (distance(nextAlbedo, albedo) < 0.05) &&
+                                    (abs(nextTransmission - transmission) < 0.05);
                 if (sameMaterial && contiguousSteps < 8) {
                     origin = nextHP + direction * DIST_EPSILON;
                     remainingMaxDist -= nextT; // subtract lookahead distance
@@ -345,8 +356,8 @@ vec3 traceRay(Ray initialRay, inout uint state, out float primaryDepth, out int 
             
             if (emissivePtIdx != hitIndex) {
                 GPUPBRRenderData lightPt = points[emissivePtIdx];
-                vec3 lightMin = lightPt.boundsMin;
-                vec3 lightMax = lightPt.boundsMax;
+                vec3 lightMin = lightPt.position - lightPt.size * 0.5;
+                vec3 lightMax = lightPt.position + lightPt.size * 0.5;
                 
                 vec3 jitter = vec3(nextFloat(state), nextFloat(state), nextFloat(state));
                 vec3 lightPos = mix(lightMin, lightMax, 0.2 + jitter * 0.6);
@@ -367,7 +378,8 @@ vec3 traceRay(Ray initialRay, inout uint state, out float primaryDepth, out int 
                     int shadowResult = voxelTraverse(shadowRay, shadowHitIndex, shadowT, shadowN, shadowHP, shadowMaxDist);
                     
                     if (shadowResult == 0 || shadowHitIndex == emissivePtIdx) {
-                        vec3 lightEmission = lightPt.color * lightPt.emittance;
+                        vec3 lightAlbedo = unpackRGB8(lightPt.color);
+                        vec3 lightEmission = lightAlbedo * lightPt.emittance;
                         float area = lightPt.size * lightPt.size; 
                         float solidAngle = min(area / max(distSq, area * 0.25), 2.0 * PI);
                         
@@ -475,7 +487,7 @@ vec3 traceRay(Ray initialRay, inout uint state, out float primaryDepth, out int 
                     weight = vec3(1.0) * (G * abs(VdotH) / (NdotV * NDotH * pTrans));
                 }
                 if (entering == 0) {
-                    weight *= exp(-hitData.absorption * t);
+                    weight *= exp(-absorption * t);
                 }
             } else {
                 float cosThetaT = sqrt(1.0 - sinThetaT2);

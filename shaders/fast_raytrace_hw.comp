@@ -24,12 +24,10 @@ struct GPURenderNode {
 struct GPUFastRenderData {
     vec3 position;
     float size;
-    vec3 color;
+    uint color;
     float emittance;
-    vec3 boundsMin;
     int objectId;
-    vec3 boundsMax;
-    float padding2;
+    uint padding2;
 };
 
 layout(std430, binding = 0) readonly buffer NodeBuffer { GPURenderNode nodes[]; };
@@ -85,6 +83,10 @@ Ray makeRay(vec3 o, vec3 d) {
     return r;
 }
 
+vec3 unpackRGB8(uint c) {
+    return vec3(float(c & 0xFF) / 255.0, float((c >> 8) & 0xFF) / 255.0, float((c >> 16) & 0xFF) / 255.0);
+}
+
 bool rayBoxIntersect(Ray ray, vec3 bMin, vec3 bMax, out float tMin, out float tMax) {
     vec3 t0 = (bMin - ray.origin) * ray.invDir;
     vec3 t1 = (bMax - ray.origin) * ray.invDir;
@@ -96,12 +98,15 @@ bool rayBoxIntersect(Ray ray, vec3 bMin, vec3 bMax, out float tMin, out float tM
 }
 
 bool rayCubeIntersect(Ray ray, GPUFastRenderData pt, out float t, out vec3 normal) {
+    vec3 bMin = pt.position - pt.size * 0.5;
+    vec3 bMax = pt.position + pt.size * 0.5;
+
     float tMin, tMax;
-    if (!rayBoxIntersect(ray, pt.boundsMin, pt.boundsMax, tMin, tMax) || tMax < 0.0) return false;
+    if (!rayBoxIntersect(ray, bMin, bMax, tMin, tMax) || tMax < 0.0) return false;
     t = tMin < 0.0 ? tMax : tMin;
     vec3 hitPoint = ray.origin + ray.dir * t;
-    vec3 dMin = abs(hitPoint - pt.boundsMin);
-    vec3 dMax = abs(hitPoint - pt.boundsMax);
+    vec3 dMin = abs(hitPoint - bMin);
+    vec3 dMax = abs(hitPoint - bMax);
     
     float minDist = 999999.0;
     int minAxis = 0;
@@ -202,18 +207,19 @@ void main() {
 
     if (hitResult == 1) {
         GPUFastRenderData hitData = points[hitIndex];
+        vec3 albedo = unpackRGB8(hitData.color);
         vec3 surfaceColor;
         if (hitData.emittance > 0.0) {
-            surfaceColor = hitData.color * hitData.emittance;
+            surfaceColor = albedo * hitData.emittance;
         } else {
             vec3 lightDir = normalize(-cam.dir);
             float diffuse = max(0.0, dot(normal, lightDir));
-            surfaceColor = hitData.color * min(1.0, 0.35 + diffuse * 0.65);
+            surfaceColor = albedo * min(1.0, 0.35 + diffuse * 0.65);
         }
         float fogT = clamp((t - cam.lodMinDist) * cam.invFogRange, 0.0, 1.0);
         finalColor = mix(cam.bgColor, surfaceColor, mix(1.0, cam.minVisibility, fogT));
         depthOut = t;
-        objIdOut = hitData.objectId;
+        objIdOut = float(hitData.objectId);
     }
     
     finalColor = clamp(finalColor, 0.0, 1.0);

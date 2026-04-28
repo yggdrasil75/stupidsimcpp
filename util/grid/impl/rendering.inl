@@ -119,29 +119,23 @@ struct alignas(16) GPURenderNode {
 struct alignas(16) GPUFastRenderData {
     Eigen::Vector3f position;
     float size;
-    Eigen::Vector3f color;
+    uint32_t color;
     float emittance;
-    Eigen::Vector3f boundsMin;
     int objectId;
-    Eigen::Vector3f boundsMax;
-    float padding2;
+    uint32_t padding2;
 };
 
 struct alignas(16) GPUPBRRenderData {
     Eigen::Vector3f position;
     float size;
-    Eigen::Vector3f color;
+    uint32_t color;
     float emittance;
-    Eigen::Vector3f boundsMin;
-    float roughness;
-    Eigen::Vector3f boundsMax;
-    float metallic;
-    Eigen::Vector3f absorption;
-    float transmission;
-    float ior;
+    uint32_t materialProps;
+    uint32_t absorption;
     int objectId;
-    float padding2;
-    float padding3;
+    uint32_t padding1;
+    uint32_t padding2;
+    uint32_t padding3;
 };
 
 struct alignas(16) GPUCameraData {
@@ -561,12 +555,13 @@ struct VulkanContext {
 
         std::vector<VkAabbPositionsKHR> aabbs(points.size());
         for (size_t i = 0; i < points.size(); ++i) {
-            aabbs[i].minX = points[i].boundsMin.x();
-            aabbs[i].minY = points[i].boundsMin.y();
-            aabbs[i].minZ = points[i].boundsMin.z();
-            aabbs[i].maxX = points[i].boundsMax.x();
-            aabbs[i].maxY = points[i].boundsMax.y();
-            aabbs[i].maxZ = points[i].boundsMax.z();
+            float halfSize = points[i].size * 0.5f;
+            aabbs[i].minX = points[i].position.x() - halfSize;
+            aabbs[i].minY = points[i].position.y() - halfSize;
+            aabbs[i].minZ = points[i].position.z() - halfSize;
+            aabbs[i].maxX = points[i].position.x() + halfSize;
+            aabbs[i].maxY = points[i].position.y() + halfSize;
+            aabbs[i].maxZ = points[i].position.z() + halfSize;
         }
 
         size_t aabbSize = aabbs.size() * sizeof(VkAabbPositionsKHR);
