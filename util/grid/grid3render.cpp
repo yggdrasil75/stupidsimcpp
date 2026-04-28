@@ -422,67 +422,14 @@ frame Octree<T, IndexType, StoragePath>::renderFrameVulkan(const Camera& cam, in
 
     frameCounter_++;
 
-    std::vector<float> rawBuffer(width * height * 5);
-    void* mappedData;
-    vkMapMemory(vkCtx.device, vkCtx.outMem, 0, outSize, 0, &mappedData);
-    memcpy(rawBuffer.data(), mappedData, outSize);
-    vkUnmapMemory(vkCtx.device, vkCtx.outMem);
-
-    for (size_t i = 0; i < rawBuffer.size(); i += 5) {
-        rawBuffer[i] /= samplesPerPixel;
-        rawBuffer[i+1] /= samplesPerPixel;
-        rawBuffer[i+2] /= samplesPerPixel;
-        rawBuffer[i+3] /= samplesPerPixel; 
-    }
+    vkCtx.dispatchSmooth(width, height, samplesPerPixel);
 
     frame outFrame(width, height, colorformat);
     std::vector<float> colorBuffer(width * height * 3);
-    
-    const int radius = 2;
-    const float spatialSigma = 2.0f;
-    const float depthSigma = 1.0f;
-    
-    #pragma omp parallel for schedule(dynamic) collapse(2)
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            float sumWeights = 0.0f;
-            float sumR = 0.0f, sumG = 0.0f, sumB = 0.0f;
-            
-            int centerIdx = (y * width + x) * 5;
-            float centerDepth = rawBuffer[centerIdx + 3];
-            int centerObj = static_cast<int>(rawBuffer[centerIdx + 4]);
-
-            for (int dy = -radius; dy <= radius; ++dy) {
-                for (int dx = -radius; dx <= radius; ++dx) {
-                    int nx = std::clamp(x + dx, 0, width - 1);
-                    int ny = std::clamp(y + dy, 0, height - 1);
-                    int nIdx = (ny * width + nx) * 5;
-                    
-                    float nDepth = rawBuffer[nIdx + 3];
-                    int nObj = static_cast<int>(rawBuffer[nIdx + 4]);
-                    
-                    float spatialDistSq = static_cast<float>(dx*dx + dy*dy);
-                    float spatialWeight = std::exp(-spatialDistSq / (2.0f * spatialSigma * spatialSigma));
-                    
-                    float depthDiff = nDepth - centerDepth;
-                    float depthWeight = std::exp(-(depthDiff * depthDiff) / (2.0f * depthSigma * depthSigma));
-                    
-                    float objWeight = (centerObj == nObj) ? 1.0f : 0.05f; 
-
-                    float weight = spatialWeight * depthWeight * objWeight;
-                    sumWeights += weight;
-                    sumR += rawBuffer[nIdx] * weight;
-                    sumG += rawBuffer[nIdx + 1] * weight;
-                    sumB += rawBuffer[nIdx + 2] * weight;
-                }
-            }
-            
-            int outIdx = (y * width + x) * 3;
-            colorBuffer[outIdx]     = std::clamp(sumR / sumWeights, 0.0f, 1.0f);
-            colorBuffer[outIdx + 1] = std::clamp(sumG / sumWeights, 0.0f, 1.0f);
-            colorBuffer[outIdx + 2] = std::clamp(sumB / sumWeights, 0.0f, 1.0f);
-        }
-    }
+    void* mappedData;
+    vkMapMemory(vkCtx.device, vkCtx.finalOutMem, 0, colorBuffer.size() * sizeof(float), 0, &mappedData);
+    memcpy(colorBuffer.data(), mappedData, colorBuffer.size() * sizeof(float));
+    vkUnmapMemory(vkCtx.device, vkCtx.finalOutMem);
 
     outFrame.setData(colorBuffer, frame::colormap::RGB);
     return outFrame;
@@ -740,18 +687,8 @@ frame Octree<T, IndexType, StoragePath>::blendedRenderFrameVulkan(const Camera& 
         currentSampleOffset += samplesInBatch;
     }
 
-    std::vector<float> pbrRaw(lowW * lowH * 5);
-    void* mappedData;
-    vkMapMemory(vkCtx.device, vkCtx.outMem, 0, pbrOutSize, 0, &mappedData);
-    memcpy(pbrRaw.data(), mappedData, pbrOutSize);
-    vkUnmapMemory(vkCtx.device, vkCtx.outMem);
-
-    for (size_t i = 0; i < pbrRaw.size(); i += 5) {
-        pbrRaw[i] /= samplesPerPixel;
-        pbrRaw[i+1] /= samplesPerPixel;
-        pbrRaw[i+2] /= samplesPerPixel;
-        pbrRaw[i+3] /= samplesPerPixel;
-    }
+    vkCtx.ensureLowResBuffer(pbrOutSize);
+    vkCtx.copyBuffer(vkCtx.outBuffer, vkCtx.lowResOutBuffer, pbrOutSize);
 
     GPUCameraData fastCamData = {
         cam.origin, lodMinDistance_, cam.direction.normalized(), invLodf, cam.up.normalized(), 0.1f, cam.right(), maxDistance_,
@@ -793,100 +730,15 @@ frame Octree<T, IndexType, StoragePath>::blendedRenderFrameVulkan(const Camera& 
         }
     }
 
-    std::vector<float> fastRaw(width * height * 5);
-    vkMapMemory(vkCtx.device, vkCtx.outMem, 0, fastOutSize, 0, &mappedData);
-    memcpy(fastRaw.data(), mappedData, fastOutSize);
-    vkUnmapMemory(vkCtx.device, vkCtx.outMem);
-
     frame outFrame(width, height, colorformat);
     std::vector<float> colorBuffer(width * height * 3);
     
-    const int radius = 2;
-    const float spatialSigma = 1.5f;
-    const float relativeDepthSigma = 0.05f;
+    vkCtx.dispatchBlend(width, height, lowW, lowH, pbrScale, samplesPerPixel);
     
-    #pragma omp parallel for schedule(dynamic) collapse(2)
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            int fastIdx = (y * width + x) * 5;
-            float fastR = fastRaw[fastIdx];
-            float fastG = fastRaw[fastIdx + 1];
-            float fastB = fastRaw[fastIdx + 2];
-            float fastDepth = fastRaw[fastIdx + 3];
-            int fastObj = static_cast<int>(fastRaw[fastIdx + 4]);
-
-            int center_lx = static_cast<int>(std::round(x * pbrScale));
-            int center_ly = static_cast<int>(std::round(y * pbrScale));
-
-            float sumWeights = 0.0f;
-            float sumR = 0.0f, sumG = 0.0f, sumB = 0.0f;
-
-            for (int dy = -radius; dy <= radius; ++dy) {
-                for (int dx = -radius; dx <= radius; ++dx) {
-                    int nx = std::clamp(center_lx + dx, 0, lowW - 1);
-                    int ny = std::clamp(center_ly + dy, 0, lowH - 1);
-                    int pbrIdx = (ny * lowW + nx) * 5;
-
-                    int pbrObj = static_cast<int>(pbrRaw[pbrIdx + 4]);
-                    
-                    if (fastObj != pbrObj) continue;
-
-                    float pbrDepth = pbrRaw[pbrIdx + 3];
-
-                    float sDistSq = static_cast<float>(dx*dx + dy*dy);
-                    float spatialWeight = std::exp(-sDistSq / (2.0f * spatialSigma * spatialSigma));
-
-                    float depthDiff = std::abs(fastDepth - pbrDepth) / std::max(fastDepth, 0.1f);
-                    
-                    if (fastDepth > 999000.0f && pbrDepth > 999000.0f) depthDiff = 0.0f;
-                    
-                    float depthWeight = std::exp(-(depthDiff * depthDiff) / (2.0f * relativeDepthSigma * relativeDepthSigma));
-
-                    float weight = spatialWeight * depthWeight;
-                    sumWeights += weight;
-                    sumR += pbrRaw[pbrIdx] * weight;
-                    sumG += pbrRaw[pbrIdx + 1] * weight;
-                    sumB += pbrRaw[pbrIdx + 2] * weight;
-                }
-            }
-            
-            if (sumWeights == 0.0f && fastObj != -1) {
-                int searchRadius = radius * 3;
-                float nearestDist = 99999.0f;
-                
-                for (int dy = -searchRadius; dy <= searchRadius; ++dy) {
-                    for (int dx = -searchRadius; dx <= searchRadius; ++dx) {
-                        int nx = std::clamp(center_lx + dx, 0, lowW - 1);
-                        int ny = std::clamp(center_ly + dy, 0, lowH - 1);
-                        int pbrIdx = (ny * lowW + nx) * 5;
-
-                        if (static_cast<int>(pbrRaw[pbrIdx + 4]) == fastObj) {
-                            float dist = static_cast<float>(dx*dx + dy*dy);
-                            if (dist < nearestDist) {
-                                nearestDist = dist;
-                                sumR = pbrRaw[pbrIdx];
-                                sumG = pbrRaw[pbrIdx + 1];
-                                sumB = pbrRaw[pbrIdx + 2];
-                                sumWeights = 1.0f;
-                            }
-                        }
-                    }
-                }
-            }
-            
-            int outIdx = (y * width + x) * 3;
-            
-            if (sumWeights > 0.0f) { 
-                colorBuffer[outIdx]     = std::clamp(sumR / sumWeights, 0.0f, 1.0f);
-                colorBuffer[outIdx + 1] = std::clamp(sumG / sumWeights, 0.0f, 1.0f);
-                colorBuffer[outIdx + 2] = std::clamp(sumB / sumWeights, 0.0f, 1.0f);
-            } else { 
-                colorBuffer[outIdx]     = std::clamp(fastR, 0.0f, 1.0f);
-                colorBuffer[outIdx + 1] = std::clamp(fastG, 0.0f, 1.0f);
-                colorBuffer[outIdx + 2] = std::clamp(fastB, 0.0f, 1.0f);
-            }
-        }
-    }
+    void* mappedData;
+    vkMapMemory(vkCtx.device, vkCtx.finalOutMem, 0, colorBuffer.size() * sizeof(float), 0, &mappedData);
+    memcpy(colorBuffer.data(), mappedData, colorBuffer.size() * sizeof(float));
+    vkUnmapMemory(vkCtx.device, vkCtx.finalOutMem);
 
     outFrame.setData(colorBuffer, frame::colormap::RGB);
     return outFrame;

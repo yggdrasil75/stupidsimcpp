@@ -1,0 +1,60 @@
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform Push {
+    int width;
+    int height;
+    int samples;
+} pc;
+
+layout(std430, binding = 0) readonly buffer InBuf { float inData[]; };
+layout(std430, binding = 1) writeonly buffer OutBuf { float outData[]; };
+
+void main() {
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    if (x >= pc.width || y >= pc.height) return;
+
+    int centerIdx = (y * pc.width + x) * 5;
+    float invSamples = 1.0 / max(1.0, float(pc.samples));
+    
+    float centerDepth = inData[centerIdx + 3] * invSamples;
+    int centerObj = int(inData[centerIdx + 4]);
+
+    float sumWeights = 0.0;
+    float sumR = 0.0, sumG = 0.0, sumB = 0.0;
+
+    int radius = 2;
+    float spatialSigma = 2.0;
+    float depthSigma = 1.0;
+
+    for (int dy = -radius; dy <= radius; ++dy) {
+        for (int dx = -radius; dx <= radius; ++dx) {
+            int nx = clamp(x + dx, 0, pc.width - 1);
+            int ny = clamp(y + dy, 0, pc.height - 1);
+            int nIdx = (ny * pc.width + nx) * 5;
+            
+            float nDepth = inData[nIdx + 3] * invSamples;
+            int nObj = int(inData[nIdx + 4]);
+            
+            float spatialDistSq = float(dx*dx + dy*dy);
+            float spatialWeight = exp(-spatialDistSq / (2.0 * spatialSigma * spatialSigma));
+            
+            float depthDiff = nDepth - centerDepth;
+            float depthWeight = exp(-(depthDiff * depthDiff) / (2.0 * depthSigma * depthSigma));
+            
+            float objWeight = (centerObj == nObj) ? 1.0 : 0.05;
+
+            float weight = spatialWeight * depthWeight * objWeight;
+            sumWeights += weight;
+            sumR += inData[nIdx] * invSamples * weight;
+            sumG += inData[nIdx + 1] * invSamples * weight;
+            sumB += inData[nIdx + 2] * invSamples * weight;
+        }
+    }
+    
+    int outIdx = (y * pc.width + x) * 3;
+    outData[outIdx]     = clamp(sumR / sumWeights, 0.0, 1.0);
+    outData[outIdx + 1] = clamp(sumG / sumWeights, 0.0, 1.0);
+    outData[outIdx + 2] = clamp(sumB / sumWeights, 0.0, 1.0);
+}

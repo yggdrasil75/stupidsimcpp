@@ -203,15 +203,25 @@ struct VulkanContext {
     
     VkShaderModule fastShader = VK_NULL_HANDLE;
     VkShaderModule pbrShader = VK_NULL_HANDLE;
+    VkShaderModule smoothShader = VK_NULL_HANDLE;
+    VkShaderModule blendShader = VK_NULL_HANDLE;
     VkPipelineLayout fastPipelineLayout = VK_NULL_HANDLE;
     VkPipelineLayout pbrPipelineLayout = VK_NULL_HANDLE;
+    VkPipelineLayout smoothPipelineLayout = VK_NULL_HANDLE;
+    VkPipelineLayout blendPipelineLayout = VK_NULL_HANDLE;
     VkPipeline fastPipeline = VK_NULL_HANDLE;
     VkPipeline pbrPipeline = VK_NULL_HANDLE;
+    VkPipeline smoothPipeline = VK_NULL_HANDLE;
+    VkPipeline blendPipeline = VK_NULL_HANDLE;
     VkDescriptorSetLayout fastDescLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout pbrDescLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout smoothDescLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout blendDescLayout = VK_NULL_HANDLE;
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
     VkDescriptorSet fastDescSet = VK_NULL_HANDLE;
     VkDescriptorSet pbrDescSet = VK_NULL_HANDLE;
+    VkDescriptorSet smoothDescSet = VK_NULL_HANDLE;
+    VkDescriptorSet blendDescSet = VK_NULL_HANDLE;
 
     VkBuffer nodeBuffer = VK_NULL_HANDLE;
     VkBuffer outBuffer = VK_NULL_HANDLE;
@@ -220,6 +230,8 @@ struct VulkanContext {
     VkBuffer pbrPointBuffer = VK_NULL_HANDLE;
     VkBuffer skyboxBuffer = VK_NULL_HANDLE;
     VkBuffer lightBuffer = VK_NULL_HANDLE;
+    VkBuffer finalOutBuffer = VK_NULL_HANDLE;
+    VkBuffer lowResOutBuffer = VK_NULL_HANDLE;
 
     VkDeviceMemory nodeMem = VK_NULL_HANDLE;
     VkDeviceMemory outMem = VK_NULL_HANDLE;
@@ -228,6 +240,8 @@ struct VulkanContext {
     VkDeviceMemory pbrPointMem = VK_NULL_HANDLE;
     VkDeviceMemory skyboxMem = VK_NULL_HANDLE;
     VkDeviceMemory lightMem = VK_NULL_HANDLE;
+    VkDeviceMemory finalOutMem = VK_NULL_HANDLE;
+    VkDeviceMemory lowResOutMem = VK_NULL_HANDLE;
 
     size_t currentNodesCap = 0;
     size_t currentOutCap = 0;
@@ -235,6 +249,8 @@ struct VulkanContext {
     size_t currentPBRPointsCap = 0;
     size_t currentSkyboxCap = 0;
     size_t currentLightCap = 0;
+    size_t currentFinalOutCap = 0;
+    size_t currentLowResOutCap = 0;
 
     bool initialized = false;
     bool hasHardwareRT = false;
@@ -417,14 +433,14 @@ struct VulkanContext {
         vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
 
         VkDescriptorPoolSize poolSizes[] = { 
-            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 10},
-            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2},
+            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 20},
+            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4},
             {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 2}
         };
         VkDescriptorPoolCreateInfo poolCreateInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         poolCreateInfo.poolSizeCount = 3;
         poolCreateInfo.pPoolSizes = poolSizes;
-        poolCreateInfo.maxSets = 3;
+        poolCreateInfo.maxSets = 6;
         vkCreateDescriptorPool(device, &poolCreateInfo, nullptr, &descriptorPool);
 
         uint32_t bindingCount = hasHardwareRT ? 7 : 6;
@@ -449,6 +465,26 @@ struct VulkanContext {
         vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &fastDescLayout);
         vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &pbrDescLayout);
 
+        VkDescriptorSetLayoutBinding smBindings[2] = {};
+        for(int i=0; i<2; i++) {
+            smBindings[i].binding = i;
+            smBindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            smBindings[i].descriptorCount = 1;
+            smBindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        }
+        VkDescriptorSetLayoutCreateInfo smLayoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 2, smBindings};
+        vkCreateDescriptorSetLayout(device, &smLayoutInfo, nullptr, &smoothDescLayout);
+
+        VkDescriptorSetLayoutBinding blBindings[3] = {};
+        for(int i=0; i<3; i++) {
+            blBindings[i].binding = i;
+            blBindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            blBindings[i].descriptorCount = 1;
+            blBindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        }
+        VkDescriptorSetLayoutCreateInfo blLayoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 3, blBindings};
+        vkCreateDescriptorSetLayout(device, &blLayoutInfo, nullptr, &blendDescLayout);
+
         VkDescriptorSetAllocateInfo allocSetInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
         allocSetInfo.descriptorPool = descriptorPool;
         allocSetInfo.descriptorSetCount = 1;
@@ -456,6 +492,10 @@ struct VulkanContext {
         vkAllocateDescriptorSets(device, &allocSetInfo, &fastDescSet);
         allocSetInfo.pSetLayouts = &pbrDescLayout;
         vkAllocateDescriptorSets(device, &allocSetInfo, &pbrDescSet);
+        allocSetInfo.pSetLayouts = &smoothDescLayout;
+        vkAllocateDescriptorSets(device, &allocSetInfo, &smoothDescSet);
+        allocSetInfo.pSetLayouts = &blendDescLayout;
+        vkAllocateDescriptorSets(device, &allocSetInfo, &blendDescSet);
 
         if (hasHardwareRT) {
             std::cout << "using _hw versions" << std::endl;
@@ -466,6 +506,8 @@ struct VulkanContext {
             fastShader = createShaderModule("./bin/fast_raytrace.spv");
             pbrShader = createShaderModule("./bin/pbr_raytrace.spv");
         }
+        smoothShader = createShaderModule("./bin/smooth.spv");
+        blendShader = createShaderModule("./bin/blend.spv");
 
         VkPipelineLayoutCreateInfo pipelineLayoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         pipelineLayoutInfo.setLayoutCount = 1;
@@ -473,6 +515,18 @@ struct VulkanContext {
         vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &fastPipelineLayout);
         pipelineLayoutInfo.pSetLayouts = &pbrDescLayout;
         vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pbrPipelineLayout);
+
+        VkPushConstantRange smPush{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(int) * 3};
+        pipelineLayoutInfo.pSetLayouts = &smoothDescLayout;
+        pipelineLayoutInfo.pushConstantRangeCount = 1;
+        pipelineLayoutInfo.pPushConstantRanges = &smPush;
+        vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &smoothPipelineLayout);
+
+        VkPushConstantRange blPush{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(int) * 5 + sizeof(float)};
+        pipelineLayoutInfo.pSetLayouts = &blendDescLayout;
+        pipelineLayoutInfo.pushConstantRangeCount = 1;
+        pipelineLayoutInfo.pPushConstantRanges = &blPush;
+        vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &blendPipelineLayout);
 
         VkComputePipelineCreateInfo computePipelineInfo{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
         computePipelineInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -488,6 +542,16 @@ struct VulkanContext {
             computePipelineInfo.layout = pbrPipelineLayout;
             computePipelineInfo.stage.module = pbrShader;
             vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &computePipelineInfo, nullptr, &pbrPipeline);
+        }
+        if (smoothShader) {
+            computePipelineInfo.layout = smoothPipelineLayout;
+            computePipelineInfo.stage.module = smoothShader;
+            vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &computePipelineInfo, nullptr, &smoothPipeline);
+        }
+        if (blendShader) {
+            computePipelineInfo.layout = blendPipelineLayout;
+            computePipelineInfo.stage.module = blendShader;
+            vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &computePipelineInfo, nullptr, &blendPipeline);
         }
 
         initialized = true;
@@ -755,7 +819,7 @@ struct VulkanContext {
                 vkDestroyBuffer(device, outBuffer, nullptr);
                 vkFreeMemory(device, outMem, nullptr);
             }
-            createBuffer(outSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, outBuffer, outMem);
+            createBuffer(outSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, outBuffer, outMem);
             currentOutCap = outSize;
         }
         if(!uboBuffer) {
@@ -874,6 +938,115 @@ struct VulkanContext {
             writes[i].pBufferInfo = &bInfos[i];
         }
         vkUpdateDescriptorSets(device, 6, writes, 0, nullptr);
+    }
+
+    void ensureLowResBuffer(size_t size) {
+        if(size > currentLowResOutCap) {
+            if(lowResOutBuffer) {
+                vkDestroyBuffer(device, lowResOutBuffer, nullptr);
+                vkFreeMemory(device, lowResOutMem, nullptr);
+            }
+            createBuffer(size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, lowResOutBuffer, lowResOutMem);
+            currentLowResOutCap = size;
+        }
+    }
+
+    void copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
+        executeSingleTimeCommands([&](VkCommandBuffer cmd) {
+            VkBufferCopy copyRegion{};
+            copyRegion.size = size;
+            vkCmdCopyBuffer(cmd, srcBuffer, dstBuffer, 1, &copyRegion);
+        });
+    }
+
+    void dispatchSmooth(int width, int height, int samples) {
+        size_t finalSize = width * height * 3 * sizeof(float);
+        if(finalSize > currentFinalOutCap) {
+            if(finalOutBuffer) {
+                vkDestroyBuffer(device, finalOutBuffer, nullptr);
+                vkFreeMemory(device, finalOutMem, nullptr);
+            }
+            createBuffer(finalSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, finalOutBuffer, finalOutMem);
+            currentFinalOutCap = finalSize;
+        }
+
+        VkDescriptorBufferInfo bInfos[2] = { {outBuffer, 0, VK_WHOLE_SIZE}, {finalOutBuffer, 0, VK_WHOLE_SIZE} };
+        VkWriteDescriptorSet writes[2] = {};
+        for(int i=0; i<2; i++) {
+            writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[i].dstSet = smoothDescSet;
+            writes[i].dstBinding = i;
+            writes[i].descriptorCount = 1;
+            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[i].pBufferInfo = &bInfos[i];
+        }
+        vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
+
+        VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        vkBeginCommandBuffer(commandBuffer, &beginInfo);
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, smoothPipeline);
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, smoothPipelineLayout, 0, 1, &smoothDescSet, 0, nullptr);
+        
+        struct { int w, h, s; } pc = {width, height, samples};
+        vkCmdPushConstants(commandBuffer, smoothPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        vkCmdDispatch(commandBuffer, (width + 15) / 16, (height + 15) / 16, 1);
+        vkEndCommandBuffer(commandBuffer);
+
+        VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &commandBuffer;
+
+        VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        VkFence fence;
+        vkCreateFence(device, &fenceInfo, nullptr, &fence);
+        vkQueueSubmit(queue, 1, &submitInfo, fence);
+        vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
+        vkDestroyFence(device, fence, nullptr);
+    }
+
+    void dispatchBlend(int width, int height, int lowW, int lowH, float pbrScale, int samples) {
+        size_t finalSize = width * height * 3 * sizeof(float);
+        if(finalSize > currentFinalOutCap) {
+            if(finalOutBuffer) { 
+                vkDestroyBuffer(device, finalOutBuffer, nullptr); 
+                vkFreeMemory(device, finalOutMem, nullptr); 
+            }
+            createBuffer(finalSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, finalOutBuffer, finalOutMem);
+            currentFinalOutCap = finalSize;
+        }
+
+        VkDescriptorBufferInfo bInfos[3] = { {outBuffer, 0, VK_WHOLE_SIZE}, {lowResOutBuffer, 0, VK_WHOLE_SIZE}, {finalOutBuffer, 0, VK_WHOLE_SIZE} };
+        VkWriteDescriptorSet writes[3] = {};
+        for(int i=0; i<3; i++) {
+            writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[i].dstSet = blendDescSet;
+            writes[i].dstBinding = i;
+            writes[i].descriptorCount = 1;
+            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[i].pBufferInfo = &bInfos[i];
+        }
+        vkUpdateDescriptorSets(device, 3, writes, 0, nullptr);
+
+        VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        vkBeginCommandBuffer(commandBuffer, &beginInfo);
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, blendPipeline);
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, blendPipelineLayout, 0, 1, &blendDescSet, 0, nullptr);
+        
+        struct { int w, h, lw, lh; float ps; int s; } pc = {width, height, lowW, lowH, pbrScale, samples};
+        vkCmdPushConstants(commandBuffer, blendPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        vkCmdDispatch(commandBuffer, (width + 15) / 16, (height + 15) / 16, 1);
+        vkEndCommandBuffer(commandBuffer);
+
+        VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        submitInfo.commandBufferCount = 1;  
+        submitInfo.pCommandBuffers = &commandBuffer;
+
+        VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO}; 
+        VkFence fence; 
+        vkCreateFence(device, &fenceInfo, nullptr, &fence);
+        vkQueueSubmit(queue, 1, &submitInfo, fence); 
+        vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX); 
+        vkDestroyFence(device, fence, nullptr);
     }
 };
 inline VulkanContext vkCtx;
