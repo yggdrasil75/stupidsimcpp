@@ -74,12 +74,14 @@ layout(binding = 3) uniform CameraData {
     uint pointCount;
     int tileOffsetX;
     int tileOffsetY;
-    int padding1;
+    int emissiveCount;
     int padding2;
 } cam;
 
 layout(std430, binding = 4) readonly buffer SkyboxBuffer { vec4 skyPixels[]; };
-layout(binding = 5) uniform accelerationStructureEXT tlas;
+layout(std430, binding = 5) readonly buffer LightBuffer { uint emissiveIndices[]; };
+layout(binding = 6) uniform accelerationStructureEXT tlas;
+
 bool isInvalid(float v) { return isnan(v) || isinf(v); }
 bool isInvalid(vec3 v) { return any(isnan(v)) || any(isinf(v)); }
 
@@ -237,6 +239,7 @@ vec3 traceRay(Ray initialRay, inout uint state, out float primaryDepth, out int 
 
     primaryDepth = LARGE;
     primaryObjId = -1;
+    bool lastBounceSpecular = true;
 
     while (bounce <= cam.maxBounces) {
         if (isInvalid(throughput) || isInvalid(finalColor) || isInvalid(origin) || isInvalid(direction)) {
@@ -318,7 +321,10 @@ vec3 traceRay(Ray initialRay, inout uint state, out float primaryDepth, out int 
         }
         
         vec3 emitted = albedo * hitData.emittance;
-        finalColor += throughput * emitted;
+        if (bounce == 0 || lastBounceSpecular) {
+            finalColor += throughput * emitted;
+        }
+
         vec3 F0 = mix(vec3(0.04), albedo, metallic);
 
         float continueProb;
@@ -333,6 +339,70 @@ vec3 traceRay(Ray initialRay, inout uint state, out float primaryDepth, out int 
         float eta = (entering == 1) ? (1.0 / ior) : ior;
         float alpha = max(1e-5, roughness * roughness);
         float alpha2 = alpha * alpha;
+        
+        if (cam.emissiveCount > 0 && entering == 1 && hitData.emittance == 0.0) {
+            int lightIdx = int(nextFloat(state) * float(cam.emissiveCount));
+            lightIdx = clamp(lightIdx, 0, cam.emissiveCount - 1);
+            uint emissivePtIdx = emissiveIndices[lightIdx];
+            
+            if (emissivePtIdx != hitIndex) {
+                GPUPBRRenderData lightPt = points[emissivePtIdx];
+                vec3 lightMin = lightPt.boundsMin;
+                vec3 lightMax = lightPt.boundsMax;
+                
+                vec3 jitter = vec3(nextFloat(state), nextFloat(state), nextFloat(state));
+                vec3 lightPos = mix(lightMin, lightMax, 0.2 + jitter * 0.6);
+                
+                vec3 shadowOrigin = hitPoint + offsetNorm * DIST_EPSILON;
+                vec3 toLight = lightPos - shadowOrigin;
+                float distSq = dot(toLight, toLight);
+                float distToLight = sqrt(distSq);
+                vec3 L = toLight / distToLight;
+                
+                float NdotL = dot(offsetNorm, L);
+                if (NdotL > 0.0) {
+                    Ray shadowRay = makeRay(shadowOrigin, L);
+                    int shadowHitIndex = -1;
+                    float shadowT; vec3 shadowN; vec3 shadowHP;
+                    float shadowMaxDist = distToLight - DIST_EPSILON;
+                    
+                    int shadowResult = voxelTraverse(shadowRay, shadowHitIndex, shadowT, shadowN, shadowHP, shadowMaxDist);
+                    
+                    if (shadowResult == 0 || shadowHitIndex == emissivePtIdx) {
+                        vec3 lightEmission = lightPt.color * lightPt.emittance;
+                        float area = lightPt.size * lightPt.size; 
+                        float solidAngle = min(area / max(distSq, area * 0.25), 2.0 * PI);
+                        
+                        vec3 H_nee = normalize(V + L);
+                        float VdotH_nee = max(0.0, dot(V, H_nee));
+                        float NdotH_nee = max(0.0, dot(offsetNorm, H_nee));
+                        float NdotV_nee = max(1e-5, dot(offsetNorm, V));
+                        
+                        vec3 F_nee = F0 + (vec3(1.0) - F0) * pow(1.0 - min(1.0, VdotH_nee), 5.0);
+                        
+                        float neeRoughness = max(roughness, 0.3);
+                        float neeAlpha = neeRoughness * neeRoughness;
+                        float neeAlpha2 = neeAlpha * neeAlpha;
+                        
+                        float G_nee = smith(NdotV_nee, neeAlpha2) * smith(NdotL, neeAlpha2);
+                        float D_nee = (neeAlpha2) / (PI * pow(NdotH_nee * NdotH_nee * (neeAlpha2 - 1.0) + 1.0, 2.0));
+                        vec3 specularBRDF = (F_nee * G_nee * D_nee) / (4.0 * NdotV_nee * NdotL + 1e-5);
+                        
+                        vec3 diffuseBRDF = albedo * (vec3(1.0) - F_nee) / PI;
+                        vec3 evalBRDF = specularBRDF + diffuseBRDF * (1.0 - transmission) * (1.0 - metallic);
+                        
+                        vec3 directLight = lightEmission * evalBRDF * NdotL * solidAngle * float(cam.emissiveCount);
+                        
+                        float lum = dot(directLight, vec3(0.2126, 0.7152, 0.0722));
+                        if (lum > 15.0) {
+                            directLight *= 15.0 / lum;
+                        }
+                        
+                        finalColor += throughput * directLight;
+                    }
+                }
+            }
+        }
 
         float r1 = nextFloat(state);
         float r2 = nextFloat(state);
@@ -385,6 +455,7 @@ vec3 traceRay(Ray initialRay, inout uint state, out float primaryDepth, out int 
                 float G = smith(NdotV, alpha2) * smith(NDotL, alpha2);
                 weight = F * (G * VdotH / (NdotV * NDotH * pspec));
             }
+            lastBounceSpecular = true;
         } else if (r_type < pspec + pdiff) {
             float r3 = nextFloat(state);
             float r4 = nextFloat(state);
@@ -394,6 +465,7 @@ vec3 traceRay(Ray initialRay, inout uint state, out float primaryDepth, out int 
             newDir = normalize(tangent * L_local.x + bitangent * L_local.y + offsetNorm * L_local.z);
             newOrigin = hitPoint + offsetNorm * DIST_EPSILON;
             weight = albedo * (vec3(1.0) - F) / pdiff;
+            lastBounceSpecular = false;
         } else {
             float sinThetaT2 = eta * eta * (1.0 - VdotH * VdotH);
             if (sinThetaT2 >= 1.0) {
@@ -417,6 +489,7 @@ vec3 traceRay(Ray initialRay, inout uint state, out float primaryDepth, out int 
                 float NDotH = max(1e-5, dot(offsetNorm, H));
                 weight = albedo * (vec3(1.0) - F) * (G * abs(VdotH) / (NdotV * NDotH * pTrans));
             }
+            lastBounceSpecular = true;
         }
         
         weight = min(weight, vec3(4.0));

@@ -172,7 +172,7 @@ struct alignas(16) GPUCameraData {
     uint32_t pointCount;
     int tileOffsetX;
     int tileOffsetY;
-    int padding1;
+    int emissiveCount;
     int padding2;
 };
 
@@ -225,18 +225,22 @@ struct VulkanContext {
     VkBuffer fastPointBuffer = VK_NULL_HANDLE;
     VkBuffer pbrPointBuffer = VK_NULL_HANDLE;
     VkBuffer skyboxBuffer = VK_NULL_HANDLE;
+    VkBuffer lightBuffer = VK_NULL_HANDLE;
+
     VkDeviceMemory nodeMem = VK_NULL_HANDLE;
     VkDeviceMemory outMem = VK_NULL_HANDLE;
     VkDeviceMemory uboMem = VK_NULL_HANDLE;
     VkDeviceMemory fastPointMem = VK_NULL_HANDLE;
     VkDeviceMemory pbrPointMem = VK_NULL_HANDLE;
     VkDeviceMemory skyboxMem = VK_NULL_HANDLE;
+    VkDeviceMemory lightMem = VK_NULL_HANDLE;
 
     size_t currentNodesCap = 0;
     size_t currentOutCap = 0;
     size_t currentFastPointsCap = 0;
     size_t currentPBRPointsCap = 0;
     size_t currentSkyboxCap = 0;
+    size_t currentLightCap = 0;
 
     bool initialized = false;
     bool hasHardwareRT = false;
@@ -419,7 +423,7 @@ struct VulkanContext {
         vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
 
         VkDescriptorPoolSize poolSizes[] = { 
-            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8},
+            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 10},
             {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2},
             {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 2}
         };
@@ -429,19 +433,19 @@ struct VulkanContext {
         poolCreateInfo.maxSets = 3;
         vkCreateDescriptorPool(device, &poolCreateInfo, nullptr, &descriptorPool);
 
-        uint32_t bindingCount = hasHardwareRT ? 6 : 5;
-        VkDescriptorSetLayoutBinding bindings[6] = {};
-        for(int i=0; i<5; i++) {
+        uint32_t bindingCount = hasHardwareRT ? 7 : 6;
+        VkDescriptorSetLayoutBinding bindings[7] = {};
+        for(int i=0; i<6; i++) {
             bindings[i].binding = i;
             bindings[i].descriptorType = i==3 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             bindings[i].descriptorCount = 1;
             bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         }
         if (hasHardwareRT) {
-            bindings[5].binding = 5;
-            bindings[5].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-            bindings[5].descriptorCount = 1;
-            bindings[5].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+            bindings[6].binding = 6;
+            bindings[6].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+            bindings[6].descriptorCount = 1;
+            bindings[6].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         }
 
         VkDescriptorSetLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
@@ -714,11 +718,29 @@ struct VulkanContext {
             asWrites[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             asWrites[i].pNext = &descASInfo;
             asWrites[i].dstSet = (i == 0) ? fastDescSet : pbrDescSet;
-            asWrites[i].dstBinding = 5;
+            asWrites[i].dstBinding = 6;
             asWrites[i].descriptorCount = 1;
             asWrites[i].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
         }
         vkUpdateDescriptorSets(device, 2, asWrites, 0, nullptr);
+    }
+
+    void updateLightBuffer(const std::vector<uint32_t>& lights) {
+        size_t size = std::max((size_t)256, lights.size() * sizeof(uint32_t));
+        if(size > currentLightCap) {
+            if(lightBuffer) {
+                vkDestroyBuffer(device, lightBuffer, nullptr);
+                vkFreeMemory(device, lightMem, nullptr);
+            }
+            createBuffer(size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, lightBuffer, lightMem);
+            currentLightCap = size;
+        }
+        if(!lights.empty()) {
+            void* data;
+            vkMapMemory(device, lightMem, 0, size, 0, &data);
+            memcpy(data, lights.data(), lights.size() * sizeof(uint32_t));
+            vkUnmapMemory(device, lightMem);
+        }
     }
 
     void updateCommonBuffers(const std::vector<GPURenderNode>& nodes, size_t outSize, GPUCameraData& camData) {
@@ -800,15 +822,16 @@ struct VulkanContext {
             vkUnmapMemory(device, fastPointMem);
         }
 
-        VkDescriptorBufferInfo bInfos[5] = { 
+        VkDescriptorBufferInfo bInfos[6] = { 
             {nodeBuffer, 0, VK_WHOLE_SIZE}, 
             {fastPointBuffer, 0, VK_WHOLE_SIZE}, 
             {outBuffer, 0, VK_WHOLE_SIZE}, 
             {uboBuffer, 0, VK_WHOLE_SIZE},
-            {skyboxBuffer, 0, VK_WHOLE_SIZE}
+            {skyboxBuffer, 0, VK_WHOLE_SIZE},
+            {lightBuffer, 0, VK_WHOLE_SIZE}
         };
-        VkWriteDescriptorSet writes[5] = {};
-        for(int i=0; i<5; i++) {
+        VkWriteDescriptorSet writes[6] = {};
+        for(int i=0; i<6; i++) {
             writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[i].dstSet = fastDescSet;
             writes[i].dstBinding = i;
@@ -816,7 +839,7 @@ struct VulkanContext {
             writes[i].descriptorType = i==3 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             writes[i].pBufferInfo = &bInfos[i];
         }
-        vkUpdateDescriptorSets(device, 5, writes, 0, nullptr);
+        vkUpdateDescriptorSets(device, 6, writes, 0, nullptr);
     }
 
     void updatePBRBuffers(const std::vector<GPUPBRRenderData>& points) {
@@ -838,15 +861,16 @@ struct VulkanContext {
             vkUnmapMemory(device, pbrPointMem);
         }
 
-        VkDescriptorBufferInfo bInfos[5] = { 
+        VkDescriptorBufferInfo bInfos[6] = { 
             {nodeBuffer, 0, VK_WHOLE_SIZE}, 
             {pbrPointBuffer, 0, VK_WHOLE_SIZE}, 
             {outBuffer, 0, VK_WHOLE_SIZE}, 
             {uboBuffer, 0, VK_WHOLE_SIZE},
-            {skyboxBuffer, 0, VK_WHOLE_SIZE}
+            {skyboxBuffer, 0, VK_WHOLE_SIZE},
+            {lightBuffer, 0, VK_WHOLE_SIZE}
         };
-        VkWriteDescriptorSet writes[5] = {};
-        for(int i=0; i<5; i++) {
+        VkWriteDescriptorSet writes[6] = {};
+        for(int i=0; i<6; i++) {
             writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[i].dstSet = pbrDescSet;
             writes[i].dstBinding = i;
@@ -854,7 +878,7 @@ struct VulkanContext {
             writes[i].descriptorType = i==3 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             writes[i].pBufferInfo = &bInfos[i];
         }
-        vkUpdateDescriptorSets(device, 5, writes, 0, nullptr);
+        vkUpdateDescriptorSets(device, 6, writes, 0, nullptr);
     }
 };
 inline VulkanContext vkCtx;

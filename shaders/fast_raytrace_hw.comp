@@ -68,7 +68,7 @@ layout(binding = 3) uniform CameraData {
 } cam;
 
 layout(std430, binding = 4) readonly buffer SkyboxBuffer { vec4 skyPixels[]; };
-layout(binding = 5) uniform accelerationStructureEXT tlas;
+layout(binding = 6) uniform accelerationStructureEXT tlas;
 
 struct Ray {
     vec3 origin;
