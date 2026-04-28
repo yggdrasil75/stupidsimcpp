@@ -27,7 +27,7 @@ struct GPUFastRenderData {
     vec3 color;
     float emittance;
     vec3 boundsMin;
-    float objectId;
+    int objectId;
     vec3 boundsMax;
     float padding2;
 };
@@ -213,7 +213,7 @@ void main() {
         float fogT = clamp((t - cam.lodMinDist) * cam.invFogRange, 0.0, 1.0);
         finalColor = mix(cam.bgColor, surfaceColor, mix(1.0, cam.minVisibility, fogT));
         depthOut = t;
-        objIdOut = float(hitData.objectId);
+        objIdOut = hitData.objectId;
     }
     
     finalColor = clamp(finalColor, 0.0, 1.0);

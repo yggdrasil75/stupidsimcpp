@@ -188,7 +188,7 @@ const RenderData_<T, IndexType, StoragePath>* Octree<T, IndexType, StoragePath>:
 
 template<typename T, typename IndexType, GridStoragePath StoragePath>
 frame Octree<T, IndexType, StoragePath>::fastRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat) {
-    TIME_FUNCTION;
+    // TIME_FUNCTION;
     updateStreaming(cam);
     
     thread_local RenderBuffer_<T, IndexType, StoragePath> tl_buffer;
@@ -272,7 +272,7 @@ frame Octree<T, IndexType, StoragePath>::fastRenderFrame(const Camera& cam, int 
 template<typename T, typename IndexType, GridStoragePath StoragePath>
 frame Octree<T, IndexType, StoragePath>::renderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat, int samplesPerPixel,
                 int maxBounces, bool globalIllumination, bool useLod) {
-    TIME_FUNCTION;
+    // TIME_FUNCTION;
     updateStreaming(cam);
     optimize();
     thread_local RenderBuffer tl_buffer;
@@ -462,7 +462,7 @@ frame Octree<T, IndexType, StoragePath>::renderFrameVulkan(const Camera& cam, in
 
 template<typename T, typename IndexType, GridStoragePath StoragePath>
 frame Octree<T, IndexType, StoragePath>::fastRenderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat) {
-    TIME_FUNCTION;
+    // TIME_FUNCTION;
     updateStreaming(cam);
     optimize();
     thread_local RenderBuffer tl_buffer;
@@ -573,7 +573,7 @@ frame Octree<T, IndexType, StoragePath>::fastRenderFrameVulkan(const Camera& cam
 template<typename T, typename IndexType, GridStoragePath StoragePath>
 frame Octree<T, IndexType, StoragePath>::blendedRenderFrameVulkan(const Camera& cam, int height, int width, float pbrScale,
                 frame::colormap colorformat, int samplesPerPixel, int maxBounces, bool globalIllumination, bool useLod) {
-    TIME_FUNCTION;
+    // TIME_FUNCTION;
     updateStreaming(cam);
     optimize();
     thread_local RenderBuffer tl_buffer;
@@ -751,9 +751,9 @@ frame Octree<T, IndexType, StoragePath>::blendedRenderFrameVulkan(const Camera& 
     frame outFrame(width, height, colorformat);
     std::vector<float> colorBuffer(width * height * 3);
     
-    const int radius = 2; // Joint Bilateral Neighborhood search
+    const int radius = 2;
     const float spatialSigma = 1.5f;
-    const float depthSigma = 0.5f;
+    const float relativeDepthSigma = 0.05f;
     
     #pragma omp parallel for schedule(dynamic) collapse(2)
     for (int y = 0; y < height; ++y) {
@@ -777,21 +777,22 @@ frame Octree<T, IndexType, StoragePath>::blendedRenderFrameVulkan(const Camera& 
                     int ny = std::clamp(center_ly + dy, 0, lowH - 1);
                     int pbrIdx = (ny * lowW + nx) * 5;
 
-                    float pbrDepth = pbrRaw[pbrIdx + 3];
                     int pbrObj = static_cast<int>(pbrRaw[pbrIdx + 4]);
+                    
+                    if (fastObj != pbrObj) continue;
+
+                    float pbrDepth = pbrRaw[pbrIdx + 3];
 
                     float sDistSq = static_cast<float>(dx*dx + dy*dy);
                     float spatialWeight = std::exp(-sDistSq / (2.0f * spatialSigma * spatialSigma));
 
-                    float depthDiff = fastDepth - pbrDepth;
-                    // Forbid penalizing extreme background distances matching
+                    float depthDiff = std::abs(fastDepth - pbrDepth) / std::max(fastDepth, 0.1f);
+                    
                     if (fastDepth > 999000.0f && pbrDepth > 999000.0f) depthDiff = 0.0f;
-                    float depthWeight = std::exp(-(depthDiff * depthDiff) / (2.0f * depthSigma * depthSigma));
+                    
+                    float depthWeight = std::exp(-(depthDiff * depthDiff) / (2.0f * relativeDepthSigma * relativeDepthSigma));
 
-                    // Hard check on object IDs to prevent blending PBR lighting across edge boundaries!
-                    float objWeight = (fastObj == pbrObj && fastObj != -1) ? 1.0f : ((fastObj == pbrObj) ? 1.0f : 0.005f);
-
-                    float weight = spatialWeight * depthWeight * objWeight;
+                    float weight = spatialWeight * depthWeight;
                     sumWeights += weight;
                     sumR += pbrRaw[pbrIdx] * weight;
                     sumG += pbrRaw[pbrIdx + 1] * weight;
@@ -799,12 +800,37 @@ frame Octree<T, IndexType, StoragePath>::blendedRenderFrameVulkan(const Camera& 
                 }
             }
             
+            if (sumWeights == 0.0f && fastObj != -1) {
+                int searchRadius = radius * 3;
+                float nearestDist = 99999.0f;
+                
+                for (int dy = -searchRadius; dy <= searchRadius; ++dy) {
+                    for (int dx = -searchRadius; dx <= searchRadius; ++dx) {
+                        int nx = std::clamp(center_lx + dx, 0, lowW - 1);
+                        int ny = std::clamp(center_ly + dy, 0, lowH - 1);
+                        int pbrIdx = (ny * lowW + nx) * 5;
+
+                        if (static_cast<int>(pbrRaw[pbrIdx + 4]) == fastObj) {
+                            float dist = static_cast<float>(dx*dx + dy*dy);
+                            if (dist < nearestDist) {
+                                nearestDist = dist;
+                                sumR = pbrRaw[pbrIdx];
+                                sumG = pbrRaw[pbrIdx + 1];
+                                sumB = pbrRaw[pbrIdx + 2];
+                                sumWeights = 1.0f;
+                            }
+                        }
+                    }
+                }
+            }
+            
             int outIdx = (y * width + x) * 3;
-            if (sumWeights > 0.05f) { // Safely apply upscaled lighting
+            
+            if (sumWeights > 0.0f) { 
                 colorBuffer[outIdx]     = std::clamp(sumR / sumWeights, 0.0f, 1.0f);
                 colorBuffer[outIdx + 1] = std::clamp(sumG / sumWeights, 0.0f, 1.0f);
                 colorBuffer[outIdx + 2] = std::clamp(sumB / sumWeights, 0.0f, 1.0f);
-            } else { // Edges where low res PBR missed a high res Fast pixel due to resolution mismatch
+            } else { 
                 colorBuffer[outIdx]     = std::clamp(fastR, 0.0f, 1.0f);
                 colorBuffer[outIdx + 1] = std::clamp(fastG, 0.0f, 1.0f);
                 colorBuffer[outIdx + 2] = std::clamp(fastB, 0.0f, 1.0f);
