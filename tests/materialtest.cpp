@@ -134,8 +134,8 @@ int main() {
     const int framesPerSegment = static_cast<int>(fps * durationPerSegment);
     const int samples = 100;
     const int blendedsamples = 100;
-    const float blendedfactor = 0.33;
-    const int video_samples = 50;
+    const float blendedfactor = 0.5;
+    const int video_samples = 250;
     const int bounces = 32;
 
     struct View {

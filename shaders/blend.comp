@@ -33,7 +33,7 @@ void main() {
     float sumWeights = 0.0;
     float sumR = 0.0, sumG = 0.0, sumB = 0.0;
 
-    int radius = 2;
+    int radius = 3;
     float spatialSigma = 1.5;
     float relativeDepthSigma = 0.05;
     float invSamples = 1.0 / max(1.0, float(pc.samples));

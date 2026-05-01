@@ -173,7 +173,7 @@ bool rayCubeIntersect(Ray ray, GPUPBRRenderData pt, out float t, out vec3 normal
     tMin = max(max(tmin3.x, tmin3.y), tmin3.z);
     tMax = min(min(tmax3.x, tmax3.y), tmax3.z);
 
-    if (tExit < -1.0) tExit = tMax;
+    tExit = tMax;
     if (tMax < max(0.0, tMin)) return false;
     
     t = tMin < 0.0 ? tMax : tMin;
@@ -208,6 +208,7 @@ vec3 sampleSkybox(vec3 d) {
 }
 
 int voxelTraverse(Ray ray, out int hitIndex, out float outT, out vec3 outNormal, out vec3 outHitPoint, inout float maxDist);
+vec3 shadowTraverse(Ray ray, float maxDist, int lightPtIdx);
 
 float smith(float cost, float alpha2) {
     float cost2 = cost * cost;
@@ -281,7 +282,7 @@ vec3 traceRay(Ray initialRay, inout uint state, out float primaryDepth, out int 
             if (bounce == 0) {
                 finalColor += throughput * sampleSkybox(direction);
             } else if (cam.globalIllumination == 1) { 
-                finalColor += throughput * sampleSkybox(direction); 
+                finalColor += throughput * sampleSkybox(direction);
             } else {
                 finalColor += throughput * cam.skylight;
             }
@@ -342,7 +343,7 @@ vec3 traceRay(Ray initialRay, inout uint state, out float primaryDepth, out int 
         float continueProb;
         if (bounce > 2) {
             continueProb = max(throughput.x, max(throughput.y, throughput.z));
-            continueProb = clamp(continueProb, 0.1, 0.95); 
+            continueProb = clamp(continueProb, 0.1, 0.95);
             if (nextFloat(state) > continueProb) break;
             throughput /= continueProb;
         } 
@@ -353,65 +354,57 @@ vec3 traceRay(Ray initialRay, inout uint state, out float primaryDepth, out int 
         float alpha2 = alpha * alpha;
         
         if (cam.emissiveCount > 0 && entering == 1 && hitData.emittance == 0.0) {
-            int lightIdx = int(nextFloat(state) * float(cam.emissiveCount));
-            lightIdx = clamp(lightIdx, 0, cam.emissiveCount - 1);
-            uint emissivePtIdx = emissiveIndices[lightIdx];
-            
-            if (emissivePtIdx != hitIndex) {
-                GPUPBRRenderData lightPt = points[emissivePtIdx];
-                vec3 lightMin = lightPt.position - lightPt.size * 0.5;
-                vec3 lightMax = lightPt.position + lightPt.size * 0.5;
+            if ((1.0 - metallic) * (1.0 - transmission) > 0.001) {
+                int lightIdx = int(nextFloat(state) * float(cam.emissiveCount));
+                lightIdx = clamp(lightIdx, 0, cam.emissiveCount - 1);
+                uint emissivePtIdx = emissiveIndices[lightIdx];
                 
-                vec3 jitter = vec3(nextFloat(state), nextFloat(state), nextFloat(state));
-                vec3 lightPos = mix(lightMin, lightMax, 0.2 + jitter * 0.6);
-                
-                vec3 shadowOrigin = hitPoint + offsetNorm * DIST_EPSILON;
-                vec3 toLight = lightPos - shadowOrigin;
-                float distSq = dot(toLight, toLight);
-                float distToLight = sqrt(distSq);
-                vec3 L = toLight / distToLight;
-                
-                float NdotL = dot(offsetNorm, L);
-                if (NdotL > 0.0) {
-                    Ray shadowRay = makeRay(shadowOrigin, L);
-                    int shadowHitIndex = -1;
-                    float shadowT; vec3 shadowN; vec3 shadowHP;
-                    float shadowMaxDist = distToLight - DIST_EPSILON;
+                if (emissivePtIdx != hitIndex) {
+                    GPUPBRRenderData lightPt = points[emissivePtIdx];
+                    vec3 lightMin = lightPt.position - lightPt.size * 0.5;
+                    vec3 lightMax = lightPt.position + lightPt.size * 0.5;
                     
-                    int shadowResult = voxelTraverse(shadowRay, shadowHitIndex, shadowT, shadowN, shadowHP, shadowMaxDist);
+                    vec3 jitter = vec3(nextFloat(state), nextFloat(state), nextFloat(state)) - 0.5;
+                    vec3 lightPos = lightPt.position + jitter * (lightPt.size * 0.8);
                     
-                    if (shadowResult == 0 || shadowHitIndex == emissivePtIdx) {
-                        vec3 lightAlbedo = unpackRGB8(lightPt.color);
-                        vec3 lightEmission = lightAlbedo * lightPt.emittance;
-                        float area = lightPt.size * lightPt.size; 
-                        float solidAngle = min(area / max(distSq, area * 0.25), 2.0 * PI);
+                    vec3 shadowOrigin = hitPoint + offsetNorm * DIST_EPSILON;
+                    vec3 toLight = lightPos - shadowOrigin;
+                    float distSq = dot(toLight, toLight);
+                    float distToLight = sqrt(distSq);
+                    vec3 L = toLight / distToLight;
+                    
+                    float NdotL = dot(offsetNorm, L);
+                    if (NdotL > 0.0) {
+                        Ray shadowRay = makeRay(shadowOrigin, L);
+                        float shadowMaxDist = distToLight - DIST_EPSILON * 2.0;
+                        vec3 shadowTransmittance = vec3(1.0);
                         
-                        vec3 H_nee = normalize(V + L);
-                        float VdotH_nee = max(0.0, dot(V, H_nee));
-                        float NdotH_nee = max(0.0, dot(offsetNorm, H_nee));
-                        float NdotV_nee = max(1e-5, dot(offsetNorm, V));
-                        
-                        vec3 F_nee = F0 + (vec3(1.0) - F0) * pow(1.0 - min(1.0, VdotH_nee), 5.0);
-                        
-                        float neeRoughness = max(roughness, 0.3);
-                        float neeAlpha = neeRoughness * neeRoughness;
-                        float neeAlpha2 = neeAlpha * neeAlpha;
-                        
-                        float G_nee = smith(NdotV_nee, neeAlpha2) * smith(NdotL, neeAlpha2);
-                        float D_nee = (neeAlpha2) / (PI * pow(NdotH_nee * NdotH_nee * (neeAlpha2 - 1.0) + 1.0, 2.0));
-                        vec3 specularBRDF = (F_nee * G_nee * D_nee) / (4.0 * NdotV_nee * NdotL + 1e-5);
-                        
-                        vec3 diffuseBRDF = albedo * (vec3(1.0) - F_nee) / PI;
-                        vec3 evalBRDF = specularBRDF + diffuseBRDF * (1.0 - transmission) * (1.0 - metallic);
-                        
-                        vec3 directLight = lightEmission * evalBRDF * NdotL * solidAngle * float(cam.emissiveCount);
-                        
-                        float lum = dot(directLight, vec3(0.2126, 0.7152, 0.0722));
-                        if (lum > 15.0) {
-                            directLight *= 15.0 / lum;
+                        if (shadowMaxDist > 0.0) {
+                            shadowTransmittance = shadowTraverse(shadowRay, shadowMaxDist, int(emissivePtIdx));
                         }
                         
-                        finalColor += throughput * directLight;
+                        if (shadowTransmittance.x > 0.0 || shadowTransmittance.y > 0.0 || shadowTransmittance.z > 0.0) {
+                            vec3 lightAlbedo = unpackRGB8(lightPt.color);
+                            vec3 lightEmission = lightAlbedo * lightPt.emittance;
+                            float area = lightPt.size * lightPt.size;
+                            float solidAngle = min(area / max(distSq, area * 0.25), 2.0 * PI);
+                            
+                            vec3 H_nee = normalize(V + L);
+                            float VdotH_nee = max(0.0, dot(V, H_nee));
+                            vec3 F_nee = F0 + (vec3(1.0) - F0) * pow(1.0 - min(1.0, VdotH_nee), 5.0);
+                            
+                            vec3 diffuseBRDF = albedo * (vec3(1.0) - F_nee) / PI;
+                            vec3 evalBRDF = diffuseBRDF * (1.0 - transmission) * (1.0 - metallic);
+                            
+                            vec3 directLight = lightEmission * evalBRDF * NdotL * solidAngle * float(cam.emissiveCount) * shadowTransmittance;
+                            
+                            float lum = dot(directLight, vec3(0.2126, 0.7152, 0.0722));
+                            if (lum > 20.0) {
+                                directLight *= 20.0 / lum;
+                            }
+                            
+                            finalColor += throughput * directLight;
+                        }
                     }
                 }
             }
@@ -435,7 +428,7 @@ vec3 traceRay(Ray initialRay, inout uint state, out float primaryDepth, out int 
 
         vec3 F = F0 + (vec3(1.0) - F0) * pow(1.0 - min(1.0, VdotH), 5.0);
 
-        float probSpec = (F.x + F.y + F.z) * 0.333333; 
+        float probSpec = (F.x + F.y + F.z) * 0.333333;
         float probT = (1.0 - metallic) * transmission;
         float probDiffuse = (1.0 - metallic) * (1.0 - transmission);
         
@@ -496,7 +489,7 @@ vec3 traceRay(Ray initialRay, inout uint state, out float primaryDepth, out int 
             } else {
                 float cosThetaT = sqrt(1.0 - sinThetaT2);
                 newDir = normalize((eta * VdotH - cosThetaT) * H - eta * V);
-                newOrigin = hitPoint - offsetNorm * DIST_EPSILON; 
+                newOrigin = hitPoint - offsetNorm * DIST_EPSILON;
                 float NdotL = max(1e-5, dot(offsetNorm, -newDir));
                 float G = smith(NdotV, alpha2) * smith(NdotL, alpha2);
                 float NDotH = max(1e-5, dot(offsetNorm, H));
@@ -555,7 +548,10 @@ int voxelTraverse(Ray ray, out int hitIndex, out float outT, out vec3 outNormal,
     while(rayQueryProceedEXT(rq)) {
         if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionAABBEXT) {
             int ptIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
-            float t; vec3 n; vec3 hp; float tEx = 0.0;
+            float t;
+            vec3 n;
+            vec3 hp;
+            float tEx = 0.0;
             if (rayCubeIntersect(ray, points[ptIdx], t, n, hp, tEx) && t >= 0.0 && t <= currentMaxDist) {
                 rayQueryGenerateIntersectionEXT(rq, t);
             }
@@ -566,11 +562,52 @@ int voxelTraverse(Ray ray, out int hitIndex, out float outT, out vec3 outNormal,
         hitIndex = rayQueryGetIntersectionPrimitiveIndexEXT(rq, true);
         outT = rayQueryGetIntersectionTEXT(rq, true);
         currentMaxDist = outT;
-        float dummyT; float tEx = 0.0;
+        float dummyT;
+        float tEx = 0.0;
         rayCubeIntersect(ray, points[hitIndex], dummyT, outNormal, outHitPoint, tEx);
         return 1;
     }
     return 0;
+}
+
+vec3 shadowTraverse(Ray ray, float maxDist, int lightPtIdx) {
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, tlas, gl_RayFlagsTerminateOnFirstHitEXT, 0xFF, ray.origin, 0.0, ray.dir, maxDist);
+
+    vec3 transmittance = vec3(1.0);
+
+    while(rayQueryProceedEXT(rq)) {
+        if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionAABBEXT) {
+            int ptIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
+            if (ptIdx == lightPtIdx) continue;
+            
+            float t;
+            vec3 n;
+            vec3 hp;
+            float tEx;
+            if (rayCubeIntersect(ray, points[ptIdx], t, n, hp, tEx) && t >= 0.0 && t <= maxDist) {
+                GPUPBRRenderData pt = points[ptIdx];
+                float r, m, tr, ior;
+                unpackMaterial(pt.materialProps, r, m, tr, ior);
+                
+                // Allow transparent shadows while immediately terminating on solid opaque
+                if (tr > 0.0 && m < 1.0) {
+                    vec3 absColor = unpackRGB8(pt.absorption);
+                    float thickness = max(0.0, tEx - t);
+                    transmittance *= exp(-absColor * thickness);
+                } else {
+                    rayQueryGenerateIntersectionEXT(rq, t);
+                }
+            }
+        }
+    }
+    
+    // Completely blocked by solid hit
+    if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionGeneratedEXT) {
+        return vec3(0.0);
+    }
+    
+    return transmittance;
 }
 
 void main() {

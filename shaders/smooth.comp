@@ -24,7 +24,7 @@ void main() {
     float sumWeights = 0.0;
     float sumR = 0.0, sumG = 0.0, sumB = 0.0;
 
-    int radius = 2;
+    int radius = 3;
     float spatialSigma = 2.0;
     float depthSigma = 1.0;
 
