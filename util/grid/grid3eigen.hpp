@@ -85,6 +85,25 @@ private:
     float minLodSize_ = 0.0f;
     size_t regionTargetPoints_ = 4096;
 
+    std::vector<std::weak_ptr<NodeData>> activePhysicsNodes_;
+    std::mutex physicsMutex_;
+
+    float phys_smoothingRadius = 0.2f;
+    float phys_restDensity = 1000.0f;
+    float phys_gasConstant = 2000.0f;
+    float phys_viscosity = 200.0f;
+    Eigen::Vector3f phys_gravity{0.0f, -9.81f, 0.0f};
+
+    SPHKernels kernels_{phys_smoothingRadius};
+    float phys_h2 = phys_smoothingRadius * phys_smoothingRadius;
+    float phys_poly6 = 315.0f / (64.0f * M_PI * std::pow(phys_smoothingRadius, 9));
+    float phys_spikyGrad = -45.0f / (M_PI * std::pow(phys_smoothingRadius, 6));
+    float phys_viscLap = 45.0f / (M_PI * std::pow(phys_smoothingRadius, 6));
+    
+    bool phys_useGravityPoint = true;
+    PointType phys_gravityCenter{0.0f, 0.0f, 0.0f};
+    float phys_gravityStrength = 9.81f;
+
     void lazilyOffload(OctreeNode* node) {
         {
             std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
@@ -214,6 +233,11 @@ public:
         auto f = p.get_future();
         enqueueTask([&p]{ p.set_value(); });
         f.wait();
+    }
+
+    void setPhysicsSmoothingRadius(float radius) {
+        phys_smoothingRadius = radius;
+        kernels_.update(radius);
     }
 private:
 
@@ -387,6 +411,8 @@ private:
     }
     
     void ensureBounds(const BoundingBox& targetBounds) {
+        if (!targetBounds.first.allFinite() || !targetBounds.second.allFinite()) return;
+
         if (!root_) {
             PointType center = (targetBounds.first + targetBounds.second) * 0.5f;
             PointType size = targetBounds.second - targetBounds.first;
@@ -397,7 +423,15 @@ private:
             return;
         }
 
+        int maxExpansions = 100;
+        int expansionCount = 0;
+
         while (true) {
+            if (expansionCount++ > maxExpansions) {
+                std::cerr << "[Octree] WARNING: Max bounds expansion reached. Particle escaped or NaN." << std::endl;
+                break;
+            }
+
             bool xInside = root_->bounds.first.x() <= targetBounds.first.x() && root_->bounds.second.x() >= targetBounds.second.x();
             bool yInside = root_->bounds.first.y() <= targetBounds.first.y() && root_->bounds.second.y() >= targetBounds.second.y();
             bool zInside = root_->bounds.first.z() <= targetBounds.first.z() && root_->bounds.second.z() >= targetBounds.second.z();
@@ -1016,8 +1050,16 @@ private:
                     float sign = 1.0f;
                     
                     for (int i = 0; i < Dim; ++i) {
-                        if (dMin[i] < minDist) { minDist = dMin[i]; minAxis = i; sign = -1.0f; }
-                        if (dMax[i] < minDist) { minDist = dMax[i]; minAxis = i; sign = 1.0f; }
+                        if (dMin[i] < minDist) {
+                            minDist = dMin[i];
+                            minAxis = i;
+                            sign = -1.0f;
+                        }
+                        if (dMax[i] < minDist) {
+                            minDist = dMax[i];
+                            minAxis = i;
+                            sign = 1.0f;
+                        }
                     }
                     hit.normal = PointType::Zero();
                     hit.normal[minAxis] = sign;
@@ -1209,15 +1251,21 @@ public:
 
     bool set(const T& data, const PointType& pos, bool visible, Eigen::Vector3f color, float size = 0.01f, bool active = true,
              int objectId = -1, float emittance = 0.0f, float roughness = 1.0f, 
-             float metallic = 0.0f, float transmission = 0.0f, float ior = 1.45f, Eigen::Vector3f absorp = Eigen::Vector3f::Zero()) {
+             float metallic = 0.0f, float transmission = 0.0f, float ior = 1.45f, Eigen::Vector3f absorp = Eigen::Vector3f::Zero(),
+             BodyType bType = BodyType::STATIC, float mass = 1.0f) {
         
         Material mat(emittance, roughness, metallic, transmission, ior, absorp);
-        auto pointData = std::make_shared<NodeData>(data, pos, visible, color, size, active, objectId, mat);
+        auto pointData = std::make_shared<NodeData>(data, pos, visible, color, size, active, objectId, mat, bType == BodyType::STATIC, bType);
+        pointData->physics.mass = mass;
         
         ensureBounds(pointData->getCubeBounds());
         
         if (insertRecursive(root_.get(), pointData, 0)) {
             this->size++;
+            if (bType != BodyType::STATIC) {
+                std::lock_guard<std::mutex> lock(physicsMutex_);
+                activePhysicsNodes_.push_back(pointData);
+            }
             return true;
         }
         return false;
@@ -1621,8 +1669,16 @@ public:
                         float sign = 1.0f;
                         
                         for (int i = 0; i < Dim; ++i) {
-                            if (dMin[i] < minDist) { minDist = dMin[i]; minAxis = i; sign = -1.0f; }
-                            if (dMax[i] < minDist) { minDist = dMax[i]; minAxis = i; sign = 1.0f; }
+                            if (dMin[i] < minDist) {
+                                minDist = dMin[i];
+                                minAxis = i;
+                                sign = -1.0f;
+                            }
+                            if (dMax[i] < minDist) {
+                                minDist = dMax[i];
+                                minAxis = i;
+                                sign = 1.0f;
+                            }
                         }
                         hit.normal = PointType::Zero();
                         hit.normal[minAxis] = sign;
@@ -1680,6 +1736,7 @@ public:
     frame fastRenderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB);
     frame renderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB,
         int samplesPerPixel = 2, int maxBounces = 4, bool globalIllumination = false, bool useLod = true);
+    void stepPhysics(float dt);
 
     std::vector<std::shared_ptr<NodeData>> getExternalNodes(int targetObjectId) {
         std::vector<std::shared_ptr<NodeData>> candidates;

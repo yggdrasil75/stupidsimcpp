@@ -1,0 +1,86 @@
+#version 450
+layout(local_size_x = 256) in;
+
+struct Particle {
+    vec4 pos_mass;
+    vec4 vel_density;
+    vec4 force_press;
+    ivec4 type_pad;
+};
+
+layout(std430, binding = 0) buffer ParticleBuffer {
+    Particle particles[];
+};
+
+layout(push_constant) uniform PushConstants {
+    float h;
+    float spiky_k;
+    float visc_l_k;
+    float viscosity;
+    float gravX, gravY, gravZ;
+    float gravStrength;
+    float gravCX, gravCY, gravCZ;
+    uint useGravityPoint;
+    uint numParticles;
+} pc;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.numParticles) return;
+
+    uint type = particles[i].type_pad.x;
+    float mass = particles[i].pos_mass.w;
+    vec3 pos = particles[i].pos_mass.xyz;
+
+    vec3 force = vec3(0.0);
+
+    if (pc.useGravityPoint == 1) {
+        vec3 dir = vec3(pc.gravCX, pc.gravCY, pc.gravCZ) - pos;
+        float distSq = dot(dir, dir);
+        if (distSq > 0.0001) {
+            force = normalize(dir) * (pc.gravStrength * mass);
+        }
+    } else {
+        force = vec3(pc.gravX, pc.gravY, pc.gravZ) * mass;
+    }
+
+    if (type != 4 && type != 5) {
+        particles[i].force_press.xyz = force;
+        return;
+    }
+
+    vec3 fPress = vec3(0.0);
+    vec3 fVisc = vec3(0.0);
+
+    float density_i = particles[i].vel_density.w;
+    float press_i = particles[i].force_press.w;
+    vec3 vel_i = particles[i].vel_density.xyz;
+
+    for (uint j = 0; j < pc.numParticles; j++) {
+        if (i == j) continue;
+        uint type_j = particles[j].type_pad.x;
+        if (type_j != 4 && type_j != 5) continue;
+
+        vec3 diff = pos - particles[j].pos_mass.xyz;
+        float r = length(diff);
+
+        if (r > 0.0001 && r < pc.h) {
+            vec3 dir = diff / r;
+            float density_j = particles[j].vel_density.w;
+            float press_j = particles[j].force_press.w;
+            float mass_j = particles[j].pos_mass.w;
+            vec3 vel_j = particles[j].vel_density.xyz;
+
+            float pressureTerm = (press_i / (density_i * density_i)) + (press_j / (density_j * density_j));
+            
+            float hr = pc.h - r;
+            float spikyGrad = -3.0 * pc.spiky_k * hr * hr;
+            fPress += -dir * mass_j * pressureTerm * spikyGrad;
+
+            float viscLap = pc.visc_l_k * hr;
+            fVisc += pc.viscosity * mass_j * (vel_j - vel_i) / density_j * viscLap;
+        }
+    }
+
+    particles[i].force_press.xyz = force + fPress + fVisc;
+}

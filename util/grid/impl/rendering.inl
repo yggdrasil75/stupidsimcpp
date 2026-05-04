@@ -170,6 +170,38 @@ struct alignas(16) GPUCameraData {
     int padding2;
 };
 
+struct alignas(16) GPUParticle {
+    Eigen::Vector4f pos_mass;
+    Eigen::Vector4f vel_density;
+    Eigen::Vector4f force_press;
+    Eigen::Vector4i type_pad;
+};
+
+struct SPHDensityPC {
+    float h;
+    float h2;
+    float poly6_k;
+    float restDensity;
+    float gasConstant;
+    uint32_t numParticles;
+};
+
+struct SPHForcePC {
+    float h;
+    float spiky_k;
+    float visc_l_k;
+    float viscosity;
+    float gravX;
+    float gravY;
+    float gravZ;
+    float gravStrength;
+    float gravCX;
+    float gravCY;
+    float gravCZ;
+    uint32_t useGravityPoint;
+    uint32_t numParticles;
+};
+
 struct WavefrontRay {
     Eigen::Vector3f origin;
     uint32_t pixelIndex;
@@ -222,6 +254,17 @@ struct VulkanContext {
     VkDescriptorSet pbrDescSet = VK_NULL_HANDLE;
     VkDescriptorSet smoothDescSet = VK_NULL_HANDLE;
     VkDescriptorSet blendDescSet = VK_NULL_HANDLE;
+    
+    VkShaderModule sphDensityShader = VK_NULL_HANDLE;
+    VkShaderModule sphForceShader = VK_NULL_HANDLE;
+    VkPipelineLayout sphPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline sphDensityPipeline = VK_NULL_HANDLE;
+    VkPipeline sphForcePipeline = VK_NULL_HANDLE;
+    VkDescriptorSetLayout sphDescLayout = VK_NULL_HANDLE;
+    VkDescriptorSet sphDescSet = VK_NULL_HANDLE;
+    VkBuffer particleBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory particleMem = VK_NULL_HANDLE;
+    size_t currentParticleCap = 0;
 
     VkBuffer nodeBuffer = VK_NULL_HANDLE;
     VkBuffer outBuffer = VK_NULL_HANDLE;
@@ -509,6 +552,38 @@ struct VulkanContext {
         smoothShader = createShaderModule("./bin/smooth.spv");
         blendShader = createShaderModule("./bin/blend.spv");
 
+        VkDescriptorSetLayoutBinding sphBinding{};
+        sphBinding.binding = 0;
+        sphBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        sphBinding.descriptorCount = 1;
+        sphBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        
+        VkDescriptorSetLayoutCreateInfo sphLayoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 1, &sphBinding};
+        vkCreateDescriptorSetLayout(device, &sphLayoutInfo, nullptr, &sphDescLayout);
+        
+        VkDescriptorSetAllocateInfo sphAllocInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        sphAllocInfo.descriptorPool = descriptorPool;
+        sphAllocInfo.descriptorSetCount = 1;
+        sphAllocInfo.pSetLayouts = &sphDescLayout;
+        vkAllocateDescriptorSets(device, &sphAllocInfo, &sphDescSet);
+
+        sphDensityShader = createShaderModule("./bin/sph_density.spv");
+        sphForceShader = createShaderModule("./bin/sph_force.spv");
+        
+        VkPushConstantRange sphPushInfo{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(SPHForcePC)}; // Use the larger struct size
+        VkPipelineLayoutCreateInfo sphPipelineLayoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        sphPipelineLayoutInfo.setLayoutCount = 1;
+        sphPipelineLayoutInfo.pSetLayouts = &sphDescLayout;
+        sphPipelineLayoutInfo.pushConstantRangeCount = 1;
+        sphPipelineLayoutInfo.pPushConstantRanges = &sphPushInfo;
+        vkCreatePipelineLayout(device, &sphPipelineLayoutInfo, nullptr, &sphPipelineLayout);
+
+        VkComputePipelineCreateInfo sphComputeInfo{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        sphComputeInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        sphComputeInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        sphComputeInfo.stage.pName = "main";
+        sphComputeInfo.layout = sphPipelineLayout;
+
         VkPipelineLayoutCreateInfo pipelineLayoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         pipelineLayoutInfo.setLayoutCount = 1;
         pipelineLayoutInfo.pSetLayouts = &fastDescLayout;
@@ -552,6 +627,15 @@ struct VulkanContext {
             computePipelineInfo.layout = blendPipelineLayout;
             computePipelineInfo.stage.module = blendShader;
             vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &computePipelineInfo, nullptr, &blendPipeline);
+        }
+        
+        if (sphDensityShader) {
+            sphComputeInfo.stage.module = sphDensityShader;
+            vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &sphComputeInfo, nullptr, &sphDensityPipeline);
+        }
+        if (sphForceShader) {
+            sphComputeInfo.stage.module = sphForceShader;
+            vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &sphComputeInfo, nullptr, &sphForcePipeline);
         }
 
         initialized = true;
@@ -1047,6 +1131,74 @@ struct VulkanContext {
         vkQueueSubmit(queue, 1, &submitInfo, fence); 
         vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX); 
         vkDestroyFence(device, fence, nullptr);
+    }
+    
+    void dispatchPhysics(std::vector<GPUParticle>& particles, const SPHDensityPC& dpc, const SPHForcePC& fpc) {
+        if (!initialized || particles.empty() || !sphDensityPipeline || !sphForcePipeline) return;
+
+        size_t size = particles.size() * sizeof(GPUParticle);
+        if (size > currentParticleCap) {
+            if (particleBuffer) {
+                vkDestroyBuffer(device, particleBuffer, nullptr);
+                vkFreeMemory(device, particleMem, nullptr);
+            }
+            createBuffer(size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, 
+                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 
+                         particleBuffer, particleMem);
+            currentParticleCap = size;
+            
+            VkDescriptorBufferInfo bInfo{particleBuffer, 0, VK_WHOLE_SIZE};
+            VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            write.dstSet = sphDescSet;
+            write.dstBinding = 0;
+            write.descriptorCount = 1;
+            write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            write.pBufferInfo = &bInfo;
+            vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+        }
+
+        void* data;
+        vkMapMemory(device, particleMem, 0, size, 0, &data);
+        memcpy(data, particles.data(), size);
+        vkUnmapMemory(device, particleMem);
+
+        VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        vkBeginCommandBuffer(commandBuffer, &beginInfo);
+        
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, sphPipelineLayout, 0, 1, &sphDescSet, 0, nullptr);
+
+        uint32_t groupCount = (particles.size() + 255) / 256;
+
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, sphDensityPipeline);
+        vkCmdPushConstants(commandBuffer, sphPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(SPHDensityPC), &dpc);
+        vkCmdDispatch(commandBuffer, groupCount, 1, 1);
+
+        VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             0, 1, &barrier, 0, nullptr, 0, nullptr);
+
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, sphForcePipeline);
+        vkCmdPushConstants(commandBuffer, sphPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(SPHForcePC), &fpc);
+        vkCmdDispatch(commandBuffer, groupCount, 1, 1);
+
+        vkEndCommandBuffer(commandBuffer);
+
+        VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &commandBuffer;
+
+        VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        VkFence fence;
+        vkCreateFence(device, &fenceInfo, nullptr, &fence);
+        vkQueueSubmit(queue, 1, &submitInfo, fence);
+        vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
+        vkDestroyFence(device, fence, nullptr);
+
+        vkMapMemory(device, particleMem, 0, size, 0, &data);
+        memcpy(particles.data(), data, size);
+        vkUnmapMemory(device, particleMem);
     }
 };
 inline VulkanContext vkCtx;

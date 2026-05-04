@@ -9,6 +9,7 @@
 #include "../util/grid/camera.hpp"
 #include "../util/grid/grid3eigen.hpp"
 #include "../util/grid/grid3render.cpp"
+#include "../util/grid/grid3physics.cpp"
 #include "../util/output/frame.hpp"
 #include "../util/output/bmpwriter.hpp"
 #include "../util/output/aviwriter.hpp"
@@ -17,7 +18,8 @@
 
 // Helper function to create a solid volume of voxels with material properties
 void createBox(Grid::Octree<int>& octree, const Eigen::Vector3f& center, const Eigen::Vector3f& size, const Eigen::Vector3f& albedo, float emission = 0.0f,
-               float roughness = 0.8f, float metallic = 0.0f, float transmission = 0.0f, float ior = 1.45f,const Eigen::Vector3f& absorp = Eigen::Vector3f::Zero(), int oid = 0) {
+               float roughness = 0.8f, float metallic = 0.0f, float transmission = 0.0f, float ior = 1.45f,const Eigen::Vector3f& absorp = Eigen::Vector3f::Zero(), 
+               int oid = 0, Grid::BodyType bType = Grid::BodyType::STATIC, float mass = 1.0f) {
     float step = 0.1f; // Voxel spacing
     Eigen::Vector3f halfSize = size / 2.0f;
     Eigen::Vector3f minB = center - halfSize;
@@ -29,7 +31,7 @@ void createBox(Grid::Octree<int>& octree, const Eigen::Vector3f& center, const E
                 Eigen::Vector3f pos(x, y, z);
                 
                 // .set(data, pos, visible, albedo, size, active, objectId, subId, emission, roughness, metallic, transmission, ior, absorption)
-                octree.set(1, pos, true, albedo, step, true, oid, emission, roughness, metallic, transmission, ior, absorp);
+                octree.set(1, pos, true, albedo, step, true, oid, emission, roughness, metallic, transmission, ior, absorp, bType, mass);
             }
         }
     }
@@ -74,6 +76,7 @@ int main() {
     // Set a dark background to emphasize the PBR light emission
     octree.setBackgroundColor(Eigen::Vector3f(0.02f, 0.02f, 0.02f));
     octree.setSkylight(Eigen::Vector3f(0.01f, 0.01f, 0.01f));
+    octree.setPhysicsSmoothingRadius(0.2f);
 
     std::cout << "Building scene..." << std::endl;
 
@@ -102,23 +105,25 @@ int main() {
     Eigen::Vector3f cBrass(0.78f, 0.69f, 0.22f);
 
     float sp = 2.0f; // spacing between cubes
+    Grid::BodyType typeFluid = Grid::BodyType::FLUID;
+    float mass = 1.0f;
 
     // --- LAYER 1: Metals ---
-    createBox(octree, Eigen::Vector3f(-sp, -sp, 0.0f), size, cGold,   0.0f, 0.08f, 0.99f, 0.0f, 1.45f, Eigen::Vector3f(0,0,0), 1);
-    createBox(octree, Eigen::Vector3f(  0, -sp, 0.0f), size, cSilver, 0.0f, 0.08f, 0.99f, 0.0f, 1.45f, Eigen::Vector3f(0,0,0), 2);
-    createBox(octree, Eigen::Vector3f( sp, -sp, 0.0f), size, cBrass,  0.0f, 0.08f, 0.99f, 0.0f, 1.45f, Eigen::Vector3f(0,0,0), 3);
+    createBox(octree, Eigen::Vector3f(-sp, -sp, 0.0f), size, cGold,   0.0f, 0.08f, 0.99f, 0.0f, 1.45f, Eigen::Vector3f(0,0,0), 1, typeFluid, mass);
+    createBox(octree, Eigen::Vector3f(  0, -sp, 0.0f), size, cSilver, 0.0f, 0.08f, 0.99f, 0.0f, 1.45f, Eigen::Vector3f(0,0,0), 2, typeFluid, mass);
+    createBox(octree, Eigen::Vector3f( sp, -sp, 0.0f), size, cBrass,  0.0f, 0.08f, 0.99f, 0.0f, 1.45f, Eigen::Vector3f(0,0,0), 3, typeFluid, mass);
 
     // --- LAYER 2: Opaque & Highly Refractive ---
-    createBox(octree, Eigen::Vector3f(-sp,  0,  0.0f), size, cRed,    0.0f, 0.05f, 0.0f, 0.0f, 2.4f, Eigen::Vector3f(0,0,0), 4);
-    createBox(octree, Eigen::Vector3f(  0,  0,  0.0f), size, cBlue,   0.0f, 0.05f, 0.0f, 0.0f, 2.4f, Eigen::Vector3f(0,0,0), 5);
-    createBox(octree, Eigen::Vector3f( sp,  0,  0.0f), size, cPurple, 0.0f, 0.05f, 0.0f, 0.0f, 2.4f, Eigen::Vector3f(0,0,0), 6);
+    createBox(octree, Eigen::Vector3f(-sp,  0,  0.0f), size, cRed,    0.0f, 0.05f, 0.0f, 0.0f, 2.4f, Eigen::Vector3f(0,0,0), 4, typeFluid, mass);
+    createBox(octree, Eigen::Vector3f(  0,  0,  0.0f), size, cBlue,   0.0f, 0.05f, 0.0f, 0.0f, 2.4f, Eigen::Vector3f(0,0,0), 5, typeFluid, mass);
+    createBox(octree, Eigen::Vector3f( sp,  0,  0.0f), size, cPurple, 0.0f, 0.05f, 0.0f, 0.0f, 2.4f, Eigen::Vector3f(0,0,0), 6, typeFluid, mass);
 
     // --- LAYER 3: Clear Glass ---
-    createBox(octree, Eigen::Vector3f(-sp,  sp, 0.0f), size, cRed,    0.0f, 0.01f, 0.0f, 0.99f, 1.5f, Eigen::Vector3f(0.05f, 0.8f, 0.8f), 7);
-    createBox(octree, Eigen::Vector3f(  0,  sp, 0.0f), size, cBlue,   0.0f, 0.01f, 0.0f, 0.99f, 1.5f, Eigen::Vector3f(0.8f, 0.8f, 0.05f), 8);
-    createBox(octree, Eigen::Vector3f( sp,  sp, 0.0f), size, cPurple, 0.0f, 0.01f, 0.0f, 0.99f, 1.5f, Eigen::Vector3f(0.4f, 1.2f, 0.4f), 9);
+    createBox(octree, Eigen::Vector3f(-sp,  sp, 0.0f), size, cRed,    0.0f, 0.01f, 0.0f, 0.99f, 1.5f, Eigen::Vector3f(0.05f, 0.8f, 0.8f), 7, typeFluid, mass);
+    createBox(octree, Eigen::Vector3f(  0,  sp, 0.0f), size, cBlue,   0.0f, 0.01f, 0.0f, 0.99f, 1.5f, Eigen::Vector3f(0.8f, 0.8f, 0.05f), 8, typeFluid, mass);
+    createBox(octree, Eigen::Vector3f( sp,  sp, 0.0f), size, cPurple, 0.0f, 0.01f, 0.0f, 0.99f, 1.5f, Eigen::Vector3f(0.4f, 1.2f, 0.4f), 9, typeFluid, mass);
 
-    createBox(octree, Eigen::Vector3f(0.0f, 0.0f, 7.4f), Eigen::Vector3f(8.0f, 8.0f, 0.2f), Eigen::Vector3f(1.0f, 1.0f, 1.0f), 15.0f, 10);
+    createBox(octree, Eigen::Vector3f(0.0f, 0.0f, 7.4f), Eigen::Vector3f(8.0f, 8.0f, 0.2f), Eigen::Vector3f(1.0f, 1.0f, 1.0f), 15.0f, 0.8f, 0.0f, 0.0f, 1.45f, Eigen::Vector3f::Zero(), 10); // STATIC by default
 
     std::cout << "Optimizing and Generating LODs..." << std::endl;
     octree.generateLODs();
@@ -129,11 +134,11 @@ int main() {
     int width = 512;
     int height = 512;
     
-    const float fps = 30.0f;
+    const float fps = 10.0f;
     const float durationPerSegment = 10.0f;
     const int framesPerSegment = static_cast<int>(fps * durationPerSegment);
-    const int samples = 100;
-    const int blendedsamples = 100;
+    const int samples = 10;
+    const int blendedsamples = 10;
     const float blendedfactor = 0.5;
     const int video_samples = 250;
     const int bounces = 32;
@@ -149,7 +154,7 @@ int main() {
         {"+X", Eigen::Vector3f( 6.8f,  0.0f,  1.0f), Eigen::Vector3f(0.0f, 0.0f, 1.0f)},
         {"+Y", Eigen::Vector3f( 0.0f,  6.8f,  1.0f), Eigen::Vector3f(0.0f, 0.0f, 1.0f)},
         {"-X", Eigen::Vector3f(-6.8f,  0.0f,  1.0f), Eigen::Vector3f(0.0f, 0.0f, 1.0f)},
-        // {"+Z", Eigen::Vector3f( 0.0f,  0.0f,  7.3f), Eigen::Vector3f(0.0f, 1.0f, 0.0f)}
+        {"+Z", Eigen::Vector3f( 0.0f,  0.0f,  7.3f), Eigen::Vector3f(0.0f, 1.0f, 0.0f)}
     };
 
     Eigen::Vector3f target(0.0f, 0.0f, 0.5f);
@@ -236,9 +241,47 @@ int main() {
     } else {
         std::cerr << "Error: Failed to save video!" << std::endl;
     }
-    
-    std::cout << "\nRender complete!" << std::endl;
 
+    std::cout << "\nStarting DYNAMIC FLUID video render (Time flows!)..." << std::endl;
+    
+    std::vector<frame> fluidVideoFrames;
+    const float fluidDuration = 15.0f; // 15 seconds of physics
+    const int totalFluidFrames = static_cast<int>(fps * fluidDuration);
+    
+    // SPH stability benefits from smaller timesteps than 1/30th
+    const int physicsSubsteps = 10;
+    const float physicsDt = 1.0f / fps;
+    const float subDt = physicsDt / physicsSubsteps;
+
+    fluidVideoFrames.reserve(totalFluidFrames);
+
+    for (int i = 0; i < totalFluidFrames; ++i) {
+        std::cout << "Simulating & Rendering fluid frame " << (i + 1) << "/" << totalFluidFrames << "..." << std::endl;
+        
+        // 1. Advance Physics Engine
+        for (int s = 0; s < physicsSubsteps; ++s) {
+            octree.stepPhysics(subDt);
+        }
+
+        // 2. Slow orbital camera looking down at the splash
+        float angle = (static_cast<float>(i) / totalFluidFrames) * (M_PI * 1.5f); // 3/4 circle orbit
+        float orbitRadius = 7.0f;
+        
+        Camera fluidCam;
+        fluidCam.origin = Eigen::Vector3f(orbitRadius * std::sin(angle), orbitRadius * std::cos(angle), 3.5f);
+        fluidCam.up = Eigen::Vector3f(0.0f, 0.0f, 1.0f);
+        fluidCam.direction = (target - fluidCam.origin).normalized();
+
+        // 3. Render
+        frame out = octree.blendedRenderFrameVulkan(fluidCam, height, width, blendedfactor, frame::colormap::RGB, video_samples, bounces, false);
+        fluidVideoFrames.push_back(std::move(out));
+    }
+
+    std::string fluidVideoFilename = "output/material_fluid_video.avi";
+    if (AVIWriter::saveAVIFromCompressedFrames(fluidVideoFilename, std::move(fluidVideoFrames), width, height, fps)) {
+        std::cout << "Fluid Simulation video saved to " << fluidVideoFilename << std::endl;
+    }
+    
     std::cout << "\nAll renders complete!" << std::endl;
     FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
     return 0;

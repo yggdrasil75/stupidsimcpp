@@ -46,6 +46,7 @@ SRC += $(IMGUI_DIR)/imgui.cpp $(IMGUI_DIR)/imgui_demo.cpp $(IMGUI_DIR)/imgui_dra
 SRC += $(IMGUI_DIR)/backends/imgui_impl_glfw.cpp $(IMGUI_DIR)/backends/imgui_impl_opengl3.cpp
 SRC += $(SRC_DIR)/stb_image.cpp
 SRC += $(GRID_DIR)/grid3render.cpp
+SRC += $(GRID_DIR)/grid3physics.cpp
 OBJS = $(addprefix $(OBJ_DIR)/, $(addsuffix .o, $(basename $(notdir $(SRC)))))
 UNAME_S := $(shell uname -s)
 EXE := $(BIN_DIR)/g2gradc
@@ -53,6 +54,7 @@ EXE := $(BIN_DIR)/g2gradc
 GLSLC := glslc
 
 SHADER_SRCS := $(SHADER_DIR)/fast_raytrace.comp $(SHADER_DIR)/pbr_raytrace.comp $(SHADER_DIR)/fast_raytrace_hw.comp $(SHADER_DIR)/pbr_raytrace_hw.comp $(SHADER_DIR)/smooth.comp $(SHADER_DIR)/blend.comp
+SHADER_SRCS += $(SHADER_DIR)/sph_density.comp $(SHADER_DIR)/sph_force.comp
 SHADER_SPVS := $(patsubst $(SHADER_DIR)/%.comp,$(BIN_DIR)/%.spv,$(SHADER_SRCS))
 
 $(shell mkdir -p $(OBJ_DIR))

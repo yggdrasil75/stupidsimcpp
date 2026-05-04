@@ -1,0 +1,55 @@
+#version 450
+layout(local_size_x = 256) in;
+
+struct Particle {
+    vec4 pos_mass;
+    vec4 vel_density;
+    vec4 force_press;
+    ivec4 type_pad;
+};
+
+layout(std430, binding = 0) buffer ParticleBuffer {
+    Particle particles[];
+};
+
+layout(push_constant) uniform PushConstants {
+    float h;
+    float h2;
+    float poly6_k;
+    float restDensity;
+    float gasConstant;
+    uint numParticles;
+} pc;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.numParticles) return;
+
+    vec3 pos = particles[i].pos_mass.xyz;
+    uint type = particles[i].type_pad.x;
+
+    if (type != 4 && type != 5) return;
+
+    float density = 0.0;
+    for (uint j = 0; j < pc.numParticles; j++) {
+        uint type_j = particles[j].type_pad.x;
+        if (type_j != 4 && type_j != 5) continue;
+
+        vec3 diff = pos - particles[j].pos_mass.xyz;
+        float r2 = dot(diff, diff);
+
+        if (r2 < pc.h2) {
+            float hr2 = pc.h2 - r2;
+            density += particles[j].pos_mass.w * pc.poly6_k * hr2 * hr2 * hr2;
+        }
+    }
+
+    density = max(density, 0.001);
+    particles[i].vel_density.w = density;
+
+    if (type == 5) {
+        particles[i].force_press.w = pc.gasConstant * density;
+    } else {
+        particles[i].force_press.w = pc.gasConstant * (density - pc.restDensity);
+    }
+}
