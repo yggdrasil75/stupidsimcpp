@@ -667,7 +667,46 @@ struct VulkanContext {
 
         vkFreeCommandBuffers(device, commandPool, 1, &cmd);
     }
-    
+
+    void copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
+        executeSingleTimeCommands([&](VkCommandBuffer cmd) {
+            VkBufferCopy copyRegion{};
+            copyRegion.size = size;
+            vkCmdCopyBuffer(cmd, srcBuffer, dstBuffer, 1, &copyRegion);
+        });
+    }
+
+    void updateDeviceLocalBuffer(VkBuffer& buffer, VkDeviceMemory& memory, size_t& currentCap, 
+                                 const void* data, size_t dataSize, size_t allocSize, VkBufferUsageFlags usage) {
+        if (allocSize > currentCap) {
+            if (buffer) {
+                vkDestroyBuffer(device, buffer, nullptr);
+                vkFreeMemory(device, memory, nullptr);
+            }
+            createBuffer(allocSize, usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT, 
+                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, buffer, memory);
+            currentCap = allocSize;
+        }
+
+        if (data && dataSize > 0) {
+            VkBuffer stagingBuffer;
+            VkDeviceMemory stagingMem;
+            createBuffer(dataSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, 
+                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 
+                         stagingBuffer, stagingMem);
+
+            void* mappedData;
+            vkMapMemory(device, stagingMem, 0, dataSize, 0, &mappedData);
+            memcpy(mappedData, data, dataSize);
+            vkUnmapMemory(device, stagingMem);
+
+            copyBuffer(stagingBuffer, buffer, dataSize);
+
+            vkDestroyBuffer(device, stagingBuffer, nullptr);
+            vkFreeMemory(device, stagingMem, nullptr);
+        }
+    }
+
     void createBufferWithAddress(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties,
                                  VkBuffer& buffer, VkDeviceMemory& bufferMemory) {
         VkBufferCreateInfo bufferInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
@@ -869,53 +908,41 @@ struct VulkanContext {
     }
 
     void updateLightBuffer(const std::vector<uint32_t>& lights) {
-        size_t size = std::max((size_t)256, lights.size() * sizeof(uint32_t));
-        if(size > currentLightCap) {
-            if(lightBuffer) {
-                vkDestroyBuffer(device, lightBuffer, nullptr);
-                vkFreeMemory(device, lightMem, nullptr);
-            }
-            createBuffer(size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, lightBuffer, lightMem);
-            currentLightCap = size;
-        }
-        if(!lights.empty()) {
-            void* data;
-            vkMapMemory(device, lightMem, 0, size, 0, &data);
-            memcpy(data, lights.data(), lights.size() * sizeof(uint32_t));
-            vkUnmapMemory(device, lightMem);
-        }
+        size_t allocSize = std::max((size_t)256, lights.size() * sizeof(uint32_t));
+        size_t dataSize = lights.size() * sizeof(uint32_t);
+        updateDeviceLocalBuffer(lightBuffer, lightMem, currentLightCap, 
+                                lights.empty() ? nullptr : lights.data(), dataSize, allocSize, 
+                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     }
 
     void updateCommonBuffers(const std::vector<GPURenderNode>& nodes, size_t outSize, GPUCameraData& camData) {
-        size_t nodeSize = std::max((size_t)256, nodes.size() * sizeof(GPURenderNode));
-        size_t uboSize = sizeof(GPUCameraData);
+        size_t allocSize = std::max((size_t)256, nodes.size() * sizeof(GPURenderNode));
+        size_t dataSize = nodes.size() * sizeof(GPURenderNode);
+        
+        // Use device local memory for nodes (critical for tree traversal performance)
+        updateDeviceLocalBuffer(nodeBuffer, nodeMem, currentNodesCap, 
+                                nodes.empty() ? nullptr : nodes.data(), dataSize, allocSize, 
+                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
-        if(nodeSize > currentNodesCap) {
-            if(nodeBuffer) {
-                vkDestroyBuffer(device, nodeBuffer, nullptr);
-                vkFreeMemory(device, nodeMem, nullptr);
-            }
-            createBuffer(nodeSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, nodeBuffer, nodeMem);
-            currentNodesCap = nodeSize;
-        }
+        // outBuffer remains HOST_VISIBLE because it is mapped/read directly in grid3render.cpp
         if(outSize > currentOutCap) {
             if(outBuffer) {
                 vkDestroyBuffer(device, outBuffer, nullptr);
                 vkFreeMemory(device, outMem, nullptr);
             }
-            createBuffer(outSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, outBuffer, outMem);
+            createBuffer(outSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, 
+                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, outBuffer, outMem);
             currentOutCap = outSize;
         }
+
+        // uboBuffer remains HOST_VISIBLE because it's tiny and mapped constantly per-tile
+        size_t uboSize = sizeof(GPUCameraData);
         if(!uboBuffer) {
-            createBuffer(uboSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, uboBuffer, uboMem);
+            createBuffer(uboSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, 
+                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, uboBuffer, uboMem);
         }
 
         void* data;
-        if(!nodes.empty()) { 
-            vkMapMemory(device, nodeMem, 0, nodeSize, 0, &data);
-            memcpy(data, nodes.data(), nodes.size() * sizeof(GPURenderNode));
-            vkUnmapMemory(device, nodeMem);
-        }
         vkMapMemory(device, uboMem, 0, uboSize, 0, &data);
         memcpy(data, &camData, uboSize);
         vkUnmapMemory(device, uboMem);
@@ -929,41 +956,22 @@ struct VulkanContext {
     }
 
     void updateSkyboxBuffer(const std::vector<Eigen::Vector4f>& skyData) {
-        size_t size = std::max((size_t)256, skyData.size() * sizeof(Eigen::Vector4f));
-        if(size > currentSkyboxCap) {
-            if(skyboxBuffer) {
-                vkDestroyBuffer(device, skyboxBuffer, nullptr);
-                vkFreeMemory(device, skyboxMem, nullptr);
-            }
-            createBuffer(size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, skyboxBuffer, skyboxMem);
-            currentSkyboxCap = size;
-        }
-        void* data;
-        if(!skyData.empty()) {
-            vkMapMemory(device, skyboxMem, 0, size, 0, &data);
-            memcpy(data, skyData.data(), skyData.size() * sizeof(Eigen::Vector4f));
-            vkUnmapMemory(device, skyboxMem);
-        }
+        size_t allocSize = std::max((size_t)256, skyData.size() * sizeof(Eigen::Vector4f));
+        size_t dataSize = skyData.size() * sizeof(Eigen::Vector4f);
+        updateDeviceLocalBuffer(skyboxBuffer, skyboxMem, currentSkyboxCap, 
+                                skyData.empty() ? nullptr : skyData.data(), dataSize, allocSize, 
+                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     }
 
     void updateFastBuffers(const std::vector<GPUFastRenderData>& points) {
-        size_t pointSize = std::max((size_t)256, points.size() * sizeof(GPUFastRenderData));
-        if(pointSize > currentFastPointsCap) {
-            if(fastPointBuffer) {
-                vkDestroyBuffer(device, fastPointBuffer, nullptr);
-                vkFreeMemory(device, fastPointMem, nullptr);
-            }
-            createBuffer(pointSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, fastPointBuffer, fastPointMem);
-            currentFastPointsCap = pointSize;
-        }
-        if (hasHardwareRT) buildHardwareAccelerationStructures(points);
+        size_t allocSize = std::max((size_t)256, points.size() * sizeof(GPUFastRenderData));
+        size_t dataSize = points.size() * sizeof(GPUFastRenderData);
         
-        void* data;
-        if(!points.empty()) {
-            vkMapMemory(device, fastPointMem, 0, pointSize, 0, &data);
-            memcpy(data, points.data(), points.size() * sizeof(GPUFastRenderData));
-            vkUnmapMemory(device, fastPointMem);
-        }
+        updateDeviceLocalBuffer(fastPointBuffer, fastPointMem, currentFastPointsCap, 
+                                points.empty() ? nullptr : points.data(), dataSize, allocSize, 
+                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+
+        if (hasHardwareRT) buildHardwareAccelerationStructures(points);
 
         VkDescriptorBufferInfo bInfos[6] = { 
             {nodeBuffer, 0, VK_WHOLE_SIZE}, 
@@ -986,23 +994,14 @@ struct VulkanContext {
     }
 
     void updatePBRBuffers(const std::vector<GPUPBRRenderData>& points) {
-        size_t pointSize = std::max((size_t)256, points.size() * sizeof(GPUPBRRenderData));
-        if(pointSize > currentPBRPointsCap) {
-            if(pbrPointBuffer) {
-                vkDestroyBuffer(device, pbrPointBuffer, nullptr);
-                vkFreeMemory(device, pbrPointMem, nullptr);
-            }
-            createBuffer(pointSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, pbrPointBuffer, pbrPointMem);
-            currentPBRPointsCap = pointSize;
-        }
-        if (hasHardwareRT) buildHardwareAccelerationStructures(points);
+        size_t allocSize = std::max((size_t)256, points.size() * sizeof(GPUPBRRenderData));
+        size_t dataSize = points.size() * sizeof(GPUPBRRenderData);
         
-        void* data;
-        if(!points.empty()) {
-            vkMapMemory(device, pbrPointMem, 0, pointSize, 0, &data);
-            memcpy(data, points.data(), points.size() * sizeof(GPUPBRRenderData));
-            vkUnmapMemory(device, pbrPointMem);
-        }
+        updateDeviceLocalBuffer(pbrPointBuffer, pbrPointMem, currentPBRPointsCap, 
+                                points.empty() ? nullptr : points.data(), dataSize, allocSize, 
+                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+
+        if (hasHardwareRT) buildHardwareAccelerationStructures(points);
 
         VkDescriptorBufferInfo bInfos[6] = { 
             {nodeBuffer, 0, VK_WHOLE_SIZE}, 
@@ -1030,17 +1029,12 @@ struct VulkanContext {
                 vkDestroyBuffer(device, lowResOutBuffer, nullptr);
                 vkFreeMemory(device, lowResOutMem, nullptr);
             }
-            createBuffer(size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, lowResOutBuffer, lowResOutMem);
+            // Retained HOST_VISIBLE so it can be mapped later if necessary
+            createBuffer(size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, 
+                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 
+                         lowResOutBuffer, lowResOutMem);
             currentLowResOutCap = size;
         }
-    }
-
-    void copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
-        executeSingleTimeCommands([&](VkCommandBuffer cmd) {
-            VkBufferCopy copyRegion{};
-            copyRegion.size = size;
-            vkCmdCopyBuffer(cmd, srcBuffer, dstBuffer, 1, &copyRegion);
-        });
     }
 
     void dispatchSmooth(int width, int height, int samples) {
