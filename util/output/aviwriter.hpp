@@ -144,7 +144,6 @@ private:
         uint32_t srcRowSize = width * srcChannels;
         uint32_t dstRowSize = width * 3; // RGB
         
-        // Convert and flip vertically for BMP format
         for (uint32_t y = 0; y < height; ++y) {
             uint32_t srcY = height - 1 - y; // Flip vertically
             const uint8_t* srcRow = frameData.data() + (srcY * srcRowSize);
@@ -153,7 +152,11 @@ private:
             // Convert to RGB format
             switch (frm.colorFormat) {
                 case frame::colormap::RGB:
-                    memcpy(dstRow, srcRow, dstRowSize);
+                    for (uint32_t x = 0; x < width; ++x) {
+                        dstRow[x * 3 + 0] = srcRow[x * 3 + 2]; // B
+                        dstRow[x * 3 + 1] = srcRow[x * 3 + 1]; // G
+                        dstRow[x * 3 + 2] = srcRow[x * 3 + 0]; // R
+                    }
                     break;
                 case frame::colormap::RGBA:
                     for (uint32_t x = 0; x < width; ++x) {
@@ -163,11 +166,7 @@ private:
                     }
                     break;
                 case frame::colormap::BGR:
-                    for (uint32_t x = 0; x < width; ++x) {
-                        dstRow[x * 3 + 2] = srcRow[x * 3 + 2];     // R
-                        dstRow[x * 3 + 1] = srcRow[x * 3 + 1]; // G
-                        dstRow[x * 3 + 0] = srcRow[x * 3 + 0];     // B
-                    }
+                    memcpy(dstRow, srcRow, dstRowSize);
                     break;
                 case frame::colormap::BGRA:
                     for (uint32_t x = 0; x < width; ++x) {
@@ -379,10 +378,7 @@ public:
     }
 
     // New method for streaming decompression of frame objects
-    static bool saveAVIFromCompressedFrames(const std::string& filename,
-                                          std::vector<frame> frames,
-                                          int width, int height, 
-                                          float fps = 30.0f) {
+    static bool saveAVIFromCompressedFrames(const std::string& filename, std::vector<frame> frames, int width, int height, float fps = 30.0f) {
         TIME_FUNCTION;
         if (frames.empty() || width <= 0 || height <= 0 || fps <= 0) {
             return false;

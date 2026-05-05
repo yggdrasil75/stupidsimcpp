@@ -131,8 +131,8 @@ int main() {
     octree.setMaxDistance(4096);
 
     // 3. Setup rendering loop
-    int width = 512;
-    int height = 512;
+    int width = 1920;
+    int height = 1080;
     
     const float fps = 10.0f;
     const float durationPerSegment = 10.0f;
@@ -228,7 +228,6 @@ int main() {
             
             frame out = octree.blendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, video_samples, bounces, false);
             // frame out = octree.renderFramefast(cam, height, width, frame::colormap::RGB, false, true);
-            
             videoFrames.push_back(std::move(out));
         }
     }
