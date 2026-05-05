@@ -152,11 +152,7 @@ private:
             // Convert to RGB format
             switch (frm.colorFormat) {
                 case frame::colormap::RGB:
-                    for (uint32_t x = 0; x < width; ++x) {
-                        dstRow[x * 3 + 0] = srcRow[x * 3 + 2]; // B
-                        dstRow[x * 3 + 1] = srcRow[x * 3 + 1]; // G
-                        dstRow[x * 3 + 2] = srcRow[x * 3 + 0]; // R
-                    }
+                    memcpy(dstRow, srcRow, dstRowSize);
                     break;
                 case frame::colormap::RGBA:
                     for (uint32_t x = 0; x < width; ++x) {
@@ -166,7 +162,11 @@ private:
                     }
                     break;
                 case frame::colormap::BGR:
-                    memcpy(dstRow, srcRow, dstRowSize);
+                    for (uint32_t x = 0; x < width; ++x) {
+                        dstRow[x * 3 + 2] = srcRow[x * 3 + 2];     // R
+                        dstRow[x * 3 + 1] = srcRow[x * 3 + 1]; // G
+                        dstRow[x * 3 + 0] = srcRow[x * 3 + 0];     // B
+                    }
                     break;
                 case frame::colormap::BGRA:
                     for (uint32_t x = 0; x < width; ++x) {
