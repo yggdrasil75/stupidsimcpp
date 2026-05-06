@@ -41,6 +41,7 @@
 #endif
 
 namespace Grid {
+    ///note for myself: use weak pointers to track objects due to them changing from grid physics.
 
 template<typename T, typename IndexType = uint16_t, GridStoragePath StoragePath = ".">
 class Octree {
@@ -104,6 +105,22 @@ private:
     bool phys_useGravityPoint = true;
     PointType phys_gravityCenter{0.0f, 0.0f, 0.0f};
     float phys_gravityStrength = 9.81f;
+    std::atomic<bool> physicsCollidersDirty_{true};
+
+    void collectCollidersRecursive(OctreeNode* node, std::vector<std::pair<PointType, float>>& colliders) {
+        if (!node) return;
+        ensureLoaded(node, false);
+        for (const auto& pt : node->points) {
+            if (pt->isActive() && (pt->physics.type == BodyType::STATIC || pt->physics.type == BodyType::KINEMATIC)) {
+                colliders.emplace_back(pt->position, pt->size);
+            }
+        }
+        if (!node->isLeaf()) {
+            for (const auto& child : node->children) {
+                if (child) collectCollidersRecursive(child.get(), colliders);
+            }
+        }
+    }
 
     void lazilyOffload(OctreeNode* node) {
         {

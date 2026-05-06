@@ -14,6 +14,7 @@
 #include "../util/output/frame.hpp"
 #include "../util/output/bmpwriter.hpp"
 #include "../util/output/aviwriter.hpp"
+#include "../util/output/y4mwriter.hpp"
 #include "../util/timing_decorator.hpp"
 #include "../util/timing_decorator.cpp"
 
@@ -21,7 +22,7 @@
 void createBox(Grid::Octree<int>& octree, const Eigen::Vector3f& center, const Eigen::Vector3f& size, const Eigen::Vector3f& albedo, float emission = 0.0f,
                float roughness = 0.8f, float metallic = 0.0f, float transmission = 0.0f, float ior = 1.45f,const Eigen::Vector3f& absorp = Eigen::Vector3f::Zero(), 
                int oid = 0, Grid::BodyType bType = Grid::BodyType::STATIC, float mass = 1.0f) {
-    float step = 0.1f; // Voxel spacing
+    float step = 0.05f; // Voxel spacing
     Eigen::Vector3f halfSize = size / 2.0f;
     Eigen::Vector3f minB = center - halfSize;
     Eigen::Vector3f maxB = center + halfSize;
@@ -204,6 +205,8 @@ int main() {
         
         out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
         filename = "output/fast_vulkanrender_" + view.name + ".bmp";
+        // out.compressFrameLZ78();
+        // out.decompress();
         BMPWriter::saveBMP(filename, out);
     }
     FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
@@ -234,45 +237,46 @@ int main() {
     videoFrames.reserve(totalFrames);
     int frameCounter = 0;
 
-    // std::cout << "\nStarting video render..." << std::endl;
-    // std::cout << "Total frames to render: " << totalFrames << std::endl;
+    std::cout << "\nStarting video render..." << std::endl;
+    std::cout << "Total frames to render: " << totalFrames << std::endl;
 
-    // for (size_t i = 0; i < views.size(); ++i) {
-    //     ScopedFunctionTimer meh("Video");
-    //     const View& startView = views[i];
-    //     const View& endView = views[(i + 1) % views.size()]; // Loop back to the first view at the end
+    for (size_t i = 0; i < views.size(); ++i) {
+        ScopedFunctionTimer meh("Video");
+        const View& startView = views[i];
+        const View& endView = views[(i + 1) % views.size()]; // Loop back to the first view at the end
 
-    //     std::cout << "\nAnimating segment: " << startView.name << " -> " << endView.name << std::endl;
+        std::cout << "\nAnimating segment: " << startView.name << " -> " << endView.name << std::endl;
 
-    //     for (int j = 0; j < framesPerSegment; ++j) {
-    //         frameCounter++;
-    //         float t = static_cast<float>(j) / static_cast<float>(framesPerSegment);
+        for (int j = 0; j < framesPerSegment; ++j) {
+            frameCounter++;
+            float t = static_cast<float>(j) / static_cast<float>(framesPerSegment);
 
-    //         Eigen::Vector3f currentOrigin = startView.origin * (1.0f - t) + endView.origin * t;
+            Eigen::Vector3f currentOrigin = startView.origin * (1.0f - t) + endView.origin * t;
             
-    //         Eigen::Vector3f currentUp = (startView.up * (1.0f - t) + endView.up * t).normalized();
+            Eigen::Vector3f currentUp = (startView.up * (1.0f - t) + endView.up * t).normalized();
             
-    //         Camera cam;
-    //         cam.origin = currentOrigin;
-    //         cam.up = currentUp;
-    //         cam.direction = (target - cam.origin).normalized();
+            Camera cam;
+            cam.origin = currentOrigin;
+            cam.up = currentUp;
+            cam.direction = (target - cam.origin).normalized();
             
-    //         std::cout << "Rendering video frame " << frameCounter << "/" << totalFrames << "..." << std::endl;
-    //         frame out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
-    //         // frame out = octree.blendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, video_samples, bounces, false);
-    //         // frame out = octree.renderFramefast(cam, height, width, frame::colormap::RGB, false, true);
-    //         videoFrames.push_back(std::move(out));
-    //     }
-    // }
+            std::cout << "Rendering video frame " << frameCounter << "/" << totalFrames << "..." << std::endl;
+            frame out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
+            // frame out = octree.blendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, video_samples, bounces, false);
+            // frame out = octree.renderFramefast(cam, height, width, frame::colormap::RGB, false, true);
+            videoFrames.push_back(std::move(out));
+        }
+    }
 
     std::cout << "\nAll frames rendered. Saving video file..." << std::endl;
-    std::string videoFilename = "output/material_test_video.avi";
+    std::string videoFilename = "output/material_test_video.y4m";
     
-    if (AVIWriter::saveAVIFromCompressedFrames(videoFilename, std::move(videoFrames), width, height, fps)) {
-        std::cout << "Video saved successfully to " << videoFilename << std::endl;
-    } else {
-        std::cerr << "Error: Failed to save video!" << std::endl;
-    }
+    y4mWriter::save(videoFilename, videoFrames, fps);
+    // if (AVIWriter::saveAVIFromCompressedFrames(videoFilename, std::move(videoFrames), width, height, fps)) {
+    //     std::cout << "Video saved successfully to " << videoFilename << std::endl;
+    // } else {
+    //     std::cerr << "Error: Failed to save video!" << std::endl;
+    // }
 
     std::cout << "\nStarting DYNAMIC FLUID video render (Time flows!)..." << std::endl;
     
@@ -331,10 +335,11 @@ int main() {
         }
     }
 
-    std::string fluidVideoFilename = "output/material_fluid_video.avi";
-    if (AVIWriter::saveAVIFromCompressedFrames(fluidVideoFilename, std::move(fluidVideoFrames), width, height, fps)) {
-        std::cout << "Fluid Simulation video saved to " << fluidVideoFilename << std::endl;
-    }
+    std::string fluidVideoFilename = "output/material_fluid_video.y4m";
+    y4mWriter::save(fluidVideoFilename, fluidVideoFrames, fps);
+    // if (AVIWriter::saveAVIFromCompressedFrames(fluidVideoFilename, std::move(fluidVideoFrames), width, height, fps)) {
+    //     std::cout << "Fluid Simulation video saved to " << fluidVideoFilename << std::endl;
+    // }
     
     std::cout << "\nAll renders complete!" << std::endl;
     FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);

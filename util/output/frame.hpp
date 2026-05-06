@@ -377,6 +377,7 @@ public:
             dict[i] = i;
         }
 
+        std::vector<uint16_t> compressed;
         uint16_t nextDict = 256;
         uint16_t cpos = 0;
         
@@ -398,7 +399,7 @@ public:
             _compressedData.push_back(0);
         }
 
-        ratio = _compressedData.size() / _data.size();
+        ratio = compressed.size() / _data.size();
         sourceSize = _data.size();
         _data.clear();
         _data.shrink_to_fit();

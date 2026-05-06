@@ -12,14 +12,6 @@
 #include <iostream>
 #include "frame.hpp"
 
-template <int a, int b, int c, int d>
-struct FourCC
-{
-    static const unsigned int value = (((((d << 8) | c) << 8) | b) << 8) | a;
-};
-
-unsigned int id(FourCC<'a', 'b', 'c', 'd'>::value);
-
 class AVIWriter {
 private:
     #pragma pack(push, 1)

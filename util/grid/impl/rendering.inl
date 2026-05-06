@@ -257,14 +257,28 @@ struct VulkanContext {
     
     VkShaderModule sphDensityShader = VK_NULL_HANDLE;
     VkShaderModule sphForceShader = VK_NULL_HANDLE;
+    VkShaderModule sphIntegrateShader = VK_NULL_HANDLE;
     VkPipelineLayout sphPipelineLayout = VK_NULL_HANDLE;
     VkPipeline sphDensityPipeline = VK_NULL_HANDLE;
     VkPipeline sphForcePipeline = VK_NULL_HANDLE;
+    VkPipeline sphIntegratePipeline = VK_NULL_HANDLE;
     VkDescriptorSetLayout sphDescLayout = VK_NULL_HANDLE;
     VkDescriptorSet sphDescSet = VK_NULL_HANDLE;
     VkBuffer particleBuffer = VK_NULL_HANDLE;
     VkDeviceMemory particleMem = VK_NULL_HANDLE;
     size_t currentParticleCap = 0;
+    VkBuffer physicsAabbBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory physicsAabbMem = VK_NULL_HANDLE;
+    size_t currentPhysicsAabbCap = 0;
+    
+    VkBuffer physicsAsInstanceBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory physicsAsInstanceMem = VK_NULL_HANDLE;
+    VkAccelerationStructureKHR physicsBlas = VK_NULL_HANDLE;
+    VkBuffer physicsBlasBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory physicsBlasMem = VK_NULL_HANDLE;
+    VkAccelerationStructureKHR physicsTlas = VK_NULL_HANDLE;
+    VkBuffer physicsTlasBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory physicsTlasMem = VK_NULL_HANDLE;
 
     VkBuffer nodeBuffer = VK_NULL_HANDLE;
     VkBuffer outBuffer = VK_NULL_HANDLE;
@@ -476,9 +490,9 @@ struct VulkanContext {
         vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
 
         VkDescriptorPoolSize poolSizes[] = { 
-            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 20},
+            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 30},
             {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4},
-            {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 2}
+            {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 4}
         };
         VkDescriptorPoolCreateInfo poolCreateInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         poolCreateInfo.poolSizeCount = 3;
@@ -552,13 +566,26 @@ struct VulkanContext {
         smoothShader = createShaderModule("./bin/smooth.spv");
         blendShader = createShaderModule("./bin/blend.spv");
 
-        VkDescriptorSetLayoutBinding sphBinding{};
-        sphBinding.binding = 0;
-        sphBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        sphBinding.descriptorCount = 1;
-        sphBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        uint32_t sphBindingCount = hasHardwareRT ? 3 : 1;
+        VkDescriptorSetLayoutBinding sphBindings[3] = {};
+        sphBindings[0].binding = 0;
+        sphBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        sphBindings[0].descriptorCount = 1;
+        sphBindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         
-        VkDescriptorSetLayoutCreateInfo sphLayoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 1, &sphBinding};
+        if (hasHardwareRT) {
+            sphBindings[1].binding = 1;
+            sphBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+            sphBindings[1].descriptorCount = 1;
+            sphBindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+            sphBindings[2].binding = 2;
+            sphBindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            sphBindings[2].descriptorCount = 1;
+            sphBindings[2].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        }
+
+        VkDescriptorSetLayoutCreateInfo sphLayoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, sphBindingCount, sphBindings};
         vkCreateDescriptorSetLayout(device, &sphLayoutInfo, nullptr, &sphDescLayout);
         
         VkDescriptorSetAllocateInfo sphAllocInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
@@ -569,6 +596,9 @@ struct VulkanContext {
 
         sphDensityShader = createShaderModule("./bin/sph_density.spv");
         sphForceShader = createShaderModule("./bin/sph_force.spv");
+        if (hasHardwareRT) {
+            sphIntegrateShader = createShaderModule("./bin/sph_integrate.spv");
+        }
         
         VkPushConstantRange sphPushInfo{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(SPHForcePC)}; // Use the larger struct size
         VkPipelineLayoutCreateInfo sphPipelineLayoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
@@ -636,6 +666,10 @@ struct VulkanContext {
         if (sphForceShader) {
             sphComputeInfo.stage.module = sphForceShader;
             vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &sphComputeInfo, nullptr, &sphForcePipeline);
+        }
+        if (hasHardwareRT && sphIntegrateShader) {
+            sphComputeInfo.stage.module = sphIntegrateShader;
+            vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &sphComputeInfo, nullptr, &sphIntegratePipeline);
         }
 
         initialized = true;
@@ -734,6 +768,173 @@ struct VulkanContext {
         VkBufferDeviceAddressInfo info{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
         info.buffer = buffer;
         return vkGetBufferDeviceAddress(device, &info);
+    }
+
+    void buildPhysicsAccelerationStructures(const std::vector<VkAabbPositionsKHR>& aabbs) {
+        if (!hasHardwareRT || aabbs.empty()) return;
+
+        size_t aabbSize = aabbs.size() * sizeof(VkAabbPositionsKHR);
+        if (aabbSize > currentPhysicsAabbCap) {
+            if (physicsAabbBuffer) {
+                vkDestroyBuffer(device, physicsAabbBuffer, nullptr);
+                vkFreeMemory(device, physicsAabbMem, nullptr);
+            }
+            createBufferWithAddress(aabbSize, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, 
+                                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, physicsAabbBuffer, physicsAabbMem);
+            currentPhysicsAabbCap = aabbSize;
+            
+            // Re-bind AABB storage buffer to desc set
+            VkDescriptorBufferInfo bInfo{physicsAabbBuffer, 0, VK_WHOLE_SIZE};
+            VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            write.dstSet = sphDescSet;
+            write.dstBinding = 2;
+            write.descriptorCount = 1;
+            write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            write.pBufferInfo = &bInfo;
+            vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+        }
+
+        void* data;
+        vkMapMemory(device, physicsAabbMem, 0, aabbSize, 0, &data);
+        memcpy(data, aabbs.data(), aabbSize);
+        vkUnmapMemory(device, physicsAabbMem);
+
+        VkAccelerationStructureGeometryKHR blasGeom{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+        blasGeom.geometryType = VK_GEOMETRY_TYPE_AABBS_KHR;
+        blasGeom.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+        blasGeom.geometry.aabbs.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR;
+        blasGeom.geometry.aabbs.data.deviceAddress = getBufferDeviceAddress(physicsAabbBuffer);
+        blasGeom.geometry.aabbs.stride = sizeof(VkAabbPositionsKHR);
+
+        VkAccelerationStructureBuildGeometryInfoKHR blasBuildInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+        blasBuildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+        blasBuildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+        blasBuildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+        blasBuildInfo.geometryCount = 1;
+        blasBuildInfo.pGeometries = &blasGeom;
+
+        uint32_t numPrimitives = static_cast<uint32_t>(aabbs.size());
+        VkAccelerationStructureBuildSizesInfoKHR blasSizeInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+        pfn_vkGetAccelerationStructureBuildSizesKHR(device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &blasBuildInfo, &numPrimitives, &blasSizeInfo);
+
+        if (physicsBlas) {
+            pfn_vkDestroyAccelerationStructureKHR(device, physicsBlas, nullptr);
+            vkDestroyBuffer(device, physicsBlasBuffer, nullptr);
+            vkFreeMemory(device, physicsBlasMem, nullptr);
+        }
+        createBufferWithAddress(blasSizeInfo.accelerationStructureSize, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, 
+                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, physicsBlasBuffer, physicsBlasMem);
+        
+        VkAccelerationStructureCreateInfoKHR blasCreateInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
+        blasCreateInfo.buffer = physicsBlasBuffer;
+        blasCreateInfo.size = blasSizeInfo.accelerationStructureSize;
+        blasCreateInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+        pfn_vkCreateAccelerationStructureKHR(device, &blasCreateInfo, nullptr, &physicsBlas);
+
+        VkAccelerationStructureDeviceAddressInfoKHR blasAddrInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR};
+        blasAddrInfo.accelerationStructure = physicsBlas;
+        VkDeviceAddress blasAddress = pfn_vkGetAccelerationStructureDeviceAddressKHR(device, &blasAddrInfo);
+
+        VkAccelerationStructureInstanceKHR tlasInstance{};
+        tlasInstance.transform = { 1.0f, 0.0f, 0.0f, 0.0f,
+                                   0.0f, 1.0f, 0.0f, 0.0f,
+                                   0.0f, 0.0f, 1.0f, 0.0f };
+        tlasInstance.instanceCustomIndex = 0;
+        tlasInstance.mask = 0xFF;
+        tlasInstance.instanceShaderBindingTableRecordOffset = 0;
+        tlasInstance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+        tlasInstance.accelerationStructureReference = blasAddress;
+
+        if (physicsAsInstanceBuffer) {
+            vkDestroyBuffer(device, physicsAsInstanceBuffer, nullptr);
+            vkFreeMemory(device, physicsAsInstanceMem, nullptr);
+        }
+        createBufferWithAddress(sizeof(VkAccelerationStructureInstanceKHR), 
+                                VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, 
+                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, physicsAsInstanceBuffer, physicsAsInstanceMem);
+        
+        vkMapMemory(device, physicsAsInstanceMem, 0, sizeof(VkAccelerationStructureInstanceKHR), 0, &data);
+        memcpy(data, &tlasInstance, sizeof(VkAccelerationStructureInstanceKHR));
+        vkUnmapMemory(device, physicsAsInstanceMem);
+
+        VkAccelerationStructureGeometryKHR tlasGeom{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+        tlasGeom.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+        tlasGeom.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+        tlasGeom.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+        tlasGeom.geometry.instances.arrayOfPointers = VK_FALSE;
+        tlasGeom.geometry.instances.data.deviceAddress = getBufferDeviceAddress(physicsAsInstanceBuffer);
+
+        VkAccelerationStructureBuildGeometryInfoKHR tlasBuildInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+        tlasBuildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+        tlasBuildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+        tlasBuildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+        tlasBuildInfo.geometryCount = 1;
+        tlasBuildInfo.pGeometries = &tlasGeom;
+
+        uint32_t numInstances = 1;
+        VkAccelerationStructureBuildSizesInfoKHR tlasSizeInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+        pfn_vkGetAccelerationStructureBuildSizesKHR(device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &tlasBuildInfo, &numInstances, &tlasSizeInfo);
+
+        if (physicsTlas) {
+            pfn_vkDestroyAccelerationStructureKHR(device, physicsTlas, nullptr);
+            vkDestroyBuffer(device, physicsTlasBuffer, nullptr);
+            vkFreeMemory(device, physicsTlasMem, nullptr);
+        }
+        createBufferWithAddress(tlasSizeInfo.accelerationStructureSize, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, 
+                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, physicsTlasBuffer, physicsTlasMem);
+
+        VkAccelerationStructureCreateInfoKHR tlasCreateInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
+        tlasCreateInfo.buffer = physicsTlasBuffer;
+        tlasCreateInfo.size = tlasSizeInfo.accelerationStructureSize;
+        tlasCreateInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+        pfn_vkCreateAccelerationStructureKHR(device, &tlasCreateInfo, nullptr, &physicsTlas);
+
+        VkBuffer scratchBuffer;
+        VkDeviceMemory scratchMem;
+        VkDeviceSize scratchSize = std::max(blasSizeInfo.buildScratchSize, tlasSizeInfo.buildScratchSize);
+        createBufferWithAddress(scratchSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, 
+                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, scratchBuffer, scratchMem);
+
+        executeSingleTimeCommands([&](VkCommandBuffer cmd) {
+            blasBuildInfo.dstAccelerationStructure = physicsBlas;
+            blasBuildInfo.scratchData.deviceAddress = getBufferDeviceAddress(scratchBuffer);
+            VkAccelerationStructureBuildRangeInfoKHR blasOffset{};
+            blasOffset.primitiveCount = numPrimitives;
+            VkAccelerationStructureBuildRangeInfoKHR* pBlasOffset = &blasOffset;
+            pfn_vkCmdBuildAccelerationStructuresKHR(cmd, 1, &blasBuildInfo, &pBlasOffset);
+
+            VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            barrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+            barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 
+                                 VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 
+                                 0, 1, &barrier, 0, nullptr, 0, nullptr);
+
+            tlasBuildInfo.dstAccelerationStructure = physicsTlas;
+            tlasBuildInfo.scratchData.deviceAddress = getBufferDeviceAddress(scratchBuffer);
+            VkAccelerationStructureBuildRangeInfoKHR tlasOffset{};
+            tlasOffset.primitiveCount = numInstances;
+            VkAccelerationStructureBuildRangeInfoKHR* pTlasOffset = &tlasOffset;
+            pfn_vkCmdBuildAccelerationStructuresKHR(cmd, 1, &tlasBuildInfo, &pTlasOffset);
+        });
+
+        vkDestroyBuffer(device, scratchBuffer, nullptr);
+        vkFreeMemory(device, scratchMem, nullptr);
+
+        // Bind the physics TLAS to descriptor set binding 1
+        VkWriteDescriptorSetAccelerationStructureKHR descASInfo{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
+        descASInfo.accelerationStructureCount = 1;
+        descASInfo.pAccelerationStructures = &physicsTlas;
+
+        VkWriteDescriptorSet asWrite{};
+        asWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        asWrite.pNext = &descASInfo;
+        asWrite.dstSet = sphDescSet;
+        asWrite.dstBinding = 1;
+        asWrite.descriptorCount = 1;
+        asWrite.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+        
+        vkUpdateDescriptorSets(device, 1, &asWrite, 0, nullptr);
     }
 
     template<typename RenderDataType>
@@ -1127,7 +1328,7 @@ struct VulkanContext {
         vkDestroyFence(device, fence, nullptr);
     }
     
-    void dispatchPhysics(std::vector<GPUParticle>& particles, const SPHDensityPC& dpc, const SPHForcePC& fpc) {
+    void dispatchPhysics(std::vector<GPUParticle>& particles, const SPHDensityPC& dpc, const SPHForcePC& fpc, const SPHIntegratePC& ipc) {
         if (!initialized || particles.empty() || !sphDensityPipeline || !sphForcePipeline) return;
 
         size_t size = particles.size() * sizeof(GPUParticle);
@@ -1176,6 +1377,15 @@ struct VulkanContext {
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, sphForcePipeline);
         vkCmdPushConstants(commandBuffer, sphPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(SPHForcePC), &fpc);
         vkCmdDispatch(commandBuffer, groupCount, 1, 1);
+
+        if (hasHardwareRT && sphIntegratePipeline != VK_NULL_HANDLE) {
+            vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 0, 1, &barrier, 0, nullptr, 0, nullptr);
+            
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, sphIntegratePipeline);
+            vkCmdPushConstants(commandBuffer, sphPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(SPHIntegratePC), &ipc);
+            vkCmdDispatch(commandBuffer, groupCount, 1, 1);
+        }
 
         vkEndCommandBuffer(commandBuffer);
 

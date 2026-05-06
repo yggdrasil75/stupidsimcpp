@@ -1,0 +1,100 @@
+#version 460
+#extension GL_EXT_ray_query : require
+
+layout(local_size_x = 256) in;
+
+struct Particle {
+    vec4 pos_mass;
+    vec4 vel_density;
+    vec4 force_press;
+    ivec4 type_pad;
+};
+
+struct AABB {
+    float minX, minY, minZ;
+    float maxX, maxY, maxZ;
+};
+
+layout(std430, binding = 0) buffer ParticleBuffer {
+    Particle particles[];
+};
+
+layout(binding = 1) uniform accelerationStructureEXT tlas;
+
+layout(std430, binding = 2) buffer AABBBuffer {
+    AABB aabbs[];
+};
+
+layout(push_constant) uniform PushConstants {
+    float dt;
+    float velocityDamping;
+    uint numParticles;
+} pc;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.numParticles) return;
+
+    uint type = particles[i].type_pad.x;
+    if (type == 0 || type == 1) return; // Skip Static and Kinematic
+
+    vec3 pos = particles[i].pos_mass.xyz;
+    vec3 vel = particles[i].vel_density.xyz;
+    vec3 force = particles[i].force_press.xyz;
+    float mass = particles[i].pos_mass.w;
+    float size = intBitsToFloat(particles[i].type_pad.y);
+
+    vec3 accel = force / mass;
+    if (dot(accel, accel) > 2500000000.0) accel = normalize(accel) * 50000.0;
+    
+    vel += accel * pc.dt;
+    vel *= max(0.0, 1.0 - pc.velocityDamping * pc.dt);
+    if (dot(vel, vel) > 2500.0) vel = normalize(vel) * 50.0;
+
+    float stepDist = length(vel) * pc.dt;
+    vec3 dir = (stepDist > 0.0001) ? normalize(vel) : vec3(0, -1, 0);
+    float castDist = stepDist + (size * 0.505);
+
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, tlas, gl_RayFlagsOpaqueEXT, 0xFF, pos, 0.0, dir, castDist);
+    
+    while(rayQueryProceedEXT(rq)) {
+        if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionAABBEXT) {
+            rayQueryGenerateIntersectionEXT(rq, rayQueryGetIntersectionTEXT(rq, false));
+        }
+    }
+
+    if (rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
+        float t = rayQueryGetIntersectionTEXT(rq, true);
+        int primitiveId = rayQueryGetIntersectionPrimitiveIndexEXT(rq, true);
+
+        vec3 hitPoint = pos + dir * t;
+        
+        // Calculate normal based on the AABB we hit
+        AABB box = aabbs[primitiveId];
+        vec3 center = vec3(box.minX + box.maxX, box.minY + box.maxY, box.minZ + box.maxZ) * 0.5;
+        vec3 halfSize = vec3(box.maxX - box.minX, box.maxY - box.minY, box.maxZ - box.minZ) * 0.5;
+        
+        vec3 normal = vec3(0.0);
+        vec3 dAbs = abs((hitPoint - center) / halfSize);
+        if (dAbs.x > dAbs.y && dAbs.x > dAbs.z) {
+            normal.x = sign(hitPoint.x - center.x);
+        } else if (dAbs.y > dAbs.z) {
+            normal.y = sign(hitPoint.y - center.y);
+        } else {
+            normal.z = sign(hitPoint.z - center.z);
+        }
+
+        pos = hitPoint + normal * (size * 0.51); 
+        
+        float restitution = 0.3;
+        vec3 vNorm = dot(vel, normal) * normal;
+        vec3 vTan = vel - vNorm;
+        vel = (vTan * 0.8) - (vNorm * restitution);
+    } else {
+        pos += vel * pc.dt;
+    }
+
+    particles[i].pos_mass.xyz = pos;
+    particles[i].vel_density.xyz = vel;
+}
