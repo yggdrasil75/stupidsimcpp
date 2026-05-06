@@ -45,7 +45,11 @@ void main() {
         force = vec3(pc.gravX, pc.gravY, pc.gravZ) * mass_i;
     }
 
-    if (type != 4 && type != 5) {
+    if (type == 5) {
+        force *= -0.5; // Gas floats away from gravity
+    }
+
+    if (type != 4 && type != 5 && type != 2) {
         particles[i].force_press.xyz = force;
         return;
     }
@@ -83,8 +87,9 @@ void main() {
             float spikyGrad = -3.0 * pc.spiky_k * hr * hr;
             fPress += -dir * massFactor * pressureTerm * spikyGrad * sizeFactor;
 
+            float viscFactor = (type == 2 && type_j == 2) ? 20.0 : 1.0;
             float viscLap = pc.visc_l_k * hr;
-            fVisc += pc.viscosity * massFactor * (vel_j - vel_i) / density_j * viscLap * sizeFactor;
+            fVisc += viscFactor * pc.viscosity * massFactor * (vel_j - vel_i) / density_j * viscLap * sizeFactor;
         }
     }
 

@@ -28,12 +28,13 @@ void main() {
     vec3 pos = particles[i].pos_mass.xyz;
     uint type = particles[i].type_pad.x;
 
-    if (type != 4 && type != 5) return;
+    // 4 = FLUID, 5 = GAS, 2 = RIGID
+    if (type != 4 && type != 5 && type != 2) return;
 
     float density = 0.0;
     for (uint j = 0; j < pc.numParticles; j++) {
         uint type_j = particles[j].type_pad.x;
-        if (type_j != 4 && type_j != 5) continue;
+        if (type_j != 4 && type_j != 5 && type_j != 2) continue;
 
         vec3 diff = pos - particles[j].pos_mass.xyz;
         float r2 = dot(diff, diff);

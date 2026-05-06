@@ -69,11 +69,18 @@ void createCheckerBox(Grid::Octree<int>& octree, const Eigen::Vector3f& center, 
     }
 }
 
-struct MeltEvent {
+enum class TargetState {
+    FLUID,
+    GAS,
+    RIGID
+};
+
+struct StateEvent {
     int frameTrigger;
     int objectId;
     float mass;
     bool isMoltenMetal;
+    TargetState targetState;
 };
 
 int main() {
@@ -176,16 +183,17 @@ int main() {
         {"-X", Eigen::Vector3f(-6.8f,  0.0f,  1.0f), Eigen::Vector3f(0.0f, 0.0f, 1.0f)},
         {"+Z", Eigen::Vector3f( 0.0f,  0.0f,  7.3f), Eigen::Vector3f(0.0f, 1.0f, 0.0f)}
     };
-    std::vector<MeltEvent> timeline = {
-        { 20,   5,  1.0f, false }, // Center -> Water
-        { 100,  8,  1.0f, false }, // Second Blue -> Water
-        { 180,  6,  1.2f, false }, // Purple 1 -> Heavy Water
-        { 260,  9,  1.2f, false }, // Purple 2 -> Heavy Water
-        { 340,  3,  8.5f, true  }, // Brass -> Molten Brass
-        { 420,  2, 10.5f, true  }, // Silver -> Molten Silver
-        { 500,  1, 19.3f, true  }, // Gold -> Molten Gold
-        { 580,  4,  0.8f, false }, // Red 1 -> Oil
-        { 660,  7,  0.8f, false }  // Red 2 -> Oil
+
+    std::vector<StateEvent> timeline = {
+        { 20,   5,  1.0f, false, TargetState::FLUID   }, // Center -> Water
+        { 100,  8,  1.0f, false, TargetState::GAS     }, // Second Blue -> gas
+        { 180,  6,  1.2f, false, TargetState::FLUID   }, // Purple 1 -> Heavy Water
+        { 260,  9,  0.4f, false, TargetState::RIGID   }, // Purple 2 -> RIGID (Floats lightly in fluid)
+        { 340,  3,  8.5f, true,  TargetState::FLUID   }, // Brass -> Molten Brass
+        { 420,  2, 10.5f, true,  TargetState::FLUID   }, // Silver -> Molten Silver
+        { 500,  1, 19.3f, true,  TargetState::FLUID   }, // Gold -> Molten Gold
+        { 580,  4,  0.1f, false, TargetState::GAS     }, // Red 1 -> GAS
+        { 660,  7,  0.1f, false, TargetState::FLUID   }  // Red 2 -> fluid
     };
 
     Eigen::Vector3f target(0.0f, 0.0f, 0.5f);
@@ -286,6 +294,8 @@ int main() {
     int fluidframeCounter = 0;
     int framesPerView = totalFluidFrames / views.size();
 
+    std::vector<std::weak_ptr<Grid::Octree<int>::NodeData>> trackedWater = octree.getWeakNodesByObjectId(5);
+
     for (size_t i = 0; i < views.size(); ++i) {
         ScopedFunctionTimer meh("Fluid");
         const View& startView = views[i];
@@ -299,12 +309,29 @@ int main() {
             // Check if it's time to melt a block
             for (const auto& event : timeline) {
                 if (fluidframeCounter == event.frameTrigger) {
-                    std::cout << ">>> TRIGGERING MELT for Object ID: " << event.objectId << std::endl;
-                    octree.makeObjectFluid(event.objectId, event.mass);
+                    std::cout << ">>> TRIGGERING STATE CHANGE for Object ID: " << event.objectId << std::endl;
+                    Grid::BodyType targetType;
+                    switch(event.targetState) {
+                        case TargetState::FLUID: targetType = Grid::BodyType::FLUID; break;
+                        case TargetState::GAS:   targetType = Grid::BodyType::GAS; break;
+                        case TargetState::RIGID: targetType = Grid::BodyType::RIGID; break;
+                    }
+                    octree.makeObjectFluid(event.objectId, event.mass, targetType);
                     
                     if (event.isMoltenMetal) {
                         // Make metals glow slightly when molten and adjust PBR values
                         octree.setMaterialByObjectId(event.objectId, 1.5f, 0.2f, 1.0f);
+                    }
+                    // octree.markPhysicsCollidersDirty();
+                }
+            }
+
+            // Slowly grow the water block's volume (mass and size) leading up to its melting and during its fluid phase
+            if (fluidframeCounter >= 10 && fluidframeCounter <= 200) {
+                for (auto& wp : trackedWater) {
+                    if (auto sp = wp.lock()) {
+                        sp->size += 0.0005f;
+                        sp->physics.mass += 0.0005f;
                     }
                 }
             }

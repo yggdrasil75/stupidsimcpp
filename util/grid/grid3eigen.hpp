@@ -1431,6 +1431,20 @@ public:
             n->physics.type = newType;
             n->physics.mass = newMass;
         }
+        physicsCollidersDirty_.store(true);
+    }
+
+    void markPhysicsCollidersDirty() {
+        physicsCollidersDirty_.store(true);
+    }
+
+    std::vector<std::weak_ptr<NodeData>> getWeakNodesByObjectId(int objectId) {
+        std::vector<std::shared_ptr<NodeData>> nodes;
+        if (root_) collectNodesByObjectId(root_.get(), objectId, nodes);
+        std::vector<std::weak_ptr<NodeData>> weakNodes;
+        weakNodes.reserve(nodes.size());
+        for (auto& n : nodes) weakNodes.push_back(n);
+        return weakNodes;
     }
 
     bool update(const PointType& pos, const T& newData) {

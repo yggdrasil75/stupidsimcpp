@@ -190,7 +190,7 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
     for (size_t i = 0; i < dynamicNodes.size(); ++i) {
         auto& node = dynamicNodes[i];
         
-        if (node->physics.type == BodyType::FLUID || node->physics.type == BodyType::GAS) {
+        if (node->physics.type == BodyType::FLUID || node->physics.type == BodyType::GAS || node->physics.type == BodyType::RIGID) {
             node->physics.density = 0.0f;
             size_t startOffset = allNeighbors.size();
             searchNode(root_.get(), node->position, phys_h2, -1, allNeighbors);
@@ -199,7 +199,7 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
 
             for (size_t j = startOffset; j < endOffset; ++j) {
                 auto& neighbor = allNeighbors[j];
-                if (neighbor->physics.type != BodyType::FLUID && neighbor->physics.type != BodyType::GAS) continue;
+                if (neighbor->physics.type != BodyType::FLUID && neighbor->physics.type != BodyType::GAS && neighbor->physics.type != BodyType::RIGID) continue;
 
                 float r = (node->position - neighbor->position).norm();
                 node->physics.density += neighbor->physics.mass * kernels_.Poly6(r);
@@ -231,11 +231,17 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
             } else {
                 node->physics.force.setZero();
             }
+            if (node->physics.type == BodyType::GAS) {
+                node->physics.force *= -0.5f;
+            }
         } else {
             node->physics.force = phys_gravity * node->physics.mass;
+            if (node->physics.type == BodyType::GAS) {
+                node->physics.force *= -0.5f;
+            }
         }
 
-        if (node->physics.type == BodyType::FLUID || node->physics.type == BodyType::GAS) {
+        if (node->physics.type == BodyType::FLUID || node->physics.type == BodyType::GAS || node->physics.type == BodyType::RIGID) {
             Eigen::Vector3f fPress = Eigen::Vector3f::Zero();
             Eigen::Vector3f fVisc = Eigen::Vector3f::Zero();
 
@@ -245,7 +251,7 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
             for (size_t j = startOffset; j < endOffset; ++j) {
                 auto& neighbor = allNeighbors[j];
                 if (neighbor == node) continue;
-                if (neighbor->physics.type != BodyType::FLUID && neighbor->physics.type != BodyType::GAS) continue;
+                if (neighbor->physics.type != BodyType::FLUID && neighbor->physics.type != BodyType::GAS && neighbor->physics.type != BodyType::RIGID) continue;
 
                 PointType diff = node->position - neighbor->position;
                 float r = diff.norm();
@@ -260,7 +266,9 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
 
                     fPress += -dir * massFactor * pressureTerm * kernels_.SpikyGrad(r) * sizeFactor;
 
-                    fVisc += phys_viscosity * massFactor * 
+                    float viscFactor = (node->physics.type == BodyType::RIGID && neighbor->physics.type == BodyType::RIGID) ? 20.0f : 1.0f;
+
+                    fVisc += viscFactor * phys_viscosity * massFactor * 
                              (neighbor->physics.velocity - node->physics.velocity) / neighbor->physics.density * 
                              kernels_.ViscLaplacian(r) * sizeFactor;
                 }
