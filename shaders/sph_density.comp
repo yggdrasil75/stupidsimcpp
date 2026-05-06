@@ -45,11 +45,15 @@ void main() {
     }
 
     density = max(density, 0.001);
+    
+    float maxDensity = pc.restDensity * 3.0;
+    float clampedDensity = min(density, maxDensity);
+
     particles[i].vel_density.w = density;
 
     if (type == 5) {
-        particles[i].force_press.w = pc.gasConstant * density;
+        particles[i].force_press.w = pc.gasConstant * clampedDensity;
     } else {
-        particles[i].force_press.w = pc.gasConstant * (density - pc.restDensity);
+        particles[i].force_press.w = pc.gasConstant * (clampedDensity - pc.restDensity);
     }
 }

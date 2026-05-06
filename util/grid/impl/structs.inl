@@ -191,6 +191,12 @@ struct SPHKernels {
     }
 };
 
+struct SPHIntegratePC {
+    float dt;
+    float velocityDamping;
+    uint32_t numParticles;
+};
+
 template<typename T, typename IndexType = uint16_t, GridStoragePath StoragePath = ".">
 struct Material_ {
     float emittance;

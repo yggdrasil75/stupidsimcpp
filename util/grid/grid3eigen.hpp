@@ -92,6 +92,7 @@ private:
     float phys_restDensity = 1000.0f;
     float phys_gasConstant = 2000.0f;
     float phys_viscosity = 200.0f;
+    float phys_velocityDamping = 0.5f;
     Eigen::Vector3f phys_gravity{0.0f, -9.81f, 0.0f};
 
     SPHKernels kernels_{phys_smoothingRadius};
@@ -238,6 +239,16 @@ public:
     void setPhysicsSmoothingRadius(float radius) {
         phys_smoothingRadius = radius;
         kernels_.update(radius);
+    }
+
+    void setPhysicsVelocityDamping(float damping) {
+        phys_velocityDamping = damping;
+    }
+    void setPhysicsGasConstant(float c) { phys_gasConstant = c; }
+    void setPhysicsViscosity(float v) { phys_viscosity = v; }
+    void setPhysicsRestDensity(float d) { phys_restDensity = d; }
+    void setphys_gravityCenter(PointType n) {
+        phys_gravityCenter = n;
     }
 private:
 
@@ -1002,7 +1013,7 @@ private:
         collectNodesByObjectIdRecursive(node, id, results, seen);
     }
 
-    bool raycastRecursive(OctreeNode* node, const Ray& ray, float tMin, float tMax, float& maxDist, RayHit& hit, const std::shared_ptr<NodeData>& ignoreNode) {
+    bool raycastRecursive(OctreeNode* node, const Ray& ray, float tMin, float tMax, float& maxDist, RayHit& hit, const std::shared_ptr<NodeData>& ignoreNode, bool hitOnlySolid = false, bool resolvePenetration = false) {
         if (!node->isLoaded()) {
             ensureLoaded(node, true);
             return false;
@@ -1013,6 +1024,7 @@ private:
 
         for (const auto& pt : node->points) {
             if (!pt->isActive() || pt == ignoreNode) continue;
+            if (hitOnlySolid && (pt->physics.type == BodyType::FLUID || pt->physics.type == BodyType::GAS)) continue;
             
             BoundingBox bounds = pt->getCubeBounds();
             
@@ -1035,7 +1047,7 @@ private:
             tMaxPt = std::min(tMaxPt, t1z);
 
             if (tMaxPt >= std::max(0.0f, tMinPt) && tMaxPt >= 0.0f) {
-                float t = tMinPt < 0.0f ? tMaxPt : tMinPt;
+                float t = tMinPt < 0.0f ? (resolvePenetration ? 0.0f : tMaxPt) : tMinPt;
                 if (t >= 0 && t <= maxDist && t <= tMax + 0.001f) {
                     maxDist = t;
                     hit.node = pt;
@@ -1082,7 +1094,7 @@ private:
             int physIdx = currIdx ^ ray.signMask;
 
             if (node->children[physIdx]) {
-                if (raycastRecursive(node->children[physIdx].get(), ray, tMin, tNext, maxDist, hit, ignoreNode)) {
+                if (raycastRecursive(node->children[physIdx].get(), ray, tMin, tNext, maxDist, hit, ignoreNode, hitOnlySolid, resolvePenetration)) {
                     hitSomething = true;
                 }
             }
@@ -1389,6 +1401,20 @@ public:
         
         return results;
     }
+    
+    void makeObjectFluid(int objectId, float newMass, BodyType newType = BodyType::FLUID) {
+        std::vector<std::shared_ptr<NodeData>> nodes;
+        collectNodesByObjectId(root_.get(), objectId, nodes);
+        
+        std::lock_guard<std::mutex> lock(physicsMutex_);
+        for (auto& n : nodes) {
+            if (n->physics.type == BodyType::STATIC && newType != BodyType::STATIC) {
+                activePhysicsNodes_.push_back(n);
+            }
+            n->physics.type = newType;
+            n->physics.mass = newMass;
+        }
+    }
 
     bool update(const PointType& pos, const T& newData) {
         auto pointData = find(pos);
@@ -1595,8 +1621,19 @@ public:
         return true;
     }
 
+    void setMaterialByObjectId(int objectId, float emittance, float roughness, float metallic) {
+        std::vector<std::shared_ptr<NodeData>> nodes;
+        collectNodesByObjectId(root_.get(), objectId, nodes);
+        for (auto& n : nodes) {
+            n->material.emittance = emittance;
+            n->material.roughness = roughness;
+            n->material.metallic = metallic;
+            invalidateLODForPoint(n);
+        }
+    }
+
     bool raycast(const PointType& origin, const PointType& direction, float maxDist, RayHit& hit,
-                 const std::shared_ptr<NodeData>& ignoreNode = nullptr) {
+                 const std::shared_ptr<NodeData>& ignoreNode = nullptr, bool hitOnlySolid = false, bool resolvePenetration = false) {
         if (!root_) return false;
         
         Ray ray(origin, direction.normalized());
@@ -1632,6 +1669,7 @@ public:
 
             for (const auto& pt : node->points) {
                 if (!pt->isActive() || pt == ignoreNode) continue;
+                if (hitOnlySolid && (pt->physics.type == BodyType::FLUID || pt->physics.type == BodyType::GAS)) continue;
                 
                 BoundingBox bounds = pt->getCubeBounds();
                 
@@ -1654,7 +1692,7 @@ public:
                 tMaxPt = std::min(tMaxPt, t1z);
 
                 if (tMaxPt >= std::max(0.0f, tMinPt) && tMaxPt >= 0.0f) {
-                    float t = tMinPt < 0.0f ? tMaxPt : tMinPt;
+                    float t = tMinPt < 0.0f ? (resolvePenetration ? 0.0f : tMaxPt) : tMinPt;
                     if (t >= 0 && t <= currentMaxDist && t <= current.tMax + 0.001f) {
                         currentMaxDist = t;
                         hit.node = pt;

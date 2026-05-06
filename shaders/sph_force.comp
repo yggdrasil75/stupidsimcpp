@@ -29,8 +29,9 @@ void main() {
     if (i >= pc.numParticles) return;
 
     uint type = particles[i].type_pad.x;
-    float mass = particles[i].pos_mass.w;
+    float mass_i = particles[i].pos_mass.w;
     vec3 pos = particles[i].pos_mass.xyz;
+    float size_i = intBitsToFloat(particles[i].type_pad.y);
 
     vec3 force = vec3(0.0);
 
@@ -38,10 +39,10 @@ void main() {
         vec3 dir = vec3(pc.gravCX, pc.gravCY, pc.gravCZ) - pos;
         float distSq = dot(dir, dir);
         if (distSq > 0.0001) {
-            force = normalize(dir) * (pc.gravStrength * mass);
+            force = normalize(dir) * (pc.gravStrength * mass_i);
         }
     } else {
-        force = vec3(pc.gravX, pc.gravY, pc.gravZ) * mass;
+        force = vec3(pc.gravX, pc.gravY, pc.gravZ) * mass_i;
     }
 
     if (type != 4 && type != 5) {
@@ -70,15 +71,20 @@ void main() {
             float press_j = particles[j].force_press.w;
             float mass_j = particles[j].pos_mass.w;
             vec3 vel_j = particles[j].vel_density.xyz;
+            float size_j = intBitsToFloat(particles[j].type_pad.y);
 
             float pressureTerm = (press_i / (density_i * density_i)) + (press_j / (density_j * density_j));
             
             float hr = pc.h - r;
+            
+            float sizeFactor = size_i * size_j;
+            float massFactor = mass_i * mass_j;
+
             float spikyGrad = -3.0 * pc.spiky_k * hr * hr;
-            fPress += -dir * mass_j * pressureTerm * spikyGrad;
+            fPress += -dir * massFactor * pressureTerm * spikyGrad * sizeFactor;
 
             float viscLap = pc.visc_l_k * hr;
-            fVisc += pc.viscosity * mass_j * (vel_j - vel_i) / density_j * viscLap;
+            fVisc += pc.viscosity * massFactor * (vel_j - vel_i) / density_j * viscLap * sizeFactor;
         }
     }
 

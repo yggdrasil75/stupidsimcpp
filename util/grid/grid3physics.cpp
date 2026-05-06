@@ -4,6 +4,7 @@ namespace Grid {
 
 template<typename T, typename IndexType, GridStoragePath StoragePath>
 void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
+    TIME_FUNCTION;
     if (!root_) return;
 
     std::vector<std::shared_ptr<NodeData>> dynamicNodes;
@@ -33,7 +34,10 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
         gpuParticles[i].pos_mass = Eigen::Vector4f(node->position.x(), node->position.y(), node->position.z(), node->physics.mass);
         gpuParticles[i].vel_density = Eigen::Vector4f(node->physics.velocity.x(), node->physics.velocity.y(), node->physics.velocity.z(), node->physics.density);
         gpuParticles[i].force_press = Eigen::Vector4f(0.0f, 0.0f, 0.0f, node->physics.pressure);
-        gpuParticles[i].type_pad = Eigen::Vector4i(static_cast<int>(node->physics.type), 0, 0, 0);
+        
+        int sizeInt;
+        std::memcpy(&sizeInt, &node->size, sizeof(float));
+        gpuParticles[i].type_pad = Eigen::Vector4i(static_cast<int>(node->physics.type), sizeInt, 0, 0);
     }
 
     SPHDensityPC dpc{};
@@ -90,12 +94,14 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
             }
 
             if (node->physics.density < 0.001f) node->physics.density = 0.001f;
+            
+            float maxDensity = phys_restDensity * 3.0f;
+            float clampedDensity = std::min(node->physics.density, maxDensity);
 
             if (node->physics.type == BodyType::GAS) {
-
-                node->physics.pressure = phys_gasConstant * node->physics.density;
+                node->physics.pressure = phys_gasConstant * clampedDensity;
             } else {
-                node->physics.pressure = phys_gasConstant * (node->physics.density - phys_restDensity);
+                node->physics.pressure = phys_gasConstant * (clampedDensity - phys_restDensity);
             }
         } else {
             neighborOffsets[i+1] = allNeighbors.size();
@@ -137,11 +143,14 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
                     float pressureTerm = (node->physics.pressure / (node->physics.density * node->physics.density)) + 
                                          (neighbor->physics.pressure / (neighbor->physics.density * neighbor->physics.density));
                     
-                    fPress += -dir * neighbor->physics.mass * pressureTerm * kernels_.SpikyGrad(r);
+                    float sizeFactor = node->size * neighbor->size;
+                    float massFactor = node->physics.mass * neighbor->physics.mass;
 
-                    fVisc += phys_viscosity * neighbor->physics.mass * 
+                    fPress += -dir * massFactor * pressureTerm * kernels_.SpikyGrad(r) * sizeFactor;
+
+                    fVisc += phys_viscosity * massFactor * 
                              (neighbor->physics.velocity - node->physics.velocity) / neighbor->physics.density * 
-                             kernels_.ViscLaplacian(r);
+                             kernels_.ViscLaplacian(r) * sizeFactor;
                 }
             }
             node->physics.force += fPress + fVisc;
@@ -152,6 +161,7 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
     std::vector<std::pair<std::shared_ptr<NodeData>, PointType>> movesBuffer;
     movesBuffer.reserve(dynamicNodes.size());
 
+    #pragma omp parallel for
     for (auto& node : dynamicNodes) {
         if (node->physics.type == BodyType::KINEMATIC) continue;
         if (!node->physics.force.allFinite()) {
@@ -165,6 +175,8 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
         }
 
         node->physics.velocity += acceleration * dt;
+        node->physics.velocity *= std::max(0.0f, 1.0f - phys_velocityDamping * dt);
+
         float maxVel = 50.0f;
         if (node->physics.velocity.squaredNorm() > maxVel * maxVel) {
             node->physics.velocity = node->physics.velocity.normalized() * maxVel;
@@ -175,22 +187,25 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
             predictedPos = node->position;
             node->physics.velocity.setZero();
         }
-        float stepDist = node->physics.velocity.norm() * dt;
-        if (stepDist > 0.0001f) {
-            RayHit hit;
-            if (raycast(node->position, node->physics.velocity, stepDist + node->size * 0.5f, hit, node)) {
-                if (hit.node && hit.node->isStatic()) {
-                    predictedPos = hit.hitPoint + hit.normal * (node->size * 0.51f);
-                    
-                    float restitution = 0.3f;
-                    Eigen::Vector3f vNorm = node->physics.velocity.dot(hit.normal) * hit.normal;
-                    Eigen::Vector3f vTan = node->physics.velocity - vNorm;
-                    
-                    node->physics.velocity = (vTan * 0.8f) - (vNorm * restitution);
-                }
-            }
+        
+        PointType castDir = node->physics.velocity;
+        if (castDir.squaredNorm() < 1e-6f) {
+            castDir = PointType(0.0f, -1.0f, 0.0f);
         }
 
+        float stepDist = node->physics.velocity.norm() * dt;
+        RayHit hit;
+        if (raycast(node->position, castDir, stepDist + node->size * 0.505f, hit, node, true, true)) {
+            if (hit.node) {
+                predictedPos = hit.hitPoint + hit.normal * (node->size * 0.51f);
+                
+                float restitution = 0.3f;
+                Eigen::Vector3f vNorm = node->physics.velocity.dot(hit.normal) * hit.normal;
+                Eigen::Vector3f vTan = node->physics.velocity - vNorm;
+                
+                node->physics.velocity = (vTan * 0.8f) - (vNorm * restitution);
+            }
+        }
 
         float halfSize = node->size * 0.5f;
         for (int i = 0; i < Dim; ++i) {
