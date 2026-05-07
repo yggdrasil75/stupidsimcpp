@@ -22,6 +22,7 @@ layout(push_constant) uniform PushConstants {
     float gravCX, gravCY, gravCZ;
     uint useGravityPoint;
     uint numParticles;
+    float airDensity;
 } pc;
 
 void main() {
@@ -33,20 +34,24 @@ void main() {
     vec3 pos = particles[i].pos_mass.xyz;
     float size_i = intBitsToFloat(particles[i].type_pad.y);
 
-    vec3 force = vec3(0.0);
+    vec3 gravityDir = vec3(0.0);
 
     if (pc.useGravityPoint == 1) {
         vec3 dir = vec3(pc.gravCX, pc.gravCY, pc.gravCZ) - pos;
         float distSq = dot(dir, dir);
         if (distSq > 0.0001) {
-            force = normalize(dir) * (pc.gravStrength * mass_i);
+            gravityDir = normalize(dir) * pc.gravStrength;
         }
     } else {
-        force = vec3(pc.gravX, pc.gravY, pc.gravZ) * mass_i;
+        gravityDir = vec3(pc.gravX, pc.gravY, pc.gravZ);
     }
 
+    vec3 force = gravityDir * mass_i;
+
     if (type == 5) {
-        force *= -0.5; // Gas floats away from gravity
+        float volume = size_i * size_i * size_i;
+        vec3 buoyancy = -gravityDir * (pc.airDensity * volume);
+        force += buoyancy;
     }
 
     if (type != 4 && type != 5 && type != 2) {
@@ -64,7 +69,7 @@ void main() {
     for (uint j = 0; j < pc.numParticles; j++) {
         if (i == j) continue;
         uint type_j = particles[j].type_pad.x;
-        if (type_j != 4 && type_j != 5) continue;
+        if (type_j != 4 && type_j != 5 && type_j != 2) continue;
 
         vec3 diff = pos - particles[j].pos_mass.xyz;
         float r = length(diff);

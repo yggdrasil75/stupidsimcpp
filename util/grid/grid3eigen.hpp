@@ -94,6 +94,7 @@ private:
     float phys_gasConstant = 2000.0f;
     float phys_viscosity = 200.0f;
     float phys_velocityDamping = 0.5f;
+    float phys_airDensity = 1.225f;
     Eigen::Vector3f phys_gravity{0.0f, -9.81f, 0.0f};
 
     SPHKernels kernels_{phys_smoothingRadius};
@@ -264,6 +265,7 @@ public:
     void setPhysicsGasConstant(float c) { phys_gasConstant = c; }
     void setPhysicsViscosity(float v) { phys_viscosity = v; }
     void setPhysicsRestDensity(float d) { phys_restDensity = d; }
+    void setPhysicsAirDensity(float d) { phys_airDensity = d; }
     void setphys_gravityCenter(PointType n) {
         phys_gravityCenter = n;
     }

@@ -82,6 +82,7 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
     fpc.gravCZ = phys_gravityCenter.z();
     fpc.useGravityPoint = phys_useGravityPoint ? 1 : 0;
     fpc.numParticles = dynamicNodes.size();
+    fpc.airDensity = phys_airDensity;
 
     SPHIntegratePC ipc{};
     ipc.dt = dt;
@@ -182,6 +183,56 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
         ensureBounds(node->getCubeBounds());
         insertRecursive(root_.get(), node, 0);
     }
+    
+    std::vector<std::shared_ptr<NodeData>> gasToRemove;
+    std::vector<std::shared_ptr<NodeData>> gasToAdd;
+    static std::mt19937 rng(1337);
+    std::uniform_real_distribution<float> splitChance(0.0f, 1.0f);
+
+    for (size_t i = 0; i < dynamicNodes.size(); ++i) {
+        auto& node = dynamicNodes[i];
+        if (node->physics.type == BodyType::GAS && node->size > 0.03f) {
+            if (splitChance(rng) < 0.02f) {
+                gasToRemove.push_back(node);
+                
+                float newSize = node->size * 0.5f;
+                float newMass = node->physics.mass * 0.125f;
+                float newTrans = std::min(0.95f, node->material.transmission + 0.35f); 
+                
+                for (int dx = -1; dx <= 1; dx += 2) {
+                    for (int dy = -1; dy <= 1; dy += 2) {
+                        for (int dz = -1; dz <= 1; dz += 2) {
+                            auto child = std::make_shared<NodeData>(*node);
+                            Eigen::Vector3f offset(dx, dy, dz);
+                            offset *= newSize * 0.5f;
+                            
+                            child->position = node->position + offset;
+                            child->size = newSize;
+                            child->physics.mass = newMass;
+                            child->material.transmission = newTrans;
+                            child->physics.velocity += offset.normalized() * 4.0f;
+                            
+                            gasToAdd.push_back(child);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (!gasToRemove.empty() || !gasToAdd.empty()) {
+        for (auto& node : gasToRemove) {
+            removeRecursive(root_.get(), node->getCubeBounds(), node);
+            node->setActive(false);
+        }
+        for (auto& child : gasToAdd) {
+            ensureBounds(child->getCubeBounds());
+            insertRecursive(root_.get(), child, 0);
+            
+            std::lock_guard<std::mutex> lock(physicsMutex_);
+            activePhysicsNodes_.push_back(child);
+        }
+    }
 #else
     float phys_h2 = phys_smoothingRadius * phys_smoothingRadius;
     std::vector<std::shared_ptr<NodeData>> allNeighbors;
@@ -223,22 +274,23 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
     for (size_t i = 0; i < dynamicNodes.size(); ++i) {
         auto& node = dynamicNodes[i];
 
+        Eigen::Vector3f gravityDir = Eigen::Vector3f::Zero();
         if (phys_useGravityPoint) {
             Eigen::Vector3f dir = phys_gravityCenter - node->position;
             float distSq = dir.squaredNorm();
             if (distSq > 0.0001f) {
-                node->physics.force = dir.normalized() * (phys_gravityStrength * node->physics.mass);
-            } else {
-                node->physics.force.setZero();
-            }
-            if (node->physics.type == BodyType::GAS) {
-                node->physics.force *= -0.5f;
+                gravityDir = dir.normalized() * phys_gravityStrength;
             }
         } else {
-            node->physics.force = phys_gravity * node->physics.mass;
-            if (node->physics.type == BodyType::GAS) {
-                node->physics.force *= -0.5f;
-            }
+            gravityDir = phys_gravity;
+        }
+
+        node->physics.force = gravityDir * node->physics.mass;
+
+        if (node->physics.type == BodyType::GAS) {
+            float volume = node->size * node->size * node->size;
+            Eigen::Vector3f buoyancy = -gravityDir * (phys_airDensity * volume);
+            node->physics.force += buoyancy;
         }
 
         if (node->physics.type == BodyType::FLUID || node->physics.type == BodyType::GAS || node->physics.type == BodyType::RIGID) {

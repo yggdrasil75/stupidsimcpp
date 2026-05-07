@@ -197,6 +197,32 @@ struct SPHIntegratePC {
     uint32_t numParticles;
 };
 
+struct SPHDensityPC {
+    float h;
+    float h2;
+    float poly6_k;
+    float restDensity;
+    float gasConstant;
+    uint32_t numParticles;
+};
+
+struct SPHForcePC {
+    float h;
+    float spiky_k;
+    float visc_l_k;
+    float viscosity;
+    float gravX;
+    float gravY;
+    float gravZ;
+    float gravStrength;
+    float gravCX;
+    float gravCY;
+    float gravCZ;
+    uint32_t useGravityPoint;
+    uint32_t numParticles;
+    float airDensity;
+};
+
 template<typename T, typename IndexType = uint16_t, GridStoragePath StoragePath = ".">
 struct Material_ {
     float emittance;

@@ -49,18 +49,26 @@ void main() {
     
     vel += accel * pc.dt;
     vel *= max(0.0, 1.0 - pc.velocityDamping * pc.dt);
-    if (dot(vel, vel) > 2500.0) vel = normalize(vel) * 50.0;
+    
+    float velLen = length(vel);
+    if (velLen > 50.0) {
+        vel = (vel / velLen) * 50.0;
+        velLen = 50.0;
+    }
 
-    float stepDist = length(vel) * pc.dt;
-    vec3 dir = (stepDist > 0.0001) ? normalize(vel) : vec3(0, -1, 0);
-    float castDist = stepDist + (size * 0.505);
+    float stepDist = velLen * pc.dt;
+    vec3 dir = (velLen > 0.0001) ? (vel / velLen) : vec3(0.0, -1.0, 0.0);
+    float pullback = size * 1.5;
+    vec3 rayOrigin = pos - dir * pullback;
+    float castDist = stepDist + (size * 0.51) + pullback;
 
     rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, tlas, gl_RayFlagsOpaqueEXT, 0xFF, pos, 0.0, dir, castDist);
+    rayQueryInitializeEXT(rq, tlas, gl_RayFlagsOpaqueEXT, 0xFF, rayOrigin, 0.0, dir, castDist);
     
     while(rayQueryProceedEXT(rq)) {
         if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionAABBEXT) {
-            rayQueryGenerateIntersectionEXT(rq, rayQueryGetIntersectionTEXT(rq, false));
+            float candidate_t = rayQueryGetIntersectionTEXT(rq, false);
+            rayQueryGenerateIntersectionEXT(rq, candidate_t);
         }
     }
 
@@ -68,7 +76,7 @@ void main() {
         float t = rayQueryGetIntersectionTEXT(rq, true);
         int primitiveId = rayQueryGetIntersectionPrimitiveIndexEXT(rq, true);
 
-        vec3 hitPoint = pos + dir * t;
+        vec3 hitPoint = rayOrigin + dir * t;
         
         // Calculate normal based on the AABB we hit
         AABB box = aabbs[primitiveId];
@@ -94,6 +102,21 @@ void main() {
     } else {
         pos += vel * pc.dt;
     }
+
+    float boundLimit = 9.8;
+    if (pos.x < -boundLimit || pos.x > boundLimit) {
+        pos.x = clamp(pos.x, -boundLimit, boundLimit);
+        vel.x *= -0.3;
+    }
+    if (pos.y < -boundLimit || pos.y > boundLimit) {
+        pos.y = clamp(pos.y, -boundLimit, boundLimit);
+        vel.y *= -0.3;
+    }
+    if (pos.z < -boundLimit || pos.z > boundLimit) {
+        pos.z = clamp(pos.z, -boundLimit, boundLimit);
+        vel.z *= -0.3;
+    }
+
 
     particles[i].pos_mass.xyz = pos;
     particles[i].vel_density.xyz = vel;

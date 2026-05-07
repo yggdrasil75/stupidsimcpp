@@ -177,31 +177,6 @@ struct alignas(16) GPUParticle {
     Eigen::Vector4i type_pad;
 };
 
-struct SPHDensityPC {
-    float h;
-    float h2;
-    float poly6_k;
-    float restDensity;
-    float gasConstant;
-    uint32_t numParticles;
-};
-
-struct SPHForcePC {
-    float h;
-    float spiky_k;
-    float visc_l_k;
-    float viscosity;
-    float gravX;
-    float gravY;
-    float gravZ;
-    float gravStrength;
-    float gravCX;
-    float gravCY;
-    float gravCZ;
-    uint32_t useGravityPoint;
-    uint32_t numParticles;
-};
-
 struct WavefrontRay {
     Eigen::Vector3f origin;
     uint32_t pixelIndex;

@@ -21,8 +21,7 @@
 // Helper function to create a solid volume of voxels with material properties
 void createBox(Grid::Octree<int>& octree, const Eigen::Vector3f& center, const Eigen::Vector3f& size, const Eigen::Vector3f& albedo, float emission = 0.0f,
                float roughness = 0.8f, float metallic = 0.0f, float transmission = 0.0f, float ior = 1.45f,const Eigen::Vector3f& absorp = Eigen::Vector3f::Zero(), 
-               int oid = 0, Grid::BodyType bType = Grid::BodyType::STATIC, float mass = 1.0f) {
-    float step = 0.05f; // Voxel spacing
+               int oid = 0, Grid::BodyType bType = Grid::BodyType::STATIC, float mass = 1.0f, float step = 0.1) {
     Eigen::Vector3f halfSize = size / 2.0f;
     Eigen::Vector3f minB = center - halfSize;
     Eigen::Vector3f maxB = center + halfSize;
@@ -99,6 +98,9 @@ int main() {
     octree.setPhysicsGasConstant(100.0f); // Lowered significantly from 2000 for stability
     octree.setPhysicsVelocityDamping(1.0f); // Higher damping stops infinite scattering
     octree.setPhysicsViscosity(15.0f);
+    octree.setPhysicsAirDensity(1.225f);
+    // octree.setPhysicsSurfaceTension(2000.0f);
+
 
     std::cout << "Building scene..." << std::endl;
 
@@ -136,19 +138,21 @@ int main() {
     createBox(octree, Eigen::Vector3f( sp, -sp, 0.0f), size, cBrass,  0.0f, 0.08f, 0.99f, 0.0f, 1.45f, Eigen::Vector3f(0,0,0), 3, initType, mass);
 
     // LAYER 2: Opaque
-    createBox(octree, Eigen::Vector3f(-sp,  0,  0.0f), size, cRed,    0.0f, 0.05f, 0.0f, 0.0f, 2.4f, Eigen::Vector3f(0,0,0), 4, initType, mass);
-    createBox(octree, Eigen::Vector3f(  0,  0,  0.0f), size, cBlue,   0.0f, 0.05f, 0.0f, 0.0f, 2.4f, Eigen::Vector3f(0,0,0), 5, initType, mass);
-    createBox(octree, Eigen::Vector3f( sp,  0,  0.0f), size, cPurple, 0.0f, 0.05f, 0.0f, 0.0f, 2.4f, Eigen::Vector3f(0,0,0), 6, initType, mass);
+    createBox(octree, Eigen::Vector3f(-sp,  0,  0.0f), size, cRed,    0.0f, 0.05f, 0.0f, 0.0f, 2.4f, Eigen::Vector3f(0,0,0), 4, initType, mass, 0.5);
+    createBox(octree, Eigen::Vector3f(  0,  0,  0.0f), size, cBlue,   0.0f, 0.05f, 0.0f, 0.0f, 2.4f, Eigen::Vector3f(0,0,0), 5, initType, mass, 0.1);
+    createBox(octree, Eigen::Vector3f( sp,  0,  0.0f), size, cPurple, 0.0f, 0.05f, 0.0f, 0.0f, 2.4f, Eigen::Vector3f(0,0,0), 6, initType, mass, 0.5);
 
     // LAYER 3: Glass
-    createBox(octree, Eigen::Vector3f(-sp,  sp, 0.0f), size, cRed,    0.0f, 0.01f, 0.0f, 0.99f, 1.5f, Eigen::Vector3f(0.05f, 0.8f, 0.8f), 7, initType, mass);
-    createBox(octree, Eigen::Vector3f(  0,  sp, 0.0f), size, cBlue,   0.0f, 0.01f, 0.0f, 0.99f, 1.5f, Eigen::Vector3f(0.8f, 0.8f, 0.05f), 8, initType, mass);
-    createBox(octree, Eigen::Vector3f( sp,  sp, 0.0f), size, cPurple, 0.0f, 0.01f, 0.0f, 0.99f, 1.5f, Eigen::Vector3f(0.4f, 1.2f, 0.4f), 9, initType, mass);
+    createBox(octree, Eigen::Vector3f(-sp,  sp, 0.0f), size, cRed,    0.0f, 0.01f, 0.0f, 0.99f, 1.5f, Eigen::Vector3f(0.05f, 0.8f, 0.8f), 7, initType, mass, 0.5);
+    createBox(octree, Eigen::Vector3f(  0,  sp, 0.0f), size, cBlue,   0.0f, 0.01f, 0.0f, 0.99f, 1.5f, Eigen::Vector3f(0.8f, 0.8f, 0.05f), 8, initType, mass, 0.5);
+    createBox(octree, Eigen::Vector3f( sp,  sp, 0.0f), size, cPurple, 0.0f, 0.01f, 0.0f, 0.99f, 1.5f, Eigen::Vector3f(0.4f, 1.2f, 0.4f), 9, initType, mass, 0.5);
 
     createBox(octree, Eigen::Vector3f(0.0f, 0.0f, 7.4f), Eigen::Vector3f(8.0f, 8.0f, 0.2f), Eigen::Vector3f(1.0f, 1.0f, 1.0f), 15.0f, 0.8f, 0.0f, 0.0f, 1.45f, Eigen::Vector3f::Zero(), 10);
 
     std::cout << "Optimizing and Generating LODs..." << std::endl;
-    octree.generateLODs();
+    // octree.generateLODs();
+    octree.setLODMinDistance(1024);
+    octree.setLODFalloff(0.01);
     octree.printStats();
     octree.setMaxDistance(4096);
 
@@ -162,7 +166,7 @@ int main() {
     const int samples = 10;
     const int blendedsamples = 10;
     const float blendedfactor = 0.5;
-    const int video_samples = 250;
+    const int videosamples = 250;
     const int bounces = 32;
     const int physicsSubsteps = 10;
     const float physicsDt = 1.0f / fps;
@@ -186,13 +190,13 @@ int main() {
 
     std::vector<StateEvent> timeline = {
         { 20,   5,  1.0f, false, TargetState::FLUID   }, // Center -> Water
-        { 100,  8,  1.0f, false, TargetState::GAS     }, // Second Blue -> gas
+        { 100,  8,  0.00005f, false, TargetState::GAS }, // Second Blue -> Lighter than air Gas
         { 180,  6,  1.2f, false, TargetState::FLUID   }, // Purple 1 -> Heavy Water
         { 260,  9,  0.4f, false, TargetState::RIGID   }, // Purple 2 -> RIGID (Floats lightly in fluid)
         { 340,  3,  8.5f, true,  TargetState::FLUID   }, // Brass -> Molten Brass
         { 420,  2, 10.5f, true,  TargetState::FLUID   }, // Silver -> Molten Silver
         { 500,  1, 19.3f, true,  TargetState::FLUID   }, // Gold -> Molten Gold
-        { 580,  4,  0.1f, false, TargetState::GAS     }, // Red 1 -> GAS
+        { 580,  4,  0.001f, false, TargetState::GAS   }, // Red 1 -> heavier GAS
         { 660,  7,  0.1f, false, TargetState::FLUID   }  // Red 2 -> fluid
     };
 
@@ -248,38 +252,40 @@ int main() {
     std::cout << "\nStarting video render..." << std::endl;
     std::cout << "Total frames to render: " << totalFrames << std::endl;
 
-    for (size_t i = 0; i < views.size(); ++i) {
-        ScopedFunctionTimer meh("Video");
-        const View& startView = views[i];
-        const View& endView = views[(i + 1) % views.size()]; // Loop back to the first view at the end
+    // for (size_t i = 0; i < views.size(); ++i) {
+    //     ScopedFunctionTimer meh("Video");
+    //     const View& startView = views[i];
+    //     const View& endView = views[(i + 1) % views.size()]; // Loop back to the first view at the end
 
-        std::cout << "\nAnimating segment: " << startView.name << " -> " << endView.name << std::endl;
+    //     std::cout << "\nAnimating segment: " << startView.name << " -> " << endView.name << std::endl;
 
-        for (int j = 0; j < framesPerSegment; ++j) {
-            frameCounter++;
-            float t = static_cast<float>(j) / static_cast<float>(framesPerSegment);
+    //     for (int j = 0; j < framesPerSegment; ++j) {
+    //         frameCounter++;
+    //         float t = static_cast<float>(j) / static_cast<float>(framesPerSegment);
 
-            Eigen::Vector3f currentOrigin = startView.origin * (1.0f - t) + endView.origin * t;
+    //         Eigen::Vector3f currentOrigin = startView.origin * (1.0f - t) + endView.origin * t;
             
-            Eigen::Vector3f currentUp = (startView.up * (1.0f - t) + endView.up * t).normalized();
+    //         Eigen::Vector3f currentUp = (startView.up * (1.0f - t) + endView.up * t).normalized();
             
-            Camera cam;
-            cam.origin = currentOrigin;
-            cam.up = currentUp;
-            cam.direction = (target - cam.origin).normalized();
+    //         Camera cam;
+    //         cam.origin = currentOrigin;
+    //         cam.up = currentUp;
+    //         cam.direction = (target - cam.origin).normalized();
             
-            std::cout << "Rendering video frame " << frameCounter << "/" << totalFrames << "..." << std::endl;
-            frame out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
-            // frame out = octree.blendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, video_samples, bounces, false);
-            // frame out = octree.renderFramefast(cam, height, width, frame::colormap::RGB, false, true);
-            videoFrames.push_back(std::move(out));
-        }
-    }
+    //         std::cout << "Rendering video frame " << frameCounter << "/" << totalFrames << "..." << std::endl;
+    //         frame out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
+    //         // frame out = octree.blendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, videosamples, bounces, false);
+    //         // frame out = octree.renderFrameVulkan(cam, height, width, frame::colormap::RGB, videosamples, false, true);
+    //         // videoFrames.push_back(std::move(out));
+    //         std::string debugFilename = "output/materialframes/debug_material_" + std::to_string(frameCounter) + ".bmp";
+    //         BMPWriter::saveBMP(debugFilename, out);
+    //     }
+    // }
 
-    std::cout << "\nAll frames rendered. Saving video file..." << std::endl;
-    std::string videoFilename = "output/material_test_video.y4m";
+    // std::cout << "\nAll frames rendered. Saving video file..." << std::endl;
+    // std::string videoFilename = "output/material_test_video.y4m";
     
-    y4mWriter::save(videoFilename, videoFrames, fps);
+    // y4mWriter::save(videoFilename, videoFrames, fps);
     // if (AVIWriter::saveAVIFromCompressedFrames(videoFilename, std::move(videoFrames), width, height, fps)) {
     //     std::cout << "Video saved successfully to " << videoFilename << std::endl;
     // } else {
@@ -326,15 +332,14 @@ int main() {
                 }
             }
 
-            // Slowly grow the water block's volume (mass and size) leading up to its melting and during its fluid phase
-            if (fluidframeCounter >= 10 && fluidframeCounter <= 200) {
-                for (auto& wp : trackedWater) {
-                    if (auto sp = wp.lock()) {
-                        sp->size += 0.0005f;
-                        sp->physics.mass += 0.0005f;
-                    }
-                }
-            }
+            // if (fluidframeCounter >= 10 && fluidframeCounter <= 200) {
+            //     for (auto& wp : trackedWater) {
+            //         if (auto sp = wp.lock()) {
+            //             sp->size += 0.0005f;
+            //             sp->physics.mass += 0.0005f;
+            //         }
+            //     }
+            // }
 
             // Step physics
             for (int s = 0; s < physicsSubsteps; ++s) {
@@ -352,18 +357,17 @@ int main() {
 
             // 3. Render
             frame out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
-            fluidVideoFrames.push_back(out);
+            // frame out = octree.renderFrameVulkan(cam, height, width, frame::colormap::RGB, videosamples, false, true);
+            // fluidVideoFrames.push_back(out);
 
-            // SAVE DEBUG FRAME EVERY 10 FRAMES
-            if (fluidframeCounter % 10 == 0) {
-                std::string debugFilename = "output/fluidframes/debug_fluid_" + std::to_string(fluidframeCounter) + ".bmp";
-                BMPWriter::saveBMP(debugFilename, out);
-            }
+            // saving to video is dumb so just gonna export here and then convert.
+            std::string debugFilename = "output/fluidframes/debug_fluid_" + std::to_string(fluidframeCounter) + ".bmp";
+            BMPWriter::saveBMP(debugFilename, out);
         }
     }
 
-    std::string fluidVideoFilename = "output/material_fluid_video.y4m";
-    y4mWriter::save(fluidVideoFilename, fluidVideoFrames, fps);
+    // std::string fluidVideoFilename = "output/material_fluid_video.y4m";
+    // y4mWriter::save(fluidVideoFilename, fluidVideoFrames, fps);
     // if (AVIWriter::saveAVIFromCompressedFrames(fluidVideoFilename, std::move(fluidVideoFrames), width, height, fps)) {
     //     std::cout << "Fluid Simulation video saved to " << fluidVideoFilename << std::endl;
     // }
