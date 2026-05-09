@@ -41,7 +41,34 @@
 #endif
 
 namespace Grid {
-    ///note for myself: use weak pointers to track objects due to them changing from grid physics.
+    // note for myself: use weak pointers to track objects due to them changing from grid physics.
+    // I could also use callbacks
+    // for physics I could make a object class and store in that an index for subobject physic types (ie: skin vs bone vs cartilege all stored in an animal object)
+    // I need to make sure that objects are either fully loaded or fully unloaded. I cant have a partially loaded object. so that has to be included in the lazy unload at some point.
+    // further notes on objects: could bring back indexed render materials, store a vector of materials in the object, index in the item. have it be 1 byte instead of 4.
+    // same with physical materials, ie: have a "bone" material, "skin" "muscle" "blood" etc when simulating the physical body of a character. (well, maybe not that detailed. but something similar)
+    // also need to store relative positions to the object center, both "resting" and "current". 
+    // some rendering options: sgvf (temporal accumulation)
+    // also some more simplistic temporal model might be easier.
+    // importance sampling: first hit finds objects that are more complex to render, less complex objects have less samples.
+    // stratification: halton or sobol, cranley-patterson rotations (look into these)
+    // every 1/10th the samples per pixel, find regions with little variance, drop those in favor of focusing on the ones with large variance.
+    // a-trous wavelet denoising intead of bilateral filtering.
+    // secondary pass of edge sharpening.
+    // have pbr buffer output sum and sum of squares to make better blending easier to manage
+    // stochastic transparency (might be for fast version?)
+    // /*At half res (scale=0.5), you're searching 3 low-res pixels = 6 full-res pixels
+    //     The object ID matching fallback radius is 9 = 18 full-res pixels
+    //     This is likely causing excessive blurring at geometric edges. You need to adapt the radius to your scale:
+    // */
+    // screen space path reuse for nearby pixels (I really need wavefront path tracing.)
+    // edge aware median prefilter for luminance variance clamping passes
+    // dynamically resize smoothing window based on noise level
+    // first hit hitpoint and norm really need reuse.
+    // change emittance to a GL_RGB9_E5 to support color light/hdr
+
+
+
 
 template<typename T, typename IndexType = uint16_t, GridStoragePath StoragePath = ".">
 class Octree {

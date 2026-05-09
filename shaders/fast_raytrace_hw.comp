@@ -3,6 +3,8 @@
 layout(local_size_x = 8, local_size_y = 8) in;
 
 #define PI 3.14159265359
+const float EPS = 1e-8;
+const float LARGE = 1e30;
 
 struct GPURenderNode {
     vec3 boundsMin;
@@ -68,6 +70,14 @@ layout(binding = 3) uniform CameraData {
 layout(std430, binding = 4) readonly buffer SkyboxBuffer { vec4 skyPixels[]; };
 layout(binding = 6) uniform accelerationStructureEXT tlas;
 
+vec3 safe_invDir(vec3 d) {
+    return vec3(
+        abs(d.x) < EPS ? (d.x < 0.0 ? -LARGE : LARGE) : 1.0 / d.x,
+        abs(d.y) < EPS ? (d.y < 0.0 ? -LARGE : LARGE) : 1.0 / d.y,
+        abs(d.z) < EPS ? (d.z < 0.0 ? -LARGE : LARGE) : 1.0 / d.z
+    );
+}
+
 struct Ray {
     vec3 origin;
     vec3 dir;
@@ -78,8 +88,8 @@ Ray makeRay(vec3 o, vec3 d) {
     Ray r;
     r.origin = o;
     r.dir = d;
-    r.invDir = 1.0 / d;
-    r.signMask = ivec3(r.invDir.x < 0 ? 1 : 0, r.invDir.y < 0 ? 1 : 0, r.invDir.z < 0 ? 1 : 0);
+    r.invDir = safe_invDir(d);
+    r.signMask = ivec3(r.invDir.x < 0.0 ? 1 : 0, r.invDir.y < 0.0 ? 1 : 0, r.invDir.z < 0.0 ? 1 : 0);
     return r;
 }
 
@@ -175,7 +185,6 @@ int voxelTraverse(Ray ray, out int hitIndex, out float outT, out vec3 outNormal)
             }
         }
     }
-
     if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionGeneratedEXT) {
         hitIndex = rayQueryGetIntersectionPrimitiveIndexEXT(rq, true);
         outT = rayQueryGetIntersectionTEXT(rq, true);
