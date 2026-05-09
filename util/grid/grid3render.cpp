@@ -6,11 +6,28 @@ void Octree<T, IndexType, StoragePath>::buildRender(RenderBuffer_<T, IndexType, 
     buffer.clear();
     if (!root_) return;
     buffer.nodes.emplace_back();
-    buildRenderNodeAt(root_.get(), buffer, 0);
+
+    std::unordered_map<int, std::shared_ptr<GridObject_<T, IndexType, StoragePath>>> localObjects;
+    {
+        std::shared_lock<std::shared_mutex> lock(objectsMutex_);
+        localObjects = objects_;
+    }
+
+    for (auto& kv : localObjects) {
+        buffer.objMaterialOffsets[kv.first] = buffer.materials.size();
+        std::shared_lock<std::shared_mutex> oLock(kv.second->objMutex);
+        for (auto& m : kv.second->renderMaterials) {
+            buffer.materials.push_back(m);
+        }
+    }
+    buffer.defaultMatIdx = buffer.materials.size();
+    buffer.materials.push_back(Material_<T, IndexType, StoragePath>());
+
+    buildRenderNodeAt(root_.get(), buffer, 0, localObjects);
 }
 
 template<typename T, typename IndexType, GridStoragePath StoragePath>
-void Octree<T, IndexType, StoragePath>::buildRenderNodeAt(OctreeNode_<T, IndexType, StoragePath>* node, RenderBuffer_<T, IndexType, StoragePath>& buffer, uint32_t nodeIdx) {
+void Octree<T, IndexType, StoragePath>::buildRenderNodeAt(OctreeNode_<T, IndexType, StoragePath>* node, RenderBuffer_<T, IndexType, StoragePath>& buffer, uint32_t nodeIdx, const std::unordered_map<int, std::shared_ptr<GridObject>>& localObjects) {
     std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
     bool isLoaded = node->isLoaded();
     
@@ -31,7 +48,13 @@ void Octree<T, IndexType, StoragePath>::buildRenderNodeAt(OctreeNode_<T, IndexTy
             rd.position = pt->position;
             rd.size = pt->size;
             rd.color = pt->color;
-            rd.material = pt->material;
+            
+            rd.materialIdx = buffer.defaultMatIdx;
+            auto it = buffer.objMaterialOffsets.find(pt->objectId);
+            if (it != buffer.objMaterialOffsets.end()) {
+                rd.materialIdx = it->second + pt->renderMatIdx;
+            }
+            
             BoundingBox bb = pt->getCubeBounds();
             rd.boundsMin = bb.first;
             rd.boundsMax = bb.second;
@@ -47,7 +70,13 @@ void Octree<T, IndexType, StoragePath>::buildRenderNodeAt(OctreeNode_<T, IndexTy
         ld.position = node->lodData->position;
         ld.size = node->lodData->size;
         ld.color = node->lodData->color;
-        ld.material = node->lodData->material;
+        
+        ld.materialIdx = buffer.defaultMatIdx;
+        auto it = buffer.objMaterialOffsets.find(node->lodData->objectId);
+        if (it != buffer.objMaterialOffsets.end()) {
+            ld.materialIdx = it->second + node->lodData->renderMatIdx;
+        }
+        
         BoundingBox bb = node->lodData->getCubeBounds();
         ld.boundsMin = bb.first;
         ld.boundsMax = bb.second;
@@ -75,7 +104,7 @@ void Octree<T, IndexType, StoragePath>::buildRenderNodeAt(OctreeNode_<T, IndexTy
             int cidx = 0;
             for (int i = 0; i < 8; ++i) {
                 if (mask & (1 << i)) {
-                    buildRenderNodeAt(node->children[i].get(), buffer, rnode.firstChild + cidx);
+                    buildRenderNodeAt(node->children[i].get(), buffer, rnode.firstChild + cidx, localObjects);
                     cidx++;
                 }
             }
@@ -240,7 +269,7 @@ frame Octree<T, IndexType, StoragePath>::fastRenderFrame(const Camera& cam, int 
 
                 rayCubeIntersect(ray, hit, t, normal, hitPoint);
                 color = hit->color;
-                Material_<T, IndexType, StoragePath> objMat = hit->material;
+                Material_<T, IndexType, StoragePath> objMat = shared_buffer.materials[hit->materialIdx];
                 
                 if (objMat.emittance > 0.0f) {
                     color = color * objMat.emittance;
@@ -286,6 +315,12 @@ static inline uint32_t packMaterialProps(float roughness, float metallic, float 
     return r8 | (m8 << 8) | (t8 << 16) | (i8 << 24);
 }
 
+struct PointSort {
+    uint64_t morton;
+    size_t idx;
+    bool operator<(const PointSort& o) const { return morton < o.morton; }
+};
+
 template<typename T, typename IndexType, GridStoragePath StoragePath>
 frame Octree<T, IndexType, StoragePath>::renderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat, int samplesPerPixel,
                 int maxBounces, bool globalIllumination, bool useLod) {
@@ -304,6 +339,19 @@ frame Octree<T, IndexType, StoragePath>::renderFrameVulkan(const Camera& cam, in
             (uint32_t)n.isLoaded, n.childMask, n.firstPoint, n.pointCount, n.lodPoint, n.firstChild, 0});
     }
 
+    std::vector<GPUMaterial> gpuMaterials;
+    gpuMaterials.reserve(tl_buffer.materials.size());
+    for (const auto& m : tl_buffer.materials) {
+        gpuMaterials.push_back({
+            m.emittance,
+            packMaterialProps(m.roughness, m.metallic, m.transmission, m.ior),
+            packRGB8(m.absorption),
+            0
+        });
+    }
+    if (gpuMaterials.empty()) gpuMaterials.push_back(GPUMaterial{});
+    vkCtx.updateMaterialBuffer(gpuMaterials);
+
     std::vector<bool> isLodPoint(tl_buffer.points.size(), false);
     for(const auto& n : tl_buffer.nodes) {
         if(n.lodPoint != -1) isLodPoint[n.lodPoint] = true;
@@ -317,12 +365,10 @@ frame Octree<T, IndexType, StoragePath>::renderFrameVulkan(const Camera& cam, in
         const auto& p = tl_buffer.points[i];
         
         gpuPoints.push_back({
-            p.position, p.size, packRGB8(p.color), p.material.emittance, 
-            packMaterialProps(p.material.roughness, p.material.metallic, p.material.transmission, p.material.ior),
-            packRGB8(p.material.absorption), p.objectId, 0, 0, 0
+            p.position, p.size, packRGB8(p.color), p.materialIdx, p.objectId, 0
         });
 
-        if (p.material.emittance > 0.0f) {
+        if (tl_buffer.materials[p.materialIdx].emittance > 0.0f) {
             gpuLights.push_back(gpuPoints.size() - 1);
         }
     }
@@ -358,9 +404,8 @@ frame Octree<T, IndexType, StoragePath>::renderFrameVulkan(const Camera& cam, in
         skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
         width, height, maxBounces, useLod ? 1 : 0, invFogRange, frameCounter_,
         (int)skyW, (int)skyH, 0, 0, globalIllumination ? 1 : 0, 
-        (uint32_t)gpuNodes.size(), (uint32_t)gpuPoints.size(), 0, 0, emissiveCount, 0
+        (uint32_t)gpuNodes.size(), (uint32_t)gpuPoints.size(), 0, 0, emissiveCount, samplesPerPixel
     };
-
 
     size_t outSize = width * height * 5 * sizeof(float);
     vkCtx.updateCommonBuffers(gpuNodes, outSize, camData);
@@ -452,6 +497,19 @@ frame Octree<T, IndexType, StoragePath>::fastRenderFrameVulkan(const Camera& cam
             (uint32_t)n.isLoaded, n.childMask, n.firstPoint, n.pointCount, n.lodPoint, n.firstChild, 0});
     }
     
+    std::vector<GPUMaterial> gpuMaterials;
+    gpuMaterials.reserve(tl_buffer.materials.size());
+    for (const auto& m : tl_buffer.materials) {
+        gpuMaterials.push_back({
+            m.emittance,
+            packMaterialProps(m.roughness, m.metallic, m.transmission, m.ior),
+            packRGB8(m.absorption),
+            0
+        });
+    }
+    if (gpuMaterials.empty()) gpuMaterials.push_back(GPUMaterial{});
+    vkCtx.updateMaterialBuffer(gpuMaterials);
+
     std::vector<bool> isLodPoint(tl_buffer.points.size(), false);
     for(const auto& n : tl_buffer.nodes) {
         if(n.lodPoint != -1) isLodPoint[n.lodPoint] = true;
@@ -464,9 +522,9 @@ frame Octree<T, IndexType, StoragePath>::fastRenderFrameVulkan(const Camera& cam
         if(isLodPoint[i]) continue;
         const auto& p = tl_buffer.points[i];
         
-        gpuPoints.push_back({p.position, p.size, packRGB8(p.color), p.material.emittance, p.objectId, 0});
+        gpuPoints.push_back({p.position, p.size, packRGB8(p.color), p.materialIdx, p.objectId, 0});
         
-        if (p.material.emittance > 0.0f) {
+        if (tl_buffer.materials[p.materialIdx].emittance > 0.0f) {
             gpuLights.push_back(gpuPoints.size() - 1);
         }
     }
@@ -501,7 +559,7 @@ frame Octree<T, IndexType, StoragePath>::fastRenderFrameVulkan(const Camera& cam
         cam.origin, lodMinDistance_, cam.direction.normalized(), invLodf, cam.up.normalized(), 0.1f, cam.right(), maxDistance_,
         skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
         width, height, 1, 1, invFogRange, frameCounter_++, (int)skyW, (int)skyH, 0, 1, 0, 
-        (uint32_t)gpuNodes.size(), (uint32_t)gpuPoints.size(), 0, 0, emissiveCount, 0
+        (uint32_t)gpuNodes.size(), (uint32_t)gpuPoints.size(), 0, 0, emissiveCount, 1
     };
 
     size_t outSize = width * height * 5 * sizeof(float);
@@ -571,6 +629,19 @@ frame Octree<T, IndexType, StoragePath>::blendedRenderFrameVulkan(const Camera& 
             (uint32_t)n.isLoaded, n.childMask, n.firstPoint, n.pointCount, n.lodPoint, n.firstChild, 0});
     }
     
+    std::vector<GPUMaterial> gpuMaterials;
+    gpuMaterials.reserve(tl_buffer.materials.size());
+    for (const auto& m : tl_buffer.materials) {
+        gpuMaterials.push_back({
+            m.emittance,
+            packMaterialProps(m.roughness, m.metallic, m.transmission, m.ior),
+            packRGB8(m.absorption),
+            0
+        });
+    }
+    if (gpuMaterials.empty()) gpuMaterials.push_back(GPUMaterial{});
+    vkCtx.updateMaterialBuffer(gpuMaterials);
+
     std::vector<bool> isLodPoint(tl_buffer.points.size(), false);
     for(const auto& n : tl_buffer.nodes) {
         if(n.lodPoint != -1) isLodPoint[n.lodPoint] = true;
@@ -587,15 +658,13 @@ frame Octree<T, IndexType, StoragePath>::blendedRenderFrameVulkan(const Camera& 
         const auto& p = tl_buffer.points[i];
         
         gpuPBRPoints.push_back({
-            p.position, p.size, packRGB8(p.color), p.material.emittance, 
-            packMaterialProps(p.material.roughness, p.material.metallic, p.material.transmission, p.material.ior),
-            packRGB8(p.material.absorption), p.objectId, 0, 0, 0
+            p.position, p.size, packRGB8(p.color), p.materialIdx, p.objectId, 0
         });
         gpuFastPoints.push_back({
-            p.position, p.size, packRGB8(p.color), p.material.emittance, p.objectId, 0
+            p.position, p.size, packRGB8(p.color), p.materialIdx, p.objectId, 0
         });
 
-        if (p.material.emittance > 0.0f) {
+        if (tl_buffer.materials[p.materialIdx].emittance > 0.0f) {
             gpuLights.push_back(gpuPBRPoints.size() - 1);
         }
     }
@@ -636,7 +705,7 @@ frame Octree<T, IndexType, StoragePath>::blendedRenderFrameVulkan(const Camera& 
         skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
         lowW, lowH, maxBounces, useLod ? 1 : 0, invFogRange, frameCounter_,
         (int)skyW, (int)skyH, 0, 0, globalIllumination ? 1 : 0, 
-        (uint32_t)gpuNodes.size(), (uint32_t)gpuPBRPoints.size(), 0, 0, emissiveCount, 0
+        (uint32_t)gpuNodes.size(), (uint32_t)gpuPBRPoints.size(), 0, 0, emissiveCount, samplesPerPixel
     };
 
     size_t pbrOutSize = lowW * lowH * 5 * sizeof(float);
@@ -694,7 +763,7 @@ frame Octree<T, IndexType, StoragePath>::blendedRenderFrameVulkan(const Camera& 
         cam.origin, lodMinDistance_, cam.direction.normalized(), invLodf, cam.up.normalized(), 0.1f, cam.right(), maxDistance_,
         skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
         width, height, 1, useLod ? 1 : 0, invFogRange, frameCounter_++, (int)skyW, (int)skyH, 0, 1, 0, 
-        (uint32_t)gpuNodes.size(), (uint32_t)gpuFastPoints.size(), 0, 0, emissiveCount, 0
+        (uint32_t)gpuNodes.size(), (uint32_t)gpuFastPoints.size(), 0, 0, emissiveCount, 1
     };
 
     size_t fastOutSize = width * height * 5 * sizeof(float);

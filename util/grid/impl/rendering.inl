@@ -167,7 +167,7 @@ struct alignas(16) GPUCameraData {
     int tileOffsetX;
     int tileOffsetY;
     int emissiveCount;
-    int padding2;
+    int targetSamples;
 };
 
 struct alignas(16) GPUParticle {
@@ -264,6 +264,7 @@ struct VulkanContext {
     VkBuffer lightBuffer = VK_NULL_HANDLE;
     VkBuffer finalOutBuffer = VK_NULL_HANDLE;
     VkBuffer lowResOutBuffer = VK_NULL_HANDLE;
+    VkBuffer adaptiveBuffer = VK_NULL_HANDLE;
 
     VkDeviceMemory nodeMem = VK_NULL_HANDLE;
     VkDeviceMemory outMem = VK_NULL_HANDLE;
@@ -274,6 +275,7 @@ struct VulkanContext {
     VkDeviceMemory lightMem = VK_NULL_HANDLE;
     VkDeviceMemory finalOutMem = VK_NULL_HANDLE;
     VkDeviceMemory lowResOutMem = VK_NULL_HANDLE;
+    VkDeviceMemory adaptiveMem = VK_NULL_HANDLE;
 
     size_t currentNodesCap = 0;
     size_t currentOutCap = 0;
@@ -283,6 +285,7 @@ struct VulkanContext {
     size_t currentLightCap = 0;
     size_t currentFinalOutCap = 0;
     size_t currentLowResOutCap = 0;
+    size_t currentAdaptiveCap = 0;
 
     bool initialized = false;
     bool hasHardwareRT = false;
@@ -366,7 +369,7 @@ struct VulkanContext {
         vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
         std::vector<VkPhysicalDevice> devices(deviceCount);
         vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data());
-        physicalDevice = devices[0]; //need to set a flag for this at some point.
+        physicalDevice = devices[1]; //need to set a flag for this at some point.
 
         uint32_t queueFamilyCount = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
@@ -465,7 +468,7 @@ struct VulkanContext {
         vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
 
         VkDescriptorPoolSize poolSizes[] = { 
-            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 30},
+            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 40},
             {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4},
             {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 4}
         };
@@ -475,8 +478,8 @@ struct VulkanContext {
         poolCreateInfo.maxSets = 6;
         vkCreateDescriptorPool(device, &poolCreateInfo, nullptr, &descriptorPool);
 
-        uint32_t bindingCount = hasHardwareRT ? 7 : 6;
-        VkDescriptorSetLayoutBinding bindings[7] = {};
+        uint32_t bindingCount = hasHardwareRT ? 8 : 6;
+        VkDescriptorSetLayoutBinding bindings[8] = {};
         for(int i=0; i<6; i++) {
             bindings[i].binding = i;
             bindings[i].descriptorType = i==3 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -488,6 +491,11 @@ struct VulkanContext {
             bindings[6].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
             bindings[6].descriptorCount = 1;
             bindings[6].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+            
+            bindings[7].binding = 7;
+            bindings[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            bindings[7].descriptorCount = 1;
+            bindings[7].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         }
 
         VkDescriptorSetLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
@@ -1111,7 +1119,17 @@ struct VulkanContext {
             currentOutCap = outSize;
         }
 
-        // uboBuffer remains HOST_VISIBLE because it's tiny and mapped constantly per-tile
+        size_t adaptiveSize = outSize; 
+        if(adaptiveSize > currentAdaptiveCap) {
+            if(adaptiveBuffer) {
+                vkDestroyBuffer(device, adaptiveBuffer, nullptr);
+                vkFreeMemory(device, adaptiveMem, nullptr);
+            }
+            createBuffer(adaptiveSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, 
+                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, adaptiveBuffer, adaptiveMem);
+            currentAdaptiveCap = adaptiveSize;
+        }
+
         size_t uboSize = sizeof(GPUCameraData);
         if(!uboBuffer) {
             createBuffer(uboSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, 
@@ -1149,24 +1167,26 @@ struct VulkanContext {
 
         if (hasHardwareRT) buildHardwareAccelerationStructures(points);
 
-        VkDescriptorBufferInfo bInfos[6] = { 
+        VkDescriptorBufferInfo bInfos[7] = { 
             {nodeBuffer, 0, VK_WHOLE_SIZE}, 
             {fastPointBuffer, 0, VK_WHOLE_SIZE}, 
             {outBuffer, 0, VK_WHOLE_SIZE}, 
             {uboBuffer, 0, VK_WHOLE_SIZE},
             {skyboxBuffer, 0, VK_WHOLE_SIZE},
-            {lightBuffer, 0, VK_WHOLE_SIZE}
+            {lightBuffer, 0, VK_WHOLE_SIZE},
+            {adaptiveBuffer, 0, VK_WHOLE_SIZE}
         };
-        VkWriteDescriptorSet writes[6] = {};
-        for(int i=0; i<6; i++) {
+        int updateCount = hasHardwareRT ? 7 : 6;
+        VkWriteDescriptorSet writes[7] = {};
+        for(int i=0; i<updateCount; i++) {
             writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[i].dstSet = fastDescSet;
-            writes[i].dstBinding = i;
+            writes[i].dstBinding = (i == 6) ? 7 : i;
             writes[i].descriptorCount = 1;
-            writes[i].descriptorType = i==3 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[i].descriptorType = (i==3) ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             writes[i].pBufferInfo = &bInfos[i];
         }
-        vkUpdateDescriptorSets(device, 6, writes, 0, nullptr);
+        vkUpdateDescriptorSets(device, updateCount, writes, 0, nullptr);
     }
 
     void updatePBRBuffers(const std::vector<GPUPBRRenderData>& points) {
@@ -1179,24 +1199,26 @@ struct VulkanContext {
 
         if (hasHardwareRT) buildHardwareAccelerationStructures(points);
 
-        VkDescriptorBufferInfo bInfos[6] = { 
+        VkDescriptorBufferInfo bInfos[7] = { 
             {nodeBuffer, 0, VK_WHOLE_SIZE}, 
             {pbrPointBuffer, 0, VK_WHOLE_SIZE}, 
             {outBuffer, 0, VK_WHOLE_SIZE}, 
             {uboBuffer, 0, VK_WHOLE_SIZE},
             {skyboxBuffer, 0, VK_WHOLE_SIZE},
-            {lightBuffer, 0, VK_WHOLE_SIZE}
+            {lightBuffer, 0, VK_WHOLE_SIZE},
+            {adaptiveBuffer, 0, VK_WHOLE_SIZE}
         };
-        VkWriteDescriptorSet writes[6] = {};
-        for(int i=0; i<6; i++) {
+        int updateCount = hasHardwareRT ? 7 : 6;
+        VkWriteDescriptorSet writes[7] = {};
+        for(int i=0; i<updateCount; i++) {
             writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[i].dstSet = pbrDescSet;
-            writes[i].dstBinding = i;
+            writes[i].dstBinding = (i == 6) ? 7 : i; 
             writes[i].descriptorCount = 1;
-            writes[i].descriptorType = i==3 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[i].descriptorType = (i==3) ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             writes[i].pBufferInfo = &bInfos[i];
         }
-        vkUpdateDescriptorSets(device, 6, writes, 0, nullptr);
+        vkUpdateDescriptorSets(device, updateCount, writes, 0, nullptr);
     }
 
     void ensureLowResBuffer(size_t size) {

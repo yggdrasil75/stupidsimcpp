@@ -44,6 +44,36 @@ enum class BodyType : uint8_t {
     GAS = 5
 };
 
+static inline uint32_t packRGB9E5(const Eigen::Vector3f& c) {
+    float rc = std::max(0.0f, c.x());
+    float gc = std::max(0.0f, c.y());
+    float bc = std::max(0.0f, c.z());
+    float max_c = std::max({rc, gc, bc});
+    if (max_c <= 0.0f) return 0;
+
+    int exp_val;
+    std::frexp(max_c, &exp_val);
+    exp_val = std::max(-15, std::min(16, exp_val));
+    float scale = std::pow(2.0f, -(exp_val - 9));
+    
+    uint32_t r = static_cast<uint32_t>(std::clamp(rc * scale, 0.0f, 511.0f));
+    uint32_t g = static_cast<uint32_t>(std::clamp(gc * scale, 0.0f, 511.0f));
+    uint32_t b = static_cast<uint32_t>(std::clamp(bc * scale, 0.0f, 511.0f));
+    uint32_t e = static_cast<uint32_t>(exp_val + 15);
+    
+    return r | (g << 9) | (b << 18) | (e << 27);
+}
+
+static inline Eigen::Vector3f unpackRGB9E5(uint32_t c) {
+    if (c == 0) return Eigen::Vector3f::Zero();
+    int e = static_cast<int>(c >> 27) - 15;
+    float scale = std::pow(2.0f, static_cast<float>(e - 9));
+    float r = static_cast<float>(c & 0x1FF) * scale;
+    float g = static_cast<float>((c >> 9) & 0x1FF) * scale;
+    float b = static_cast<float>((c >> 18) & 0x1FF) * scale;
+    return Eigen::Vector3f(r, g, b);
+}
+
 template<typename T, typename IndexType = uint16_t, GridStoragePath StoragePath = ".">
 struct PhysicsState_ {
     Eigen::Vector3f velocity{0.0f, 0.0f, 0.0f};
