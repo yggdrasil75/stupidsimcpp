@@ -27,6 +27,16 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
 
     if (dynamicNodes.empty()) return;
 
+    std::unordered_map<int, std::shared_ptr<GridObject_<T, IndexType, StoragePath>>> localObjects;
+    {
+        std::shared_lock<std::shared_mutex> lock(objectsMutex_);
+        localObjects = objects_;
+    }
+    auto getObj = [&](int id) -> std::shared_ptr<GridObject_<T, IndexType, StoragePath>> {
+        auto it = localObjects.find(id);
+        return it != localObjects.end() ? it->second : nullptr;
+    };
+
 #ifdef VULKAN_SUPPORT
     if (vkCtx.hasHardwareRT && physicsCollidersDirty_) {
         std::vector<std::pair<PointType, float>> statics;
@@ -51,13 +61,16 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
     std::vector<GPUParticle> gpuParticles(dynamicNodes.size());
     for (size_t i = 0; i < dynamicNodes.size(); ++i) {
         auto& node = dynamicNodes[i];
-        gpuParticles[i].pos_mass = Eigen::Vector4f(node->position.x(), node->position.y(), node->position.z(), node->physics.mass);
+        auto obj = getObj(node->objectId);
+        PhysicsMaterial_ pmat = obj ? obj->getPhysicsMaterial(node->physMatIdx) : PhysicsMaterial_();
+
+        gpuParticles[i].pos_mass = Eigen::Vector4f(node->position.x(), node->position.y(), node->position.z(), pmat.mass);
         gpuParticles[i].vel_density = Eigen::Vector4f(node->physics.velocity.x(), node->physics.velocity.y(), node->physics.velocity.z(), node->physics.density);
         gpuParticles[i].force_press = Eigen::Vector4f(0.0f, 0.0f, 0.0f, node->physics.pressure);
         
         int sizeInt;
         std::memcpy(&sizeInt, &node->size, sizeof(float));
-        gpuParticles[i].type_pad = Eigen::Vector4i(static_cast<int>(node->physics.type), sizeInt, 0, 0);
+        gpuParticles[i].type_pad = Eigen::Vector4i(static_cast<int>(pmat.type), sizeInt, 0, 0);
     }
 
     SPHDensityPC dpc{};
@@ -96,6 +109,8 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
 
     for (size_t i = 0; i < dynamicNodes.size(); ++i) {
         auto& node = dynamicNodes[i];
+        auto obj = getObj(node->objectId);
+        PhysicsMaterial_ pmat = obj ? obj->getPhysicsMaterial(node->physMatIdx) : PhysicsMaterial_();
         
         // If Vulkan RT did the integration, we copy the final pos/vel and queue the octree moves
         if (vkCtx.hasHardwareRT) {
@@ -122,10 +137,10 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
             node->physics.pressure = gpuParticles[i].force_press.w();
             node->physics.force = Eigen::Vector3f(gpuParticles[i].force_press.x(), gpuParticles[i].force_press.y(), gpuParticles[i].force_press.z());
             
-            if (node->physics.type == BodyType::KINEMATIC) continue;
+            if (pmat.type == BodyType::KINEMATIC) continue;
             if (!node->physics.force.allFinite()) node->physics.force.setZero();
 
-            Eigen::Vector3f acceleration = node->physics.force / node->physics.mass;
+            Eigen::Vector3f acceleration = node->physics.force / pmat.mass;
             float maxAccel = 50000.0f;
             if (acceleration.squaredNorm() > maxAccel * maxAccel) {
                 acceleration = acceleration.normalized() * maxAccel;
@@ -191,13 +206,23 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
 
     for (size_t i = 0; i < dynamicNodes.size(); ++i) {
         auto& node = dynamicNodes[i];
-        if (node->physics.type == BodyType::GAS && node->size > 0.03f) {
+        auto obj = getObj(node->objectId);
+        PhysicsMaterial_ pmat = obj ? obj->getPhysicsMaterial(node->physMatIdx) : PhysicsMaterial_();
+
+        if (pmat.type == BodyType::GAS && node->size > 0.03f) {
             if (splitChance(rng) < 0.02f) {
                 gasToRemove.push_back(node);
                 
                 float newSize = node->size * 0.5f;
-                float newMass = node->physics.mass * 0.125f;
-                float newTrans = std::min(0.95f, node->material.transmission + 0.35f); 
+                float newMass = pmat.mass * 0.125f;
+                
+                Material_ rmat = obj ? obj->getRenderMaterial(node->renderMatIdx) : Material_<T, IndexType, StoragePath>();
+                rmat.transmission = std::min(0.95f, rmat.transmission + 0.35f); 
+                PhysicsMaterial_ cpmat = pmat;
+                cpmat.mass = newMass;
+
+                uint16_t childRidx = obj ? obj->getOrAddRenderMaterial(rmat) : 0;
+                uint16_t childPidx = obj ? obj->getOrAddPhysicsMaterial(cpmat) : 0;
                 
                 for (int dx = -1; dx <= 1; dx += 2) {
                     for (int dy = -1; dy <= 1; dy += 2) {
@@ -208,8 +233,8 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
                             
                             child->position = node->position + offset;
                             child->size = newSize;
-                            child->physics.mass = newMass;
-                            child->material.transmission = newTrans;
+                            child->renderMatIdx = childRidx;
+                            child->physMatIdx = childPidx;
                             child->physics.velocity += offset.normalized() * 4.0f;
                             
                             gasToAdd.push_back(child);
@@ -240,8 +265,10 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
     std::vector<size_t> neighborOffsets(dynamicNodes.size() + 1, 0);
     for (size_t i = 0; i < dynamicNodes.size(); ++i) {
         auto& node = dynamicNodes[i];
+        auto obj = getObj(node->objectId);
+        PhysicsMaterial_ pmat = obj ? obj->getPhysicsMaterial(node->physMatIdx) : PhysicsMaterial_();
         
-        if (node->physics.type == BodyType::FLUID || node->physics.type == BodyType::GAS || node->physics.type == BodyType::RIGID) {
+        if (pmat.type == BodyType::FLUID || pmat.type == BodyType::GAS || pmat.type == BodyType::RIGID) {
             node->physics.density = 0.0f;
             size_t startOffset = allNeighbors.size();
             searchNode(root_.get(), node->position, phys_h2, -1, allNeighbors);
@@ -250,10 +277,13 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
 
             for (size_t j = startOffset; j < endOffset; ++j) {
                 auto& neighbor = allNeighbors[j];
-                if (neighbor->physics.type != BodyType::FLUID && neighbor->physics.type != BodyType::GAS && neighbor->physics.type != BodyType::RIGID) continue;
+                auto nObj = getObj(neighbor->objectId);
+                PhysicsMaterial_ nPmat = nObj ? nObj->getPhysicsMaterial(neighbor->physMatIdx) : PhysicsMaterial_();
+
+                if (nPmat.type != BodyType::FLUID && nPmat.type != BodyType::GAS && nPmat.type != BodyType::RIGID) continue;
 
                 float r = (node->position - neighbor->position).norm();
-                node->physics.density += neighbor->physics.mass * kernels_.Poly6(r);
+                node->physics.density += nPmat.mass * kernels_.Poly6(r);
             }
 
             if (node->physics.density < 0.001f) node->physics.density = 0.001f;
@@ -261,7 +291,7 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
             float maxDensity = phys_restDensity * 3.0f;
             float clampedDensity = std::min(node->physics.density, maxDensity);
 
-            if (node->physics.type == BodyType::GAS) {
+            if (pmat.type == BodyType::GAS) {
                 node->physics.pressure = phys_gasConstant * clampedDensity;
             } else {
                 node->physics.pressure = phys_gasConstant * (clampedDensity - phys_restDensity);
@@ -273,6 +303,8 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
 
     for (size_t i = 0; i < dynamicNodes.size(); ++i) {
         auto& node = dynamicNodes[i];
+        auto obj = getObj(node->objectId);
+        PhysicsMaterial_ pmat = obj ? obj->getPhysicsMaterial(node->physMatIdx) : PhysicsMaterial_();
 
         Eigen::Vector3f gravityDir = Eigen::Vector3f::Zero();
         if (phys_useGravityPoint) {
@@ -285,15 +317,15 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
             gravityDir = phys_gravity;
         }
 
-        node->physics.force = gravityDir * node->physics.mass;
+        node->physics.force = gravityDir * pmat.mass;
 
-        if (node->physics.type == BodyType::GAS) {
+        if (pmat.type == BodyType::GAS) {
             float volume = node->size * node->size * node->size;
             Eigen::Vector3f buoyancy = -gravityDir * (phys_airDensity * volume);
             node->physics.force += buoyancy;
         }
 
-        if (node->physics.type == BodyType::FLUID || node->physics.type == BodyType::GAS || node->physics.type == BodyType::RIGID) {
+        if (pmat.type == BodyType::FLUID || pmat.type == BodyType::GAS || pmat.type == BodyType::RIGID) {
             Eigen::Vector3f fPress = Eigen::Vector3f::Zero();
             Eigen::Vector3f fVisc = Eigen::Vector3f::Zero();
 
@@ -303,7 +335,11 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
             for (size_t j = startOffset; j < endOffset; ++j) {
                 auto& neighbor = allNeighbors[j];
                 if (neighbor == node) continue;
-                if (neighbor->physics.type != BodyType::FLUID && neighbor->physics.type != BodyType::GAS && neighbor->physics.type != BodyType::RIGID) continue;
+                
+                auto nObj = getObj(neighbor->objectId);
+                PhysicsMaterial_ nPmat = nObj ? nObj->getPhysicsMaterial(neighbor->physMatIdx) : PhysicsMaterial_();
+
+                if (nPmat.type != BodyType::FLUID && nPmat.type != BodyType::GAS && nPmat.type != BodyType::RIGID) continue;
 
                 PointType diff = node->position - neighbor->position;
                 float r = diff.norm();
@@ -314,11 +350,11 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
                                          (neighbor->physics.pressure / (neighbor->physics.density * neighbor->physics.density));
                     
                     float sizeFactor = node->size * neighbor->size;
-                    float massFactor = node->physics.mass * neighbor->physics.mass;
+                    float massFactor = pmat.mass * nPmat.mass;
 
                     fPress += -dir * massFactor * pressureTerm * kernels_.SpikyGrad(r) * sizeFactor;
 
-                    float viscFactor = (node->physics.type == BodyType::RIGID && neighbor->physics.type == BodyType::RIGID) ? 20.0f : 1.0f;
+                    float viscFactor = (pmat.type == BodyType::RIGID && nPmat.type == BodyType::RIGID) ? 20.0f : 1.0f;
 
                     fVisc += viscFactor * phys_viscosity * massFactor * 
                              (neighbor->physics.velocity - node->physics.velocity) / neighbor->physics.density * 

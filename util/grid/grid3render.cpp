@@ -324,7 +324,7 @@ struct PointSort {
 template<typename T, typename IndexType, GridStoragePath StoragePath>
 frame Octree<T, IndexType, StoragePath>::renderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat, int samplesPerPixel,
                 int maxBounces, bool globalIllumination, bool useLod) {
-    TIME_FUNCTION;
+    // TIME_FUNCTION;
     updateStreaming(cam);
     optimize();
     thread_local RenderBuffer tl_buffer;
@@ -357,12 +357,49 @@ frame Octree<T, IndexType, StoragePath>::renderFrameVulkan(const Camera& cam, in
         if(n.lodPoint != -1) isLodPoint[n.lodPoint] = true;
     }
 
-    std::vector<GPUPBRRenderData> gpuPoints;
-    std::vector<uint32_t> gpuLights;
-    gpuPoints.reserve(tl_buffer.points.size());
+    Eigen::Vector3f globalMin = Eigen::Vector3f::Constant(std::numeric_limits<float>::max());
+    Eigen::Vector3f globalMax = Eigen::Vector3f::Constant(std::numeric_limits<float>::lowest());
+    
+    std::vector<size_t> validIndices;
+    validIndices.reserve(tl_buffer.points.size());
     for(size_t i = 0; i < tl_buffer.points.size(); ++i) {
         if(isLodPoint[i]) continue;
-        const auto& p = tl_buffer.points[i];
+        validIndices.push_back(i);
+        globalMin = globalMin.cwiseMin(tl_buffer.points[i].position);
+        globalMax = globalMax.cwiseMax(tl_buffer.points[i].position);
+    }
+    
+    Eigen::Vector3f extent = globalMax - globalMin;
+    if (extent.x() <= 0.0f) extent.x() = 1.0f;
+    if (extent.y() <= 0.0f) extent.y() = 1.0f;
+    if (extent.z() <= 0.0f) extent.z() = 1.0f;
+    Eigen::Vector3f invExtent = extent.cwiseInverse();
+
+    std::vector<PointSort> sortedPoints;
+    sortedPoints.reserve(validIndices.size());
+    for(size_t idx : validIndices) {
+        Eigen::Vector3f normPos = (tl_buffer.points[idx].position - globalMin).cwiseProduct(invExtent);
+        uint32_t x = std::min(std::max(normPos.x() * 2097151.0f, 0.0f), 2097151.0f);
+        uint32_t y = std::min(std::max(normPos.y() * 2097151.0f, 0.0f), 2097151.0f);
+        uint32_t z = std::min(std::max(normPos.z() * 2097151.0f, 0.0f), 2097151.0f);
+        
+        uint64_t m = 0;
+        for (int i = 0; i < 21; ++i) {
+            m |= ((uint64_t)((x >> i) & 1) << (3 * i)) |
+                 ((uint64_t)((y >> i) & 1) << (3 * i + 1)) |
+                 ((uint64_t)((z >> i) & 1) << (3 * i + 2));
+        }
+        sortedPoints.push_back({m, idx});
+    }
+    
+    std::sort(sortedPoints.begin(), sortedPoints.end());
+
+    std::vector<GPUPBRRenderData> gpuPoints;
+    std::vector<uint32_t> gpuLights;
+    gpuPoints.reserve(sortedPoints.size());
+    
+    for(const auto& sp : sortedPoints) {
+        const auto& p = tl_buffer.points[sp.idx];
         
         gpuPoints.push_back({
             p.position, p.size, packRGB8(p.color), p.materialIdx, p.objectId, 0
@@ -484,7 +521,7 @@ template<typename T, typename IndexType, GridStoragePath StoragePath>
 frame Octree<T, IndexType, StoragePath>::fastRenderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat) {
     // TIME_FUNCTION;
     updateStreaming(cam);
-    optimize();
+    // optimize();
     thread_local RenderBuffer tl_buffer;
     buildRender(tl_buffer);
     
@@ -614,7 +651,7 @@ frame Octree<T, IndexType, StoragePath>::fastRenderFrameVulkan(const Camera& cam
 template<typename T, typename IndexType, GridStoragePath StoragePath>
 frame Octree<T, IndexType, StoragePath>::blendedRenderFrameVulkan(const Camera& cam, int height, int width, float pbrScale,
                 frame::colormap colorformat, int samplesPerPixel, int maxBounces, bool globalIllumination, bool useLod) {
-    TIME_FUNCTION;
+    // TIME_FUNCTION;
     updateStreaming(cam);
     optimize();
     thread_local RenderBuffer tl_buffer;
@@ -647,15 +684,51 @@ frame Octree<T, IndexType, StoragePath>::blendedRenderFrameVulkan(const Camera& 
         if(n.lodPoint != -1) isLodPoint[n.lodPoint] = true;
     }
 
-    std::vector<GPUPBRRenderData> gpuPBRPoints;
-    gpuPBRPoints.reserve(tl_buffer.points.size());
-    std::vector<GPUFastRenderData> gpuFastPoints;
-    gpuFastPoints.reserve(tl_buffer.points.size());
-    std::vector<uint32_t> gpuLights;
-
+    Eigen::Vector3f globalMin = Eigen::Vector3f::Constant(std::numeric_limits<float>::max());
+    Eigen::Vector3f globalMax = Eigen::Vector3f::Constant(std::numeric_limits<float>::lowest());
+    
+    std::vector<size_t> validIndices;
+    validIndices.reserve(tl_buffer.points.size());
     for(size_t i = 0; i < tl_buffer.points.size(); ++i) {
         if(isLodPoint[i]) continue;
-        const auto& p = tl_buffer.points[i];
+        validIndices.push_back(i);
+        globalMin = globalMin.cwiseMin(tl_buffer.points[i].position);
+        globalMax = globalMax.cwiseMax(tl_buffer.points[i].position);
+    }
+    
+    Eigen::Vector3f extent = globalMax - globalMin;
+    if (extent.x() <= 0.0f) extent.x() = 1.0f;
+    if (extent.y() <= 0.0f) extent.y() = 1.0f;
+    if (extent.z() <= 0.0f) extent.z() = 1.0f;
+    Eigen::Vector3f invExtent = extent.cwiseInverse();
+
+    std::vector<PointSort> sortedPoints;
+    sortedPoints.reserve(validIndices.size());
+    for(size_t idx : validIndices) {
+        Eigen::Vector3f normPos = (tl_buffer.points[idx].position - globalMin).cwiseProduct(invExtent);
+        uint32_t x = std::min(std::max(normPos.x() * 2097151.0f, 0.0f), 2097151.0f);
+        uint32_t y = std::min(std::max(normPos.y() * 2097151.0f, 0.0f), 2097151.0f);
+        uint32_t z = std::min(std::max(normPos.z() * 2097151.0f, 0.0f), 2097151.0f);
+        
+        uint64_t m = 0;
+        for (int i = 0; i < 21; ++i) {
+            m |= ((uint64_t)((x >> i) & 1) << (3 * i)) |
+                 ((uint64_t)((y >> i) & 1) << (3 * i + 1)) |
+                 ((uint64_t)((z >> i) & 1) << (3 * i + 2));
+        }
+        sortedPoints.push_back({m, idx});
+    }
+    
+    std::sort(sortedPoints.begin(), sortedPoints.end());
+
+    std::vector<GPUPBRRenderData> gpuPBRPoints;
+    gpuPBRPoints.reserve(sortedPoints.size());
+    std::vector<GPUFastRenderData> gpuFastPoints;
+    gpuFastPoints.reserve(sortedPoints.size());
+    std::vector<uint32_t> gpuLights;
+
+    for(const auto& sp : sortedPoints) {
+        const auto& p = tl_buffer.points[sp.idx];
         
         gpuPBRPoints.push_back({
             p.position, p.size, packRGB8(p.color), p.materialIdx, p.objectId, 0

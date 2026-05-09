@@ -3,6 +3,9 @@
 #include <sstream>
 #include <cmath>
 #include <algorithm>
+#include <vector>
+#include <mutex>
+#include <shared_mutex>
 
 namespace Grid{
 
@@ -78,10 +81,8 @@ template<typename T, typename IndexType = uint16_t, GridStoragePath StoragePath 
 struct PhysicsState_ {
     Eigen::Vector3f velocity{0.0f, 0.0f, 0.0f};
     Eigen::Vector3f force{0.0f, 0.0f, 0.0f};
-    float mass = 1.0f;
     float density = 1.0f;
     float pressure = 0.0f;
-    BodyType type = BodyType::STATIC;
 };
 
 struct SPHKernels {
@@ -265,12 +266,79 @@ struct Material_ {
     Material_(float e = 0.0f, float r = 1.0f, float m = 0.0f, float t = 0.0f, float i = 1.45f, Eigen::Vector3f a = Eigen::Vector3f::Zero())
         : emittance(e), roughness(r), metallic(m), transmission(t), ior(i), absorption(a) {}
 
+    bool operator==(const Material_& o) const {
+        return emittance == o.emittance && roughness == o.roughness &&
+               metallic == o.metallic && transmission == o.transmission &&
+               ior == o.ior && absorption == o.absorption;
+    }
+    
     bool operator<(const Material_& o) const {
         if (emittance != o.emittance) return emittance < o.emittance;
         if (roughness != o.roughness) return roughness < o.roughness;
         if (metallic != o.metallic) return metallic < o.metallic;
         if (transmission != o.transmission) return transmission < o.transmission;
         return ior < o.ior;
+    }
+};
+
+struct PhysicsMaterial_ {
+    BodyType type = BodyType::STATIC;
+    float mass = 1.0f;
+    
+    bool operator==(const PhysicsMaterial_& o) const {
+        return type == o.type && mass == o.mass;
+    }
+};
+
+template<typename T, typename IndexType = uint16_t, GridStoragePath StoragePath = ".">
+struct GridObject_ {
+    int id;
+    bool allowPartialUnload = true;
+    PointType centerPosition = PointType::Zero();
+
+    std::vector<Material_<T, IndexType, StoragePath>> renderMaterials;
+    std::vector<PhysicsMaterial_> physicsMaterials;
+
+    struct VoxelRel {
+        PointType relPos;
+        uint16_t renderMatIdx;
+        uint16_t physMatIdx;
+        float size;
+    };
+    std::vector<VoxelRel> relativeVoxels;
+
+    mutable std::shared_mutex objMutex;
+
+    GridObject_(int objId = -1) : id(objId) {}
+
+    uint16_t getOrAddRenderMaterial(const Material_<T, IndexType, StoragePath>& mat) {
+        std::unique_lock<std::shared_mutex> lock(objMutex);
+        for (size_t i = 0; i < renderMaterials.size(); ++i) {
+            if (renderMaterials[i] == mat) return static_cast<uint16_t>(i);
+        }
+        renderMaterials.push_back(mat);
+        return static_cast<uint16_t>(renderMaterials.size() - 1);
+    }
+
+    uint16_t getOrAddPhysicsMaterial(const PhysicsMaterial_& pmat) {
+        std::unique_lock<std::shared_mutex> lock(objMutex);
+        for (size_t i = 0; i < physicsMaterials.size(); ++i) {
+            if (physicsMaterials[i] == pmat) return static_cast<uint16_t>(i);
+        }
+        physicsMaterials.push_back(pmat);
+        return static_cast<uint16_t>(physicsMaterials.size() - 1);
+    }
+    
+    Material_<T, IndexType, StoragePath> getRenderMaterial(uint16_t idx) const {
+        std::shared_lock<std::shared_mutex> lock(objMutex);
+        if (idx < renderMaterials.size()) return renderMaterials[idx];
+        return Material_<T, IndexType, StoragePath>();
+    }
+    
+    PhysicsMaterial_ getPhysicsMaterial(uint16_t idx) const {
+        std::shared_lock<std::shared_mutex> lock(objMutex);
+        if (idx < physicsMaterials.size()) return physicsMaterials[idx];
+        return PhysicsMaterial_();
     }
 };
 
@@ -281,27 +349,24 @@ struct NodeData_ {
     int objectId;
     float size;
     Eigen::Vector3f color;
-    Material_<T, IndexType, StoragePath> material;
+    uint16_t renderMatIdx;
+    uint16_t physMatIdx;
     std::atomic<uint8_t> flags;
     PhysicsState_<T, IndexType, StoragePath> physics;
 
     NodeData_(const T& data, const PointType& pos, bool visible, const Eigen::Vector3f& color, float size = 0.01f,
-                bool active = true, int objectId = -1, const Material_<T, IndexType, StoragePath>& material = Material_<T, IndexType, StoragePath>(), bool staticbit = 0, BodyType bodyType = BodyType::STATIC) 
+                bool active = true, int objectId = -1, uint16_t rIdx = 0, uint16_t pIdx = 0, bool staticbit = 0) 
             : data(data), position(pos), objectId(objectId), size(size), 
-                color(color), material(material), flags(0) {
+                color(color), renderMatIdx(rIdx), physMatIdx(pIdx), flags(0) {
         setActive(active);
         setVisible(visible);
         setStatic(staticbit);
-        physics.type = bodyType;
-        if (staticbit) physics.type = BodyType::STATIC;
     }
     
-    NodeData_() : objectId(-1), size(0.0f), color(Eigen::Vector3f::Zero()), material(), flags(0) {
-        physics.type = BodyType::STATIC;
-    }
+    NodeData_() : objectId(-1), size(0.0f), color(Eigen::Vector3f::Zero()), renderMatIdx(0), physMatIdx(0), flags(0) {}
 
     NodeData_(const NodeData_& other) : data(other.data), position(other.position), objectId(other.objectId), size(other.size),
-            color(other.color), material(other.material), flags(other.flags.load(std::memory_order_relaxed)), physics(other.physics) {}
+            color(other.color), renderMatIdx(other.renderMatIdx), physMatIdx(other.physMatIdx), flags(other.flags.load(std::memory_order_relaxed)), physics(other.physics) {}
 
     NodeData_& operator=(const NodeData_& other) {
         if (this != &other) {
@@ -310,7 +375,8 @@ struct NodeData_ {
             objectId = other.objectId;
             size = other.size;
             color = other.color;
-            material = other.material;
+            renderMatIdx = other.renderMatIdx;
+            physMatIdx = other.physMatIdx;
             physics = other.physics;
             flags.store(other.flags.load(std::memory_order_relaxed), std::memory_order_relaxed);
         }
@@ -584,7 +650,8 @@ struct OctreeNode_ {
             writeVal(out, pt->flags.load(std::memory_order_relaxed));
             writeVal(out, pt->size);
             writeVec3(out, pt->color);
-            writeVal(out, pt->material);
+            writeVal(out, pt->renderMatIdx);
+            writeVal(out, pt->physMatIdx);
         }
 
         if (!isLeaf()) {
@@ -615,7 +682,8 @@ struct OctreeNode_ {
             pt->flags.store(f, std::memory_order_relaxed);
             readVal(in, pt->size);
             readVec3(in, pt->color);
-            readVal(in, pt->material);
+            readVal(in, pt->renderMatIdx);
+            readVal(in, pt->physMatIdx);
             points.push_back(pt);
         }
 
@@ -702,7 +770,8 @@ struct OctreeNode_ {
             writeVal(out, pt->flags.load(std::memory_order_relaxed));
             writeVal(out, pt->size);
             writeVec3(out, pt->color);
-            writeVal(out, pt->material);
+            writeVal(out, pt->renderMatIdx);
+            writeVal(out, pt->physMatIdx);
         }
 
         if (!isLeaf()) {
@@ -743,7 +812,8 @@ struct OctreeNode_ {
             pt->flags.store(f, std::memory_order_relaxed);
             readVal(in, pt->size);
             readVec3(in, pt->color);
-            readVal(in, pt->material);
+            readVal(in, pt->renderMatIdx);
+            readVal(in, pt->physMatIdx);
             points.push_back(pt);
         }
 

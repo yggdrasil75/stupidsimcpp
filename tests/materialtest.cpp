@@ -165,8 +165,8 @@ int main() {
     const int samples = 100;
     const int blendedsamples = 100;
     const float blendedfactor = 0.5;
-    const int videosamples = 512;
-    const int bounces = 8;
+    const int videosamples = 256;
+    const int bounces = 4;
     const int physicsSubsteps = 10;
     const float physicsDt = 1.0f / fps;
     const float subDt = physicsDt / physicsSubsteps;
@@ -259,7 +259,7 @@ int main() {
         std::cout << "\nAnimating segment: " << startView.name << " -> " << endView.name << std::endl;
 
         for (int j = 0; j < framesPerSegment; ++j) {
-            if (frameCounter < 1436) {
+            if (frameCounter < -1) {
                 frameCounter++;
                 continue;
             }
@@ -284,6 +284,7 @@ int main() {
             BMPWriter::saveBMP(debugFilename, out);
         }
     }
+    FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
 
     // std::cout << "\nAll frames rendered. Saving video file..." << std::endl;
     // std::string videoFilename = "output/material_test_video.y4m";

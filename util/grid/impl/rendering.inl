@@ -10,7 +10,7 @@ struct RenderData_ {
     PointType position;
     float size;
     Eigen::Vector3f color;
-    Material_<T, IndexType, StoragePath> material;
+    uint32_t materialIdx;
     PointType boundsMin;
     PointType boundsMax;
     int objectId;
@@ -38,10 +38,15 @@ template<typename T, typename IndexType, GridStoragePath StoragePath>
 struct RenderBuffer_ {
     std::vector<RenderNode_<T, IndexType, StoragePath>> nodes;
     std::vector<RenderData_<T, IndexType, StoragePath>> points;
+    std::vector<Material_<T, IndexType, StoragePath>> materials;
+    std::unordered_map<int, uint32_t> objMaterialOffsets;
+    uint32_t defaultMatIdx;
     
     void clear() {
         nodes.clear();
         points.clear();
+        materials.clear();
+        objMaterialOffsets.clear();
     }
 };
 
@@ -116,11 +121,18 @@ struct alignas(16) GPURenderNode {
     uint32_t padding3;
 };
 
+struct alignas(16) GPUMaterial {
+    float emittance;
+    uint32_t materialProps;
+    uint32_t absorption;
+    uint32_t padding;
+};
+
 struct alignas(16) GPUFastRenderData {
     Eigen::Vector3f position;
     float size;
     uint32_t color;
-    float emittance;
+    uint32_t materialIdx;
     int objectId;
     uint32_t padding2;
 };
@@ -129,13 +141,9 @@ struct alignas(16) GPUPBRRenderData {
     Eigen::Vector3f position;
     float size;
     uint32_t color;
-    float emittance;
-    uint32_t materialProps;
-    uint32_t absorption;
+    uint32_t materialIdx;
     int objectId;
     uint32_t padding1;
-    uint32_t padding2;
-    uint32_t padding3;
 };
 
 struct alignas(16) GPUCameraData {
@@ -265,6 +273,7 @@ struct VulkanContext {
     VkBuffer finalOutBuffer = VK_NULL_HANDLE;
     VkBuffer lowResOutBuffer = VK_NULL_HANDLE;
     VkBuffer adaptiveBuffer = VK_NULL_HANDLE;
+    VkBuffer materialBuffer = VK_NULL_HANDLE;
 
     VkDeviceMemory nodeMem = VK_NULL_HANDLE;
     VkDeviceMemory outMem = VK_NULL_HANDLE;
@@ -276,6 +285,7 @@ struct VulkanContext {
     VkDeviceMemory finalOutMem = VK_NULL_HANDLE;
     VkDeviceMemory lowResOutMem = VK_NULL_HANDLE;
     VkDeviceMemory adaptiveMem = VK_NULL_HANDLE;
+    VkDeviceMemory materialMem = VK_NULL_HANDLE;
 
     size_t currentNodesCap = 0;
     size_t currentOutCap = 0;
@@ -286,6 +296,7 @@ struct VulkanContext {
     size_t currentFinalOutCap = 0;
     size_t currentLowResOutCap = 0;
     size_t currentAdaptiveCap = 0;
+    size_t currentMaterialCap = 0;
 
     bool initialized = false;
     bool hasHardwareRT = false;
@@ -478,28 +489,31 @@ struct VulkanContext {
         poolCreateInfo.maxSets = 6;
         vkCreateDescriptorPool(device, &poolCreateInfo, nullptr, &descriptorPool);
 
-        uint32_t bindingCount = hasHardwareRT ? 8 : 6;
-        VkDescriptorSetLayoutBinding bindings[8] = {};
+        VkDescriptorSetLayoutBinding bindings[9] = {};
         for(int i=0; i<6; i++) {
             bindings[i].binding = i;
             bindings[i].descriptorType = i==3 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             bindings[i].descriptorCount = 1;
             bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         }
-        if (hasHardwareRT) {
-            bindings[6].binding = 6;
-            bindings[6].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-            bindings[6].descriptorCount = 1;
-            bindings[6].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-            
-            bindings[7].binding = 7;
-            bindings[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            bindings[7].descriptorCount = 1;
-            bindings[7].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-        }
+        
+        bindings[6].binding = 6;
+        bindings[6].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+        bindings[6].descriptorCount = 1;
+        bindings[6].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        
+        bindings[7].binding = 7;
+        bindings[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        bindings[7].descriptorCount = 1;
+        bindings[7].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        bindings[8].binding = 8;
+        bindings[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        bindings[8].descriptorCount = 1;
+        bindings[8].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
         VkDescriptorSetLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        layoutInfo.bindingCount = bindingCount;
+        layoutInfo.bindingCount = 9;
         layoutInfo.pBindings = bindings;
 
         vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &fastDescLayout);
@@ -1098,6 +1112,14 @@ struct VulkanContext {
                                 lights.empty() ? nullptr : lights.data(), dataSize, allocSize, 
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     }
+    
+    void updateMaterialBuffer(const std::vector<GPUMaterial>& materials) {
+        size_t allocSize = std::max((size_t)256, materials.size() * sizeof(GPUMaterial));
+        size_t dataSize = materials.size() * sizeof(GPUMaterial);
+        updateDeviceLocalBuffer(materialBuffer, materialMem, currentMaterialCap, 
+                                materials.empty() ? nullptr : materials.data(), dataSize, allocSize, 
+                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    }
 
     void updateCommonBuffers(const std::vector<GPURenderNode>& nodes, size_t outSize, GPUCameraData& camData) {
         size_t allocSize = std::max((size_t)256, nodes.size() * sizeof(GPURenderNode));
@@ -1167,21 +1189,22 @@ struct VulkanContext {
 
         if (hasHardwareRT) buildHardwareAccelerationStructures(points);
 
-        VkDescriptorBufferInfo bInfos[7] = { 
+        VkDescriptorBufferInfo bInfos[8] = { 
             {nodeBuffer, 0, VK_WHOLE_SIZE}, 
             {fastPointBuffer, 0, VK_WHOLE_SIZE}, 
             {outBuffer, 0, VK_WHOLE_SIZE}, 
             {uboBuffer, 0, VK_WHOLE_SIZE},
             {skyboxBuffer, 0, VK_WHOLE_SIZE},
             {lightBuffer, 0, VK_WHOLE_SIZE},
-            {adaptiveBuffer, 0, VK_WHOLE_SIZE}
+            {adaptiveBuffer, 0, VK_WHOLE_SIZE},
+            {materialBuffer, 0, VK_WHOLE_SIZE}
         };
-        int updateCount = hasHardwareRT ? 7 : 6;
-        VkWriteDescriptorSet writes[7] = {};
+        int updateCount = 8;
+        VkWriteDescriptorSet writes[8] = {};
         for(int i=0; i<updateCount; i++) {
             writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[i].dstSet = fastDescSet;
-            writes[i].dstBinding = (i == 6) ? 7 : i;
+            writes[i].dstBinding = (i >= 6) ? i + 1 : i; // 6 is handled by AS update
             writes[i].descriptorCount = 1;
             writes[i].descriptorType = (i==3) ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             writes[i].pBufferInfo = &bInfos[i];
@@ -1199,21 +1222,22 @@ struct VulkanContext {
 
         if (hasHardwareRT) buildHardwareAccelerationStructures(points);
 
-        VkDescriptorBufferInfo bInfos[7] = { 
+        VkDescriptorBufferInfo bInfos[8] = { 
             {nodeBuffer, 0, VK_WHOLE_SIZE}, 
             {pbrPointBuffer, 0, VK_WHOLE_SIZE}, 
             {outBuffer, 0, VK_WHOLE_SIZE}, 
             {uboBuffer, 0, VK_WHOLE_SIZE},
             {skyboxBuffer, 0, VK_WHOLE_SIZE},
             {lightBuffer, 0, VK_WHOLE_SIZE},
-            {adaptiveBuffer, 0, VK_WHOLE_SIZE}
+            {adaptiveBuffer, 0, VK_WHOLE_SIZE},
+            {materialBuffer, 0, VK_WHOLE_SIZE}
         };
-        int updateCount = hasHardwareRT ? 7 : 6;
-        VkWriteDescriptorSet writes[7] = {};
+        int updateCount = 8;
+        VkWriteDescriptorSet writes[8] = {};
         for(int i=0; i<updateCount; i++) {
             writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[i].dstSet = pbrDescSet;
-            writes[i].dstBinding = (i == 6) ? 7 : i; 
+            writes[i].dstBinding = (i >= 6) ? i + 1 : i; 
             writes[i].descriptorCount = 1;
             writes[i].descriptorType = (i==3) ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             writes[i].pBufferInfo = &bInfos[i];

@@ -50,23 +50,25 @@ namespace Grid {
     // also need to store relative positions to the object center, both "resting" and "current". 
     // some rendering options: sgvf (temporal accumulation)
     // also some more simplistic temporal model might be easier.
-    // importance sampling: first hit finds objects that are more complex to render, less complex objects have less samples.
+    
     // stratification: halton or sobol, cranley-patterson rotations (look into these)
-    // every 1/10th the samples per pixel, find regions with little variance, drop those in favor of focusing on the ones with large variance.
-    // a-trous wavelet denoising intead of bilateral filtering.
-    // secondary pass of edge sharpening.
-    // have pbr buffer output sum and sum of squares to make better blending easier to manage
     // stochastic transparency (might be for fast version?)
     // /*At half res (scale=0.5), you're searching 3 low-res pixels = 6 full-res pixels
     //     The object ID matching fallback radius is 9 = 18 full-res pixels
     //     This is likely causing excessive blurring at geometric edges. You need to adapt the radius to your scale:
     // */
-    // screen space path reuse for nearby pixels (I really need wavefront path tracing.)
-    // edge aware median prefilter for luminance variance clamping passes
-    // dynamically resize smoothing window based on noise level
-    // first hit hitpoint and norm really need reuse.
     // change emittance to a GL_RGB9_E5 to support color light/hdr
 
+// importance sampling: first hit finds objects that are more complex to render, less complex objects have less samples.
+// every 1/10th the samples per pixel, find regions with little variance, drop those in favor of focusing on the ones with large variance.
+// screen space path reuse for nearby pixels (I really need wavefront path tracing.)
+// first hit hitpoint and norm really need reuse.
+
+    // a-trous wavelet denoising intead of bilateral filtering.
+    // secondary pass of edge sharpening.
+    // have pbr buffer output sum and sum of squares to make better blending easier to manage
+    // edge aware median prefilter for luminance variance clamping passes
+    // dynamically resize smoothing window based on noise level
 
 
 
@@ -80,6 +82,7 @@ public:
     using RenderNode = RenderNode_<T, IndexType, StoragePath>;
     using RenderData = RenderData_<T, IndexType, StoragePath>;
     using RenderBuffer = RenderBuffer_<T, IndexType, StoragePath>;
+    using GridObject = GridObject_<T, IndexType, StoragePath>;
 
 private:
     int countBits(uint8_t mask) const {
@@ -95,6 +98,9 @@ private:
     size_t maxDepth;
     size_t size;
     size_t maxPointsPerNode;
+    
+    std::unordered_map<int, std::shared_ptr<GridObject>> objects_;
+    mutable std::shared_mutex objectsMutex_;
     
     Skybox skybox_;
     Eigen::Vector3f skylight_ = {0.1f, 0.1f, 0.1f};
@@ -139,7 +145,10 @@ private:
         if (!node) return;
         ensureLoaded(node, false);
         for (const auto& pt : node->points) {
-            if (pt->isActive() && (pt->physics.type == BodyType::STATIC || pt->physics.type == BodyType::KINEMATIC)) {
+            auto obj = getObject(pt->objectId);
+            BodyType bType = obj ? obj->getPhysicsMaterial(pt->physMatIdx).type : BodyType::STATIC;
+            
+            if (pt->isActive() && (bType == BodyType::STATIC || bType == BodyType::KINEMATIC)) {
                 colliders.emplace_back(pt->position, pt->size);
             }
         }
@@ -255,6 +264,22 @@ private:
     }
 
 public:
+    std::shared_ptr<GridObject> getOrCreateObject(int id) {
+        std::unique_lock<std::shared_mutex> lock(objectsMutex_);
+        auto it = objects_.find(id);
+        if (it != objects_.end()) return it->second;
+        auto obj = std::make_shared<GridObject>(id);
+        objects_[id] = obj;
+        return obj;
+    }
+
+    std::shared_ptr<GridObject> getObject(int id) const {
+        std::shared_lock<std::shared_mutex> lock(objectsMutex_);
+        auto it = objects_.find(id);
+        if (it != objects_.end()) return it->second;
+        return nullptr;
+    }
+
     void addSkyBody(int id, const PointType& dir, float angularRadius, uint8_t r, uint8_t g, uint8_t b, uint8_t emittance = 255) {
         skybox_.addBody(id, dir, angularRadius, r, g, b, emittance);
     }
@@ -431,7 +456,7 @@ private:
             }
             
             if (!insertedInChild) {
-            std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
+                std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
                 node->points.emplace_back(pointData);
                 node->setDirty(true);
             }
@@ -579,7 +604,10 @@ private:
             totalVolume += v;
             avgPos += item->position * v;
             avgColor += item->color * v;
-            Material mat = item->material;
+            
+            auto obj = getObject(item->objectId);
+            Material mat = obj ? obj->getRenderMaterial(item->renderMatIdx) : Material();
+            
             avgEmittance += mat.emittance * v;
             avgRoughness += mat.roughness * v;
             avgMetallic += mat.metallic * v;
@@ -609,7 +637,9 @@ private:
             lod->color = (avgColor * invVol);
             Material avgMat(avgEmittance * invVol, avgRoughness * invVol, avgMetallic * invVol,
                             avgTransmission * invVol, avgIor * invVol);
-            lod->material = avgMat;
+            
+            auto obj = getOrCreateObject(-1);
+            lod->renderMatIdx = obj->getOrAddRenderMaterial(avgMat);
             
             lod->setActive(true);
             lod->setVisible(true);
@@ -1059,18 +1089,27 @@ private:
         collectNodesByObjectIdRecursive(node, id, results, seen);
     }
 
-    bool raycastRecursive(OctreeNode* node, const Ray& ray, float tMin, float tMax, float& maxDist, RayHit& hit, const std::shared_ptr<NodeData>& ignoreNode, bool hitOnlySolid = false, bool resolvePenetration = false) {
+    bool raycastRecursive(OctreeNode* node, const Ray& ray, float tMin, float tMax, float& maxDist, RayHit& hit, const std::shared_ptr<NodeData>& ignoreNode, bool hitOnlySolid, bool resolvePenetration, const std::unordered_map<int, std::shared_ptr<GridObject>>& localObjects) {
         if (!node->isLoaded()) {
             ensureLoaded(node, true);
             return false;
         }
+
+        auto getObj = [&](int id) -> std::shared_ptr<GridObject> {
+            auto it = localObjects.find(id);
+            return it != localObjects.end() ? it->second : nullptr;
+        };
 
         std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
         bool hitSomething = false;
 
         for (const auto& pt : node->points) {
             if (!pt->isActive() || pt == ignoreNode) continue;
-            if (hitOnlySolid && (pt->physics.type == BodyType::FLUID || pt->physics.type == BodyType::GAS)) continue;
+            if (hitOnlySolid) {
+                auto obj = getObj(pt->objectId);
+                BodyType bType = obj ? obj->getPhysicsMaterial(pt->physMatIdx).type : BodyType::STATIC;
+                if (bType == BodyType::FLUID || bType == BodyType::GAS) continue;
+            }
             
             BoundingBox bounds = pt->getCubeBounds();
             
@@ -1140,7 +1179,7 @@ private:
             int physIdx = currIdx ^ ray.signMask;
 
             if (node->children[physIdx]) {
-                if (raycastRecursive(node->children[physIdx].get(), ray, tMin, tNext, maxDist, hit, ignoreNode, hitOnlySolid, resolvePenetration)) {
+                if (raycastRecursive(node->children[physIdx].get(), ray, tMin, tNext, maxDist, hit, ignoreNode, hitOnlySolid, resolvePenetration, localObjects)) {
                     hitSomething = true;
                 }
             }
@@ -1153,7 +1192,7 @@ private:
     }
 
     void buildRender(RenderBuffer_<T, IndexType, StoragePath>& buffer);
-    void buildRenderNodeAt(OctreeNode* node, RenderBuffer_<T, IndexType, StoragePath>& buffer, uint32_t nodeIdx);
+    void buildRenderNodeAt(OctreeNode* node, RenderBuffer_<T, IndexType, StoragePath>& buffer, uint32_t nodeIdx, const std::unordered_map<int, std::shared_ptr<GridObject>>& localObjects);
     const RenderData* fastVoxelTraverse(const RenderBuffer_<T, IndexType, StoragePath>& buffer, const Ray& ray, float maxDist);
 public:
     Octree(const PointType& minBound, const PointType& maxBound, size_t maxPointsPerNode=8, size_t maxDepth = 16) :
@@ -1178,6 +1217,14 @@ public:
             streamingQueued_(false), skybox_(other.skybox_), regionTargetPoints_(other.regionTargetPoints_),
             minLodSize_(other.minLodSize_), minLodVolume_(other.minLodVolume_) {
         if (other.root_) root_ = other.root_->clone();
+        
+        {
+            std::shared_lock<std::shared_mutex> lockOther(other.objectsMutex_);
+            std::unique_lock<std::shared_mutex> lockThis(objectsMutex_);
+            for (const auto& pair : other.objects_) {
+                objects_[pair.first] = std::make_shared<GridObject>(*pair.second);
+            }
+        }
         startWorkerThread();
     }
 
@@ -1188,6 +1235,12 @@ public:
             minLodSize_(other.minLodSize_), minLodVolume_(other.minLodVolume_) {
         other.stopWorkerThread();
         root_ = std::move(other.root_);
+        
+        {
+            std::unique_lock<std::shared_mutex> lockOther(other.objectsMutex_);
+            std::unique_lock<std::shared_mutex> lockThis(objectsMutex_);
+            objects_ = std::move(other.objects_);
+        }
         
         {
             std::lock_guard<std::mutex> lock(other.taskMutex_);
@@ -1218,6 +1271,15 @@ public:
 
         if (other.root_) root_ = other.root_->clone();
         
+        {
+            std::shared_lock<std::shared_mutex> lockOther(other.objectsMutex_);
+            std::unique_lock<std::shared_mutex> lockThis(objectsMutex_);
+            objects_.clear();
+            for (const auto& pair : other.objects_) {
+                objects_[pair.first] = std::make_shared<GridObject>(*pair.second);
+            }
+        }
+
         startWorkerThread();
         return *this;
     }
@@ -1242,6 +1304,12 @@ public:
         
         root_ = std::move(other.root_);
         
+        {
+            std::unique_lock<std::shared_mutex> lockOther(other.objectsMutex_);
+            std::unique_lock<std::shared_mutex> lockThis(objectsMutex_);
+            objects_ = std::move(other.objects_);
+        }
+
         {
             std::lock_guard<std::mutex> lock(other.taskMutex_);
             taskQueue_ = std::move(other.taskQueue_);
@@ -1312,9 +1380,20 @@ public:
              float metallic = 0.0f, float transmission = 0.0f, float ior = 1.45f, Eigen::Vector3f absorp = Eigen::Vector3f::Zero(),
              BodyType bType = BodyType::STATIC, float mass = 1.0f) {
         
+        auto obj = getOrCreateObject(objectId);
         Material mat(emittance, roughness, metallic, transmission, ior, absorp);
-        auto pointData = std::make_shared<NodeData>(data, pos, visible, color, size, active, objectId, mat, bType == BodyType::STATIC, bType);
-        pointData->physics.mass = mass;
+        uint16_t rIdx = obj->getOrAddRenderMaterial(mat);
+        
+        PhysicsMaterial_ pmat{bType, mass};
+        uint16_t pIdx = obj->getOrAddPhysicsMaterial(pmat);
+
+        auto pointData = std::make_shared<NodeData>(data, pos, visible, color, size, active, objectId, rIdx, pIdx, bType == BodyType::STATIC);
+        
+        PointType relPos = pos - obj->centerPosition;
+        {
+            std::unique_lock<std::shared_mutex> lock(obj->objMutex);
+            obj->relativeVoxels.push_back({relPos, rIdx, pIdx, size});
+        }
         
         ensureBounds(pointData->getCubeBounds());
         
@@ -1331,18 +1410,27 @@ public:
 
     void queuedset(const T& data, const PointType& pos, bool visible, Eigen::Vector3f color, float size = 0.01f, bool active = true,
              int objectId = -1, float emittance = 0.0f, float roughness = 1.0f, float metallic = 0.0f, float transmission = 0.0f,
-             float ior = 1.45f, Eigen::Vector3f absorp = Eigen::Vector3f::Zero()) {
-        enqueueTask([this, data, pos, visible, color, size, active, objectId, emittance, roughness, metallic, transmission, ior, absorp]() {
+             float ior = 1.45f, Eigen::Vector3f absorp = Eigen::Vector3f::Zero(),
+             BodyType bType = BodyType::STATIC, float mass = 1.0f) {
+        enqueueTask([this, data, pos, visible, color, size, active, objectId, emittance, roughness, metallic, transmission, ior, absorp, bType, mass]() {
+            auto obj = getOrCreateObject(objectId);
             Material mat(emittance, roughness, metallic, transmission, ior, absorp);
-            auto pointData = std::make_shared<NodeData>(data, pos, visible, color, size, active, objectId, mat);
+            uint16_t rIdx = obj->getOrAddRenderMaterial(mat);
+            
+            PhysicsMaterial_ pmat{bType, mass};
+            uint16_t pIdx = obj->getOrAddPhysicsMaterial(pmat);
+
+            auto pointData = std::make_shared<NodeData>(data, pos, visible, color, size, active, objectId, rIdx, pIdx, bType == BodyType::STATIC);
             
             ensureBounds(pointData->getCubeBounds());
             
             if (insertRecursive(root_.get(), pointData, 0)) {
                 this->size++;
-                return;
+                if (bType != BodyType::STATIC) {
+                    std::lock_guard<std::mutex> lock(physicsMutex_);
+                    activePhysicsNodes_.push_back(pointData);
+                }
             }
-            return;
         });
     }
 
@@ -1377,6 +1465,32 @@ public:
         OctreeNode::writeVec3(out, root_->bounds.first);
         OctreeNode::writeVec3(out, root_->bounds.second);
 
+        {
+            std::shared_lock<std::shared_mutex> lock(objectsMutex_);
+            uint32_t numObjects = objects_.size();
+            OctreeNode::writeVal(out, numObjects);
+            for (const auto& pair : objects_) {
+                OctreeNode::writeVal(out, pair.first);
+                auto obj = pair.second;
+                
+                std::shared_lock<std::shared_mutex> objLock(obj->objMutex);
+                OctreeNode::writeVal(out, obj->allowPartialUnload);
+                OctreeNode::writeVec3(out, obj->centerPosition);
+                
+                uint32_t numRMat = obj->renderMaterials.size();
+                OctreeNode::writeVal(out, numRMat);
+                for (const auto& mat : obj->renderMaterials) {
+                    OctreeNode::writeVal(out, mat);
+                }
+                
+                uint32_t numPMat = obj->physicsMaterials.size();
+                OctreeNode::writeVal(out, numPMat);
+                for (const auto& pmat : obj->physicsMaterials) {
+                    OctreeNode::writeVal(out, pmat);
+                }
+            }
+        }
+
         root_->serialize(out, regionTargetPoints_);
         
         out.close();
@@ -1406,6 +1520,35 @@ public:
         PointType minBound, maxBound;
         OctreeNode::readVec3(in, minBound);
         OctreeNode::readVec3(in, maxBound);
+
+        {
+            std::unique_lock<std::shared_mutex> lock(objectsMutex_);
+            objects_.clear();
+            uint32_t numObjects = 0;
+            OctreeNode::readVal(in, numObjects);
+            for (uint32_t i = 0; i < numObjects; ++i) {
+                int id;
+                OctreeNode::readVal(in, id);
+                auto obj = std::make_shared<GridObject>(id);
+                OctreeNode::readVal(in, obj->allowPartialUnload);
+                OctreeNode::readVec3(in, obj->centerPosition);
+                
+                uint32_t numRMat;
+                OctreeNode::readVal(in, numRMat);
+                obj->renderMaterials.resize(numRMat);
+                for (uint32_t j = 0; j < numRMat; ++j) {
+                    OctreeNode::readVal(in, obj->renderMaterials[j]);
+                }
+                
+                uint32_t numPMat;
+                OctreeNode::readVal(in, numPMat);
+                obj->physicsMaterials.resize(numPMat);
+                for (uint32_t j = 0; j < numPMat; ++j) {
+                    OctreeNode::readVal(in, obj->physicsMaterials[j]);
+                }
+                objects_[id] = obj;
+            }
+        }
 
         root_ = std::make_unique<OctreeNode>(minBound, maxBound);
         root_->deserialize(in, regionTargetPoints_);
@@ -1452,13 +1595,17 @@ public:
         std::vector<std::shared_ptr<NodeData>> nodes;
         collectNodesByObjectId(root_.get(), objectId, nodes);
         
+        auto obj = getOrCreateObject(objectId);
+        PhysicsMaterial_ pmat{newType, newMass};
+        uint16_t newIdx = obj->getOrAddPhysicsMaterial(pmat);
+
         std::lock_guard<std::mutex> lock(physicsMutex_);
         for (auto& n : nodes) {
-            if (n->physics.type == BodyType::STATIC && newType != BodyType::STATIC) {
+            PhysicsMaterial_ oldPmat = obj->getPhysicsMaterial(n->physMatIdx);
+            if (oldPmat.type == BodyType::STATIC && newType != BodyType::STATIC) {
                 activePhysicsNodes_.push_back(n);
             }
-            n->physics.type = newType;
-            n->physics.mass = newMass;
+            n->physMatIdx = newIdx;
         }
         physicsCollidersDirty_.store(true);
     }
@@ -1519,21 +1666,16 @@ public:
         pointData->setActive(newActive);
         pointData->objectId = targetObjId;
         
-        if (newEmittance >= 0) {
-            pointData->material.emittance = newEmittance;
-        }
-        if (newRoughness >= 0) { 
-            pointData->material.roughness = newRoughness;
-        }
-        if (newMetallic >= 0) { 
-            pointData->material.metallic = newMetallic;
-        }
-        if (newTransmission >= 0) { 
-            pointData->material.transmission = newTransmission;
-        }
-        if (newIor >= 0) { 
-            pointData->material.ior = newIor;
-        }
+        auto obj = getOrCreateObject(targetObjId);
+        Material mat = obj->getRenderMaterial(pointData->renderMatIdx);
+        
+        if (newEmittance >= 0) mat.emittance = newEmittance;
+        if (newRoughness >= 0) mat.roughness = newRoughness;
+        if (newMetallic >= 0) mat.metallic = newMetallic;
+        if (newTransmission >= 0) mat.transmission = newTransmission;
+        if (newIor >= 0) mat.ior = newIor;
+        
+        pointData->renderMatIdx = obj->getOrAddRenderMaterial(mat);
         
         ensureBounds(pointData->getCubeBounds());
         bool res = insertRecursive(root_.get(), pointData, 0);
@@ -1652,7 +1794,10 @@ public:
     bool setEmittance(const PointType& pos, float emittance, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
-        pointData->material.emittance = emittance;
+        auto obj = getOrCreateObject(pointData->objectId);
+        Material mat = obj->getRenderMaterial(pointData->renderMatIdx);
+        mat.emittance = emittance;
+        pointData->renderMatIdx = obj->getOrAddRenderMaterial(mat);
         invalidateLODForPoint(pointData);
         return true;
     }
@@ -1660,7 +1805,10 @@ public:
     bool setRoughness(const PointType& pos, float roughness, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
-        pointData->material.roughness = roughness;
+        auto obj = getOrCreateObject(pointData->objectId);
+        Material mat = obj->getRenderMaterial(pointData->renderMatIdx);
+        mat.roughness = roughness;
+        pointData->renderMatIdx = obj->getOrAddRenderMaterial(mat);
         invalidateLODForPoint(pointData);
         return true;
     }
@@ -1668,7 +1816,10 @@ public:
     bool setMetallic(const PointType& pos, float metallic, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
-        pointData->material.metallic = metallic;
+        auto obj = getOrCreateObject(pointData->objectId);
+        Material mat = obj->getRenderMaterial(pointData->renderMatIdx);
+        mat.metallic = metallic;
+        pointData->renderMatIdx = obj->getOrAddRenderMaterial(mat);
         invalidateLODForPoint(pointData);
         return true;
     }
@@ -1676,18 +1827,27 @@ public:
     bool setTransmission(const PointType& pos, float transmission, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
-        pointData->material.transmission = transmission;
+        auto obj = getOrCreateObject(pointData->objectId);
+        Material mat = obj->getRenderMaterial(pointData->renderMatIdx);
+        mat.transmission = transmission;
+        pointData->renderMatIdx = obj->getOrAddRenderMaterial(mat);
         invalidateLODForPoint(pointData);
         return true;
     }
 
     void setMaterialByObjectId(int objectId, float emittance, float roughness, float metallic) {
+        auto obj = getOrCreateObject(objectId);
+        {
+            std::unique_lock<std::shared_mutex> lock(obj->objMutex);
+            for (auto& mat : obj->renderMaterials) {
+                mat.emittance = emittance;
+                mat.roughness = roughness;
+                mat.metallic = metallic;
+            }
+        }
         std::vector<std::shared_ptr<NodeData>> nodes;
         collectNodesByObjectId(root_.get(), objectId, nodes);
         for (auto& n : nodes) {
-            n->material.emittance = emittance;
-            n->material.roughness = roughness;
-            n->material.metallic = metallic;
             invalidateLODForPoint(n);
         }
     }
@@ -1695,6 +1855,16 @@ public:
     bool raycast(const PointType& origin, const PointType& direction, float maxDist, RayHit& hit,
                  const std::shared_ptr<NodeData>& ignoreNode = nullptr, bool hitOnlySolid = false, bool resolvePenetration = false) {
         if (!root_) return false;
+        
+        std::unordered_map<int, std::shared_ptr<GridObject>> localObjects;
+        {
+            std::shared_lock<std::shared_mutex> lock(objectsMutex_);
+            localObjects = objects_;
+        }
+        auto getObj = [&](int id) -> std::shared_ptr<GridObject> {
+            auto it = localObjects.find(id);
+            return it != localObjects.end() ? it->second : nullptr;
+        };
         
         Ray ray(origin, direction.normalized());
         
@@ -1729,7 +1899,11 @@ public:
 
             for (const auto& pt : node->points) {
                 if (!pt->isActive() || pt == ignoreNode) continue;
-                if (hitOnlySolid && (pt->physics.type == BodyType::FLUID || pt->physics.type == BodyType::GAS)) continue;
+                if (hitOnlySolid) {
+                    auto obj = getObj(pt->objectId);
+                    BodyType bType = obj ? obj->getPhysicsMaterial(pt->physMatIdx).type : BodyType::STATIC;
+                    if (bType == BodyType::FLUID || bType == BodyType::GAS) continue;
+                }
                 
                 BoundingBox bounds = pt->getCubeBounds();
                 
@@ -1886,7 +2060,8 @@ public:
             for(int i=0; i<6; ++i) {
                 auto neighbor = find(node->position + dirs[i] * node->size, checkRad);
                 if(neighbor && neighbor->objectId == objectId && neighbor->isActive()) {
-                    Material nMat = neighbor->material;
+                    auto nObj = getObject(neighbor->objectId);
+                    Material nMat = nObj ? nObj->getRenderMaterial(neighbor->renderMatIdx) : Material();
                     if (nMat.transmission < 0.01f) {
                         hiddenSides++;
                     }
