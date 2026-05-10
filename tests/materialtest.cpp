@@ -165,7 +165,7 @@ int main() {
     const int samples = 100;
     const int blendedsamples = 100;
     const float blendedfactor = 0.5;
-    const int videosamples = 256;
+    const int videosamples = 512;
     const int bounces = 4;
     const int physicsSubsteps = 10;
     const float physicsDt = 1.0f / fps;
@@ -210,12 +210,12 @@ int main() {
         cam.direction = (target - view.origin).normalized();
         cam.up = view.up;
         
-        frame out = octree.fastRenderFrame(cam, height, width, frame::colormap::RGB);
-        std::string filename = "output/fast_cpurender_" + view.name + ".bmp";
-        BMPWriter::saveBMP(filename, out);
+        // frame out = octree.fastRenderFrame(cam, height, width, frame::colormap::RGB);
+        // std::string filename = "output/fast_cpurender_" + view.name + ".bmp";
+        // BMPWriter::saveBMP(filename, out);
         
-        out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
-        filename = "output/fast_vulkanrender_" + view.name + ".bmp";
+        frame out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
+        std::string filename = "output/fast_vulkanrender_" + view.name + ".bmp";
         // out.compressFrameLZ78();
         // out.decompress();
         BMPWriter::saveBMP(filename, out);

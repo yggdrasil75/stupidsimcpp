@@ -1121,13 +1121,12 @@ struct VulkanContext {
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     }
 
-    void updateCommonBuffers(const std::vector<GPURenderNode>& nodes, size_t outSize, GPUCameraData& camData) {
-        size_t allocSize = std::max((size_t)256, nodes.size() * sizeof(GPURenderNode));
-        size_t dataSize = nodes.size() * sizeof(GPURenderNode);
+    void updateCommonBuffers(size_t outSize, GPUCameraData& camData) {
+        size_t allocSize = (size_t)256;
         
         // Use device local memory for nodes (critical for tree traversal performance)
         updateDeviceLocalBuffer(nodeBuffer, nodeMem, currentNodesCap, 
-                                nodes.empty() ? nullptr : nodes.data(), dataSize, allocSize, 
+                                nullptr, 0, allocSize, 
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
         // outBuffer remains HOST_VISIBLE because it is mapped/read directly in grid3render.cpp

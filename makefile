@@ -51,7 +51,7 @@ OBJS = $(addprefix $(OBJ_DIR)/, $(addsuffix .o, $(basename $(notdir $(SRC)))))
 UNAME_S := $(shell uname -s)
 EXE := $(BIN_DIR)/g2gradc
 
-GLSLC := glslc
+GLSLC := glslc --target-env=vulkan1.3
 
 SHADER_SRCS := $(SHADER_DIR)/fast_raytrace.comp $(SHADER_DIR)/pbr_raytrace.comp $(SHADER_DIR)/fast_raytrace_hw.comp $(SHADER_DIR)/pbr_raytrace_hw.comp $(SHADER_DIR)/smooth.comp $(SHADER_DIR)/blend.comp
 SHADER_SRCS += $(SHADER_DIR)/sph_density.comp $(SHADER_DIR)/sph_force.comp $(SHADER_DIR)/sph_integrate.comp

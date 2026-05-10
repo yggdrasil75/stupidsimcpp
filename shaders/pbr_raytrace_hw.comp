@@ -1,5 +1,6 @@
 #version 460
 #extension GL_EXT_ray_query : require
+#extension GL_KHR_shader_subgroup_arithmetic : require 
 layout(local_size_x = 8, local_size_y = 8) in;
 
 #define PI 3.14159265359
@@ -7,23 +8,6 @@ const float EPS = 1e-8;
 const float LARGE = 1e30;
 const float GAP_EPSILON = 1e-2;
 const float DIST_EPSILON = 1e-4;
-
-struct GPURenderNode {
-    vec3 boundsMin;
-    float padding1;
-    vec3 boundsMax;
-    float padding2;
-    vec3 center;
-    float nodeSize;
-    uint isLeaf;
-    uint isLoaded;
-    uint childMask;
-    uint firstPoint;
-    uint pointCount;
-    int  lodPoint;
-    uint firstChild;
-    uint padding3;
-};
 
 struct GPUMaterial {
     float emittance;
@@ -41,7 +25,6 @@ struct GPUPBRRenderData {
     uint padding1;
 };
 
-layout(std430, binding = 0) readonly buffer NodeBuffer { GPURenderNode nodes[]; };
 layout(std430, binding = 1) readonly buffer PointBuffer { GPUPBRRenderData points[]; };
 layout(std430, binding = 2) buffer OutputBuffer { float pixels[]; };
 
@@ -82,6 +65,11 @@ layout(std430, binding = 5) readonly buffer LightBuffer { uint emissiveIndices[]
 layout(binding = 6) uniform accelerationStructureEXT tlas;
 layout(std430, binding = 7) buffer AdaptiveBuffer { float adaptiveData[]; };
 layout(std430, binding = 8) readonly buffer MaterialBuffer { GPUMaterial materials[]; };
+
+shared vec3 sharedColor[gl_WorkGroupSize.x][gl_WorkGroupSize.y];
+shared int  sharedHitIndex[gl_WorkGroupSize.x][gl_WorkGroupSize.y];
+shared vec3 sharedNormal[gl_WorkGroupSize.x][gl_WorkGroupSize.y];
+shared uint groupActiveCount;
 
 vec3 unpackRGB8(uint c) {
     return vec3(float(c & 0xFF) / 255.0, float((c >> 8) & 0xFF) / 255.0, float((c >> 16) & 0xFF) / 255.0);
@@ -126,8 +114,6 @@ Ray makeRay(vec3 o, vec3 d) {
     return r;
 }
 
-uint rng_state;
-
 int getMediumVoxelAt(vec3 pt, int targetObjectId, int ignoreIdx) {
     if (targetObjectId == -1) return -1;
     
@@ -166,21 +152,12 @@ uint pcg_hash(uint seed) {
     return (word >> 22u) ^ word;
 }
 
-void init_rng(ivec2 pixel_coord, int sample_idx) {
-    rng_state = pcg_hash(pixel_coord.x + pixel_coord.y * cam.width + pcg_hash(cam.frameCount) + pcg_hash(sample_idx));
-}
-
 float nextFloat(inout uint state) {
     if (state == 0) state = 123456789;
     state ^= state << 13;
     state ^= state >> 17;
     state ^= state << 5;
     return (state & 0xFFFFFF) / 16777216.0f;
-}
-
-float random_float() {
-    rng_state = pcg_hash(rng_state);
-    return float(rng_state) / float(0xFFFFFFFFu);
 }
 
 bool rayBoxIntersect(Ray ray, vec3 bMin, vec3 bMax, out float tMin, out float tMax) {
@@ -273,7 +250,7 @@ vec3 hemisphereSample(vec3 n, inout uint state) {
     return t * x + b * y + n * z;
 }
 
-vec3 traceRay(Ray initialRay, inout uint state, out float primaryDepth, out int primaryObjId, out float primaryComplexity, 
+vec3 traceRay(Ray initialRay, inout uint state, inout uint group_state, out float primaryDepth, out int primaryObjId, out float primaryComplexity, 
               int p_hitResult, int p_hitIndex, vec3 p_normal, vec3 p_hitPoint, float p_t) {
                 
     if (isInvalid(initialRay.origin) || isInvalid(initialRay.dir)) return vec3(0.0, 1.0, 0.0);
@@ -287,8 +264,8 @@ vec3 traceRay(Ray initialRay, inout uint state, out float primaryDepth, out int 
     int transparentBounces = 0;
     int volumetricBounces = 0;
     
-    const int MAX_TRANSPARENT_BOUNCES = 128;
-    const int MAX_VOLUMETRIC_BOUNCES = 64;
+    const int MAX_TRANSPARENT_BOUNCES = 12;
+    const int MAX_VOLUMETRIC_BOUNCES = 8;
 
     vec3 origin = initialRay.origin;
     vec3 direction = initialRay.dir;
@@ -460,8 +437,9 @@ vec3 traceRay(Ray initialRay, inout uint state, out float primaryDepth, out int 
         if (bounce > 2) {
             continueProb = max(throughput.x, max(throughput.y, throughput.z));
             continueProb = clamp(continueProb, 0.1, 0.95);
-            if (nextFloat(state) > continueProb) break;
-            throughput /= continueProb;
+            float warpContinueProb = subgroupMax(continueProb);
+            if (nextFloat(group_state) > warpContinueProb) break;
+            throughput /= warpContinueProb; 
         } 
 
         vec3 V = -direction;
@@ -471,7 +449,7 @@ vec3 traceRay(Ray initialRay, inout uint state, out float primaryDepth, out int 
         
         if (cam.emissiveCount > 0 && entering == 1 && surfaceMat.emittance == 0.0) {
             if ((1.0 - metallic) * (1.0 - transmission) > 0.001) {
-                int lightIdx = int(nextFloat(state) * float(cam.emissiveCount));
+                int lightIdx = int(nextFloat(group_state) * float(cam.emissiveCount));
                 lightIdx = clamp(lightIdx, 0, cam.emissiveCount - 1);
                 uint emissivePtIdx = emissiveIndices[lightIdx];
                 
@@ -561,7 +539,7 @@ vec3 traceRay(Ray initialRay, inout uint state, out float primaryDepth, out int 
             pTrans = pTrans * insump;
         }
 
-        float r_type = nextFloat(state);
+        float r_type = nextFloat(group_state);
         vec3 newDir;
         vec3 newOrigin;
         vec3 weight = vec3(0.0);
@@ -645,39 +623,6 @@ vec3 traceRay(Ray initialRay, inout uint state, out float primaryDepth, out int 
     if (isInvalid(finalColor)) return vec3(0.0, 1.0, 0.0);
     return finalColor;
 }
-
-shared vec3 sharedColor[8][8];
-shared int sharedHitIndex[8][8];
-shared vec3 sharedNormal[8][8];
-shared uint groupActiveCount;
-
-void checkAndUpdateHit(Ray ray, int ptIdx, float ptT, vec3 ptN, vec3 ptHP, inout int hitFound,
-     inout float currentMaxDist, inout float outT, inout vec3 outNormal, inout vec3 outHitPoint,
-     inout int hitIndex) {
-    bool isNewExit = dot(ray.dir, ptN) > 0.0;
-    bool isCurrExit = (hitFound == 1) && (dot(ray.dir, outNormal) > 0.0);
-    
-    bool shouldUpdate = false;
-    if (hitFound == 0) {
-        if (ptT <= currentMaxDist) shouldUpdate = true;
-    } else {
-        if (ptT < currentMaxDist - 1e-5) {
-            shouldUpdate = true;
-        } else if (ptT <= currentMaxDist + 1e-5) {
-            if (isNewExit && !isCurrExit) shouldUpdate = true;
-        }
-    }
-    
-    if (shouldUpdate) {
-        currentMaxDist = ptT;
-        outT = ptT;
-        outNormal = ptN;
-        outHitPoint = ptHP;
-        hitIndex = ptIdx;
-        hitFound = 1;
-    }
-}
-
 
 int voxelTraverse(Ray ray, out int hitIndex, out float outT, out vec3 outNormal, out vec3 outHitPoint, inout float currentMaxDist) {
     rayQueryEXT rq;
@@ -821,8 +766,11 @@ void main() {
             break;
         }
 
-        init_rng(coord, global_s);
-        
+        uint path_seed = global_s;
+        // nextFloat(path_seed);
+        //rng_state = pcg_hash(pixel_coord.x + pixel_coord.y * cam.width + pcg_hash(cam.frameCount) + pcg_hash(sample_idx));
+        path_seed = pcg_hash(coord.x + coord.y * cam.width + pcg_hash(path_seed));
+        uint group_seed = pcg_hash(gl_WorkGroupID.x + gl_WorkGroupID.y * 65536 + pcg_hash(global_s));
         Ray ray;
         int hitResult = 0;
         int hitIdx = -1;
@@ -831,8 +779,8 @@ void main() {
         vec3 pHP = vec3(0.0);
         
         if (is_valid_pixel) {
-            float px = (2.0 * (float(coord.x) + nextFloat(rng_state)) / float(cam.width) - 1.0) * cam.tanfovx;
-            float py = (1.0 - 2.0 * (float(coord.y) + nextFloat(rng_state)) / float(cam.height)) * cam.tanfovy;
+            float px = (2.0 * (float(coord.x) + nextFloat(path_seed)) / float(cam.width) - 1.0) * cam.tanfovx;
+            float py = (1.0 - 2.0 * (float(coord.y) + nextFloat(path_seed)) / float(cam.height)) * cam.tanfovy;
             
             vec3 rayDir = normalize(cam.dir + cam.right * px + cam.up * py);
             ray = makeRay(cam.origin, rayDir);
@@ -878,7 +826,7 @@ void main() {
         float pComplexity = 1.0;
 
         if (needsTrace && is_valid_pixel) {
-            tracedResult = traceRay(ray, rng_state, pDepth, pObjId, pComplexity, hitResult, hitIdx, pNormal, pHP, pDepth);
+            tracedResult = traceRay(ray, path_seed, group_seed, pDepth, pObjId, pComplexity, hitResult, hitIdx, pNormal, pHP, pDepth);
         }
         
         sharedColor[smem_x][smem_y] = tracedResult;
