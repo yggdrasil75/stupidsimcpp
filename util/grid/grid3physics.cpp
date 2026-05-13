@@ -5,239 +5,47 @@ namespace Grid {
 template<typename T, typename IndexType, GridStoragePath StoragePath>
 void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
 
-    if (!root_) return;
+    if (!root_ || dt <= 0.0f) return;
 
-    std::vector<std::shared_ptr<NodeData>> dynamicNodes;
-    
-    {
-        std::lock_guard<std::mutex> lock(physicsMutex_);
-        activePhysicsNodes_.erase(
-            std::remove_if(activePhysicsNodes_.begin(), activePhysicsNodes_.end(),
-                [](const std::weak_ptr<NodeData>& wp) { return wp.expired(); }),
-            activePhysicsNodes_.end()
-        );
-        
-        dynamicNodes.reserve(activePhysicsNodes_.size());
-        for (const auto& wp : activePhysicsNodes_) {
-            if (auto sp = wp.lock()) {
-                if (sp->isActive()) dynamicNodes.push_back(sp);
-            }
-        }
-    }
-
-    if (dynamicNodes.empty()) return;
-
-    std::unordered_map<int, std::shared_ptr<GridObject_<T, IndexType, StoragePath>>> localObjects;
+    int maxObjId = -1;
     {
         std::shared_lock<std::shared_mutex> lock(objectsMutex_);
-        localObjects = objects_;
-    }
-    auto getObj = [&](int id) -> std::shared_ptr<GridObject_<T, IndexType, StoragePath>> {
-        auto it = localObjects.find(id);
-        return it != localObjects.end() ? it->second : nullptr;
-    };
-
-#ifdef VULKAN_SUPPORT
-    if (vkCtx.hasHardwareRT && physicsCollidersDirty_) {
-        std::vector<std::pair<PointType, float>> statics;
-        collectCollidersRecursive(root_.get(), statics);
-        std::vector<VkAabbPositionsKHR> aabbs;
-        aabbs.reserve(statics.size());
-        for (const auto& s : statics) {
-            float hs = s.second * 0.5f;
-            VkAabbPositionsKHR aabb;
-            aabb.minX = s.first.x() - hs;
-            aabb.minY = s.first.y() - hs;
-            aabb.minZ = s.first.z() - hs;
-            aabb.maxX = s.first.x() + hs;
-            aabb.maxY = s.first.y() + hs;
-            aabb.maxZ = s.first.z() + hs;
-            aabbs.push_back(aabb);
-        }
-        vkCtx.buildPhysicsAccelerationStructures(aabbs);
-        physicsCollidersDirty_ = false;
-    }
-
-    std::vector<GPUParticle> gpuParticles(dynamicNodes.size());
-    for (size_t i = 0; i < dynamicNodes.size(); ++i) {
-        auto& node = dynamicNodes[i];
-        auto obj = getObj(node->objectId);
-        PhysicsMaterial_ pmat = obj ? obj->getPhysicsMaterial(node->physMatIdx) : PhysicsMaterial_();
-
-        gpuParticles[i].pos_mass = Eigen::Vector4f(node->position.x(), node->position.y(), node->position.z(), pmat.mass);
-        gpuParticles[i].vel_density = Eigen::Vector4f(node->physics.velocity.x(), node->physics.velocity.y(), node->physics.velocity.z(), node->physics.density);
-        gpuParticles[i].force_press = Eigen::Vector4f(0.0f, 0.0f, 0.0f, node->physics.pressure);
-        
-        int sizeInt;
-        std::memcpy(&sizeInt, &node->size, sizeof(float));
-        gpuParticles[i].type_pad = Eigen::Vector4i(static_cast<int>(pmat.type), sizeInt, 0, 0);
-    }
-
-    SPHDensityPC dpc{};
-    dpc.h = phys_smoothingRadius;
-    dpc.h2 = phys_smoothingRadius * phys_smoothingRadius;
-    dpc.poly6_k = kernels_.poly6_k;
-    dpc.restDensity = phys_restDensity;
-    dpc.gasConstant = phys_gasConstant;
-    dpc.numParticles = dynamicNodes.size();
-
-    SPHForcePC fpc{};
-    fpc.h = phys_smoothingRadius;
-    fpc.spiky_k = kernels_.spiky_k;
-    fpc.visc_l_k = kernels_.visc_l_k;
-    fpc.viscosity = phys_viscosity;
-    fpc.gravX = phys_gravity.x();
-    fpc.gravY = phys_gravity.y();
-    fpc.gravZ = phys_gravity.z();
-    fpc.gravStrength = phys_gravityStrength;
-    fpc.gravCX = phys_gravityCenter.x();
-    fpc.gravCY = phys_gravityCenter.y();
-    fpc.gravCZ = phys_gravityCenter.z();
-    fpc.useGravityPoint = phys_useGravityPoint ? 1 : 0;
-    fpc.numParticles = dynamicNodes.size();
-    fpc.airDensity = phys_airDensity;
-
-    SPHIntegratePC ipc{};
-    ipc.dt = dt;
-    ipc.velocityDamping = phys_velocityDamping;
-    ipc.numParticles = dynamicNodes.size();
-
-    vkCtx.dispatchPhysics(gpuParticles, dpc, fpc, ipc);
-
-    std::vector<std::pair<std::shared_ptr<NodeData>, PointType>> movesBuffer;
-    movesBuffer.reserve(dynamicNodes.size());
-
-    for (size_t i = 0; i < dynamicNodes.size(); ++i) {
-        auto& node = dynamicNodes[i];
-        auto obj = getObj(node->objectId);
-        PhysicsMaterial_ pmat = obj ? obj->getPhysicsMaterial(node->physMatIdx) : PhysicsMaterial_();
-        
-        // If Vulkan RT did the integration, we copy the final pos/vel and queue the octree moves
-        if (vkCtx.hasHardwareRT) {
-            node->physics.velocity = Eigen::Vector3f(gpuParticles[i].vel_density.x(), gpuParticles[i].vel_density.y(), gpuParticles[i].vel_density.z());
-            node->physics.density = gpuParticles[i].vel_density.w();
-            node->physics.pressure = gpuParticles[i].force_press.w();
-            
-            PointType predictedPos(gpuParticles[i].pos_mass.x(), gpuParticles[i].pos_mass.y(), gpuParticles[i].pos_mass.z());
-            
-            float halfSize = node->size * 0.5f;
-            for (int d = 0; d < Dim; ++d) {
-                if (predictedPos[d] < root_->bounds.first[d] + halfSize) {
-                    predictedPos[d] = root_->bounds.first[d] + halfSize;
-                    node->physics.velocity[d] *= -0.3f;
-                } else if (predictedPos[d] > root_->bounds.second[d] - halfSize) {
-                    predictedPos[d] = root_->bounds.second[d] - halfSize;
-                    node->physics.velocity[d] *= -0.3f;
-                }
-            }
-            movesBuffer.push_back({node, predictedPos});
-        } else {
-            // Software integration fallback fallback
-            node->physics.density = gpuParticles[i].vel_density.w();
-            node->physics.pressure = gpuParticles[i].force_press.w();
-            node->physics.force = Eigen::Vector3f(gpuParticles[i].force_press.x(), gpuParticles[i].force_press.y(), gpuParticles[i].force_press.z());
-            
-            if (pmat.type == BodyType::KINEMATIC) continue;
-            if (!node->physics.force.allFinite()) node->physics.force.setZero();
-
-            Eigen::Vector3f acceleration = node->physics.force / pmat.mass;
-            float maxAccel = 50000.0f;
-            if (acceleration.squaredNorm() > maxAccel * maxAccel) {
-                acceleration = acceleration.normalized() * maxAccel;
-            }
-
-            node->physics.velocity += acceleration * dt;
-            node->physics.velocity *= std::max(0.0f, 1.0f - phys_velocityDamping * dt);
-
-            float maxVel = 50.0f;
-            if (node->physics.velocity.squaredNorm() > maxVel * maxVel) {
-                node->physics.velocity = node->physics.velocity.normalized() * maxVel;
-            }
-            PointType predictedPos = node->position + node->physics.velocity * dt;
-
-            if (!predictedPos.allFinite()) {
-                predictedPos = node->position;
-                node->physics.velocity.setZero();
-            }
-            
-            PointType castDir = node->physics.velocity;
-            if (castDir.squaredNorm() < 1e-6f) castDir = PointType(0.0f, -1.0f, 0.0f);
-
-            float stepDist = node->physics.velocity.norm() * dt;
-            RayHit hit;
-            if (raycast(node->position, castDir, stepDist + node->size * 0.505f, hit, node, true, true)) {
-                if (hit.node) {
-                    predictedPos = hit.hitPoint + hit.normal * (node->size * 0.51f);
-                    float restitution = 0.3f;
-                    Eigen::Vector3f vNorm = node->physics.velocity.dot(hit.normal) * hit.normal;
-                    Eigen::Vector3f vTan = node->physics.velocity - vNorm;
-                    node->physics.velocity = (vTan * 0.8f) - (vNorm * restitution);
-                }
-            }
-
-            float halfSize = node->size * 0.5f;
-            for (int d = 0; d < Dim; ++d) {
-                if (predictedPos[d] < root_->bounds.first[d] + halfSize) {
-                    predictedPos[d] = root_->bounds.first[d] + halfSize;
-                    node->physics.velocity[d] *= -0.3f;
-                } else if (predictedPos[d] > root_->bounds.second[d] - halfSize) {
-                    predictedPos[d] = root_->bounds.second[d] - halfSize;
-                    node->physics.velocity[d] *= -0.3f;
-                }
-            }
-
-            movesBuffer.push_back({node, predictedPos});
+        for (const auto& pair : objects_) {
+            if (pair.first > maxObjId) maxObjId = pair.first;
         }
     }
 
-    for (auto& movePair : movesBuffer) {
-        auto& node = movePair.first;
-        PointType& newPos = movePair.second;
-        removeRecursive(root_.get(), node->getCubeBounds(), node);
-        node->position = newPos;
-        ensureBounds(node->getCubeBounds());
-        insertRecursive(root_.get(), node, 0);
+    std::vector<std::vector<PhysicsMaterial_>> fastMats(maxObjId + 2);
+    {
+        std::shared_lock<std::shared_mutex> lock(objectsMutex_);
+        for (const auto& pair : objects_) {
+            std::shared_lock<std::shared_mutex> objLock(pair.second->objMutex);
+            fastMats[pair.first + 1] = pair.second->physicsMaterials;
+        }
     }
-    
-    std::vector<std::shared_ptr<NodeData>> gasToRemove;
-    std::vector<std::shared_ptr<NodeData>> gasToAdd;
-    static std::mt19937 rng(1337);
-    std::uniform_real_distribution<float> splitChance(0.0f, 1.0f);
+    size_t fastMatsSize = fastMats.size();
 
-    for (size_t i = 0; i < dynamicNodes.size(); ++i) {
-        auto& node = dynamicNodes[i];
-        auto obj = getObj(node->objectId);
-        PhysicsMaterial_ pmat = obj ? obj->getPhysicsMaterial(node->physMatIdx) : PhysicsMaterial_();
-
-        if (pmat.type == BodyType::GAS && node->size > 0.03f) {
-            if (splitChance(rng) < 0.02f) {
-                gasToRemove.push_back(node);
-                
-                float newSize = node->size * 0.5f;
-                float newMass = pmat.mass * 0.125f;
-                
-                Material_ rmat = obj ? obj->getRenderMaterial(node->renderMatIdx) : Material_<T, IndexType, StoragePath>();
-                rmat.transmission = std::min(0.95f, rmat.transmission + 0.35f); 
-                PhysicsMaterial_ cpmat = pmat;
-                cpmat.mass = newMass;
-
-                uint16_t childRidx = obj ? obj->getOrAddRenderMaterial(rmat) : 0;
-                uint16_t childPidx = obj ? obj->getOrAddPhysicsMaterial(cpmat) : 0;
-                
-                for (int dx = -1; dx <= 1; dx += 2) {
-                    for (int dy = -1; dy <= 1; dy += 2) {
-                        for (int dz = -1; dz <= 1; dz += 2) {
-                            auto child = std::make_shared<NodeData>(*node);
-                            Eigen::Vector3f offset(dx, dy, dz);
-                            offset *= newSize * 0.5f;
-                            
-                            child->position = node->position + offset;
-                            child->size = newSize;
-                            child->renderMatIdx = childRidx;
-                            child->physMatIdx = childPidx;
-                            child->physics.velocity += offset.normalized() * 4.0f;
-                            
-                            gasToAdd.push_back(child);
+    std::vector<std::shared_ptr<NodeData>> fluidNodes;
+    {
+        std::lock_guard<std::mutex> lock(physicsMutex_);
+        
+        size_t writeIdx = 0;
+        for (size_t i = 0; i < activePhysicsNodes_.size(); ++i) {
+            if (!activePhysicsNodes_[i].expired()) {
+                activePhysicsNodes_[writeIdx++] = activePhysicsNodes_[i];
+            }
+        }
+        activePhysicsNodes_.resize(writeIdx);
+        
+        fluidNodes.reserve(writeIdx);
+        for (size_t i = 0; i < writeIdx; ++i) {
+            if (auto sp = activePhysicsNodes_[i].lock()) {
+                if (sp->isActive()) {
+                    int objIdx = sp->objectId + 1;
+                    if (objIdx >= 0 && objIdx < fastMatsSize) {
+                        const auto& mats = fastMats[objIdx];
+                        if (sp->physMatIdx < mats.size() && mats[sp->physMatIdx].type == BodyType::FLUID) {
+                            fluidNodes.push_back(sp);
                         }
                     }
                 }
@@ -245,126 +53,213 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
         }
     }
 
-    if (!gasToRemove.empty() || !gasToAdd.empty()) {
-        for (auto& node : gasToRemove) {
-            removeRecursive(root_.get(), node->getCubeBounds(), node);
-            node->setActive(false);
-        }
-        for (auto& child : gasToAdd) {
-            ensureBounds(child->getCubeBounds());
-            insertRecursive(root_.get(), child, 0);
-            
-            std::lock_guard<std::mutex> lock(physicsMutex_);
-            activePhysicsNodes_.push_back(child);
-        }
-    }
-#else
-    float phys_h2 = phys_smoothingRadius * phys_smoothingRadius;
+    if (fluidNodes.empty()) return;
+
+    float h = phys_smoothingRadius;
+    float h2 = h * h;
+    float maxKernelVol = 4.18879f * h2 * h;
     std::vector<std::shared_ptr<NodeData>> allNeighbors;
-    allNeighbors.reserve(dynamicNodes.size() * 40);
-    std::vector<size_t> neighborOffsets(dynamicNodes.size() + 1, 0);
-    for (size_t i = 0; i < dynamicNodes.size(); ++i) {
-        auto& node = dynamicNodes[i];
-        auto obj = getObj(node->objectId);
-        PhysicsMaterial_ pmat = obj ? obj->getPhysicsMaterial(node->physMatIdx) : PhysicsMaterial_();
+    allNeighbors.reserve(fluidNodes.size() * 64);
+    std::vector<size_t> neighborOffsets(fluidNodes.size() + 1, 0);
+
+    // --- Pass 1: Gather Neighbors, Compute Density & Pressure ---
+    for (size_t i = 0; i < fluidNodes.size(); ++i) {
+        auto& node = fluidNodes[i];
+        PointType center = node->position;
         
-        if (pmat.type == BodyType::FLUID || pmat.type == BodyType::GAS || pmat.type == BodyType::RIGID) {
-            node->physics.density = 0.0f;
-            size_t startOffset = allNeighbors.size();
-            searchNode(root_.get(), node->position, phys_h2, -1, allNeighbors);
-            size_t endOffset = allNeighbors.size();
-            neighborOffsets[i+1] = endOffset;
+        size_t startOffset = allNeighbors.size();
 
-            for (size_t j = startOffset; j < endOffset; ++j) {
-                auto& neighbor = allNeighbors[j];
-                auto nObj = getObj(neighbor->objectId);
-                PhysicsMaterial_ nPmat = nObj ? nObj->getPhysicsMaterial(neighbor->physMatIdx) : PhysicsMaterial_();
-
-                if (nPmat.type != BodyType::FLUID && nPmat.type != BodyType::GAS && nPmat.type != BodyType::RIGID) continue;
-
-                float r = (node->position - neighbor->position).norm();
-                node->physics.density += nPmat.mass * kernels_.Poly6(r);
-            }
-
-            if (node->physics.density < 0.001f) node->physics.density = 0.001f;
+        OctreeNode* stack[256];
+        int stackPtr = 0;
+        stack[stackPtr++] = root_.get();
+        
+        while (stackPtr > 0) {
+            OctreeNode* currNode = stack[--stackPtr];
             
-            float maxDensity = phys_restDensity * 3.0f;
-            float clampedDensity = std::min(node->physics.density, maxDensity);
-
-            if (pmat.type == BodyType::GAS) {
-                node->physics.pressure = phys_gasConstant * clampedDensity;
-            } else {
-                node->physics.pressure = phys_gasConstant * (clampedDensity - phys_restDensity);
+            PointType closest;
+            for (int k = 0; k < Dim; ++k) {
+                closest[k] = std::max(currNode->bounds.first[k], std::min(center[k], currNode->bounds.second[k]));
             }
-        } else {
-            neighborOffsets[i+1] = allNeighbors.size();
-        }
-    }
+            if ((closest - center).squaredNorm() > h2) continue;
+            
+            if (!currNode->isLoaded()) continue;
 
-    for (size_t i = 0; i < dynamicNodes.size(); ++i) {
-        auto& node = dynamicNodes[i];
-        auto obj = getObj(node->objectId);
-        PhysicsMaterial_ pmat = obj ? obj->getPhysicsMaterial(node->physMatIdx) : PhysicsMaterial_();
-
-        Eigen::Vector3f gravityDir = Eigen::Vector3f::Zero();
-        if (phys_useGravityPoint) {
-            Eigen::Vector3f dir = phys_gravityCenter - node->position;
-            float distSq = dir.squaredNorm();
-            if (distSq > 0.0001f) {
-                gravityDir = dir.normalized() * phys_gravityStrength;
-            }
-        } else {
-            gravityDir = phys_gravity;
-        }
-
-        node->physics.force = gravityDir * pmat.mass;
-
-        if (pmat.type == BodyType::GAS) {
-            float volume = node->size * node->size * node->size;
-            Eigen::Vector3f buoyancy = -gravityDir * (phys_airDensity * volume);
-            node->physics.force += buoyancy;
-        }
-
-        if (pmat.type == BodyType::FLUID || pmat.type == BodyType::GAS || pmat.type == BodyType::RIGID) {
-            Eigen::Vector3f fPress = Eigen::Vector3f::Zero();
-            Eigen::Vector3f fVisc = Eigen::Vector3f::Zero();
-
-            size_t startOffset = neighborOffsets[i];
-            size_t endOffset = neighborOffsets[i+1];
-
-            for (size_t j = startOffset; j < endOffset; ++j) {
-                auto& neighbor = allNeighbors[j];
-                if (neighbor == node) continue;
-                
-                auto nObj = getObj(neighbor->objectId);
-                PhysicsMaterial_ nPmat = nObj ? nObj->getPhysicsMaterial(neighbor->physMatIdx) : PhysicsMaterial_();
-
-                if (nPmat.type != BodyType::FLUID && nPmat.type != BodyType::GAS && nPmat.type != BodyType::RIGID) continue;
-
-                PointType diff = node->position - neighbor->position;
-                float r = diff.norm();
-                
-                if (r > 0.0001f && r < phys_smoothingRadius) {
-                    PointType dir = diff / r;
-                    float pressureTerm = (node->physics.pressure / (node->physics.density * node->physics.density)) + 
-                                         (neighbor->physics.pressure / (neighbor->physics.density * neighbor->physics.density));
-                    
-                    float sizeFactor = node->size * neighbor->size;
-                    float massFactor = pmat.mass * nPmat.mass;
-
-                    fPress += -dir * massFactor * pressureTerm * kernels_.SpikyGrad(r) * sizeFactor;
-
-                    float viscFactor = (pmat.type == BodyType::RIGID && nPmat.type == BodyType::RIGID) ? 20.0f : 1.0f;
-
-                    fVisc += viscFactor * phys_viscosity * massFactor * 
-                             (neighbor->physics.velocity - node->physics.velocity) / neighbor->physics.density * 
-                             kernels_.ViscLaplacian(r) * sizeFactor;
+            std::shared_lock<std::shared_mutex> lock(currNode->nodeMutex);
+            for (size_t k = 0; k < currNode->points.size(); ++k) {
+                const auto& pt = currNode->points[k];
+                if (pt->isActive() && (pt->position - center).squaredNorm() <= h2) {
+                    allNeighbors.push_back(pt);
                 }
             }
-            node->physics.force += fPress + fVisc;
+            
+            if (!currNode->isLeaf()) {
+                for (int k = 0; k < 8; ++k) {
+                    if (currNode->children[k]) stack[stackPtr++] = currNode->children[k].get();
+                }
+            }
+        }
+        
+        size_t endOffset = allNeighbors.size();
+        neighborOffsets[i+1] = endOffset;
+
+        // Dimensionless Density (Volume Fraction)
+        float densityFraction = 0.0f;
+        
+        for (size_t j = startOffset; j < endOffset; ++j) {
+            auto& neighbor = allNeighbors[j];
+            int nObjIdx = neighbor->objectId + 1;
+            
+            PhysicsMaterial_ nPmat;
+            if (nObjIdx >= 0 && nObjIdx < fastMatsSize && neighbor->physMatIdx < fastMats[nObjIdx].size()) {
+                nPmat = fastMats[nObjIdx][neighbor->physMatIdx];
+            }
+
+            if (nPmat.type == BodyType::FLUID) {
+                float r = (center - neighbor->position).norm();
+                float V_j = std::min(neighbor->size * neighbor->size * neighbor->size, maxKernelVol); 
+                densityFraction += V_j * kernels_.Poly6(r);
+            }
+        }
+
+        node->physics.density = densityFraction * phys_restDensity; 
+        
+        // Compute pressure using Volume formulation (1.0 = perfect rest density).
+        // Strongly clamp the max over-density to prevent explosive single-frame shocks.
+        float over_density = std::max(0.0f, densityFraction - 1.0f);
+        over_density = std::min(over_density, 1.5f); // Cap maximum pressure force multiplier
+        node->physics.pressure = phys_gasConstant * over_density; 
+    }
+
+    // --- Pass 2: Compute Forces ---
+    for (size_t i = 0; i < fluidNodes.size(); ++i) {
+        auto& node = fluidNodes[i];
+        
+        float V_i = std::min(node->size * node->size * node->size, maxKernelVol);
+        float mass_i = V_i * phys_restDensity;
+
+        // Calculate Gravity
+        Eigen::Vector3f gravityDir = phys_useGravityPoint ? 
+            (phys_gravityCenter - node->position).normalized() * phys_gravityStrength : phys_gravity;
+        
+        node->physics.force = gravityDir * mass_i;
+
+        Eigen::Vector3f fPress = Eigen::Vector3f::Zero();
+        Eigen::Vector3f fVisc = Eigen::Vector3f::Zero();
+
+        size_t startOffset = neighborOffsets[i];
+        size_t endOffset = neighborOffsets[i+1];
+
+        for (size_t j = startOffset; j < endOffset; ++j) {
+            auto& neighbor = allNeighbors[j];
+            if (neighbor == node) continue;
+            
+            int nObjIdx = neighbor->objectId + 1;
+            PhysicsMaterial_ nPmat;
+            if (nObjIdx >= 0 && nObjIdx < fastMatsSize && neighbor->physMatIdx < fastMats[nObjIdx].size()) {
+                nPmat = fastMats[nObjIdx][neighbor->physMatIdx];
+            }
+
+            PointType diff = node->position - neighbor->position;
+            float r = diff.norm();
+            
+            // Stacked singularity fallback (prevents perfectly overlapping random spawns from generating NaNs)
+            if (r < 1e-5f) {
+                fPress += Eigen::Vector3f::Random().normalized() * mass_i * 25.0f;
+                continue;
+            }
+            
+            if (r < h) {
+                PointType dir = diff / r; // Direction pointing AWAY from neighbor
+                
+                if (nPmat.type == BodyType::FLUID) {
+                    float V_j = std::min(neighbor->size * neighbor->size * neighbor->size, maxKernelVol);
+
+                    // Fluid Pressure (Volume SPH Formulation)
+                    // F_press = - V_i * V_j * (P_i + P_j) * \nabla W
+                    float P_sum = node->physics.pressure + neighbor->physics.pressure;
+                    float F_p_mag = -V_i * V_j * P_sum * kernels_.SpikyGrad(r); // SpikyGrad is negative, resulting in a positive magnitude
+                    fPress += dir * F_p_mag;
+
+                    // Fluid Viscosity
+                    float F_v_mag = V_i * V_j * phys_viscosity * kernels_.ViscLaplacian(r);
+                    fVisc += F_v_mag * (neighbor->physics.velocity - node->physics.velocity);
+
+                } else if (nPmat.type == BodyType::STATIC || nPmat.type == BodyType::KINEMATIC) {
+                    // Fluid <-> Solid Interaction (Robust Penalty Force - decoupled from SPH density)
+                    float minDist = (node->size + neighbor->size) * 0.5f;
+                    if (r < minDist) {
+                        float overlap = minDist - r;
+                        
+                        // Dynamic stiffnes calculated to comfortably counteract gravity at minimal penetration
+                        float baseG = (phys_gravityStrength > 0.1f) ? phys_gravityStrength : 9.81f;
+                        float stiffness = mass_i * baseG * 200.0f; 
+                        fPress += dir * overlap * stiffness;
+                        
+                        // Impact damping against the wall to absorb kinetic energy
+                        Eigen::Vector3f relVel = node->physics.velocity - neighbor->physics.velocity;
+                        float approachSpeed = relVel.dot(dir);
+                        if (approachSpeed < 0.0f) {
+                            fPress += -dir * approachSpeed * mass_i * 20.0f;
+                        }
+                    }
+                }
+            }
+        }
+        node->physics.force += fPress + fVisc;
+    }
+
+    // --- Pass 3: Integration and Movement ---
+    struct MoveAction {
+        std::shared_ptr<NodeData> node;
+        PointType newPos;
+    };
+    std::vector<MoveAction> pendingMoves;
+    pendingMoves.reserve(fluidNodes.size());
+
+    for (size_t i = 0; i < fluidNodes.size(); ++i) {
+        auto& node = fluidNodes[i];
+        
+        float V_i = std::min(node->size * node->size * node->size, maxKernelVol);
+        float mass_i = V_i * phys_restDensity;
+
+        Eigen::Vector3f accel = node->physics.force / mass_i;
+        
+        // Strict game-friendly acceleration clamp (Max 100 Gs)
+        float maxAccel = 1000.0f; 
+        if (accel.squaredNorm() > maxAccel * maxAccel) {
+            accel = accel.normalized() * maxAccel;
+        }
+        
+        // Semi-implicit Euler integration
+        node->physics.velocity += accel * dt;
+        
+        // Apply global velocity damping
+        node->physics.velocity *= std::max(0.0f, 1.0f - phys_velocityDamping * dt);
+
+        // Limit Velocity (Prevent particles from tunneling through the grid in one frame)
+        float maxVel = std::max(h / dt, 25.0f);
+        if (node->physics.velocity.squaredNorm() > maxVel * maxVel) {
+            node->physics.velocity = node->physics.velocity.normalized() * maxVel;
+        }
+
+        PointType newPos = node->position + node->physics.velocity * dt;
+        pendingMoves.push_back({node, newPos});
+    }
+
+    // --- Execute Spatial Movements ---
+    for (size_t i = 0; i < pendingMoves.size(); ++i) {
+        auto& move = pendingMoves[i];
+        auto& node = move.node;
+        
+        // Extract, update position, and re-insert
+        if (removeRecursive(root_.get(), node->getCubeBounds(), node)) {
+            node->position = move.newPos;
+            ensureBounds(node->getCubeBounds());
+            if (!insertRecursive(root_.get(), node, 0)) {
+                size--; // Revert counter if re-insertion fails (e.g. invalid bounds)
+            }
         }
     }
 
-#endif
 }
 }
