@@ -49,11 +49,20 @@ void Octree<T, IndexType, StoragePath>::buildRenderNodeAt(OctreeNode_<T, IndexTy
             rd.size = pt->size;
             rd.color = pt->color;
             
+            uint32_t isGas = 0;
+            auto objIt = localObjects.find(pt->objectId);
+            if (objIt != localObjects.end()) {
+                if (objIt->second->getPhysicsMaterial(pt->physMatIdx).type == BodyType::GAS) {
+                    isGas = 1;
+                }
+            }
+            
             rd.materialIdx = buffer.defaultMatIdx;
             auto it = buffer.objMaterialOffsets.find(pt->objectId);
             if (it != buffer.objMaterialOffsets.end()) {
                 rd.materialIdx = it->second + pt->renderMatIdx;
             }
+            rd.isGas = isGas;
             
             BoundingBox bb = pt->getCubeBounds();
             rd.boundsMin = bb.first;
@@ -71,11 +80,20 @@ void Octree<T, IndexType, StoragePath>::buildRenderNodeAt(OctreeNode_<T, IndexTy
         ld.size = node->lodData->size;
         ld.color = node->lodData->color;
         
+        uint32_t isGas = 0;
+        auto objIt = localObjects.find(node->lodData->objectId);
+        if (objIt != localObjects.end()) {
+            if (objIt->second->getPhysicsMaterial(node->lodData->physMatIdx).type == BodyType::GAS) {
+                isGas = 1;
+            }
+        }
+        
         ld.materialIdx = buffer.defaultMatIdx;
         auto it = buffer.objMaterialOffsets.find(node->lodData->objectId);
         if (it != buffer.objMaterialOffsets.end()) {
             ld.materialIdx = it->second + node->lodData->renderMatIdx;
         }
+        ld.isGas = isGas;
         
         BoundingBox bb = node->lodData->getCubeBounds();
         ld.boundsMin = bb.first;
@@ -395,7 +413,7 @@ frame Octree<T, IndexType, StoragePath>::renderFrameVulkan(const Camera& cam, in
         const auto& p = tl_buffer.points[sp.idx];
         
         gpuPoints.push_back({
-            p.position, p.size, packRGB8(p.color), p.materialIdx, p.objectId, 0
+            p.position, p.size, packRGB8(p.color), p.materialIdx, p.objectId, p.isGas
         });
 
         if (tl_buffer.materials[p.materialIdx].emittance > 0.0f) {
@@ -544,7 +562,7 @@ frame Octree<T, IndexType, StoragePath>::fastRenderFrameVulkan(const Camera& cam
         if(isLodPoint[i]) continue;
         const auto& p = tl_buffer.points[i];
         
-        gpuPoints.push_back({p.position, p.size, packRGB8(p.color), p.materialIdx, p.objectId, 0});
+        gpuPoints.push_back({p.position, p.size, packRGB8(p.color), p.materialIdx, p.objectId, p.isGas});
         
         if (tl_buffer.materials[p.materialIdx].emittance > 0.0f) {
             gpuLights.push_back(gpuPoints.size() - 1);
@@ -708,10 +726,10 @@ frame Octree<T, IndexType, StoragePath>::blendedRenderFrameVulkan(const Camera& 
         const auto& p = tl_buffer.points[sp.idx];
         
         gpuPBRPoints.push_back({
-            p.position, p.size, packRGB8(p.color), p.materialIdx, p.objectId, 0
+            p.position, p.size, packRGB8(p.color), p.materialIdx, p.objectId, p.isGas
         });
         gpuFastPoints.push_back({
-            p.position, p.size, packRGB8(p.color), p.materialIdx, p.objectId, 0
+            p.position, p.size, packRGB8(p.color), p.materialIdx, p.objectId, p.isGas
         });
 
         if (tl_buffer.materials[p.materialIdx].emittance > 0.0f) {

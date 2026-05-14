@@ -22,7 +22,7 @@ struct GPUPBRRenderData {
     uint color;
     uint materialIdx;
     int objectId;
-    uint padding1;
+    uint isGas;
 };
 
 layout(std430, binding = 1) readonly buffer PointBuffer { GPUPBRRenderData points[]; };
@@ -310,11 +310,12 @@ vec3 traceRay(Ray initialRay, inout uint state, inout uint group_state, out floa
                     primaryObjId = points[hitIndex].objectId;
                     GPUPBRRenderData hd = points[hitIndex];
                     GPUMaterial mData = materials[hd.materialIdx];
+                    bool isGas = hd.isGas != 0;
 
                     float r, m, tr, ior;
                     unpackMaterial(mData.materialProps, r, m, tr, ior);
                     float comp = 0.3;
-                    if (tr > 0.0) comp += 0.5;
+                    if (tr > 0.0 || isGas) comp += 0.5;
                     if (m > 0.0) comp += 0.2;
                     if (r > 0.0 && r < 0.9) comp += 0.3;
                     if (mData.emittance > 0.0) comp += 0.2;
@@ -340,18 +341,32 @@ vec3 traceRay(Ray initialRay, inout uint state, inout uint group_state, out floa
             unpackMaterial(mData.materialProps, r, m, tr, ior);
             vec3 medAbsorption = unpackRGB8(mData.absorption);
             vec3 medAlbedo = unpackRGB8(medData.color);
+            bool isMedGas = medData.isGas != 0;
+
             vec3 sigma_a = medAbsorption * 5.0; 
-            sigma_t = medAbsorption * 10.0; 
-            vec3 sigma_s = medAlbedo * (1.0 - tr) * 15.0; 
-            float max_sigma_s = max(sigma_s.x, max(sigma_s.y, sigma_s.z));
+            sigma_s = medAlbedo * (1.0 - tr) * 15.0; 
+            if (isMedGas) {
+                float densityProxy = max(0.001, 1.0 - tr);
+                vec3 compColor = vec3(1.0) - medAlbedo;
+                sigma_a = (medAbsorption + compColor * 2.0) * densityProxy * 5.0; 
+                sigma_s = medAlbedo * densityProxy * 5.0; 
+            }
             
-            if (max_sigma_s > 1e-5) {
-                float t_scatter = -log(max(1e-7, 1.0 - nextFloat(state))) / max_sigma_s;
+            vec3 sigma_t_vec = sigma_a + sigma_s;
+            float max_sigma_t = max(sigma_t_vec.x, max(sigma_t_vec.y, sigma_t_vec.z));
+            vec3 emission = (mData.emittance > 0.0) ? medAlbedo * mData.emittance : vec3(0.0);
+            
+            if (max_sigma_t > 1e-5) {
+                float t_scatter = -log(max(1e-7, 1.0 - nextFloat(state))) / max_sigma_t;
                 if (t_scatter < t) {
                     scattered = true;
                     t_actual = t_scatter;
                     
                     vec3 scatterPos = origin + direction * t_scatter;
+                    
+                    if (emission.x > 0.0 || emission.y > 0.0 || emission.z > 0.0) {
+                        finalColor += throughput * emission * (vec3(1.0) - exp(-sigma_t_vec * t_actual)) / max(sigma_t_vec, vec3(1e-5));
+                    }
                     
                     float z = 1.0 - 2.0 * nextFloat(state);
                     float radius = sqrt(max(0.0, 1.0 - z*z));
@@ -359,11 +374,16 @@ vec3 traceRay(Ray initialRay, inout uint state, inout uint group_state, out floa
                     direction = vec3(radius * cos(phi), radius * sin(phi), z);
                     origin = scatterPos;
                     
-                    throughput *= (sigma_s / max_sigma_s);
+                    throughput *= (sigma_s / max_sigma_t) * exp((vec3(max_sigma_t) - sigma_t_vec) * t_actual);
                     volumetricBounces++;
                 }
             }
-            throughput *= exp(-sigma_a * t_actual);
+            if (!scattered) {
+                if (emission.x > 0.0 || emission.y > 0.0 || emission.z > 0.0) {
+                    finalColor += throughput * emission * (vec3(1.0) - exp(-sigma_t_vec * t_actual)) / max(sigma_t_vec, vec3(1e-5));
+                }
+                throughput *= exp((vec3(max_sigma_t) - sigma_t_vec) * t_actual);
+            }
             
             if (max(max(throughput.x, throughput.y), throughput.z) < 0.01) break;
         }
@@ -395,6 +415,7 @@ vec3 traceRay(Ray initialRay, inout uint state, inout uint group_state, out floa
         vec3 offsetNorm = entering == 1 ? normal : -normal;
 
         bool skipSurface = false;
+        bool isMedGas = hitData.isGas != 0;
         
         if (currentMediumObjId != -1 && hitData.objectId == currentMediumObjId) {
             if (entering == 1) {
@@ -415,6 +436,19 @@ vec3 traceRay(Ray initialRay, inout uint state, inout uint group_state, out floa
             origin = hitPoint + direction * (GAP_EPSILON * 2.0);
             transparentBounces++;
             continue; 
+        }
+
+        if (isMedGas) {
+            if (entering == 1) {
+                currentMediumObjId = hitData.objectId;
+                currentMediumVoxelIdx = hitIndex;
+            } else {
+                currentMediumObjId = -1;
+                currentMediumVoxelIdx = -1;
+            }
+            origin = hitPoint + direction * (GAP_EPSILON * 2.0);
+            transparentBounces++;
+            continue;
         }
 
         GPUMaterial surfaceMat = materials[hitData.materialIdx];
@@ -685,14 +719,24 @@ vec3 shadowTraverse(Ray ray, float maxDist, int lightPtIdx) {
                 GPUMaterial tMat = materials[pt.materialIdx];
                 float r, m, tr, ior;
                 unpackMaterial(tMat.materialProps, r, m, tr, ior);
+                bool isMedGas = pt.isGas != 0;
                 
-                if (tr > 0.0 && m < 1.0) {
+                if (isMedGas || (tr > 0.0 && m < 1.0)) {
                     vec3 absColor = unpackRGB8(tMat.absorption);
                     float actualTEntry = max(0.0, tEntry);
                     float actualTExit = min(maxDist, tExit);
                     float thickness = max(0.0, actualTExit - actualTEntry);
                     
-                    transmittance *= exp(-absColor * 10.0 * thickness);
+                    if (isMedGas) {
+                        vec3 albColor = unpackRGB8(pt.color);
+                        float densityProxy = max(0.001, 1.0 - tr);
+                        vec3 compColor = vec3(1.0) - albColor;
+                        vec3 sigma_a = (absColor + compColor * 2.0) * densityProxy * 5.0;
+                        vec3 sigma_s = albColor * densityProxy * 5.0;
+                        transmittance *= exp(-(sigma_a + sigma_s) * thickness);
+                    } else {
+                        transmittance *= exp(-absColor * 10.0 * thickness);
+                    }
                 } else {
                     float tHit = tEntry < 0.0 ? tExit : tEntry;
                     if (tHit >= 0.0 && tHit <= maxDist) rayQueryGenerateIntersectionEXT(rq, tHit);
@@ -839,11 +883,12 @@ void main() {
                 pObjId = points[hitIdx].objectId;
                 GPUPBRRenderData hd = points[hitIdx];
                 GPUMaterial mData = materials[hd.materialIdx];
+                bool isGas = (hd.materialIdx >> 31) != 0;
 
                 float r, m, tr, ior;
                 unpackMaterial(mData.materialProps, r, m, tr, ior);
                 float comp = 0.3;
-                if (tr > 0.0) comp += 0.5;
+                if (tr > 0.0 || isGas) comp += 0.5;
                 if (m > 0.0) comp += 0.2;
                 if (r > 0.0 && r < 0.9) comp += 0.3;
                 if (mData.emittance > 0.0) comp += 0.2;

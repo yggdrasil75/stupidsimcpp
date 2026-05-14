@@ -301,6 +301,7 @@ struct GridObject_ {
     int id;
     uint8_t objectFlags;
     PointType centerPosition = PointType::Zero();
+    float maxGasVoxelSize = 0.0f;
 
     std::vector<Material_<T, IndexType, StoragePath>> renderMaterials;
     std::vector<PhysicsMaterial_> physicsMaterials;

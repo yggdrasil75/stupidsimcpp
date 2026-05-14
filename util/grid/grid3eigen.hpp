@@ -144,6 +144,8 @@ private:
     float phys_viscosity = 200.0f;
     float phys_velocityDamping = 0.5f;
     float phys_airDensity = 1.225f;
+    float phys_gasExpansionRate = 0.5f;
+    float phys_maxGasSize = 1.0f;
     Eigen::Vector3f phys_gravity{0.0f, -9.81f, 0.0f};
 
     SPHKernels kernels_{phys_smoothingRadius};
@@ -418,6 +420,8 @@ public:
     void setPhysicsViscosity(float v) { phys_viscosity = v; }
     void setPhysicsRestDensity(float d) { phys_restDensity = d; }
     void setPhysicsAirDensity(float d) { phys_airDensity = d; }
+    void setPhysicsGasExpansionRate(float rate) { phys_gasExpansionRate = rate; }
+    void setPhysicsMaxGasSize(float maxGas) { phys_maxGasSize = maxGas; }
     void setphys_gravityCenter(PointType n) {
         phys_gravityCenter = n;
     }
@@ -1843,6 +1847,7 @@ public:
                 std::shared_lock<std::shared_mutex> objLock(obj->objMutex);
                 OctreeNode::writeVal(out, obj->objectFlags);
                 OctreeNode::writeVec3(out, obj->centerPosition);
+                OctreeNode::writeVal(out, obj->maxGasVoxelSize);
                 
                 uint32_t numRMat = obj->renderMaterials.size();
                 OctreeNode::writeVal(out, numRMat);
@@ -1899,6 +1904,7 @@ public:
                 auto obj = std::make_shared<GridObject>(id);
                 OctreeNode::readVal(in, obj->objectFlags);
                 OctreeNode::readVec3(in, obj->centerPosition);
+                OctreeNode::readVal(in, obj->maxGasVoxelSize);
                 
                 uint32_t numRMat;
                 OctreeNode::readVal(in, numRMat);

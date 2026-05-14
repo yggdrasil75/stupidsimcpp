@@ -14,6 +14,7 @@ struct RenderData_ {
     PointType boundsMin;
     PointType boundsMax;
     int objectId;
+    uint32_t isGas;
 };
 
 template<typename T, typename IndexType, GridStoragePath StoragePath>
@@ -134,7 +135,7 @@ struct alignas(16) GPUFastRenderData {
     uint32_t color;
     uint32_t materialIdx;
     int objectId;
-    uint32_t padding2;
+    uint32_t isGas;
 };
 
 struct alignas(16) GPUPBRRenderData {
@@ -143,7 +144,7 @@ struct alignas(16) GPUPBRRenderData {
     uint32_t color;
     uint32_t materialIdx;
     int objectId;
-    uint32_t padding1;
+    uint32_t isGas;
 };
 
 struct alignas(16) GPUCameraData {

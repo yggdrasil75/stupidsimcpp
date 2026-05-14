@@ -108,15 +108,45 @@ int main() {
     Eigen::Vector3f cDarkGray(0.2f, 0.2f, 0.2f);
     float chkSize = 1.0f;
 
-    // Floor (Bounds: Z from -0.7 to -0.5)
-    // The boxes sit exactly on Z = -0.5
+    // Floor
     createCheckerBox(octree, Eigen::Vector3f(0.0f, 0.0f, -0.6f), Eigen::Vector3f(14.4f, 14.4f, 0.2f), cLightGray, cDarkGray, chkSize);
     
-    // Walls (Bounds: X/Y inner boundaries at +/- 7.0, rising from Z=-0.5 up to Z=7.5)
+    // Walls
     createCheckerBox(octree, Eigen::Vector3f( 7.1f,  0.0f, 3.5f), Eigen::Vector3f(0.2f, 14.4f, 8.0f), cLightGray, cDarkGray, chkSize); // +X
     createCheckerBox(octree, Eigen::Vector3f(-7.1f,  0.0f, 3.5f), Eigen::Vector3f(0.2f, 14.4f, 8.0f), cLightGray, cDarkGray, chkSize); // -X
     createCheckerBox(octree, Eigen::Vector3f( 0.0f,  7.1f, 3.5f), Eigen::Vector3f(14.0f, 0.2f, 8.0f), cLightGray, cDarkGray, chkSize); // +Y
     createCheckerBox(octree, Eigen::Vector3f( 0.0f, -7.1f, 3.5f), Eigen::Vector3f(14.0f, 0.2f, 8.0f), cLightGray, cDarkGray, chkSize); // -Y
+    {
+        Eigen::Vector3f ceilingCenter(0.0f, 0.0f, 7.4f);
+        Eigen::Vector3f ceilingSize(14.4f, 14.4f, 0.2f);
+        Eigen::Vector3f lightSize(8.0f, 8.0f, 0.2f);
+        float step = 0.5f;
+
+        Eigen::Vector3f minCeiling = ceilingCenter - ceilingSize / 2.0f;
+        Eigen::Vector3f maxCeiling = ceilingCenter + ceilingSize / 2.0f;
+        Eigen::Vector3f minLight = ceilingCenter - lightSize / 2.0f;
+        Eigen::Vector3f maxLight = ceilingCenter + lightSize / 2.0f;
+
+        Eigen::Vector3f cBlack(0.01f, 0.01f, 0.01f);
+        Eigen::Vector3f cWhite(1.0f, 1.0f, 1.0f);
+
+        for (float x = minCeiling.x(); x <= maxCeiling.x(); x += step) {
+            for (float y = minCeiling.y(); y <= maxCeiling.y(); y += step) {
+                for (float z = minCeiling.z(); z <= maxCeiling.z(); z += step) {
+                    Eigen::Vector3f pos(x, y, z);
+                    
+                    bool isLightArea = (x >= minLight.x() && x <= maxLight.x() &&
+                                        y >= minLight.y() && y <= maxLight.y());
+
+                    if (isLightArea) {
+                        octree.set(1, pos, true, cWhite, step, true, 10, 15.0f, 0.8f, 0.0f, 0.0f, 1.45f, Eigen::Vector3f::Zero(), Grid::BodyType::STATIC, 1.0f);
+                    } else {
+                        octree.set(1, pos, true, cBlack, step, true, 100, 0.0f, 0.8f, 0.2f, 0.0f, 1.45f, Eigen::Vector3f::Zero(), Grid::BodyType::STATIC, 1.0f);
+                    }
+                }
+            }
+        }
+    }
 
     // 2b. Create the 3x3 material sampler grid inside the room
     Eigen::Vector3f cRed(1.0f, 0.1f, 0.1f);
@@ -146,8 +176,6 @@ int main() {
     createBox(octree, Eigen::Vector3f(  0,  sp, 0.0f), size, cBlue,   0.0f, 0.01f, 0.0f, 0.99f, 1.5f, Eigen::Vector3f(0.8f, 0.8f, 0.05f), 8, initType, mass, 0.5);
     createBox(octree, Eigen::Vector3f( sp,  sp, 0.0f), size, cPurple, 0.0f, 0.01f, 0.0f, 0.99f, 1.5f, Eigen::Vector3f(0.4f, 1.2f, 0.4f), 9, initType, mass, 0.5);
 
-    createBox(octree, Eigen::Vector3f(0.0f, 0.0f, 7.4f), Eigen::Vector3f(8.0f, 8.0f, 0.2f), Eigen::Vector3f(1.0f, 1.0f, 1.0f), 15.0f, 0.8f, 0.0f, 0.0f, 1.45f, Eigen::Vector3f::Zero(), 10);
-
     std::cout << "Optimizing and Generating LODs..." << std::endl;
     // octree.generateLODs();
     octree.setLODMinDistance(1024);
@@ -156,7 +184,7 @@ int main() {
     octree.setMaxDistance(4096);
 
     // 3. Setup rendering loop
-    int width = 1920;
+    int width = 1080;
     int height = 1080;
     
     const float fps = 30.0f;
@@ -165,7 +193,7 @@ int main() {
     const int samples = 100;
     const int blendedsamples = 100;
     const float blendedfactor = 0.5;
-    const int videosamples = 512;
+    const int videosamples = 100;
     const int bounces = 4;
     const int physicsSubsteps = 10;
     const float physicsDt = 1.0f / fps;
@@ -222,26 +250,26 @@ int main() {
     }
     FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
 
-    for (const auto& view : views) {
-        ScopedFunctionTimer meh("Slow Section");
-        std::cout << "\nRendering view from " << view.name << " direction (Slow "<< samples <<" Samples Pass)..." << std::endl;
+    // for (const auto& view : views) {
+    //     ScopedFunctionTimer meh("Slow Section");
+    //     std::cout << "\nRendering view from " << view.name << " direction (Slow "<< samples <<" Samples Pass)..." << std::endl;
         
-        Camera cam;
-        cam.origin = view.origin;
-        cam.direction = (target - view.origin).normalized();
-        cam.up = view.up;
+    //     Camera cam;
+    //     cam.origin = view.origin;
+    //     cam.direction = (target - view.origin).normalized();
+    //     cam.up = view.up;
         
-        frame out = octree.renderFrameVulkan(cam, height, width, frame::colormap::RGB, samples, bounces, false, true);
-        std::string filename = "output/slow_vulkanrender_" + view.name + ".bmp";
-        BMPWriter::saveBMP(filename, out);
-        std::cout << "slow done" << std::endl;
+    //     frame out = octree.renderFrameVulkan(cam, height, width, frame::colormap::RGB, samples, bounces, false, true);
+    //     std::string filename = "output/slow_vulkanrender_" + view.name + ".bmp";
+    //     BMPWriter::saveBMP(filename, out);
+    //     std::cout << "slow done" << std::endl;
 
-        out = octree.blendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, blendedsamples, bounces, false, true);
-        filename = "output/slow_blendrender_" + view.name + ".bmp";
-        BMPWriter::saveBMP(filename, out);
-        std::cout << "blended done" << std::endl;
-    }
-    FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
+    //     out = octree.blendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, blendedsamples, bounces, false, true);
+    //     filename = "output/slow_blendrender_" + view.name + ".bmp";
+    //     BMPWriter::saveBMP(filename, out);
+    //     std::cout << "blended done" << std::endl;
+    // }
+    // FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
 
     std::vector<frame> videoFrames;
     const int totalFrames = framesPerSegment * views.size();
@@ -251,40 +279,40 @@ int main() {
     std::cout << "\nStarting video render..." << std::endl;
     std::cout << "Total frames to render: " << totalFrames << std::endl;
 
-    for (size_t i = 0; i < views.size(); ++i) {
-        ScopedFunctionTimer meh("Video");
-        const View& startView = views[i];
-        const View& endView = views[(i + 1) % views.size()]; // Loop back to the first view at the end
+    // for (size_t i = 0; i < views.size(); ++i) {
+    //     ScopedFunctionTimer meh("Video");
+    //     const View& startView = views[i];
+    //     const View& endView = views[(i + 1) % views.size()]; // Loop back to the first view at the end
 
-        std::cout << "\nAnimating segment: " << startView.name << " -> " << endView.name << std::endl;
+    //     std::cout << "\nAnimating segment: " << startView.name << " -> " << endView.name << std::endl;
 
-        for (int j = 0; j < framesPerSegment; ++j) {
-            if (frameCounter < -1) {
-                frameCounter++;
-                continue;
-            }
-            frameCounter++;
-            float t = static_cast<float>(j) / static_cast<float>(framesPerSegment);
+    //     for (int j = 0; j < framesPerSegment; ++j) {
+    //         if (frameCounter < -1) {
+    //             frameCounter++;
+    //             continue;
+    //         }
+    //         frameCounter++;
+    //         float t = static_cast<float>(j) / static_cast<float>(framesPerSegment);
 
-            Eigen::Vector3f currentOrigin = startView.origin * (1.0f - t) + endView.origin * t;
+    //         Eigen::Vector3f currentOrigin = startView.origin * (1.0f - t) + endView.origin * t;
             
-            Eigen::Vector3f currentUp = (startView.up * (1.0f - t) + endView.up * t).normalized();
+    //         Eigen::Vector3f currentUp = (startView.up * (1.0f - t) + endView.up * t).normalized();
             
-            Camera cam;
-            cam.origin = currentOrigin;
-            cam.up = currentUp;
-            cam.direction = (target - cam.origin).normalized();
+    //         Camera cam;
+    //         cam.origin = currentOrigin;
+    //         cam.up = currentUp;
+    //         cam.direction = (target - cam.origin).normalized();
             
-            std::cout << "Rendering video frame " << frameCounter << "/" << totalFrames << "..." << std::endl;
-            // frame out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
-            frame out = octree.blendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, videosamples, bounces, false);
-            // frame out = octree.renderFrameVulkan(cam, height, width, frame::colormap::RGB, videosamples, bounces, false, true);
-            // videoFrames.push_back(std::move(out));
-            std::string debugFilename = "output/materialframes/debug_material_" + std::to_string(frameCounter) + ".bmp";
-            BMPWriter::saveBMP(debugFilename, out);
-        }
-    }
-    FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
+    //         std::cout << "Rendering video frame " << frameCounter << "/" << totalFrames << "..." << std::endl;
+    //         // frame out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
+    //         frame out = octree.blendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, videosamples, bounces, false);
+    //         // frame out = octree.renderFrameVulkan(cam, height, width, frame::colormap::RGB, videosamples, bounces, false, true);
+    //         // videoFrames.push_back(std::move(out));
+    //         std::string debugFilename = "output/materialframes/debug_material_" + std::to_string(frameCounter) + ".bmp";
+    //         BMPWriter::saveBMP(debugFilename, out);
+    //     }
+    // }
+    // FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
 
     // std::cout << "\nAll frames rendered. Saving video file..." << std::endl;
     // std::string videoFilename = "output/material_test_video.y4m";
@@ -306,6 +334,8 @@ int main() {
 
     std::vector<std::weak_ptr<Grid::Octree<int>::NodeData>> trackedWater = octree.getWeakNodesByObjectId(5);
 
+    Camera cam;
+    cam.fov = 100;
     for (size_t i = 0; i < views.size(); ++i) {
         ScopedFunctionTimer meh("Fluid");
         const View& startView = views[i];
@@ -352,7 +382,6 @@ int main() {
 
             // Interpolate camera
             float t = static_cast<float>(j) / static_cast<float>(framesPerView);
-            Camera cam;
             cam.origin = startView.origin * (1.0f - t) + endView.origin * t;
             cam.up = (startView.up * (1.0f - t) + endView.up * t).normalized();
             cam.direction = (target - cam.origin).normalized();
@@ -361,7 +390,7 @@ int main() {
 
             // 3. Render
             // frame out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
-            frame out = octree.blendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, videosamples, bounces, false);
+            frame out = octree.blendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, videosamples, bounces, false, true);
 
             // frame out = octree.renderFrameVulkan(cam, height, width, frame::colormap::RGB, videosamples, bounces, true, false);
             // fluidVideoFrames.push_back(out);
