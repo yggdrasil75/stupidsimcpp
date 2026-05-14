@@ -342,7 +342,7 @@ struct ImpactEvent {
 class planetsim {
 public:
     planetConfig config;
-    Octree<Particle, int16_t, "output/fibSphere"> grid;
+    Grid::Octree<Particle, int16_t, "output/fibSphere"> grid;
     std::vector<PlateConfig> plates;
     std::mt19937 rng = std::mt19937(42);
     bool starAdded = false;
@@ -353,7 +353,7 @@ public:
 
     planetsim() {
         config = planetConfig();
-        grid = Octree<Particle, int16_t, "output/fibSphere">(v3(-config.gridSizeCubeMin,-config.gridSizeCubeMin,-config.gridSizeCubeMin),v3(config.gridSizeCubeMin,config.gridSizeCubeMin,config.gridSizeCubeMin), 4, 64);
+        grid = Grid::Octree<Particle, int16_t, "output/fibSphere">(v3(-config.gridSizeCubeMin,-config.gridSizeCubeMin,-config.gridSizeCubeMin),v3(config.gridSizeCubeMin,config.gridSizeCubeMin,config.gridSizeCubeMin), 4, 64);
     }
 
     float evaluate2DStack(const Eigen::Vector2f& point, const NoisePreviewState& state, PNoise2& gen) {
@@ -1632,7 +1632,7 @@ public:
         TIME_FUNCTION;
         auto allNodes = grid.findInRadius(config.center, config.radius * 1.5f);
         
-        std::vector<std::pair<std::shared_ptr<Octree<Particle, int16_t, "output/fibSphere">::NodeData>, v3>> smoothMoves;
+        std::vector<std::pair<std::shared_ptr<Grid::Octree<Particle, int16_t, "output/fibSphere">::NodeData>, v3>> smoothMoves;
         
         for (auto& n : allNodes) {
             if (!n->isActive() || n->objectId == 2) continue;

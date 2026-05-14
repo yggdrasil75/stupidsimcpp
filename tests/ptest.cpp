@@ -13,6 +13,8 @@
 #include "plant.cpp"
 // #include "terrain.cpp"
 #include "../util/basicdefines.hpp"
+#include "../util/grid/grid3render.cpp"
+#include "../util/grid/grid3physics.cpp"
 
 void framebuffer_size_callback(GLFWwindow* window, int width, int height) {
     glViewport(0, 0, width, height);
