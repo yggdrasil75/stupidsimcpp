@@ -70,6 +70,22 @@ namespace Grid {
     // edge aware median prefilter for luminance variance clamping passes
     // dynamically resize smoothing window based on noise level
 
+    //object crud:
+    /*
+    insert list of voxels.
+    get a vector of weak pointers to all voxels in an object
+    import an obj.
+    change the current allow partial offload bit to be a flag so I can add more there later.
+    changing a render material by its index
+    getting a render material index from a voxel
+    changing a physics material by its index
+    getting a physics material index from a voxel
+    object transforms (rotation, moving, etc)
+    removing an object
+    subdivide object (split each voxel into 8)
+    smooth object? (subdivide and then remove corner?)
+
+    */
 
 
 template<typename T, typename IndexType = uint16_t, GridStoragePath StoragePath = ".">
