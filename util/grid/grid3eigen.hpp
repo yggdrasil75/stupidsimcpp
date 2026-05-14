@@ -263,6 +263,90 @@ private:
         }
     }
 
+    BoundingBox getNodesBounds(const std::vector<std::shared_ptr<NodeData>>& nodes) const {
+        if (nodes.empty()) return {PointType::Zero(), PointType::Zero()};
+        BoundingBox bounds = nodes[0]->getCubeBounds();
+        for (size_t i = 1; i < nodes.size(); ++i) {
+            BoundingBox cb = nodes[i]->getCubeBounds();
+            bounds.first = bounds.first.cwiseMin(cb.first);
+            bounds.second = bounds.second.cwiseMax(cb.second);
+        }
+        return bounds;
+    }
+
+    OctreeNode* getHighestCommonNode(OctreeNode* current, const BoundingBox& bounds, int currentDepth, int& outDepth) const {
+        if (!current || current->isLeaf()) {
+            outDepth = currentDepth;
+            return current;
+        }
+        for (int i = 0; i < 8; ++i) {
+            if (current->children[i]) {
+                BoundingBox cb = createChildBounds(current, i);
+                if (boxContainsBox(cb, bounds)) {
+                    return getHighestCommonNode(current->children[i].get(), bounds, currentDepth + 1, outDepth);
+                }
+            }
+        }
+        outDepth = currentDepth;
+        return current;
+    }
+
+    size_t removeObjectBatchRecursive(OctreeNode* node, int objectId) {
+        if (!node) return 0;
+        ensureLoaded(node, false);
+        size_t removed = 0;
+        {
+            std::lock_guard<std::shared_mutex> lock(node->nodeMutex);
+            auto it = std::partition(node->points.begin(), node->points.end(),
+                [objectId](const auto& pt) { return pt->objectId != objectId; });
+            if (it != node->points.end()) {
+                removed += std::distance(it, node->points.end());
+                node->points.erase(it, node->points.end());
+            }
+        }
+        if (!node->isLeaf()) {
+            for (int i = 0; i < 8; ++i) {
+                if (node->children[i]) {
+                    removed += removeObjectBatchRecursive(node->children[i].get(), objectId);
+                }
+            }
+        }
+        if (removed > 0) {
+            std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
+            node->lodData = nullptr;
+            node->setDirty(true);
+        }
+        return removed;
+    }
+
+    size_t removeSpecificNodesBatchRecursive(OctreeNode* node, const std::unordered_set<std::shared_ptr<NodeData>>& nodesToRemove) {
+        if (!node || nodesToRemove.empty()) return 0;
+        ensureLoaded(node, false);
+        size_t removed = 0;
+        {
+            std::lock_guard<std::shared_mutex> lock(node->nodeMutex);
+            auto it = std::partition(node->points.begin(), node->points.end(),
+                [&](const auto& pt) { return nodesToRemove.find(pt) == nodesToRemove.end(); });
+            if (it != node->points.end()) {
+                removed += std::distance(it, node->points.end());
+                node->points.erase(it, node->points.end());
+            }
+        }
+        if (!node->isLeaf()) {
+            for (int i = 0; i < 8; ++i) {
+                if (node->children[i]) {
+                    removed += removeSpecificNodesBatchRecursive(node->children[i].get(), nodesToRemove);
+                }
+            }
+        }
+        if (removed > 0) {
+            std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
+            node->lodData = nullptr;
+            node->setDirty(true);
+        }
+        return removed;
+    }
+
 public:
     std::shared_ptr<GridObject> getOrCreateObject(int id) {
         std::unique_lock<std::shared_mutex> lock(objectsMutex_);
@@ -1408,6 +1492,273 @@ public:
         return false;
     }
 
+    bool insertVoxels(int objectId, const std::vector<PointType>& positions, const T& defaultData, 
+                      float voxelSize = 0.1f, const Eigen::Vector3f& color = {1.0f, 1.0f, 1.0f},
+                      BodyType bType = BodyType::STATIC, float mass = 1.0f,
+                      float emittance = 0.0f, float roughness = 1.0f, 
+                      float metallic = 0.0f, float transmission = 0.0f, float ior = 1.45f,
+                      Eigen::Vector3f absorp = Eigen::Vector3f::Zero()) {
+        if (!root_) return false;
+        auto obj = getOrCreateObject(objectId);
+        Material mat(emittance, roughness, metallic, transmission, ior, absorp);
+        uint16_t rIdx = obj->getOrAddRenderMaterial(mat);
+        PhysicsMaterial_ pmat{bType, mass};
+        uint16_t pIdx = obj->getOrAddPhysicsMaterial(pmat);
+
+        std::vector<std::shared_ptr<NodeData>> newPhysNodes;
+        bool allInserted = true;
+        
+        for (const auto& pos : positions) {
+            auto pointData = std::make_shared<NodeData>(defaultData, pos, true, color, voxelSize, true, objectId, rIdx, pIdx, bType == BodyType::STATIC);
+            
+            PointType relPos = pos - obj->centerPosition;
+            {
+                std::unique_lock<std::shared_mutex> lock(obj->objMutex);
+                obj->relativeVoxels.push_back({relPos, rIdx, pIdx, voxelSize});
+            }
+            
+            ensureBounds(pointData->getCubeBounds());
+            if (insertRecursive(root_.get(), pointData, 0)) {
+                this->size++;
+                if (bType != BodyType::STATIC) {
+                    newPhysNodes.push_back(pointData);
+                }
+            } else {
+                allInserted = false;
+            }
+        }
+        
+        if (!newPhysNodes.empty()) {
+            std::lock_guard<std::mutex> lock(physicsMutex_);
+            for (auto& n : newPhysNodes) {
+                activePhysicsNodes_.push_back(n);
+            }
+        }
+        
+        return allInserted;
+    }
+
+    bool importOBJ(int objectId, const std::string& filepath, const T& defaultData, 
+                   float voxelSize = 0.1f, const Eigen::Vector3f& color = {1.0f, 1.0f, 1.0f}) {
+        std::ifstream file(filepath);
+        if (!file.is_open()) return false;
+
+        std::vector<PointType> positions;
+        std::string line;
+        while (std::getline(file, line)) {
+            if (line.length() >= 2 && line[0] == 'v' && line[1] == ' ') {
+                std::istringstream s(line.substr(2));
+                PointType p;
+                s >> p.x() >> p.y() >> p.z();
+                
+                p.x() = std::round(p.x() / voxelSize) * voxelSize;
+                p.y() = std::round(p.y() / voxelSize) * voxelSize;
+                p.z() = std::round(p.z() / voxelSize) * voxelSize;
+
+                positions.push_back(p);
+            }
+        }
+        
+        auto ptLess = [](const PointType& a, const PointType& b) {
+            if (a.x() != b.x()) return a.x() < b.x();
+            if (a.y() != b.y()) return a.y() < b.y();
+            return a.z() < b.z();
+        };
+        std::sort(positions.begin(), positions.end(), ptLess);
+        positions.erase(std::unique(positions.begin(), positions.end(), 
+            [](const PointType& a, const PointType& b) {
+                return (a - b).squaredNorm() < 0.0001f;
+            }), positions.end());
+
+        return insertVoxels(objectId, positions, defaultData, voxelSize, color);
+    }
+
+    int getRenderMaterialIndex(const PointType& pos, float tolerance = 0.0001f) {
+        auto pt = find(pos, tolerance);
+        if (!pt) return -1;
+        return pt->renderMatIdx;
+    }
+
+    int getPhysicsMaterialIndex(const PointType& pos, float tolerance = 0.0001f) {
+        auto pt = find(pos, tolerance);
+        if (!pt) return -1;
+        return pt->physMatIdx;
+    }
+
+    bool updateRenderMaterial(int objectId, uint16_t index, const Material& mat) {
+        auto obj = getObject(objectId);
+        if (!obj) return false;
+        {
+            std::unique_lock<std::shared_mutex> lock(obj->objMutex);
+            if (index >= obj->renderMaterials.size()) return false;
+            obj->renderMaterials[index] = mat;
+        }
+        std::vector<std::shared_ptr<NodeData>> nodes;
+        if (root_) collectNodesByObjectId(root_.get(), objectId, nodes);
+        for (auto& n : nodes) invalidateLODForPoint(n);
+        return true;
+    }
+
+    bool updatePhysicsMaterial(int objectId, uint16_t index, const PhysicsMaterial_& pmat) {
+        auto obj = getObject(objectId);
+        if (!obj) return false;
+        {
+            std::unique_lock<std::shared_mutex> lock(obj->objMutex);
+            if (index >= obj->physicsMaterials.size()) return false;
+            obj->physicsMaterials[index] = pmat;
+        }
+        markPhysicsCollidersDirty();
+        return true;
+    }
+
+    bool removeObject(int objectId) {
+        std::vector<std::shared_ptr<NodeData>> nodes;
+        if (root_) collectNodesByObjectId(root_.get(), objectId, nodes);
+        if (nodes.empty()) return false;
+
+        BoundingBox oldBounds = getNodesBounds(nodes);
+        int startDepth = 0;
+        OctreeNode* startNode = getHighestCommonNode(root_.get(), oldBounds, 0, startDepth);
+
+        size_t removed = removeObjectBatchRecursive(startNode, objectId);
+        size -= removed;
+
+        {
+            std::unique_lock<std::shared_mutex> lock(objectsMutex_);
+            objects_.erase(objectId);
+        }
+        return true;
+    }
+
+    bool rotateObject(int objectId, const Eigen::Matrix3f& rotation, const PointType& pivot) {
+        if (!root_) return false;
+        std::vector<std::shared_ptr<NodeData>> nodes;
+        collectNodesByObjectId(root_.get(), objectId, nodes);
+        if (nodes.empty()) return false;
+
+        BoundingBox oldBounds = getNodesBounds(nodes);
+        int oldDepth = 0;
+        OctreeNode* oldStart = getHighestCommonNode(root_.get(), oldBounds, 0, oldDepth);
+
+        size_t removed = removeObjectBatchRecursive(oldStart, objectId);
+        size -= removed;
+
+        for (auto& n : nodes) {
+            PointType offset = n->position - pivot;
+            n->position = pivot + (rotation * offset);
+        }
+
+        BoundingBox newBounds = getNodesBounds(nodes);
+        ensureBounds(newBounds);
+
+        int newDepth = 0;
+        OctreeNode* newStart = getHighestCommonNode(root_.get(), newBounds, 0, newDepth);
+
+        size_t added = 0;
+        for (auto& n : nodes) {
+            if (insertRecursive(newStart, n, newDepth)) {
+                added++;
+            }
+        }
+        size += added;
+        
+        auto obj = getObject(objectId);
+        if (obj) {
+            std::unique_lock<std::shared_mutex> lock(obj->objMutex);
+            obj->centerPosition = pivot + (rotation * (obj->centerPosition - pivot));
+            for (auto& rv : obj->relativeVoxels) {
+                rv.relPos = rotation * rv.relPos;
+            }
+        }
+        
+        return true;
+    }
+
+    bool rotateObjectCenter(int objectId, const Eigen::Matrix3f& rotation) {
+        auto obj = getObject(objectId);
+        if (!obj) return false;
+        return rotateObject(objectId, rotation, obj->centerPosition);
+    }
+
+    bool subdivideObject(int objectId) {
+        if (!root_) return false;
+        std::vector<std::shared_ptr<NodeData>> nodes;
+        collectNodesByObjectId(root_.get(), objectId, nodes);
+        if (nodes.empty()) return false;
+
+        BoundingBox oldBounds = getNodesBounds(nodes);
+        int oldDepth = 0;
+        OctreeNode* oldStart = getHighestCommonNode(root_.get(), oldBounds, 0, oldDepth);
+
+        size_t removed = removeObjectBatchRecursive(oldStart, objectId);
+        size -= removed;
+
+        size_t added = 0;
+        for (auto& n : nodes) {
+            float newSize = n->size * 0.5f;
+            float offset = newSize * 0.5f;
+            
+            for (int i = 0; i < 8; ++i) {
+                PointType newPos = n->position;
+                newPos.x() += (i & 1) ? offset : -offset;
+                newPos.y() += (i & 2) ? offset : -offset;
+                newPos.z() += (i & 4) ? offset : -offset;
+
+                auto childNode = std::make_shared<NodeData>(*n);
+                childNode->position = newPos;
+                childNode->size = newSize;
+
+                if (insertRecursive(oldStart, childNode, oldDepth)) {
+                    added++;
+                }
+            }
+        }
+        size += added;
+        return true;
+    }
+
+    bool smoothObject(int objectId) {
+        if (!subdivideObject(objectId)) return false;
+
+        std::vector<std::shared_ptr<NodeData>> nodes;
+        collectNodesByObjectId(root_.get(), objectId, nodes);
+
+        std::unordered_set<std::shared_ptr<NodeData>> toRemove;
+        std::vector<std::shared_ptr<NodeData>> toRemoveVec;
+        
+        for (auto& n : nodes) {
+            int exposedFaces = 0;
+            float step = n->size;
+            const std::array<PointType, 6> dirs = {
+                PointType(1, 0, 0), PointType(-1, 0, 0),
+                PointType(0, 1, 0), PointType(0, -1, 0),
+                PointType(0, 0, 1), PointType(0, 0, -1)
+            };
+            
+            for (const auto& dir : dirs) {
+                auto neighbor = find(n->position + (dir * step), step * 0.25f);
+                if (!neighbor || !neighbor->isActive() || neighbor->objectId != objectId) {
+                    exposedFaces++;
+                }
+            }
+            
+            if (exposedFaces >= 3) {
+                toRemove.insert(n);
+                toRemoveVec.push_back(n);
+            }
+        }
+
+        if (!toRemoveVec.empty()) {
+            BoundingBox remBounds = getNodesBounds(toRemoveVec);
+            int remDepth = 0;
+            OctreeNode* start = getHighestCommonNode(root_.get(), remBounds, 0, remDepth);
+            size_t removed = removeSpecificNodesBatchRecursive(start, toRemove);
+            size -= removed;
+        }
+        
+        return true;
+    }
+
     void queuedset(const T& data, const PointType& pos, bool visible, Eigen::Vector3f color, float size = 0.01f, bool active = true,
              int objectId = -1, float emittance = 0.0f, float roughness = 1.0f, float metallic = 0.0f, float transmission = 0.0f,
              float ior = 1.45f, Eigen::Vector3f absorp = Eigen::Vector3f::Zero(),
@@ -1474,7 +1825,7 @@ public:
                 auto obj = pair.second;
                 
                 std::shared_lock<std::shared_mutex> objLock(obj->objMutex);
-                OctreeNode::writeVal(out, obj->allowPartialUnload);
+                OctreeNode::writeVal(out, obj->objectFlags);
                 OctreeNode::writeVec3(out, obj->centerPosition);
                 
                 uint32_t numRMat = obj->renderMaterials.size();
@@ -1530,7 +1881,7 @@ public:
                 int id;
                 OctreeNode::readVal(in, id);
                 auto obj = std::make_shared<GridObject>(id);
-                OctreeNode::readVal(in, obj->allowPartialUnload);
+                OctreeNode::readVal(in, obj->objectFlags);
                 OctreeNode::readVec3(in, obj->centerPosition);
                 
                 uint32_t numRMat;
@@ -2077,18 +2428,36 @@ public:
         collectNodesByObjectId(root_.get(), objectId, nodes);
         if(nodes.empty()) return false;
 
-        for(auto& n : nodes) {
-            if (removeRecursive(root_.get(), n->getCubeBounds(), n)) {
-                size--;
-            }
-        }
+        BoundingBox oldBounds = getNodesBounds(nodes);
+        int oldDepth = 0;
+        OctreeNode* oldStart = getHighestCommonNode(root_.get(), oldBounds, 0, oldDepth);
+        
+        size_t removed = removeObjectBatchRecursive(oldStart, objectId);
+        size -= removed;
+
+        BoundingBox newBounds = oldBounds;
+        newBounds.first += offset;
+        newBounds.second += offset;
+        ensureBounds(newBounds);
+
+        int newDepth = 0;
+        OctreeNode* newStart = getHighestCommonNode(root_.get(), newBounds, 0, newDepth);
+
+        size_t added = 0;
         for(auto& n : nodes) {
             n->position += offset;
-            ensureBounds(n->getCubeBounds());
-            if (insertRecursive(root_.get(), n, 0)) {
-                size++;
+            if (insertRecursive(newStart, n, newDepth)) {
+                added++;
             }
         }
+        size += added;
+        
+        auto obj = getObject(objectId);
+        if (obj) {
+            std::unique_lock<std::shared_mutex> lock(obj->objMutex);
+            obj->centerPosition += offset;
+        }
+        
         return true;
     }
 

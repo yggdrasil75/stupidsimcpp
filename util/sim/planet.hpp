@@ -61,7 +61,6 @@ struct NeighborData {
 
 struct Particle {
     float noiseDisplacement = 0.0f;
-    int plateID = -1;
     
     std::unique_ptr<AltPositions> altPos = nullptr;
 
@@ -71,7 +70,6 @@ struct Particle {
     float temperature = 0.0f;
     float water = 0.0f;
     float moisture = 0.0f;
-    v3 originColor;
     bool surface = false;
 
     //gravity factors:
@@ -105,10 +103,8 @@ struct Particle {
 
     Particle(const Particle& other) {
         noiseDisplacement = other.noiseDisplacement;
-        plateID = other.plateID;
         currentPos = other.currentPos;
         plateDisplacement = other.plateDisplacement;
-        originColor = other.originColor;
         surface = other.surface;
         
         velocity = other.velocity;
@@ -145,10 +141,8 @@ struct Particle {
     Particle& operator=(const Particle& other) {
         if (this != &other) {
             noiseDisplacement = other.noiseDisplacement;
-            plateID = other.plateID;
             currentPos = other.currentPos;
             plateDisplacement = other.plateDisplacement;
-            originColor = other.originColor;
             surface = other.surface;
             
             velocity = other.velocity;
@@ -191,7 +185,6 @@ struct Particle {
 
     void serialize(std::ofstream& out) const {
         writeBin(out, noiseDisplacement);
-        writeBin(out, plateID);
         
         bool hasAltPos = (altPos != nullptr);
         writeBin(out, hasAltPos);
@@ -203,7 +196,6 @@ struct Particle {
         
         writeBin(out, currentPos);
         writeBin(out, plateDisplacement);
-        writeBin(out, originColor);
         writeBin(out, surface);
         writeBin(out, velocity);
         writeBin(out, acceleration);
@@ -236,7 +228,6 @@ struct Particle {
     static Particle deserialize(std::ifstream& in) {
         Particle p;
         readBin(in, p.noiseDisplacement);
-        readBin(in, p.plateID);
         
         bool hasAltPos;
         readBin(in, hasAltPos);
@@ -249,7 +240,6 @@ struct Particle {
         
         readBin(in, p.currentPos);
         readBin(in, p.plateDisplacement);
-        readBin(in, p.originColor);
         readBin(in, p.surface);
         readBin(in, p.velocity);
         readBin(in, p.acceleration);
@@ -351,9 +341,39 @@ public:
     std::vector<ImpactEvent> impactHistory;
     int dynMoonId = 10;
 
+    using NodeType = std::shared_ptr<typename decltype(grid)::NodeData>;
+
     planetsim() {
         config = planetConfig();
         grid = Grid::Octree<Particle, int16_t, "output/fibSphere">(v3(-config.gridSizeCubeMin,-config.gridSizeCubeMin,-config.gridSizeCubeMin),v3(config.gridSizeCubeMin,config.gridSizeCubeMin,config.gridSizeCubeMin), 4, 64);
+    }
+
+    v3 getOriginColor(const NodeType& pt) {
+        if (!pt) return v3(1,1,1);
+        auto obj = grid.getObject(pt->objectId);
+        if (obj) return obj->getRenderMaterial(pt->renderMatIdx).absorption;
+        return v3(1,1,1);
+    }
+
+    void setOriginColor(const NodeType& pt, const v3& color) {
+        if (!pt) return;
+        auto obj = grid.getOrCreateObject(pt->objectId);
+        auto mat = obj->getRenderMaterial(pt->renderMatIdx);
+        mat.absorption = color;
+        pt->renderMatIdx = obj->getOrAddRenderMaterial(mat);
+    }
+
+    void changeNodeObject(const v3& pos, int newObjectId) {
+        auto pt = grid.find(pos, config.voxelSize * 0.5f);
+        if (pt && pt->objectId != newObjectId) {
+            auto oldObj = grid.getObject(pt->objectId);
+            typename decltype(grid)::Material mat;
+            if (oldObj) mat = oldObj->getRenderMaterial(pt->renderMatIdx);
+            
+            auto newObj = grid.getOrCreateObject(newObjectId);
+            pt->renderMatIdx = newObj->getOrAddRenderMaterial(mat);
+            pt->objectId = newObjectId;
+        }
     }
 
     float evaluate2DStack(const Eigen::Vector2f& point, const NoisePreviewState& state, PNoise2& gen) {
@@ -430,11 +450,10 @@ public:
             pt.altPos->tectonicPos = pos;
             
             pt.currentPos = pos;
-            pt.originColor = config.color;
             pt.noiseDisplacement = 0.0f;
             pt.surface = true;
             config.surfaceNodes[i] = pt.currentPos;
-            grid.set(pt, pt.currentPos, true, pt.originColor, config.voxelSize, true, 1, false, 0.0f, 0.0f, 0.0f);
+            grid.set(pt, pt.currentPos, true, config.color, config.voxelSize, true, -1, 0.0f, 1.0f, 0.0f, 0.0f, 1.45f, config.color);
         }
         config.currentStep = 1;
         std::cout << "Step 1 done. base sphere generated" << std::endl;
@@ -520,9 +539,7 @@ public:
                     
                     auto sNode = grid.find(config.surfaceNodes[seedIndex], config.voxelSize * 0.5f);
                     if (sNode) {
-                        Particle p = sNode->data;
-                        p.plateID = i; 
-                        grid.updateData(config.surfaceNodes[seedIndex], p);
+                        changeNodeObject(config.surfaceNodes[seedIndex], i);
                         plates[i].plateEulerPolep = sNode->position;
                     }
 
@@ -550,9 +567,7 @@ public:
 
                 auto sNode = grid.find(config.surfaceNodes[seedIndex], config.voxelSize * 0.5f);
                 if (sNode) {
-                    Particle p = sNode->data;
-                    p.plateID = i;
-                    grid.updateData(config.surfaceNodes[seedIndex], p);
+                    changeNodeObject(config.surfaceNodes[seedIndex], i);
                     plates[i].plateEulerPolep = sNode->position;
                 }
 
@@ -638,7 +653,7 @@ public:
                 std::cout << "gpr couldnt find" << std::endl;
                 continue;
             }
-            int pID = node->data.plateID;
+            int pID = node->objectId;
             if (pID == -1) {
                 unassignedCount++;
             } else {
@@ -647,7 +662,7 @@ public:
                     int nIdx = node->data.nearNeighbors[n].index;
                     if (nIdx == -1) break;
                     auto nNode = grid.find(config.surfaceNodes[nIdx], config.voxelSize * 0.5f);
-                    if (nNode && nNode->data.plateID == -1) {
+                    if (nNode && nNode->objectId == -1) {
                         frontiers[pID].push_back(nIdx);
                     }
                 }
@@ -690,20 +705,18 @@ public:
                 frontiers[selPlate].pop_back();
 
                 auto candNode = grid.find(config.surfaceNodes[candIdx], config.voxelSize * 0.5f);
-                if (candNode && candNode->data.plateID == -1) {
-                    Particle p = candNode->data;
-                    p.plateID = selPlate;
-                    grid.updateData(config.surfaceNodes[candIdx], p);
+                if (candNode && candNode->objectId == -1) {
+                    changeNodeObject(config.surfaceNodes[candIdx], selPlate);
                     
                     plates[selPlate].assignedNodes.push_back(candIdx);
                     unassignedCount--;
                     successfulGrowth = true;
 
                     for (int n = 0; n < 8; n++) {
-                        int nIdx = p.nearNeighbors[n].index;
+                        int nIdx = candNode->data.nearNeighbors[n].index;
                         if (nIdx == -1) break;
                         auto nNode = grid.find(config.surfaceNodes[nIdx], config.voxelSize * 0.5f);
-                        if (nNode && nNode->data.plateID == -1) {
+                        if (nNode && nNode->objectId == -1) {
                             frontiers[selPlate].push_back(nIdx);
                         }
                     }
@@ -730,7 +743,7 @@ public:
         int unassignedCount = 0;
         for (const auto& pos : config.surfaceNodes) {
             auto node = grid.find(pos, config.voxelSize * 0.5f);
-            if (node && node->data.plateID == -1) unassignedCount++;
+            if (node && node->objectId == -1) unassignedCount++;
         }
 
         while (unassignedCount > 0) {
@@ -741,8 +754,8 @@ public:
                 auto node = grid.find(config.surfaceNodes[i], config.voxelSize * 0.5f);
                 if (!node) continue;
                 
-                if (node->data.plateID != -1) {
-                    nextState[i] = node->data.plateID;
+                if (node->objectId != -1) {
+                    nextState[i] = node->objectId;
                 } else {
                     std::unordered_map<int, int> counts;
                     int bestPlate = -1;
@@ -754,7 +767,7 @@ public:
                         auto nNode = grid.find(config.surfaceNodes[nIdx], config.voxelSize * 0.5f);
                         if (!nNode) continue;
                         
-                        int pID = nNode->data.plateID;
+                        int pID = nNode->objectId;
                         if (pID != -1) {
                             counts[pID]++;
                             if (counts[pID] > maxCount || (counts[pID] == maxCount && (rng() % 2 == 0))) {
@@ -772,10 +785,8 @@ public:
             
             for (int i = 0; i < config.surfaceNodes.size(); i++) {
                 auto node = grid.find(config.surfaceNodes[i], config.voxelSize * 0.5f);
-                if (node && node->data.plateID == -1 && nextState[i] != -1) {
-                    Particle p = node->data;
-                    p.plateID = nextState[i];
-                    grid.updateData(config.surfaceNodes[i], p);
+                if (node && node->objectId == -1 && nextState[i] != -1) {
+                    changeNodeObject(config.surfaceNodes[i], nextState[i]);
                     plates[nextState[i]].assignedNodes.push_back(i);
                     unassignedCount--;
                 }
@@ -784,20 +795,19 @@ public:
             if (assignedThisRound == 0 && unassignedCount > 0) {
                 for (int i = 0; i < config.surfaceNodes.size(); i++) {
                     auto node = grid.find(config.surfaceNodes[i], config.voxelSize * 0.5f);
-                    if (node && node->data.plateID == -1) {
+                    if (node && node->objectId == -1) {
                         int closestPlate = 0;
                         float minDist = std::numeric_limits<float>::max();
                         for (int p = 0; p < config.numPlates; p++) {
                             auto asdfsdfsdfsdfs = grid.find(plates[p].plateEulerPolep);
+                            if (!asdfsdfsdfsdfs) continue;
                             float d = (node->data.altPos->originalPos - asdfsdfsdfsdfs->data.altPos->originalPos).norm();
                             if (d < minDist) {
                                 minDist = d;
                                 closestPlate = p;
                             }
                         }
-                        Particle pt = node->data;
-                        pt.plateID = closestPlate;
-                        grid.updateData(config.surfaceNodes[i], pt);
+                        changeNodeObject(config.surfaceNodes[i], closestPlate);
                         plates[closestPlate].assignedNodes.push_back(i);
                         unassignedCount--;
                     }
@@ -818,16 +828,16 @@ public:
                 if (!node) continue;
                 
                 std::unordered_map<int, int> counts;
-                counts[node->data.plateID]++;
+                counts[node->objectId]++;
                 
                 for (int n = 0; n < 8; n++) {
                     int nIdx = node->data.nearNeighbors[n].index;
                     if (nIdx == -1) break;
                     auto nNode = grid.find(config.surfaceNodes[nIdx], config.voxelSize * 0.5f);
-                    if (nNode) counts[nNode->data.plateID]++;
+                    if (nNode) counts[nNode->objectId]++;
                 }
                 
-                int bestPlate = node->data.plateID;
+                int bestPlate = node->objectId;
                 int maxCount = 0;
                 for (auto& pair : counts) {
                     if (pair.second > maxCount) {
@@ -840,10 +850,8 @@ public:
             
             for (int i = 0; i < config.surfaceNodes.size(); i++) {
                 auto node = grid.find(config.surfaceNodes[i], config.voxelSize * 0.5f);
-                if (node && nextPlateID[i] != -1) {
-                    Particle p = node->data;
-                    p.plateID = nextPlateID[i];
-                    grid.updateData(config.surfaceNodes[i], p);
+                if (node && nextPlateID[i] != -1 && node->objectId != nextPlateID[i]) {
+                    changeNodeObject(config.surfaceNodes[i], nextPlateID[i]);
                 }
             }
         }
@@ -853,8 +861,8 @@ public:
         }
         for (int i = 0; i < config.surfaceNodes.size(); i++) {
             auto node = grid.find(config.surfaceNodes[i], config.voxelSize * 0.5f);
-            if (node && node->data.plateID != -1) {
-                plates[node->data.plateID].assignedNodes.push_back(i);
+            if (node && node->objectId != -1) {
+                plates[node->objectId].assignedNodes.push_back(i);
             }
         }
     }
@@ -987,7 +995,7 @@ public:
                 if (!node) continue;
                 Particle p = node->data;
 
-                int myPlate = p.plateID;
+                int myPlate = node->objectId;
                 if (myPlate == -1) continue;
                 
                 Eigen::Vector3f myPos = p.altPos->originalPos.normalized();
@@ -1004,7 +1012,7 @@ public:
                     auto nNode = grid.find(config.surfaceNodes[nIdx], config.voxelSize * 0.5f);
                     if (!nNode) continue;
 
-                    int nPlate = nNode->data.plateID;
+                    int nPlate = nNode->objectId;
                     if (nPlate != -1 && myPlate != nPlate) {
                         boundaryCount++;
                         Eigen::Vector3f nPos = nNode->data.altPos->originalPos.normalized();
@@ -1254,18 +1262,20 @@ public:
                     newPt.surface = true;
                     newPt.currentPos = smoothPos;
                     
+                    int newPtObjectId = -1;
+                    v3 newPtColor(1,1,1);
                     if (w1 > w2 && w1 > w3) {
-                        newPt.plateID = p1.plateID;
-                        newPt.originColor = p1.originColor;
+                        newPtObjectId = pt1->objectId;
+                        newPtColor = getOriginColor(pt1);
                     } else if (w2 > w3) {
-                        newPt.plateID = p2.plateID;
-                        newPt.originColor = p2.originColor;
+                        newPtObjectId = pt2->objectId;
+                        newPtColor = getOriginColor(pt2);
                     } else {
-                        newPt.plateID = p3.plateID;
-                        newPt.originColor = p3.originColor;
+                        newPtObjectId = pt3->objectId;
+                        newPtColor = getOriginColor(pt3);
                     }
 
-                    grid.queuedset(newPt, newPt.currentPos, true, newPt.originColor, config.voxelSize, true, 1, false, 0.0f, 0.0f, 0.0f);
+                    grid.queuedset(newPt, newPt.currentPos, true, newPtColor, config.voxelSize, true, newPtObjectId, 0.0f, 1.0f, 0.0f, 0.0f, 1.45f, newPtColor);
                     
                     config.interpolatedNodes.push_back(newPt.currentPos);
 
@@ -1402,7 +1412,6 @@ public:
                     if (inside) {
                         Particle ip;
                         ip.surface = false;
-                        ip.plateID = -1;
                         ip.currentPos = pos;
 
                         float depthRatio = dist / localMaxRadius;
@@ -1412,13 +1421,14 @@ public:
 
                         if (depthRatio < 0.5f) {
                             float blend = depthRatio * 2.0f;
-                            finalColor = coreColor * (1.0f - blend) + mantleColor * blend;
+                            float quantizedBlend = std::round(blend * 32.0f) / 32.0f;
+                            finalColor = coreColor * (1.0f - quantizedBlend) + mantleColor * quantizedBlend;
                         }
 
-                        ip.originColor = finalColor;
                         ip.mass = 100.0f;
 
-                        grid.queuedset(ip, pos, true, finalColor, config.voxelSize, true, 1, false, 0.0f, 0.0f, 0.0f);
+                        int interiorObjectId = config.numPlates; 
+                        grid.queuedset(ip, pos, true, finalColor, config.voxelSize, true, interiorObjectId, 0.0f, 1.0f, 0.0f, 0.0f, 1.45f, finalColor);
                         #pragma omp atomic
                         fillCount++;
                     }
@@ -1440,7 +1450,7 @@ public:
         auto affected = grid.findInRadius(impactCenter, affectRadius);
         
         std::vector<v3> toRemove;
-        std::vector<std::pair<v3, Particle>> toUpdate;
+        std::vector<std::tuple<v3, Particle, v3>> toUpdate;
         
         for (auto& n : affected) {
             if (!n->isActive()) continue;
@@ -1456,24 +1466,24 @@ public:
                 p.impactShock = std::clamp(p.impactShock + falloff, 0.0f, 1.0f);
                 p.materials(4, 0) = Eigen::half(std::clamp(static_cast<float>(p.materials(4, 0)) + falloff * 0.5f, 0.0f, 1.0f));
                 
-                v3 origCol = p.originColor;
+                v3 origCol = getOriginColor(n);
                 v3 burnCol(0.1f, 0.05f, 0.05f); // Reddish dark scorch
                 v3 newCol = origCol * (1.0f - falloff) + burnCol * falloff;
-                p.originColor = newCol;
+                setOriginColor(n, newCol);
                 
                 // Push nodes out slightly to form a crater rim
                 v3 pushDir = (n->position - impactCenter).normalized();
                 p.currentPos = n->position + pushDir * (falloff * config.voxelSize * 2.0f);
                 
-                toUpdate.push_back({n->position, p});
+                toUpdate.push_back({n->position, p, newCol});
             }
         }
         
         for (auto& pos : toRemove) grid.remove(pos, config.voxelSize);
         for (auto& up : toUpdate) {
-            grid.move(up.first, up.second.currentPos);
-            grid.updateData(up.second.currentPos, up.second);
-            grid.setColor(up.second.currentPos, up.second.originColor);
+            grid.move(std::get<0>(up), std::get<1>(up).currentPos);
+            grid.updateData(std::get<1>(up).currentPos, std::get<1>(up));
+            grid.setColor(std::get<1>(up).currentPos, std::get<2>(up));
         }
         
         impactHistory.push_back({targetPos, affectRadius});
@@ -1494,7 +1504,7 @@ public:
             auto affected = grid.findInRadius(currentPos, affectRadius);
             
             std::vector<v3> toRemove;
-            std::vector<std::pair<v3, Particle>> toUpdate;
+            std::vector<std::tuple<v3, Particle, v3>> toUpdate;
             
             for (auto& n : affected) {
                 if (!n->isActive()) continue;
@@ -1508,18 +1518,19 @@ public:
                     p.impactHeat = std::clamp(p.impactHeat + falloff * 0.5f, 0.0f, 1.0f);
                     p.impactShock = std::clamp(p.impactShock + falloff * 0.5f, 0.0f, 1.0f);
                     
-                    v3 origCol = p.originColor;
+                    v3 origCol = getOriginColor(n);
                     v3 burnCol(0.2f, 0.15f, 0.1f);
-                    p.originColor = (origCol * (1.0f - falloff) + burnCol * falloff);
+                    v3 newCol = (origCol * (1.0f - falloff) + burnCol * falloff);
+                    setOriginColor(n, newCol);
                     
-                    toUpdate.push_back({n->position, p});
+                    toUpdate.push_back({n->position, p, newCol});
                 }
             }
             
             for (auto& pos : toRemove) grid.remove(pos, config.voxelSize);
             for (auto& up : toUpdate) {
-                grid.updateData(up.first, up.second);
-                grid.setColor(up.first, up.second.originColor);
+                grid.updateData(std::get<0>(up), std::get<1>(up));
+                grid.setColor(std::get<0>(up), std::get<2>(up));
             }
         }
         
@@ -1543,7 +1554,7 @@ public:
             auto affected = grid.findInRadius(fragPos, fragRadius * 1.5f);
             
             std::vector<v3> toRemove;
-            std::vector<std::pair<v3, Particle>> toUpdate;
+            std::vector<std::tuple<v3, Particle, v3>> toUpdate;
             
             for (auto& n : affected) {
                 if (!n->isActive()) continue;
@@ -1556,18 +1567,19 @@ public:
                     
                     p.impactDebris = std::clamp(p.impactDebris + falloff, 0.0f, 1.0f);
                     
-                    v3 origCol = p.originColor;
+                    v3 origCol = getOriginColor(n);
                     v3 dustCol(0.6f, 0.5f, 0.4f);
-                    p.originColor = (origCol * (1.0f - falloff) + dustCol * falloff);
+                    v3 newCol = (origCol * (1.0f - falloff) + dustCol * falloff);
+                    setOriginColor(n, newCol);
                     
-                    toUpdate.push_back({n->position, p});
+                    toUpdate.push_back({n->position, p, newCol});
                 }
             }
             
             for (auto& pos : toRemove) grid.remove(pos, config.voxelSize);
             for (auto& up : toUpdate) {
-                grid.updateData(up.first, up.second);
-                grid.setColor(up.first, up.second.originColor);
+                grid.updateData(std::get<0>(up), std::get<1>(up));
+                grid.setColor(std::get<0>(up), std::get<2>(up));
             }
         }
         
@@ -1635,7 +1647,7 @@ public:
         std::vector<std::pair<std::shared_ptr<Grid::Octree<Particle, int16_t, "output/fibSphere">::NodeData>, v3>> smoothMoves;
         
         for (auto& n : allNodes) {
-            if (!n->isActive() || n->objectId == 2) continue;
+            if (!n->isActive() || n->objectId == config.numPlates) continue;
             
             auto neighbors = grid.findInRadius(n->position, config.voxelSize * 1.5f);
             if (neighbors.size() > 20) continue;
@@ -1643,7 +1655,7 @@ public:
             v3 avgPos = v3::Zero();
             int count = 0;
             for (auto& neighbor : neighbors) {
-                if (neighbor->isActive() && neighbor->objectId != 2) {
+                if (neighbor->isActive() && neighbor->objectId != config.numPlates) {
                     avgPos += neighbor->position;
                     count++;
                 }

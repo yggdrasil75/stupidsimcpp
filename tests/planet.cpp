@@ -411,12 +411,13 @@ public:
             auto pt = sim.grid.find(pos, sim.config.voxelSize * 0.5f);
             if (!pt) continue;
             auto& p = pt->data;
-            v3 color = p.originColor;
+            v3 originColor = sim.getOriginColor(pt);
+            v3 color = originColor;
             
             switch (currentColorMode) {
                 case DebugColorMode::PLATES:
-                    if (p.plateID != -1 && p.plateID < sim.plates.size()) {
-                        color = sim.plates[p.plateID].debugColor;
+                    if (pt->objectId != -1 && pt->objectId < sim.plates.size()) {
+                        color = sim.plates[pt->objectId].debugColor;
                     } else {
                         color = v3(0.5f, 0.5f, 0.5f);
                     }
@@ -465,7 +466,7 @@ public:
                 }
                 case DebugColorMode::BASE:
                 default:
-                    color = p.originColor;
+                    color = originColor;
                     break;
             }
 
@@ -479,12 +480,13 @@ public:
             auto pt = sim.grid.find(pos, sim.config.voxelSize * 0.5f);
             if (!pt) continue;
             auto& p = pt->data;
-            v3 color = p.originColor;
+            v3 originColor = sim.getOriginColor(pt);
+            v3 color = originColor;
             
             switch (currentColorMode) {
                 case DebugColorMode::PLATES:
-                    if (p.plateID != -1 && p.plateID < sim.plates.size()) {
-                        color = sim.plates[p.plateID].debugColor;
+                    if (pt->objectId != -1 && pt->objectId < sim.plates.size()) {
+                        color = sim.plates[pt->objectId].debugColor;
                     } else {
                         color = v3(0.5f, 0.5f, 0.5f);
                     }
@@ -533,7 +535,7 @@ public:
                 }
                 case DebugColorMode::BASE:
                 default:
-                    color = p.originColor;
+                    color = originColor;
                     break;
             }
 
@@ -600,7 +602,11 @@ public:
                     p_pos = p.altPos->tectonicPos;
                     break;
                 case DebugMapMode::TECTONICCOLOR: 
-                    p_pos = sim.plates[p.plateID].debugColor;
+                    if (pt->objectId != -1 && pt->objectId < sim.plates.size()) {
+                        p_pos = sim.plates[pt->objectId].debugColor;
+                    } else {
+                        p_pos = v3(0.5f, 0.5f, 0.5f);
+                    }
                     break;
                 case DebugMapMode::CURRENT:
                 default:
