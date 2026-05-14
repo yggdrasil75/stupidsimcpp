@@ -22,6 +22,8 @@ static constexpr uint8_t LOADQUEUED = 1 << 3;
 static constexpr uint8_t SAVEDQUEUED = 1 << 4;
 static constexpr uint8_t KEEPLOADED_BIT = 1 << 5;
 
+static constexpr uint8_t OBJ_ALLOW_PARTIAL_UNLOAD_BIT = 1 << 0;
+
 template<typename> struct is_shared_ptr : std::false_type {};
 template<typename T> struct is_shared_ptr<std::shared_ptr<T>> : std::true_type {};
 using PointType = Eigen::Matrix<float, Dim, 1>;
@@ -256,12 +258,16 @@ struct SPHForcePC {
 
 template<typename T, typename IndexType = uint16_t, GridStoragePath StoragePath = ".">
 struct Material_ {
-    float emittance;
+    float emittance; //replace with eigen::vector3f<eigen::half> for chromaticity
+    //or use uint32_t r8g8b8i8.
+    // or a reasonable option: rgb9e5 GL_RGB9_E5
     float roughness;
-    float metallic;
+    float metallic; //rename to reflective or something
     float transmission;
     float ior;
     Eigen::Vector3f absorption;
+    //bandwidth?
+    //dispersion?
 
     Material_(float e = 0.0f, float r = 1.0f, float m = 0.0f, float t = 0.0f, float i = 1.45f, Eigen::Vector3f a = Eigen::Vector3f::Zero())
         : emittance(e), roughness(r), metallic(m), transmission(t), ior(i), absorption(a) {}
@@ -293,7 +299,7 @@ struct PhysicsMaterial_ {
 template<typename T, typename IndexType = uint16_t, GridStoragePath StoragePath = ".">
 struct GridObject_ {
     int id;
-    bool allowPartialUnload = true;
+    uint8_t objectFlags;
     PointType centerPosition = PointType::Zero();
 
     std::vector<Material_<T, IndexType, StoragePath>> renderMaterials;
@@ -309,7 +315,15 @@ struct GridObject_ {
 
     mutable std::shared_mutex objMutex;
 
-    GridObject_(int objId = -1) : id(objId) {}
+    GridObject_(int objId = -1) : id(objId), objectFlags(OBJ_ALLOW_PARTIAL_UNLOAD_BIT) {}
+
+    bool isPartialUnloadAllowed() const {
+        return objectFlags & OBJ_ALLOW_PARTIAL_UNLOAD_BIT;
+    }
+    void setPartialUnloadAllowed(bool v) {
+        if (v) objectFlags |= OBJ_ALLOW_PARTIAL_UNLOAD_BIT;
+        else objectFlags &= ~OBJ_ALLOW_PARTIAL_UNLOAD_BIT;
+    }
 
     uint16_t getOrAddRenderMaterial(const Material_<T, IndexType, StoragePath>& mat) {
         std::unique_lock<std::shared_mutex> lock(objMutex);

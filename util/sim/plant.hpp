@@ -642,7 +642,7 @@ class PlantSim {
 public:
     enum class WeatherState { CLEAR, RAIN, SNOW };
 
-    Octree<std::shared_ptr<PlantsimParticle>, uint8_t, "output/plants"> grid;
+    Grid::Octree<std::shared_ptr<PlantsimParticle>, uint8_t, "output/plants"> grid;
     PlantConfig config;
     std::mt19937 rng;
 
