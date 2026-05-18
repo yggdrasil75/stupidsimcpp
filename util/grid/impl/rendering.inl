@@ -554,7 +554,7 @@ struct VulkanContext {
 
         if (hasHardwareRT) {
             std::cout << "using _hw versions" << std::endl;
-            fastShader = createShaderModule("./bin/fast_rasterize.spv");
+            fastShader = createShaderModule("./bin/fast_rasterize_hw.spv");
             pbrShader = createShaderModule("./bin/pbr_raytrace_hw.spv");
         } else {
             std::cout << "using software versions" << std::endl;

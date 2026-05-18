@@ -55,7 +55,7 @@ GLSLC := glslc --target-env=vulkan1.3
 
 SHADER_SRCS := $(SHADER_DIR)/fast_raytrace.comp $(SHADER_DIR)/pbr_raytrace.comp $(SHADER_DIR)/fast_raytrace_hw.comp $(SHADER_DIR)/pbr_raytrace_hw.comp $(SHADER_DIR)/smooth.comp $(SHADER_DIR)/blend.comp
 SHADER_SRCS += $(SHADER_DIR)/sph_density.comp $(SHADER_DIR)/sph_force.comp $(SHADER_DIR)/sph_integrate.comp
-SHADER_SRCS += $(SHADER_DIR)/fast_rasterize.comp
+SHADER_SRCS += $(SHADER_DIR)/fast_rasterize.comp $(SHADER_DIR)/fast_rasterize_hw.comp
 SHADER_SPVS := $(patsubst $(SHADER_DIR)/%.comp,$(BIN_DIR)/%.spv,$(SHADER_SRCS))
 
 $(shell mkdir -p $(OBJ_DIR))
