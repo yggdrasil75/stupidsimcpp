@@ -554,11 +554,11 @@ struct VulkanContext {
 
         if (hasHardwareRT) {
             std::cout << "using _hw versions" << std::endl;
-            fastShader = createShaderModule("./bin/fast_raytrace_hw.spv");
+            fastShader = createShaderModule("./bin/fast_rasterize.spv");
             pbrShader = createShaderModule("./bin/pbr_raytrace_hw.spv");
         } else {
             std::cout << "using software versions" << std::endl;
-            fastShader = createShaderModule("./bin/fast_raytrace.spv");
+            fastShader = createShaderModule("./bin/fast_rasterize.spv");
             pbrShader = createShaderModule("./bin/pbr_raytrace.spv");
         }
         smoothShader = createShaderModule("./bin/smooth.spv");
@@ -1122,12 +1122,13 @@ struct VulkanContext {
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     }
 
-    void updateCommonBuffers(size_t outSize, GPUCameraData& camData) {
-        size_t allocSize = (size_t)256;
+    void updateCommonBuffers(size_t outSize, GPUCameraData& camData, const std::vector<GPURenderNode>& nodes = {}) {
+        size_t dataSize = nodes.size() * sizeof(GPURenderNode);
+        size_t allocSize = std::max((size_t)256, dataSize);
         
         // Use device local memory for nodes (critical for tree traversal performance)
         updateDeviceLocalBuffer(nodeBuffer, nodeMem, currentNodesCap, 
-                                nullptr, 0, allocSize, 
+                                nodes.empty() ? nullptr : nodes.data(), dataSize, allocSize, 
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
         // outBuffer remains HOST_VISIBLE because it is mapped/read directly in grid3render.cpp

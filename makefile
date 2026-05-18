@@ -39,8 +39,8 @@ endif
 CXXFLAGS = $(BASE_CXXFLAGS) $(SIMD_CXXFLAGS) 
 
 # Source files
-SRC := $(SRC_DIR)/ptest.cpp
-# SRC := $(SRC_DIR)/materialtest.cpp
+# SRC := $(SRC_DIR)/ptest.cpp
+SRC := $(SRC_DIR)/materialtest.cpp
 #SRC := $(SRC_DIR)/g2chromatic2.cpp
 SRC += $(IMGUI_DIR)/imgui.cpp $(IMGUI_DIR)/imgui_demo.cpp $(IMGUI_DIR)/imgui_draw.cpp $(IMGUI_DIR)/imgui_tables.cpp $(IMGUI_DIR)/imgui_widgets.cpp
 SRC += $(IMGUI_DIR)/backends/imgui_impl_glfw.cpp $(IMGUI_DIR)/backends/imgui_impl_opengl3.cpp
@@ -55,6 +55,7 @@ GLSLC := glslc --target-env=vulkan1.3
 
 SHADER_SRCS := $(SHADER_DIR)/fast_raytrace.comp $(SHADER_DIR)/pbr_raytrace.comp $(SHADER_DIR)/fast_raytrace_hw.comp $(SHADER_DIR)/pbr_raytrace_hw.comp $(SHADER_DIR)/smooth.comp $(SHADER_DIR)/blend.comp
 SHADER_SRCS += $(SHADER_DIR)/sph_density.comp $(SHADER_DIR)/sph_force.comp $(SHADER_DIR)/sph_integrate.comp
+SHADER_SRCS += $(SHADER_DIR)/fast_rasterize.comp
 SHADER_SPVS := $(patsubst $(SHADER_DIR)/%.comp,$(BIN_DIR)/%.spv,$(SHADER_SRCS))
 
 $(shell mkdir -p $(OBJ_DIR))
