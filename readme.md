@@ -74,6 +74,29 @@ full pbr for the user to view, partial pbr for some of the creatures, others wil
 lod
 
 
+goal 1:
+the bonzai tree.
+
+goal 2:
+physics simulation for animals (randomly generated animals)
+
+goal 3:
+tomogatchi with basic environment
+
+goal 4:
+plant/animal creation.
+
+goal 5:
+generally realized sub environments (the 10^3 miles)
+this will be randomized+the factors that will be used later for the planet
+
+goal 6:
+planet creation and generalized planet simulation
+
+goal 7:
+integration
+
+
 
 
 
