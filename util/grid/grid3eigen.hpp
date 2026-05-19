@@ -87,6 +87,51 @@ namespace Grid {
 
     */
 
+    /*
+    gas ideas:
+    eulerian field using nodes as sample points.
+    would probably need a minimum size to be able to be reasonable.
+
+
+    fluid ideas:
+    bodies of water can be simulated with eulerian as well.
+    rivers and contained fluids will use the current sph voxels methodology.
+    as voxels in rivers reach oceans or lakes, they will "dissolve" into the surrounding euler field.
+    as they rain down from a cloud, they will "clump" into voxels.
+
+    static: 
+    static. no physics move it, it can block fluids, gases, and rigid. it doesnt move. its static.
+
+    rigid:
+    can move and be moved by fluids and gases (needs lots of pressure for gases to move it) and other rigids.
+    physics forces like gravity, wind, etc.
+    the ai models we train can move these directly if they are part of their object. alternatively, they can call the kinematics.
+    need to tract connections (voxel 1 is connected to voxel 2 at this precise 3d angle)
+
+    kinematic:
+    we will create a "test chamber" where rigid bodies are controlled by the models trained for them.
+    this will generate kinematics for fast calls by the ai, and then have an "untested" solver where the physics will operate a rigid body.
+    that will be added to the test chamber if it happens often, creating a new predefined kinematic for the ai to call.
+
+    soft body:
+    can move and be moved by fluids and gases (needs lots of pressure for gases to move it) and other rigids.
+    physics forces like gravity, wind, etc.
+    can be deformed (move voxels) will require voxel positions to be stored twice: current and "resting".
+    might need permanent deforms: major deform will break it (cut/tear) and long term deforms will move the static.
+    could also just have a "natural connection" instead where the physics just push back instead of remembering the resting position.
+    dont know how to do that.
+
+    */
+
+    /*
+    eventual creature stuff:
+    Creature = {
+        Skeleton: hierarchy of Bone nodes,
+        Joint motors: angles/torques for AI to control,
+        SoftTissueSolver: (PBD/FEM) attached to bone frames,
+        Material palettes: per‑creature, shared by all voxels.
+    }
+    */
 
 template<typename T, typename IndexType = uint16_t, GridStoragePath StoragePath = ".">
 class Octree {
