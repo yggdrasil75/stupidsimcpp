@@ -14,7 +14,7 @@ struct RenderData_ {
     PointType boundsMin;
     PointType boundsMax;
     int objectId;
-    uint32_t isGas;
+    float gasDensity;
 };
 
 template<typename T, typename IndexType, GridStoragePath StoragePath>
@@ -32,7 +32,7 @@ struct RenderNode_ {
     int32_t lodPoint;
     uint32_t firstChild;
     
-    OctreeNode_<T, IndexType, StoragePath>* originalNode;
+    OctreeNode_<T, float, IndexType, StoragePath>* originalNode; 
 };
 
 template<typename T, typename IndexType, GridStoragePath StoragePath>
@@ -135,7 +135,7 @@ struct alignas(16) GPUFastRenderData {
     uint32_t color;
     uint32_t materialIdx;
     int objectId;
-    uint32_t isGas;
+    float gasDensity;
 };
 
 struct alignas(16) GPUPBRRenderData {
@@ -144,7 +144,7 @@ struct alignas(16) GPUPBRRenderData {
     uint32_t color;
     uint32_t materialIdx;
     int objectId;
-    uint32_t isGas;
+    float gasDensity;
 };
 
 struct alignas(16) GPUCameraData {
@@ -184,6 +184,23 @@ struct alignas(16) GPUParticle {
     Eigen::Vector4f vel_density;
     Eigen::Vector4f force_press;
     Eigen::Vector4i type_pad;
+};
+
+struct ASData {
+    VkBuffer aabbBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory aabbMem = VK_NULL_HANDLE;
+    size_t currentAabbCap = 0;
+    
+    VkBuffer asInstanceBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory asInstanceMem = VK_NULL_HANDLE;
+    
+    VkAccelerationStructureKHR blas = VK_NULL_HANDLE;
+    VkBuffer blasBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory blasMem = VK_NULL_HANDLE;
+    
+    VkAccelerationStructureKHR tlas = VK_NULL_HANDLE;
+    VkBuffer tlasBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory tlasMem = VK_NULL_HANDLE;
 };
 
 struct WavefrontRay {
@@ -302,18 +319,8 @@ struct VulkanContext {
     bool initialized = false;
     bool hasHardwareRT = false;
     
-    VkBuffer aabbBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory aabbMem = VK_NULL_HANDLE;
-    VkBuffer asInstanceBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory asInstanceMem = VK_NULL_HANDLE;
-    
-    VkAccelerationStructureKHR blas = VK_NULL_HANDLE;
-    VkBuffer blasBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory blasMem = VK_NULL_HANDLE;
-    
-    VkAccelerationStructureKHR tlas = VK_NULL_HANDLE;
-    VkBuffer tlasBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory tlasMem = VK_NULL_HANDLE;
+    ASData fastAS;
+    ASData pbrAS;
 
     size_t currentAabbCap = 0;
 
@@ -936,8 +943,10 @@ struct VulkanContext {
     }
 
     template<typename RenderDataType>
-    void buildHardwareAccelerationStructures(const std::vector<RenderDataType>& points) {
+    void buildHardwareAccelerationStructures(const std::vector<RenderDataType>& points, bool isFast) {
         if (!hasHardwareRT || points.empty()) return;
+
+        ASData& as = isFast ? fastAS : pbrAS;
 
         std::vector<VkAabbPositionsKHR> aabbs(points.size());
         for (size_t i = 0; i < points.size(); ++i) {
@@ -951,26 +960,26 @@ struct VulkanContext {
         }
 
         size_t aabbSize = aabbs.size() * sizeof(VkAabbPositionsKHR);
-        if (aabbSize > currentAabbCap) {
-            if (aabbBuffer) {
-                vkDestroyBuffer(device, aabbBuffer, nullptr);
-                vkFreeMemory(device, aabbMem, nullptr);
+        if (aabbSize > as.currentAabbCap) {
+            if (as.aabbBuffer) {
+                vkDestroyBuffer(device, as.aabbBuffer, nullptr);
+                vkFreeMemory(device, as.aabbMem, nullptr);
             }
             createBufferWithAddress(aabbSize, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, 
-                                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, aabbBuffer, aabbMem);
-            currentAabbCap = aabbSize;
+                                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, as.aabbBuffer, as.aabbMem);
+            as.currentAabbCap = aabbSize;
         }
 
         void* data;
-        vkMapMemory(device, aabbMem, 0, aabbSize, 0, &data);
+        vkMapMemory(device, as.aabbMem, 0, aabbSize, 0, &data);
         memcpy(data, aabbs.data(), aabbSize);
-        vkUnmapMemory(device, aabbMem);
+        vkUnmapMemory(device, as.aabbMem);
 
         VkAccelerationStructureGeometryKHR blasGeom{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
         blasGeom.geometryType = VK_GEOMETRY_TYPE_AABBS_KHR;
         blasGeom.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
         blasGeom.geometry.aabbs.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR;
-        blasGeom.geometry.aabbs.data.deviceAddress = getBufferDeviceAddress(aabbBuffer);
+        blasGeom.geometry.aabbs.data.deviceAddress = getBufferDeviceAddress(as.aabbBuffer);
         blasGeom.geometry.aabbs.stride = sizeof(VkAabbPositionsKHR);
 
         VkAccelerationStructureBuildGeometryInfoKHR blasBuildInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
@@ -984,22 +993,22 @@ struct VulkanContext {
         VkAccelerationStructureBuildSizesInfoKHR blasSizeInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
         pfn_vkGetAccelerationStructureBuildSizesKHR(device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &blasBuildInfo, &numPrimitives, &blasSizeInfo);
 
-        if (blas) {
-            pfn_vkDestroyAccelerationStructureKHR(device, blas, nullptr);
-            vkDestroyBuffer(device, blasBuffer, nullptr);
-            vkFreeMemory(device, blasMem, nullptr);
+        if (as.blas) {
+            pfn_vkDestroyAccelerationStructureKHR(device, as.blas, nullptr);
+            vkDestroyBuffer(device, as.blasBuffer, nullptr);
+            vkFreeMemory(device, as.blasMem, nullptr);
         }
         createBufferWithAddress(blasSizeInfo.accelerationStructureSize, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, 
-                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, blasBuffer, blasMem);
+                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, as.blasBuffer, as.blasMem);
         
         VkAccelerationStructureCreateInfoKHR blasCreateInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
-        blasCreateInfo.buffer = blasBuffer;
+        blasCreateInfo.buffer = as.blasBuffer;
         blasCreateInfo.size = blasSizeInfo.accelerationStructureSize;
         blasCreateInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-        pfn_vkCreateAccelerationStructureKHR(device, &blasCreateInfo, nullptr, &blas);
+        pfn_vkCreateAccelerationStructureKHR(device, &blasCreateInfo, nullptr, &as.blas);
 
         VkAccelerationStructureDeviceAddressInfoKHR blasAddrInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR};
-        blasAddrInfo.accelerationStructure = blas;
+        blasAddrInfo.accelerationStructure = as.blas;
         VkDeviceAddress blasAddress = pfn_vkGetAccelerationStructureDeviceAddressKHR(device, &blasAddrInfo);
 
         VkAccelerationStructureInstanceKHR tlasInstance{};
@@ -1012,24 +1021,24 @@ struct VulkanContext {
         tlasInstance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
         tlasInstance.accelerationStructureReference = blasAddress;
 
-        if (asInstanceBuffer) {
-            vkDestroyBuffer(device, asInstanceBuffer, nullptr);
-            vkFreeMemory(device, asInstanceMem, nullptr);
+        if (as.asInstanceBuffer) {
+            vkDestroyBuffer(device, as.asInstanceBuffer, nullptr);
+            vkFreeMemory(device, as.asInstanceMem, nullptr);
         }
         createBufferWithAddress(sizeof(VkAccelerationStructureInstanceKHR), 
                                 VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, 
-                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, asInstanceBuffer, asInstanceMem);
+                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, as.asInstanceBuffer, as.asInstanceMem);
         
-        vkMapMemory(device, asInstanceMem, 0, sizeof(VkAccelerationStructureInstanceKHR), 0, &data);
+        vkMapMemory(device, as.asInstanceMem, 0, sizeof(VkAccelerationStructureInstanceKHR), 0, &data);
         memcpy(data, &tlasInstance, sizeof(VkAccelerationStructureInstanceKHR));
-        vkUnmapMemory(device, asInstanceMem);
+        vkUnmapMemory(device, as.asInstanceMem);
 
         VkAccelerationStructureGeometryKHR tlasGeom{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
         tlasGeom.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
         tlasGeom.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
         tlasGeom.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
         tlasGeom.geometry.instances.arrayOfPointers = VK_FALSE;
-        tlasGeom.geometry.instances.data.deviceAddress = getBufferDeviceAddress(asInstanceBuffer);
+        tlasGeom.geometry.instances.data.deviceAddress = getBufferDeviceAddress(as.asInstanceBuffer);
 
         VkAccelerationStructureBuildGeometryInfoKHR tlasBuildInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
         tlasBuildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
@@ -1042,19 +1051,19 @@ struct VulkanContext {
         VkAccelerationStructureBuildSizesInfoKHR tlasSizeInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
         pfn_vkGetAccelerationStructureBuildSizesKHR(device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &tlasBuildInfo, &numInstances, &tlasSizeInfo);
 
-        if (tlas) {
-            pfn_vkDestroyAccelerationStructureKHR(device, tlas, nullptr);
-            vkDestroyBuffer(device, tlasBuffer, nullptr);
-            vkFreeMemory(device, tlasMem, nullptr);
+        if (as.tlas) {
+            pfn_vkDestroyAccelerationStructureKHR(device, as.tlas, nullptr);
+            vkDestroyBuffer(device, as.tlasBuffer, nullptr);
+            vkFreeMemory(device, as.tlasMem, nullptr);
         }
         createBufferWithAddress(tlasSizeInfo.accelerationStructureSize, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, 
-                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, tlasBuffer, tlasMem);
+                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, as.tlasBuffer, as.tlasMem);
 
         VkAccelerationStructureCreateInfoKHR tlasCreateInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
-        tlasCreateInfo.buffer = tlasBuffer;
+        tlasCreateInfo.buffer = as.tlasBuffer;
         tlasCreateInfo.size = tlasSizeInfo.accelerationStructureSize;
         tlasCreateInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
-        pfn_vkCreateAccelerationStructureKHR(device, &tlasCreateInfo, nullptr, &tlas);
+        pfn_vkCreateAccelerationStructureKHR(device, &tlasCreateInfo, nullptr, &as.tlas);
 
         VkBuffer scratchBuffer;
         VkDeviceMemory scratchMem;
@@ -1063,7 +1072,7 @@ struct VulkanContext {
                                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, scratchBuffer, scratchMem);
 
         executeSingleTimeCommands([&](VkCommandBuffer cmd) {
-            blasBuildInfo.dstAccelerationStructure = blas;
+            blasBuildInfo.dstAccelerationStructure = as.blas;
             blasBuildInfo.scratchData.deviceAddress = getBufferDeviceAddress(scratchBuffer);
             VkAccelerationStructureBuildRangeInfoKHR blasOffset{};
             blasOffset.primitiveCount = numPrimitives;
@@ -1078,7 +1087,7 @@ struct VulkanContext {
                                  VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 
                                  0, 1, &barrier, 0, nullptr, 0, nullptr);
 
-            tlasBuildInfo.dstAccelerationStructure = tlas;
+            tlasBuildInfo.dstAccelerationStructure = as.tlas;
             tlasBuildInfo.scratchData.deviceAddress = getBufferDeviceAddress(scratchBuffer);
             VkAccelerationStructureBuildRangeInfoKHR tlasOffset{};
             tlasOffset.primitiveCount = numInstances;
@@ -1092,18 +1101,17 @@ struct VulkanContext {
 
         VkWriteDescriptorSetAccelerationStructureKHR descASInfo{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
         descASInfo.accelerationStructureCount = 1;
-        descASInfo.pAccelerationStructures = &tlas;
+        descASInfo.pAccelerationStructures = &as.tlas;
 
-        VkWriteDescriptorSet asWrites[2] = {};
-        for (int i = 0; i < 2; i++) {
-            asWrites[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            asWrites[i].pNext = &descASInfo;
-            asWrites[i].dstSet = (i == 0) ? fastDescSet : pbrDescSet;
-            asWrites[i].dstBinding = 6;
-            asWrites[i].descriptorCount = 1;
-            asWrites[i].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-        }
-        vkUpdateDescriptorSets(device, 2, asWrites, 0, nullptr);
+        VkWriteDescriptorSet asWrite{};
+        asWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        asWrite.pNext = &descASInfo;
+        asWrite.dstSet = isFast ? fastDescSet : pbrDescSet;
+        asWrite.dstBinding = 6;
+        asWrite.descriptorCount = 1;
+        asWrite.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+        
+        vkUpdateDescriptorSets(device, 1, &asWrite, 0, nullptr);
     }
 
     void updateLightBuffer(const std::vector<uint32_t>& lights) {
@@ -1124,7 +1132,7 @@ struct VulkanContext {
 
     void updateCommonBuffers(size_t outSize, GPUCameraData& camData, const std::vector<GPURenderNode>& nodes = {}) {
         size_t dataSize = nodes.size() * sizeof(GPURenderNode);
-        size_t allocSize = std::max((size_t)256, dataSize);
+        size_t allocSize = std::max((size_t)256, dataSize * sizeof(uint32_t));
         
         // Use device local memory for nodes (critical for tree traversal performance)
         updateDeviceLocalBuffer(nodeBuffer, nodeMem, currentNodesCap, 
@@ -1137,7 +1145,7 @@ struct VulkanContext {
                 vkDestroyBuffer(device, outBuffer, nullptr);
                 vkFreeMemory(device, outMem, nullptr);
             }
-            createBuffer(outSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, 
+            createBuffer(outSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, 
                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, outBuffer, outMem);
             currentOutCap = outSize;
         }
@@ -1188,7 +1196,7 @@ struct VulkanContext {
                                 points.empty() ? nullptr : points.data(), dataSize, allocSize, 
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
-        if (hasHardwareRT) buildHardwareAccelerationStructures(points);
+        if (hasHardwareRT) buildHardwareAccelerationStructures(points, true);
 
         VkDescriptorBufferInfo bInfos[8] = { 
             {nodeBuffer, 0, VK_WHOLE_SIZE}, 
@@ -1221,7 +1229,7 @@ struct VulkanContext {
                                 points.empty() ? nullptr : points.data(), dataSize, allocSize, 
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
-        if (hasHardwareRT) buildHardwareAccelerationStructures(points);
+        if (hasHardwareRT) buildHardwareAccelerationStructures(points, false);
 
         VkDescriptorBufferInfo bInfos[8] = { 
             {nodeBuffer, 0, VK_WHOLE_SIZE}, 

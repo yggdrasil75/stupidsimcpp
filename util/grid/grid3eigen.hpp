@@ -133,17 +133,18 @@ namespace Grid {
     }
     */
 
-template<typename T, typename IndexType = uint16_t, GridStoragePath StoragePath = ".">
+template<typename T, typename GasT = float, typename IndexType = uint16_t, GridStoragePath StoragePath = ".">
 class Octree {
 public:
     using NodeData = NodeData_<T, IndexType, StoragePath>;
-    using OctreeNode = OctreeNode_<T, IndexType, StoragePath>;
+    using OctreeNode = OctreeNode_<T, GasT, IndexType, StoragePath>;
     using Material = Material_<T, IndexType, StoragePath>;
     using RayHit = RayHit_<T, IndexType, StoragePath>;
     using RenderNode = RenderNode_<T, IndexType, StoragePath>;
     using RenderData = RenderData_<T, IndexType, StoragePath>;
     using RenderBuffer = RenderBuffer_<T, IndexType, StoragePath>;
     using GridObject = GridObject_<T, IndexType, StoragePath>;
+    using EulerianGasState = EulerianGasState_<GasT>;
 
 private:
     int countBits(uint8_t mask) const {
@@ -535,6 +536,7 @@ private:
         for (int i = 0; i < 8; ++i) {
             BoundingBox childBounds = createChildBounds(node, i);
             node->children[i] = std::make_unique<OctreeNode>(childBounds.first, childBounds.second);
+            node->children[i]->gasState = node->gasState;
         }
 
         std::vector<std::shared_ptr<NodeData>> keep;
@@ -593,6 +595,7 @@ private:
                     if (boxContainsBox(childBounds, cubeBounds)) {
                         if (!node->children[i]) {
                             node->children[i] = std::make_unique<OctreeNode>(childBounds.first, childBounds.second);
+                            node->children[i]->gasState = node->gasState;
                         }
                         targetChild = node->children[i].get();
                         break;
@@ -611,6 +614,29 @@ private:
             }
             return true;
         }
+    }
+
+    OctreeNode* ensureNodeAtDepthRecursive(OctreeNode* node, const PointType& pos, size_t depth, size_t targetDepth) {
+        ensureLoaded(node);
+        if (depth >= targetDepth || depth >= maxDepth) return node;
+        
+        if (node->isLeaf()) {
+            splitNode(node, depth);
+        }
+        
+        int octant = getOctant(pos, node->center);
+        if (!node->children[octant]) {
+            BoundingBox childBounds = createChildBounds(node, octant);
+            node->children[octant] = std::make_unique<OctreeNode>(childBounds.first, childBounds.second);
+            node->children[octant]->gasState = node->gasState;
+        }
+        return ensureNodeAtDepthRecursive(node->children[octant].get(), pos, depth + 1, targetDepth);
+    }
+
+    OctreeNode* ensureNodeAtDepth(const PointType& pos, size_t targetDepth) {
+        if (!root_) return nullptr;
+        if (!root_->contains(pos)) return nullptr;
+        return ensureNodeAtDepthRecursive(root_.get(), pos, 0, targetDepth);
     }
 
     bool invalidateNodeLODRecursive(OctreeNode* node, const BoundingBox& bounds) {
@@ -711,29 +737,8 @@ private:
     void ensureLOD(OctreeNode* node) {
         ensureLoaded(node);
         std::lock_guard<std::shared_mutex> lock(node->nodeMutex);
-        if (node->lodData != nullptr) return;
-
-        if (node->isLeaf()) {
-            if (node->points.empty()) {
-                auto lod = std::make_shared<NodeData>();
-                lod->position = node->center;
-                node->lodData = lod;
-                return;
-            } else if (node->points.size() == 1) {
-                const auto& pt = node->points[0];
-                if (pt->isActive() && pt->isVisible()) {
-                    double v = static_cast<double>(pt->size) * pt->size * pt->size;
-                    if (v > static_cast<double>(minLodVolume_)) {
-                        node->lodData = pt;
-                        return;
-                    }
-                }
-                auto lod = std::make_shared<NodeData>();
-                lod->position = node->center;
-                node->lodData = lod;
-                return;
-            }
-        }
+        
+        bool requiresVoxelLOD = (node->lodData == nullptr);
 
         Eigen::Vector3f avgPos = Eigen::Vector3f::Zero();
         Eigen::Vector3f avgColor = Eigen::Vector3f::Zero();
@@ -746,6 +751,7 @@ private:
         int count = 0;
 
         auto accumulate = [&](const std::shared_ptr<NodeData>& item) {
+            if (!requiresVoxelLOD) return;
             if (!item || !item->isActive() || !item->isVisible()) return;
             float v = item->size * item->size * item->size;
             if (v <= 0.0) return;
@@ -765,39 +771,110 @@ private:
             count++;
         };
 
-        for(const auto& pt : node->points) accumulate(pt);
+        if (requiresVoxelLOD) {
+            if (node->isLeaf()) {
+                if (node->points.empty()) {
+                    auto lod = std::make_shared<NodeData>();
+                    lod->position = node->center;
+                    node->lodData = lod;
+                } else if (node->points.size() == 1) {
+                    const auto& pt = node->points[0];
+                    if (pt->isActive() && pt->isVisible()) {
+                        double v = static_cast<double>(pt->size) * pt->size * pt->size;
+                        if (v > static_cast<double>(minLodVolume_)) {
+                            node->lodData = pt;
+                        } else {
+                            auto lod = std::make_shared<NodeData>();
+                            lod->position = node->center;
+                            node->lodData = lod;
+                        }
+                    } else {
+                        auto lod = std::make_shared<NodeData>();
+                        lod->position = node->center;
+                        node->lodData = lod;
+                    }
+                }
+            }
+            
+            if (node->isLeaf() && node->lodData != nullptr) {
+                // Done with leaf voxel LOD
+            } else {
+                for(const auto& pt : node->points) accumulate(pt);
+            }
+        }
 
         for (const auto& child : node->children) {
             if (child) {
                 ensureLOD(child.get());
-                if (child->lodData) {
+                if (requiresVoxelLOD && child->lodData) {
                     accumulate(child->lodData);
                 }
             }
         }
 
-        if (count > 0 && totalVolume > minLodVolume_) {
-            double invVol = 1.0 / totalVolume;
+        if (!node->isLeaf()) {
+            float totalGasVol = 0.0f;
+            float weightedDensity = 0.0f;
+            Eigen::Vector3f weightedVel = Eigen::Vector3f::Zero();
+            float weightedPressure = 0.0f;
             
-            auto lod = std::make_shared<NodeData>();
-            lod->position = (avgPos * invVol);
-            lod->size = std::cbrt(totalVolume);
+            float maxDensity = -1.0f;
+            GasT bestGasData{};
 
-            lod->color = (avgColor * invVol);
-            Material avgMat(avgEmittance * invVol, avgRoughness * invVol, avgMetallic * invVol,
-                            avgTransmission * invVol, avgIor * invVol);
+            for (int i = 0; i < 8; ++i) {
+                if (node->children[i]) {
+                    auto& cGas = node->children[i]->gasState;
+                    float v = node->children[i]->nodeSize;
+                    float vol = v * v * v;
+                    totalGasVol += vol;
+                    
+                    weightedDensity += cGas.density * vol;
+                    weightedVel += cGas.velocity * (cGas.density * vol);
+                    weightedPressure += cGas.pressure * vol;
+                    
+                    if (cGas.density > maxDensity) {
+                        maxDensity = cGas.density;
+                        bestGasData = cGas.data;
+                    }
+                }
+            }
             
-            auto obj = getOrCreateObject(-1);
-            lod->renderMatIdx = obj->getOrAddRenderMaterial(avgMat);
-            
-            lod->setActive(true);
-            lod->setVisible(true);
-            lod->objectId = -1; 
-            node->lodData = lod;
-        } else {
-            auto lod = std::make_shared<NodeData>();
-            lod->position = node->center;
-            node->lodData = lod;
+            if (totalGasVol > 0.0f) {
+                node->gasState.density = weightedDensity / totalGasVol;
+                if (weightedDensity > 0.0f) {
+                    node->gasState.velocity = weightedVel / weightedDensity;
+                } else {
+                    node->gasState.velocity = Eigen::Vector3f::Zero();
+                }
+                node->gasState.pressure = weightedPressure / totalGasVol;
+                node->gasState.data = bestGasData;
+            }
+        }
+
+        if (requiresVoxelLOD && !node->isLeaf() && (node->lodData == nullptr)) {
+            if (count > 0 && totalVolume > minLodVolume_) {
+                double invVol = 1.0 / totalVolume;
+                
+                auto lod = std::make_shared<NodeData>();
+                lod->position = (avgPos * invVol);
+                lod->size = std::cbrt(totalVolume);
+
+                lod->color = (avgColor * invVol);
+                Material avgMat(avgEmittance * invVol, avgRoughness * invVol, avgMetallic * invVol,
+                                avgTransmission * invVol, avgIor * invVol);
+                
+                auto obj = getOrCreateObject(-1);
+                lod->renderMatIdx = obj->getOrAddRenderMaterial(avgMat);
+                
+                lod->setActive(true);
+                lod->setVisible(true);
+                lod->objectId = -1; 
+                node->lodData = lod;
+            } else {
+                auto lod = std::make_shared<NodeData>();
+                lod->position = node->center;
+                node->lodData = lod;
+            }
         }
     }
 
@@ -1005,6 +1082,7 @@ private:
         node->points.clear();
         node->points.shrink_to_fit();
         node->lodData = nullptr;
+        node->gasState = EulerianGasState();
         
         for (int i = 0; i < 8; ++i) {
             if (node->children[i]) {
@@ -1257,7 +1335,7 @@ private:
             if (hitOnlySolid) {
                 auto obj = getObj(pt->objectId);
                 BodyType bType = obj ? obj->getPhysicsMaterial(pt->physMatIdx).type : BodyType::STATIC;
-                if (bType == BodyType::FLUID || bType == BodyType::GAS) continue;
+                if (bType == BodyType::FLUID) continue;
             }
             
             BoundingBox bounds = pt->getCubeBounds();
@@ -1555,6 +1633,70 @@ public:
             return true;
         }
         return false;
+    }
+
+    bool setGas(const PointType& pos, const GasT& gasData, float density, const Eigen::Vector3f& velocity = Eigen::Vector3f::Zero(), float pressure = 0.0f) {
+        ensureBounds({pos, pos});
+        OctreeNode* node = ensureNodeAtDepth(pos, maxDepth);
+        if (node) {
+            std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
+            node->gasState.data = gasData;
+            node->gasState.density = density;
+            node->gasState.velocity = velocity;
+            node->gasState.pressure = pressure;
+            node->setDirty(true);
+            return true;
+        }
+        return false;
+    }
+
+    EulerianGasState* getGas(const PointType& pos) {
+        if (!root_ || !root_->contains(pos)) return nullptr;
+        OctreeNode* node = root_.get();
+        while (!node->isLeaf()) {
+            int octant = getOctant(pos, node->center);
+            if (node->children[octant]) {
+                node = node->children[octant].get();
+            } else {
+                break;
+            }
+        }
+        return &node->gasState;
+    }
+
+    void vaporizeObject(int objectId, float initialDensity = 1.0f) {
+        if (!root_) return;
+        std::vector<std::shared_ptr<NodeData>> nodes;
+        collectNodesByObjectId(root_.get(), objectId, nodes);
+        if (nodes.empty()) return;
+
+        for (auto& pt : nodes) {
+            OctreeNode* leaf = ensureNodeAtDepth(pt->position, maxDepth);
+            if (leaf) {
+                std::unique_lock<std::shared_mutex> lock(leaf->nodeMutex);
+                if (leaf->gasState.density <= 0.001f) {
+                    leaf->gasState.color = pt->color;
+                    leaf->gasState.renderMatIdx = pt->renderMatIdx;
+                    leaf->gasState.objectId = pt->objectId;
+                    leaf->gasState.velocity = pt->physics.velocity;
+                } else {
+                    float w1 = leaf->gasState.density;
+                    float w2 = initialDensity;
+                    leaf->gasState.color = (leaf->gasState.color * w1 + pt->color * w2) / (w1 + w2);
+                    leaf->gasState.velocity = (leaf->gasState.velocity * w1 + pt->physics.velocity * w2) / (w1 + w2);
+                }
+                leaf->gasState.density += initialDensity;
+                leaf->setDirty(true);
+            }
+        }
+
+        BoundingBox oldBounds = getNodesBounds(nodes);
+        int startDepth = 0;
+        OctreeNode* startNode = getHighestCommonNode(root_.get(), oldBounds, 0, startDepth);
+        size_t removed = removeObjectBatchRecursive(startNode, objectId);
+        size -= removed;
+
+        generateLODs();
     }
 
     bool insertVoxels(int objectId, const std::vector<PointType>& positions, const T& defaultData, 
@@ -2320,7 +2462,7 @@ public:
                 if (hitOnlySolid) {
                     auto obj = getObj(pt->objectId);
                     BodyType bType = obj ? obj->getPhysicsMaterial(pt->physMatIdx).type : BodyType::STATIC;
-                    if (bType == BodyType::FLUID || bType == BodyType::GAS) continue;
+                    if (bType == BodyType::FLUID) continue;
                 }
                 
                 BoundingBox bounds = pt->getCubeBounds();

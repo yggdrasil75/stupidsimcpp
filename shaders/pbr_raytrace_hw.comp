@@ -22,7 +22,7 @@ struct GPUPBRRenderData {
     uint color;
     uint materialIdx;
     int objectId;
-    uint isGas;
+    float gasDensity;
 };
 
 layout(std430, binding = 1) readonly buffer PointBuffer { GPUPBRRenderData points[]; };
@@ -310,7 +310,7 @@ vec3 traceRay(Ray initialRay, inout uint state, inout uint group_state, out floa
                     primaryObjId = points[hitIndex].objectId;
                     GPUPBRRenderData hd = points[hitIndex];
                     GPUMaterial mData = materials[hd.materialIdx];
-                    bool isGas = hd.isGas != 0;
+                    bool isGas = hd.gasDensity > 0.0;
 
                     float r, m, tr, ior;
                     unpackMaterial(mData.materialProps, r, m, tr, ior);
@@ -341,12 +341,12 @@ vec3 traceRay(Ray initialRay, inout uint state, inout uint group_state, out floa
             unpackMaterial(mData.materialProps, r, m, tr, ior);
             vec3 medAbsorption = unpackRGB8(mData.absorption);
             vec3 medAlbedo = unpackRGB8(medData.color);
-            bool isMedGas = medData.isGas != 0;
+            bool isMedGas = medData.gasDensity > 0.0;
 
             vec3 sigma_a = medAbsorption * 5.0; 
             sigma_s = medAlbedo * (1.0 - tr) * 15.0; 
             if (isMedGas) {
-                float densityProxy = max(0.001, 1.0 - tr);
+                float densityProxy = medData.gasDensity;
                 vec3 compColor = vec3(1.0) - medAlbedo;
                 sigma_a = (medAbsorption + compColor * 2.0) * densityProxy * 5.0; 
                 sigma_s = medAlbedo * densityProxy * 5.0; 
@@ -415,7 +415,7 @@ vec3 traceRay(Ray initialRay, inout uint state, inout uint group_state, out floa
         vec3 offsetNorm = entering == 1 ? normal : -normal;
 
         bool skipSurface = false;
-        bool isMedGas = hitData.isGas != 0;
+        bool isMedGas = hitData.gasDensity > 0.0;
         
         if (currentMediumObjId != -1 && hitData.objectId == currentMediumObjId) {
             if (entering == 1) {
@@ -719,7 +719,7 @@ vec3 shadowTraverse(Ray ray, float maxDist, int lightPtIdx) {
                 GPUMaterial tMat = materials[pt.materialIdx];
                 float r, m, tr, ior;
                 unpackMaterial(tMat.materialProps, r, m, tr, ior);
-                bool isMedGas = pt.isGas != 0;
+                bool isMedGas = pt.gasDensity > 0.0;
                 
                 if (isMedGas || (tr > 0.0 && m < 1.0)) {
                     vec3 absColor = unpackRGB8(tMat.absorption);
@@ -729,7 +729,7 @@ vec3 shadowTraverse(Ray ray, float maxDist, int lightPtIdx) {
                     
                     if (isMedGas) {
                         vec3 albColor = unpackRGB8(pt.color);
-                        float densityProxy = max(0.001, 1.0 - tr);
+                        float densityProxy = pt.gasDensity;
                         vec3 compColor = vec3(1.0) - albColor;
                         vec3 sigma_a = (absColor + compColor * 2.0) * densityProxy * 5.0;
                         vec3 sigma_s = albColor * densityProxy * 5.0;
@@ -883,7 +883,7 @@ void main() {
                 pObjId = points[hitIdx].objectId;
                 GPUPBRRenderData hd = points[hitIdx];
                 GPUMaterial mData = materials[hd.materialIdx];
-                bool isGas = (hd.materialIdx >> 31) != 0;
+                bool isGas = hd.gasDensity > 0.0;
 
                 float r, m, tr, ior;
                 unpackMaterial(mData.materialProps, r, m, tr, ior);

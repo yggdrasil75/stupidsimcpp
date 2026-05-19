@@ -1,8 +1,8 @@
 #include "grid3eigen.hpp"
 namespace Grid {
 
-template<typename T, typename IndexType, GridStoragePath StoragePath>
-void Octree<T, IndexType, StoragePath>::buildRender(RenderBuffer_<T, IndexType, StoragePath>& buffer) {
+template<typename T, typename GasT, typename IndexType, GridStoragePath StoragePath>
+void Octree<T, GasT, IndexType, StoragePath>::buildRender(RenderBuffer_<T, IndexType, StoragePath>& buffer) {
     buffer.clear();
     if (!root_) return;
     buffer.nodes.emplace_back();
@@ -26,8 +26,8 @@ void Octree<T, IndexType, StoragePath>::buildRender(RenderBuffer_<T, IndexType, 
     buildRenderNodeAt(root_.get(), buffer, 0, localObjects);
 }
 
-template<typename T, typename IndexType, GridStoragePath StoragePath>
-void Octree<T, IndexType, StoragePath>::buildRenderNodeAt(OctreeNode_<T, IndexType, StoragePath>* node, RenderBuffer_<T, IndexType, StoragePath>& buffer, uint32_t nodeIdx, const std::unordered_map<int, std::shared_ptr<GridObject>>& localObjects) {
+template<typename T, typename GasT, typename IndexType, GridStoragePath StoragePath>
+void Octree<T, GasT, IndexType, StoragePath>::buildRenderNodeAt(OctreeNode_<T, GasT, IndexType, StoragePath>* node, RenderBuffer_<T, IndexType, StoragePath>& buffer, uint32_t nodeIdx, const std::unordered_map<int, std::shared_ptr<GridObject>>& localObjects) {
     std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
     bool isLoaded = node->isLoaded();
     
@@ -49,26 +49,46 @@ void Octree<T, IndexType, StoragePath>::buildRenderNodeAt(OctreeNode_<T, IndexTy
             rd.size = pt->size;
             rd.color = pt->color;
             
-            uint32_t isGas = 0;
-            auto objIt = localObjects.find(pt->objectId);
-            if (objIt != localObjects.end()) {
-                if (objIt->second->getPhysicsMaterial(pt->physMatIdx).type == BodyType::GAS) {
-                    isGas = 1;
-                }
-            }
+            float gasDensity = 0.0f;
+            // auto objIt = localObjects.find(pt->objectId);
+            // if (objIt != localObjects.end()) {
+            //     if (objIt->second->getPhysicsMaterial(pt->physMatIdx).type == BodyType::GAS) {
+            //         gasDensity = 1.0f;
+            //     }
+            // }
             
             rd.materialIdx = buffer.defaultMatIdx;
             auto it = buffer.objMaterialOffsets.find(pt->objectId);
             if (it != buffer.objMaterialOffsets.end()) {
                 rd.materialIdx = it->second + pt->renderMatIdx;
             }
-            rd.isGas = isGas;
+            rd.gasDensity = gasDensity;
             
             BoundingBox bb = pt->getCubeBounds();
             rd.boundsMin = bb.first;
             rd.boundsMax = bb.second;
             rd.objectId = pt->objectId;
             buffer.points.push_back(rd);
+        }
+
+        if (node->isLeaf() && node->gasState.density > 0.001f) {
+            RenderData_<T, IndexType, StoragePath> gd;
+            gd.position = node->center;
+            gd.size = node->nodeSize;
+            gd.color = node->gasState.color;
+            
+            gd.materialIdx = buffer.defaultMatIdx;
+            auto it = buffer.objMaterialOffsets.find(node->gasState.objectId);
+            if (it != buffer.objMaterialOffsets.end()) {
+                gd.materialIdx = it->second + node->gasState.renderMatIdx;
+            }
+            gd.gasDensity = node->gasState.density;
+            
+            PointType halfSize = PointType(node->nodeSize * 0.5f, node->nodeSize * 0.5f, node->nodeSize * 0.5f);
+            gd.boundsMin = node->center - halfSize;
+            gd.boundsMax = node->center + halfSize;
+            gd.objectId = node->gasState.objectId;
+            buffer.points.push_back(gd);
         }
     }
     rnode.pointCount = static_cast<uint32_t>(buffer.points.size() - rnode.firstPoint);
@@ -80,20 +100,20 @@ void Octree<T, IndexType, StoragePath>::buildRenderNodeAt(OctreeNode_<T, IndexTy
         ld.size = node->lodData->size;
         ld.color = node->lodData->color;
         
-        uint32_t isGas = 0;
-        auto objIt = localObjects.find(node->lodData->objectId);
-        if (objIt != localObjects.end()) {
-            if (objIt->second->getPhysicsMaterial(node->lodData->physMatIdx).type == BodyType::GAS) {
-                isGas = 1;
-            }
-        }
+        float gasDensity = 0.0f;
+        // auto objIt = localObjects.find(node->lodData->objectId);
+        // if (objIt != localObjects.end()) {
+        //     if (objIt->second->getPhysicsMaterial(node->lodData->physMatIdx).type == BodyType::GAS) {
+        //         gasDensity = 1.0f;
+        //     }
+        // }
         
         ld.materialIdx = buffer.defaultMatIdx;
         auto it = buffer.objMaterialOffsets.find(node->lodData->objectId);
         if (it != buffer.objMaterialOffsets.end()) {
             ld.materialIdx = it->second + node->lodData->renderMatIdx;
         }
-        ld.isGas = isGas;
+        ld.gasDensity = gasDensity;
         
         BoundingBox bb = node->lodData->getCubeBounds();
         ld.boundsMin = bb.first;
@@ -132,8 +152,8 @@ void Octree<T, IndexType, StoragePath>::buildRenderNodeAt(OctreeNode_<T, IndexTy
     buffer.nodes[nodeIdx] = rnode;
 }
 
-template<typename T, typename IndexType, GridStoragePath StoragePath>
-const RenderData_<T, IndexType, StoragePath>* Octree<T, IndexType, StoragePath>::fastVoxelTraverse(const RenderBuffer_<T, IndexType, StoragePath>& buffer, const Ray& ray, float maxDist) {
+template<typename T, typename GasT, typename IndexType, GridStoragePath StoragePath>
+const RenderData_<T, IndexType, StoragePath>* Octree<T, GasT, IndexType, StoragePath>::fastVoxelTraverse(const RenderBuffer_<T, IndexType, StoragePath>& buffer, const Ray& ray, float maxDist) {
     const RenderData_<T, IndexType, StoragePath>* hit = nullptr;
     if (buffer.nodes.empty()) return hit;
     float tMin, tMax;
@@ -233,8 +253,8 @@ const RenderData_<T, IndexType, StoragePath>* Octree<T, IndexType, StoragePath>:
     return hit;
 }
 
-template<typename T, typename IndexType, GridStoragePath StoragePath>
-frame Octree<T, IndexType, StoragePath>::fastRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat) {
+template<typename T, typename GasT, typename IndexType, GridStoragePath StoragePath>
+frame Octree<T, GasT, IndexType, StoragePath>::fastRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat) {
     // TIME_FUNCTION;
     updateStreaming(cam);
     
@@ -339,8 +359,8 @@ struct PointSort {
     bool operator<(const PointSort& o) const { return morton < o.morton; }
 };
 
-template<typename T, typename IndexType, GridStoragePath StoragePath>
-frame Octree<T, IndexType, StoragePath>::renderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat, int samplesPerPixel,
+template<typename T, typename GasT, typename IndexType, GridStoragePath StoragePath>
+frame Octree<T, GasT, IndexType, StoragePath>::renderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat, int samplesPerPixel,
                 int maxBounces, bool globalIllumination, bool useLod) {
     TIME_FUNCTION;
     updateStreaming(cam);
@@ -413,7 +433,7 @@ frame Octree<T, IndexType, StoragePath>::renderFrameVulkan(const Camera& cam, in
         const auto& p = tl_buffer.points[sp.idx];
         
         gpuPoints.push_back({
-            p.position, p.size, packRGB8(p.color), p.materialIdx, p.objectId, p.isGas
+            p.position, p.size, packRGB8(p.color), p.materialIdx, p.objectId, p.gasDensity
         });
 
         if (tl_buffer.materials[p.materialIdx].emittance > 0.0f) {
@@ -549,8 +569,8 @@ frame Octree<T, IndexType, StoragePath>::renderFrameVulkan(const Camera& cam, in
     return outFrame;
 }
 
-template<typename T, typename IndexType, GridStoragePath StoragePath>
-frame Octree<T, IndexType, StoragePath>::fastRenderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat) {
+template<typename T, typename GasT, typename IndexType, GridStoragePath StoragePath>
+frame Octree<T, GasT, IndexType, StoragePath>::fastRenderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat) {
     // TIME_FUNCTION;
     updateStreaming(cam);
     // optimize();
@@ -584,7 +604,7 @@ frame Octree<T, IndexType, StoragePath>::fastRenderFrameVulkan(const Camera& cam
         data.color = packRGB8(pt.color);
         data.materialIdx = pt.materialIdx;
         data.objectId = pt.objectId;
-        data.isGas = pt.isGas;
+        data.gasDensity = pt.gasDensity;
         gpuPoints.push_back(data);
         
         if (tl_buffer.materials[pt.materialIdx].emittance > 0.0f) {
@@ -695,8 +715,8 @@ frame Octree<T, IndexType, StoragePath>::fastRenderFrameVulkan(const Camera& cam
     return outFrame;
 }
 
-template<typename T, typename IndexType, GridStoragePath StoragePath>
-frame Octree<T, IndexType, StoragePath>::blendedRenderFrameVulkan(const Camera& cam, int height, int width, float pbrScale,
+template<typename T, typename GasT, typename IndexType, GridStoragePath StoragePath>
+frame Octree<T, GasT, IndexType, StoragePath>::blendedRenderFrameVulkan(const Camera& cam, int height, int width, float pbrScale,
                 frame::colormap colorformat, int samplesPerPixel, int maxBounces, bool globalIllumination, bool useLod) {
     TIME_FUNCTION;
     updateStreaming(cam);
@@ -762,23 +782,25 @@ frame Octree<T, IndexType, StoragePath>::blendedRenderFrameVulkan(const Camera& 
     std::sort(sortedPoints.begin(), sortedPoints.end());
 
     std::vector<GPUPBRRenderData> gpuPBRPoints;
+    std::vector<uint32_t> pbrLights;
     gpuPBRPoints.reserve(sortedPoints.size());
-    std::vector<uint32_t> gpuLights;
 
     for(const auto& sp : sortedPoints) {
         const auto& p = tl_buffer.points[sp.idx];
         
         gpuPBRPoints.push_back({
-            p.position, p.size, packRGB8(p.color), p.materialIdx, p.objectId, p.isGas
+            p.position, p.size, packRGB8(p.color), p.materialIdx, p.objectId, p.gasDensity
         });
 
         if (tl_buffer.materials[p.materialIdx].emittance > 0.0f) {
-            gpuLights.push_back(gpuPBRPoints.size() - 1);
+            pbrLights.push_back(gpuPBRPoints.size() - 1);
         }
     }
 
     std::vector<GPUFastRenderData> gpuFastPoints;
     gpuFastPoints.reserve(tl_buffer.points.size());
+    std::vector<uint32_t> fastLights;
+
     for (size_t i = 0; i < tl_buffer.points.size(); ++i) {
         const auto& pt = tl_buffer.points[i];
         GPUFastRenderData data;
@@ -787,9 +809,17 @@ frame Octree<T, IndexType, StoragePath>::blendedRenderFrameVulkan(const Camera& 
         data.color = packRGB8(pt.color);
         data.materialIdx = pt.materialIdx;
         data.objectId = pt.objectId;
-        data.isGas = pt.isGas;
+        data.gasDensity = pt.gasDensity;
         gpuFastPoints.push_back(data);
+
+        if (tl_buffer.materials[pt.materialIdx].emittance > 0.0f) {
+            fastLights.push_back(i);
+        }
     }
+
+    int fastEmissiveCount = fastLights.size();
+    if(gpuFastPoints.empty()) gpuFastPoints.push_back(GPUFastRenderData{});
+    if(fastLights.empty()) fastLights.push_back(0);
 
     std::vector<GPURenderNode> gpuNodes;
     gpuNodes.reserve(tl_buffer.nodes.size());
@@ -813,15 +843,9 @@ frame Octree<T, IndexType, StoragePath>::blendedRenderFrameVulkan(const Camera& 
     }
     if (gpuNodes.empty()) gpuNodes.push_back(GPURenderNode{});
 
-    int emissiveCount = gpuLights.size();
+    int pbrEmissiveCount = pbrLights.size();
     if(gpuPBRPoints.empty()) gpuPBRPoints.push_back(GPUPBRRenderData{});
-    if(gpuFastPoints.empty()) gpuFastPoints.push_back(GPUFastRenderData{});
-    if(gpuLights.empty()) gpuLights.push_back(0);
-
-    float aspect = static_cast<float>(width) / height;
-    float fovRad = cam.fovRad();
-    float tanHalfFov = tan(fovRad * 0.5f);
-    float invFogRange = 1.0f / std::max(0.001f, maxDistance_ - lodMinDistance_);
+    if(pbrLights.empty()) pbrLights.push_back(0);
 
     size_t skyW = skybox_.skybox.getWidth();
     size_t skyH = skybox_.skybox.getHeight();
@@ -838,8 +862,11 @@ frame Octree<T, IndexType, StoragePath>::blendedRenderFrameVulkan(const Camera& 
             }
         }
     }
-    vkCtx.updateSkyboxBuffer(skyData);
 
+    float aspect = static_cast<float>(width) / height;
+    float fovRad = cam.fovRad();
+    float tanHalfFov = tan(fovRad * 0.5f);
+    float invFogRange = 1.0f / std::max(0.001f, maxDistance_ - lodMinDistance_);
     int lowW = std::max(1, static_cast<int>(width * pbrScale));
     int lowH = std::max(1, static_cast<int>(height * pbrScale));
 
@@ -848,12 +875,13 @@ frame Octree<T, IndexType, StoragePath>::blendedRenderFrameVulkan(const Camera& 
         skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
         lowW, lowH, maxBounces, useLod ? 1 : 0, invFogRange, frameCounter_,
         (int)skyW, (int)skyH, 0, 0, globalIllumination ? 1 : 0, 
-        (uint32_t)gpuNodes.size(), (uint32_t)gpuPBRPoints.size(), 0, 0, emissiveCount, samplesPerPixel
+        (uint32_t)gpuNodes.size(), (uint32_t)gpuPBRPoints.size(), 0, 0, pbrEmissiveCount, samplesPerPixel
     };
 
     size_t pbrOutSize = lowW * lowH * 5 * sizeof(float);
     vkCtx.updateCommonBuffers(pbrOutSize, pbrCamData, gpuNodes);
-    vkCtx.updateLightBuffer(gpuLights);
+    vkCtx.updateSkyboxBuffer(skyData);
+    vkCtx.updateLightBuffer(pbrLights);
     vkCtx.updatePBRBuffers(gpuPBRPoints);
 
     int currentSampleOffset = 0;
@@ -907,47 +935,37 @@ frame Octree<T, IndexType, StoragePath>::blendedRenderFrameVulkan(const Camera& 
         cam.origin, lodMinDistance_, cam.direction.normalized(), invLodf, cam.up.normalized(), 0.1f, cam.right(), maxDistance_,
         skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
         width, height, 1, useLod ? 1 : 0, invFogRange, frameCounter_++, (int)skyW, (int)skyH, 0, 1, 0, 
-        (uint32_t)gpuNodes.size(), (uint32_t)gpuFastPoints.size(), 0, 0, emissiveCount, 1
+        (uint32_t)gpuNodes.size(), (uint32_t)gpuFastPoints.size(), 0, 0, fastEmissiveCount, 1
     };
 
     size_t fastOutSize = width * height * 5 * sizeof(float);
     vkCtx.updateCommonBuffers(fastOutSize, fastCamData, gpuNodes);
+    vkCtx.updateLightBuffer(fastLights);
     vkCtx.updateFastBuffers(gpuFastPoints);
 
-    int tileW = 512;
-    int tileH = 512;
-    for (int y = 0; y < height; y += tileH) {
-        for (int x = 0; x < width; x += tileW) {
-            int drawW = std::min(tileW, width - x);
-            int drawH = std::min(tileH, height - y);
-            fastCamData.tileOffsetX = x;
-            fastCamData.tileOffsetY = y;
-            vkCtx.updateCameraData(fastCamData);
+    VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    vkBeginCommandBuffer(vkCtx.commandBuffer, &beginInfo);
+    vkCmdBindPipeline(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.fastPipeline);
+    vkCmdBindDescriptorSets(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.fastPipelineLayout, 0, 1, &vkCtx.fastDescSet, 0, nullptr);
+    vkCmdDispatch(vkCtx.commandBuffer, (width + 7) / 8, (height + 7) / 8, 1);
+    vkEndCommandBuffer(vkCtx.commandBuffer);
 
-            VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-            vkBeginCommandBuffer(vkCtx.commandBuffer, &beginInfo);
-            vkCmdBindPipeline(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.fastPipeline);
-            vkCmdBindDescriptorSets(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.fastPipelineLayout, 0, 1, &vkCtx.fastDescSet, 0, nullptr);
-            vkCmdDispatch(vkCtx.commandBuffer, (drawW + 7) / 8, (drawH + 7) / 8, 1);
-            vkEndCommandBuffer(vkCtx.commandBuffer);
+    VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &vkCtx.commandBuffer;
 
-            VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-            submitInfo.commandBufferCount = 1;
-            submitInfo.pCommandBuffers = &vkCtx.commandBuffer;
-
-            VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-            VkFence fence;
-            vkCreateFence(vkCtx.device, &fenceInfo, nullptr, &fence);
-            vkQueueSubmit(vkCtx.queue, 1, &submitInfo, fence);
-            vkWaitForFences(vkCtx.device, 1, &fence, VK_TRUE, UINT64_MAX);
-            vkDestroyFence(vkCtx.device, fence, nullptr);
-        }
-    }
+    VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    VkFence fence;
+    vkCreateFence(vkCtx.device, &fenceInfo, nullptr, &fence);
+    vkQueueSubmit(vkCtx.queue, 1, &submitInfo, fence);
+    vkWaitForFences(vkCtx.device, 1, &fence, VK_TRUE, UINT64_MAX);
+    vkDestroyFence(vkCtx.device, fence, nullptr);
 
     frame outFrame(width, height, colorformat);
     std::vector<float> colorBuffer(width * height * 3);
     
     vkCtx.dispatchBlend(width, height, lowW, lowH, pbrScale, samplesPerPixel);
+    // vkCtx.dispatchSmooth(width, height, samplesPerPixel);
     
     void* mappedData;
     vkMapMemory(vkCtx.device, vkCtx.finalOutMem, 0, colorBuffer.size() * sizeof(float), 0, &mappedData);

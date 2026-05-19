@@ -6,6 +6,8 @@
 #include <vector>
 #include <mutex>
 #include <shared_mutex>
+#include <type_traits>
+#include <memory>
 
 namespace Grid{
 
@@ -46,7 +48,7 @@ enum class BodyType : uint8_t {
     RIGID = 2,
     SOFT = 3,
     FLUID = 4,
-    GAS = 5
+    // GAS = 5
 };
 
 static inline uint32_t packRGB9E5(const Eigen::Vector3f& c) {
@@ -434,11 +436,25 @@ struct NodeData_ {
     }
 };
 
-template<typename T, typename IndexType = uint16_t, GridStoragePath StoragePath = ".">
+template<typename GasT>
+struct EulerianGasState_ {
+    GasT data{};
+    Eigen::Vector3f velocity{0.0f, 0.0f, 0.0f};
+    float density = 0.0f;
+    float pressure = 0.0f;
+    
+    int objectId = -1;
+    uint16_t renderMatIdx = 0;
+    Eigen::Vector3f color{1.0f, 1.0f, 1.0f};
+};
+
+template<typename T, typename GasT = float, typename IndexType = uint16_t, GridStoragePath StoragePath = ".">
 struct OctreeNode_ {
     BoundingBox bounds;
+    EulerianGasState_<GasT> gasState;
+
     std::vector<std::shared_ptr<NodeData_<T, IndexType, StoragePath>>> points;
-    std::array<std::unique_ptr<OctreeNode_<T, IndexType, StoragePath>>, 8> children;
+    std::array<std::unique_ptr<OctreeNode_<T, GasT, IndexType, StoragePath>>, 8> children;
     PointType center;
     float nodeSize;
     std::atomic<uint8_t> flags;
@@ -453,21 +469,22 @@ struct OctreeNode_ {
         setLoadQueued(false);
         setSaveQueued(false);
         setKeepLoaded(false);
-        for (std::unique_ptr<OctreeNode_<T, IndexType, StoragePath>>& child : children) {
+        for (std::unique_ptr<OctreeNode_<T, GasT, IndexType, StoragePath>>& child : children) {
             child = nullptr;
         }
         center = (bounds.first + bounds.second) * 0.5;
         nodeSize = (bounds.second - bounds.first).norm();
     }
 
-    std::unique_ptr<OctreeNode_<T, IndexType, StoragePath>> clone() const {
-        auto newNode = std::make_unique<OctreeNode_<T, IndexType, StoragePath>>(bounds.first, bounds.second);
+    std::unique_ptr<OctreeNode_<T, GasT, IndexType, StoragePath>> clone() const {
+        auto newNode = std::make_unique<OctreeNode_<T, GasT, IndexType, StoragePath>>(bounds.first, bounds.second);
         newNode->flags.store(flags.load(std::memory_order_relaxed), std::memory_order_relaxed);
         
         newNode->points = points;
         newNode->center = center;
         newNode->nodeSize = nodeSize;
         newNode->lodData = lodData;
+        newNode->gasState = gasState;
         
         if (!isLeaf()) {
             for (int i = 0; i < 8; ++i) {
@@ -590,43 +607,45 @@ struct OctreeNode_ {
         vec = Eigen::Vector3f(x, y, z);
     }
 
-    static void serializeData(std::ofstream& out, const T& data) {
-        if constexpr (is_shared_ptr<T>::value) {
+    template<typename D>
+    static void serializeFieldData(std::ofstream& out, const D& data) {
+        if constexpr (is_shared_ptr<D>::value) {
             bool hasData = (data != nullptr);
             writeVal(out, hasData);
             if (hasData) data->serialize(out);
-        } else if constexpr (std::is_pointer_v<T>) {
+        } else if constexpr (std::is_pointer_v<D>) {
             bool hasData = (data != nullptr);
             writeVal(out, hasData);
             if (hasData) data->serialize(out);
-        } else if constexpr (std::is_class_v<T>) {
+        } else if constexpr (std::is_class_v<D>) {
             data.serialize(out);
         } else {
             writeVal(out, data);
         }
     }
 
-    static void deserializeData(std::ifstream& in, T& data) {
-        if constexpr (is_shared_ptr<T>::value) {
+    template<typename D>
+    static void deserializeFieldData(std::ifstream& in, D& data) {
+        if constexpr (is_shared_ptr<D>::value) {
             bool hasData;
             readVal(in, hasData);
             if (hasData) {
-                using ElemType = typename T::element_type;
+                using ElemType = typename D::element_type;
                 data = ElemType::deserialize(in);
             } else {
                 data = nullptr;
             }
-        } else if constexpr (std::is_pointer_v<T>) {
+        } else if constexpr (std::is_pointer_v<D>) {
             bool hasData;
             readVal(in, hasData);
             if (hasData) {
-                using ElemType = std::remove_pointer_t<T>;
+                using ElemType = std::remove_pointer_t<D>;
                 data = ElemType::deserialize(in);
             } else {
                 data = nullptr;
             }
-        } else if constexpr (std::is_class_v<T>) {
-            data = T::deserialize(in);
+        } else if constexpr (std::is_class_v<D>) {
+            data = D::deserialize(in);
         } else {
             readVal(in, data);
         }
@@ -657,9 +676,18 @@ struct OctreeNode_ {
 
     void serializeSubtree(std::ofstream& out) const {
         writeVal(out, isLeaf());
+
+        serializeFieldData(out, gasState.data);
+        writeVec3(out, gasState.velocity);
+        writeVal(out, gasState.density);
+        writeVal(out, gasState.pressure);
+        writeVal(out, gasState.objectId);
+        writeVal(out, gasState.renderMatIdx);
+        writeVec3(out, gasState.color);
+
         writeVal(out, points.size());
         for (const auto& pt : points) {
-            serializeData(out, pt->data);
+            serializeFieldData(out, pt->data);
             writeVec3(out, pt->position);
             writeVal(out, pt->objectId);
             writeVal(out, pt->flags.load(std::memory_order_relaxed));
@@ -684,12 +712,20 @@ struct OctreeNode_ {
         readVal(in, leaf);
         setLeaf(leaf);
 
+        deserializeFieldData(in, gasState.data);
+        readVec3(in, gasState.velocity);
+        readVal(in, gasState.density);
+        readVal(in, gasState.pressure);
+        readVal(in, gasState.objectId);
+        readVal(in, gasState.renderMatIdx);
+        readVec3(in, gasState.color);
+
         size_t pointCount;
         readVal(in, pointCount);
         points.reserve(pointCount);
         for (size_t i = 0; i < pointCount; ++i) {
             auto pt = std::make_shared<NodeData_<T, IndexType, StoragePath>>();
-            deserializeData(in, pt->data);
+            deserializeFieldData(in, pt->data);
             readVec3(in, pt->position);
             readVal(in, pt->objectId);
             uint8_t f;
@@ -713,7 +749,7 @@ struct OctreeNode_ {
                         childMin[d] = high ? center[d] : bounds.first[d];
                         childMax[d] = high ? bounds.second[d] : center[d];
                     }
-                    children[i] = std::make_unique<OctreeNode_<T, IndexType, StoragePath>>(childMin, childMax);
+                    children[i] = std::make_unique<OctreeNode_<T, GasT, IndexType, StoragePath>>(childMin, childMax);
                     std::lock_guard<std::shared_mutex> lock(children[i]->nodeMutex);
                     children[i]->deserializeSubtree(in);
                 } else {
@@ -777,9 +813,18 @@ struct OctreeNode_ {
         }
 
         writeVal(out, isLeaf());
+
+        serializeFieldData(out, gasState.data);
+        writeVec3(out, gasState.velocity);
+        writeVal(out, gasState.density);
+        writeVal(out, gasState.pressure);
+        writeVal(out, gasState.objectId);
+        writeVal(out, gasState.renderMatIdx);
+        writeVec3(out, gasState.color);
+
         writeVal(out, points.size());
         for (const auto& pt : points) {
-            serializeData(out, pt->data);
+            serializeFieldData(out, pt->data);
             writeVec3(out, pt->position);
             writeVal(out, pt->objectId);
             writeVal(out, pt->flags.load(std::memory_order_relaxed));
@@ -814,12 +859,20 @@ struct OctreeNode_ {
         readVal(in, leaf);
         setLeaf(leaf);
 
+        deserializeFieldData(in, gasState.data);
+        readVec3(in, gasState.velocity);
+        readVal(in, gasState.density);
+        readVal(in, gasState.pressure);
+        readVal(in, gasState.objectId);
+        readVal(in, gasState.renderMatIdx);
+        readVec3(in, gasState.color);
+
         size_t pointCount;
         readVal(in, pointCount);
         points.reserve(pointCount);
         for (size_t i = 0; i < pointCount; ++i) {
             auto pt = std::make_shared<NodeData_<T, IndexType, StoragePath>>();
-            deserializeData(in, pt->data);
+            deserializeFieldData(in, pt->data);
             readVec3(in, pt->position);
             readVal(in, pt->objectId);
             uint8_t f;
@@ -843,7 +896,7 @@ struct OctreeNode_ {
                         childMin[d] = high ? center[d] : bounds.first[d];
                         childMax[d] = high ? bounds.second[d] : center[d];
                     }
-                    children[i] = std::make_unique<OctreeNode_<T, IndexType, StoragePath>>(childMin, childMax);
+                    children[i] = std::make_unique<OctreeNode_<T, GasT, IndexType, StoragePath>>(childMin, childMax);
                     children[i]->deserialize(in, regionTargetPoints);
                 } else {
                     children[i] = nullptr;
