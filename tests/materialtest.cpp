@@ -184,8 +184,8 @@ int main() {
     octree.setMaxDistance(4096);
 
     // 3. Setup rendering loop
-    int width = 1080;
-    int height = 1080;
+    int width = 512;
+    int height = 512;
     
     const float fps = 30.0f;
     const float durationPerSegment = 10.0f;
@@ -240,9 +240,9 @@ int main() {
         cam.direction = (target - view.origin).normalized();
         cam.up = view.up;
         
-        out = octree.fastRenderFrame(cam, height, width, frame::colormap::RGB);
-        filename = "output/fast_cpurender_" + view.name + ".bmp";
-        BMPWriter::saveBMP(filename, out);
+        // out = octree.fastRenderFrame(cam, height, width, frame::colormap::RGB);
+        // filename = "output/fast_cpurender_" + view.name + ".bmp";
+        // BMPWriter::saveBMP(filename, out);
         
         out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
         filename = "output/fast_vulkanrender_" + view.name + ".bmp";
@@ -389,9 +389,8 @@ int main() {
 
             // 3. Render
             // frame out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
-            frame out = octree.blendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, videosamples, bounces, false, true);
-
-            // frame out = octree.renderFrameVulkan(cam, height, width, frame::colormap::RGB, videosamples, bounces, true, false);
+            // frame out = octree.blendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, videosamples, bounces, false, true);
+            frame out = octree.renderFrameVulkan(cam, height, width, frame::colormap::RGB, videosamples, bounces, true, false);
             // fluidVideoFrames.push_back(out);
 
             // saving to video is dumb so just gonna export here and then convert.

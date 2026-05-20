@@ -26,6 +26,11 @@ static constexpr uint8_t KEEPLOADED_BIT = 1 << 5;
 
 static constexpr uint8_t OBJ_ALLOW_PARTIAL_UNLOAD_BIT = 1 << 0;
 
+static constexpr uint8_t WORKER_ON = 1 << 0;
+static constexpr uint8_t AUTO_OPTIMIZE = 1 << 1;
+static constexpr uint8_t QUEUE_STREAMING = 1 << 2;
+static constexpr uint8_t PHYSICS_COLLIDER_DIRTY = 1 << 3;
+
 template<typename> struct is_shared_ptr : std::false_type {};
 template<typename T> struct is_shared_ptr<std::shared_ptr<T>> : std::true_type {};
 using PointType = Eigen::Matrix<float, Dim, 1>;

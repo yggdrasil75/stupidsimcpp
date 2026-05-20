@@ -666,7 +666,7 @@ frame Octree<T, GasT, IndexType, StoragePath>::fastRenderFrameVulkan(const Camer
         (uint32_t)gpuNodes.size(), (uint32_t)gpuPoints.size(), 0, 0, emissiveCount, 1
     };
 
-    size_t outSize = width * height * 5 * sizeof(float);
+    size_t outSize = width * height * 3 * sizeof(float);
     vkCtx.updateCommonBuffers(outSize, camData, gpuNodes);
     vkCtx.updateSkyboxBuffer(skyData);
     vkCtx.updateLightBuffer(gpuLights);
@@ -674,8 +674,8 @@ frame Octree<T, GasT, IndexType, StoragePath>::fastRenderFrameVulkan(const Camer
 
     VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     vkBeginCommandBuffer(vkCtx.commandBuffer, &beginInfo);
-    vkCmdBindPipeline(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.fastPipeline);
-    vkCmdBindDescriptorSets(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.fastPipelineLayout, 0, 1, &vkCtx.fastDescSet, 0, nullptr);
+    vkCmdBindPipeline(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.rasterizePipeline);
+    vkCmdBindDescriptorSets(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.fastPipelineLayout, 0, 1, &vkCtx.rasterizeDescSet, 0, nullptr);
     
     vkCmdDispatch(vkCtx.commandBuffer, (width + 7) / 8, (height + 7) / 8, 1);
     vkEndCommandBuffer(vkCtx.commandBuffer);
@@ -695,7 +695,7 @@ frame Octree<T, GasT, IndexType, StoragePath>::fastRenderFrameVulkan(const Camer
     frame outFrame(width, height, colorformat);
     std::vector<float> colorBuffer(width * height * 3);
     
-    std::vector<float> rawBuffer(width * height * 5);
+    std::vector<float> rawBuffer(width * height * 3);
     void* mappedData;
     vkMapMemory(vkCtx.device, vkCtx.outMem, 0, outSize, 0, &mappedData);
     memcpy(rawBuffer.data(), mappedData, outSize);
@@ -703,11 +703,10 @@ frame Octree<T, GasT, IndexType, StoragePath>::fastRenderFrameVulkan(const Camer
 
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
-            int outIdx = (y * width + x) * 3;
-            int inIdx = (y * width + x) * 5;
-            colorBuffer[outIdx]     = std::clamp(rawBuffer[inIdx], 0.0f, 1.0f);
-            colorBuffer[outIdx + 1] = std::clamp(rawBuffer[inIdx + 1], 0.0f, 1.0f);
-            colorBuffer[outIdx + 2] = std::clamp(rawBuffer[inIdx + 2], 0.0f, 1.0f);
+            int idx = (y * width + x) * 3;
+            colorBuffer[idx]     = std::clamp(rawBuffer[idx], 0.0f, 1.0f);
+            colorBuffer[idx + 1] = std::clamp(rawBuffer[idx + 1], 0.0f, 1.0f);
+            colorBuffer[idx + 2] = std::clamp(rawBuffer[idx + 2], 0.0f, 1.0f);
         }
     }
 
@@ -938,28 +937,28 @@ frame Octree<T, GasT, IndexType, StoragePath>::blendedRenderFrameVulkan(const Ca
         (uint32_t)gpuNodes.size(), (uint32_t)gpuFastPoints.size(), 0, 0, fastEmissiveCount, 1
     };
 
-    size_t fastOutSize = width * height * 5 * sizeof(float);
+    size_t fastOutSize = width * height * 3 * sizeof(float);
     vkCtx.updateCommonBuffers(fastOutSize, fastCamData, gpuNodes);
     vkCtx.updateLightBuffer(fastLights);
     vkCtx.updateFastBuffers(gpuFastPoints);
 
-    VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    vkBeginCommandBuffer(vkCtx.commandBuffer, &beginInfo);
-    vkCmdBindPipeline(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.fastPipeline);
-    vkCmdBindDescriptorSets(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.fastPipelineLayout, 0, 1, &vkCtx.fastDescSet, 0, nullptr);
+    VkCommandBufferBeginInfo beginInfo2{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    vkBeginCommandBuffer(vkCtx.commandBuffer, &beginInfo2);
+    vkCmdBindPipeline(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.rasterizePipeline);
+    vkCmdBindDescriptorSets(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.fastPipelineLayout, 0, 1, &vkCtx.rasterizeDescSet, 0, nullptr);
     vkCmdDispatch(vkCtx.commandBuffer, (width + 7) / 8, (height + 7) / 8, 1);
     vkEndCommandBuffer(vkCtx.commandBuffer);
 
-    VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &vkCtx.commandBuffer;
+    VkSubmitInfo submitInfo2{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submitInfo2.commandBufferCount = 1;
+    submitInfo2.pCommandBuffers = &vkCtx.commandBuffer;
 
-    VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-    VkFence fence;
-    vkCreateFence(vkCtx.device, &fenceInfo, nullptr, &fence);
-    vkQueueSubmit(vkCtx.queue, 1, &submitInfo, fence);
-    vkWaitForFences(vkCtx.device, 1, &fence, VK_TRUE, UINT64_MAX);
-    vkDestroyFence(vkCtx.device, fence, nullptr);
+    VkFenceCreateInfo fenceInfo2{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    VkFence fence2;
+    vkCreateFence(vkCtx.device, &fenceInfo2, nullptr, &fence2);
+    vkQueueSubmit(vkCtx.queue, 1, &submitInfo2, fence2);
+    vkWaitForFences(vkCtx.device, 1, &fence2, VK_TRUE, UINT64_MAX);
+    vkDestroyFence(vkCtx.device, fence2, nullptr);
 
     frame outFrame(width, height, colorformat);
     std::vector<float> colorBuffer(width * height * 3);
