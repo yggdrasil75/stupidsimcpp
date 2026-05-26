@@ -223,23 +223,6 @@ private:
         }
     }
 
-    OctreeNode* getHighestCommonNode(OctreeNode* current, const BoundingBox& bounds, int currentDepth, int& outDepth) const {
-        if (!current || current->isLeaf()) {
-            outDepth = currentDepth;
-            return current;
-        }
-        for (int i = 0; i < 8; ++i) {
-            if (current->children[i]) {
-                BoundingBox cb = createChildBounds(current, i);
-                if (boxContainsBox(cb, bounds)) {
-                    return getHighestCommonNode(current->children[i].get(), bounds, currentDepth + 1, outDepth);
-                }
-            }
-        }
-        outDepth = currentDepth;
-        return current;
-    }
-
     size_t removeObjectBatchRecursive(OctreeNode* node, int objectId) {
         if (!node) return 0;
         ensureLoaded(node, false);
@@ -297,21 +280,6 @@ private:
     }
 
 public:
-    std::shared_ptr<GridObject> getOrCreateObject(int id) {
-        std::unique_lock<std::shared_mutex> lock(objectsMutex_);
-        auto it = objects_.find(id);
-        if (it != objects_.end()) return it->second;
-        auto obj = std::make_shared<GridObject>(id);
-        objects_[id] = obj;
-        return obj;
-    }
-
-    std::shared_ptr<GridObject> getObject(int id) const {
-        std::shared_lock<std::shared_mutex> lock(objectsMutex_);
-        auto it = objects_.find(id);
-        if (it != objects_.end()) return it->second;
-        return nullptr;
-    }
 
     void addSkyBody(int id, const PointType& dir, float angularRadius, uint8_t r, uint8_t g, uint8_t b, uint8_t emittance = 255) {
         skybox_.addBody(id, dir, angularRadius, r, g, b, emittance);
@@ -328,41 +296,7 @@ public:
     void bakeSkyBody(int id) {
         skybox_.bakeBody(id);
     }
-
-    void waitForIdle() {
-        if (std::this_thread::get_id() == workerThread_.get_id()) {
-            return;
-        }
-        std::promise<void> p;
-        auto f = p.get_future();
-        enqueueTask([&p]{ p.set_value(); });
-        f.wait();
-    }
-
-    void setPhysicsSmoothingRadius(float radius) {
-        phys_smoothingRadius = radius;
-        kernels_.update(radius);
-    }
-
-    void setPhysicsVelocityDamping(float damping) {
-        phys_velocityDamping = damping;
-    }
-    void setPhysicsGasConstant(float c) { phys_gasConstant = c; }
-    void setPhysicsViscosity(float v) { phys_viscosity = v; }
-    void setPhysicsRestDensity(float d) { phys_restDensity = d; }
-    void setPhysicsAirDensity(float d) { phys_airDensity = d; }
-    void setPhysicsGasExpansionRate(float rate) { phys_gasExpansionRate = rate; }
-    void setPhysicsMaxGasSize(float maxGas) { phys_maxGasSize = maxGas; }
-    void setphys_gravityCenter(PointType n) {
-        phys_gravityCenter = n;
-    }
 private:
-
-    float lodFalloffRate_ = 0.1f; // Lower = better, higher = worse. 0-1
-    float invLodf = 1 / lodFalloffRate_;
-    float lodMinDistance_ = 100.0f;
-    float maxDistance_ = lodMinDistance_ * lodMinDistance_;
-    float keepDistance_ = maxDistance_ * 1.2;
     
     struct Ray {
         PointType origin;
@@ -378,15 +312,6 @@ private:
             signMask = (sign[0] | sign[1] << 1 | sign[2] << 2);
         }
     };
-
-    uint8_t getOctant(const PointType& point, const PointType& center) const {
-        return (point[0] >= center[0]) | ((point[1] >= center[1]) << 1) | ((point[2] >= center[2]) << 2);
-        // uint8_t octant = 0;
-        // if (point[0] >= center[0]) octant |= 1;
-        // if (point[1] >= center[1]) octant |= 2;
-        // if (point[2] >= center[2]) octant |= 4;
-        // return octant;
-    }
 
     BoundingBox createChildBounds(const OctreeNode* node, uint8_t octant) const {
         PointType childMin, childMax;
@@ -1464,21 +1389,6 @@ public:
     Eigen::Vector3f getBackgroundColor() const { 
         return backgroundColor_; 
     }
-
-    void setLODFalloff(float rate) {
-        lodFalloffRate_ = rate;
-        invLodf = 1 / rate;
-    }
-    void setLODMinDistance(float dist) { lodMinDistance_ = dist; }
-    void setMaxDistance(float dist) {
-        maxDistance_ = dist;
-        keepDistance_ = dist * 1.2;
-    }
-    void setMinLODSize(float size) {
-        minLodSize_ = size;
-        minLodVolume_ = size * size * size;
-    }
-    float getMinLODSize() const { return minLodSize_; }
     void setRegionTargetPoints(size_t points) { regionTargetPoints_ = points; }
     size_t getRegionTargetPoints() const { return regionTargetPoints_; }
 

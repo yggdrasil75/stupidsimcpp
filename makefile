@@ -2,6 +2,7 @@
 BIN_DIR := ./bin
 SRC_DIR := ./tests
 IMGUI_DIR = ./imgui
+EIGEN_DIR = ./eigen
 OBJ_DIR := $(BIN_DIR)/obj
 STB_DIR := ./stb
 SHADER_DIR := ./shaders
@@ -9,7 +10,7 @@ GRID_DIR := ./util/grid
 
 # Compiler and flags
 CXX := g++
-BASE_CXXFLAGS = -std=c++23 -O3 -fopenmp -march=native -I$(IMGUI_DIR) -I$(IMGUI_DIR)/backends -I$(STB_DIR) 
+BASE_CXXFLAGS = -std=c++23 -O3 -fopenmp -march=native -I$(IMGUI_DIR) -I$(IMGUI_DIR)/backends -I$(STB_DIR) -I$(EIGEN_DIR)
 BASE_CXXFLAGS += -g
 BASE_CXXFLAGS += `pkg-config --cflags glfw3`
 
@@ -40,8 +41,9 @@ CXXFLAGS = $(BASE_CXXFLAGS) $(SIMD_CXXFLAGS)
 
 # Source files
 # SRC := $(SRC_DIR)/ptest.cpp
-SRC := $(SRC_DIR)/materialtest.cpp
+# SRC := $(SRC_DIR)/materialtest.cpp
 #SRC := $(SRC_DIR)/g2chromatic2.cpp
+SRC := $(SRC_DIR)/trainer.cpp
 SRC += $(IMGUI_DIR)/imgui.cpp $(IMGUI_DIR)/imgui_demo.cpp $(IMGUI_DIR)/imgui_draw.cpp $(IMGUI_DIR)/imgui_tables.cpp $(IMGUI_DIR)/imgui_widgets.cpp
 SRC += $(IMGUI_DIR)/backends/imgui_impl_glfw.cpp $(IMGUI_DIR)/backends/imgui_impl_opengl3.cpp
 SRC += $(SRC_DIR)/stb_image.cpp

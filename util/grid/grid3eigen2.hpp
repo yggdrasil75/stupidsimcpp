@@ -37,9 +37,10 @@ private:
     00000001=worker on
     00000010=auto optimize enabled
     00000100=queue streaming
-    00001000=physics collider (do I actually need this?)
+    00001000=physics collider dirty (do I actually need this?)
     */
     std::atomic<uint8_t> flags;
+    PointType fatStep;
 
     //skybox
     Skybox skybox_;
@@ -61,6 +62,11 @@ private:
     float minLodVolume_ = 0.0f;
     float minLodSize_ = 0.0f;
     size_t regionTargetPoints_ = 4096;
+    float lodFalloffRate_ = 0.1f;
+    float invLodf = 1 / lodFalloffRate_;
+    float lodMinDistance_ = 100.0f;
+    float maxDistance_ = lodMinDistance_ * lodMinDistance_;
+    float keepDistance_ = maxDistance_ * 1.2;
 
     //physics
     std::mutex physicsMutex_;
@@ -120,8 +126,49 @@ public:
         else flags.fetch_and(~PHYSICS_COLLIDER_DIRTY, std::memory_order_relaxed);
     }
 
+    uint8_t getOctant(const PointType& point, const PointType& center) const {
+        return (point[0] >= center[0]) | ((point[1] >= center[1]) << 1) | ((point[2] >= center[2]) << 2);
+    }
+
+    uint16_t getFatCellIndex(const PointType& point) const {
+        PointType rootMin = root_.get().bounds.first;
+        uint8_t x = static_cast<uint8_t>((point[0] - rootMin[0]) / xStep);
+        uint8_t y = static_cast<uint8_t>((point[1] - rootMin[1]) / yStep);
+        uint8_t z = static_cast<uint8_t>((point[2] - rootMin[2]) / zStep);
+        x &= 0x0F;
+        y &= 0x0F;
+        z &= 0x0F;
+        return mortonEncode16B(x, y, z);
+    }
+
+    uint16_t mortonEncode16B(uint8_t x, uint8_t y, uint8_t z) {
+        uint16_t xx = (x | (x << 8)) & 0x0F0F;
+        uint16_t yy = (y | (y << 8)) & 0x0F0F;
+        uint16_t zz = (z | (z << 8)) & 0x0F0F;
+        
+        xx = (xx | (xx << 4)) & 0x0C3;
+        yy = (yy | (yy << 4)) & 0x0C3;
+        zz = (zz | (zz << 4)) & 0x0C3;
+        
+        return xx | (yy << 1) | (zz << 2);
+    }
+
 
 //recursives
+    OctreeNode* getHighestCommonNodeRecursive(const PointType Min, const PointType Max, OctreeNode* current) const {
+        if (current->isFat()) {
+            uint16_t coct = getFatCellIndex(Min);
+            if (coct = getFatCellIndex(Max)) {
+                getHighestCommonNodeRecursive(Min, Max, current);
+            }
+        } else {
+            uint8_t coct = getOctant(Min, current->center);
+            if (coct == getOctant(Max, current->center)) {
+                getHighestCommonNodeRecursive(Min, Max, current->children[coct])
+            }
+        }
+        return current;
+    }
 
 //tasks
     void lazilyOffload(OctreeNode* node) {
@@ -187,7 +234,7 @@ public:
     }
 
     void startWorkerThread() {
-        setWorkerRunning(false);
+        setWorkerRunning(true);
         workerThread_ = std::thread([this]() {
             auto lastOptimize = std::chrono::steady_clock::now();
             while (true) {
@@ -237,12 +284,102 @@ public:
         return bounds;
     }
 
-    OctreeNode* getHighestCommonNodeRecursive(const std::vector<std::shared_ptr<NodeData>>& nodes) const {
-        
+    OctreeNode* getHighestCommonNode(const std::vector<PointType>& positions, OctreeNode* current) const {
+        PointType min, max;
+        for (auto pos : positions) {
+            if (min.x > pos.x) min.x = pos.x;
+            if (min.y > pos.y) min.y = pos.y;
+            if (min.z > pos.z) min.z = pos.z;
+            if (max.x > pos.x) max.x = pos.x;
+            if (max.y > pos.y) max.y = pos.y;
+            if (max.z > pos.z) max.z = pos.z;
+        }
+
+        OctreeNode current = root.get();
+        getHighestCommonNodeRecursive(min, max, current);
+        return current;
+    }
+
+    OctreeNode* getHighestCommonNode(const vector<NodeData_>& nodes, OctreeNode* current) const {
+        PointType min, max;
+        for (auto node : nodes) {
+            if (min.x > node.position.x) min.x = node.position.x;
+            if (min.y > node.position.y) min.y = node.position.y;
+            if (min.z > node.position.z) min.z = node.position.z;
+            if (max.x > node.position.x) max.x = node.position.x;
+            if (max.y > node.position.y) max.y = node.position.y;
+            if (max.z > node.position.z) max.z = node.position.z;
+        }
+
+        OctreeNode current = root.get();
+        getHighestCommonNodeRecursive(min, max, current);
+        return current;
     }
 
 //public functions
 public:
+
+//setters
+    std::shared_ptr<GridObject> getOrCreateObject(int id) {
+        std::unique_lock<std::shared_mutex> lock(objectsMutex_);
+        auto it = objects_.find(id);
+        if (it != objects_.end()) return it->second;
+        auto obj = std::make_shared<GridObject>(id);
+        objects_[id] = obj;
+        return obj;
+    }
+
+    void setPhysicsSmoothingRadius(float radius) {
+        phys_smoothingRadius = radius;
+        kernels_.update(radius);
+    }
+
+    void setPhysicsVelocityDamping(float damping) { phys_velocityDamping = damping; }
+    void setPhysicsViscosity(float v) { phys_viscosity = v; }
+    void setPhysicsRestDensity(float d) { phys_restDensity = d; }
+    void setphys_gravityCenter(PointType n) { phys_gravity = n; }
+    void setphys_gravityStrength(float d) { phys_gravityStrength = d; }
+
+    void setLODFalloff(float rate) {
+        lodFalloffRate_ = rate;
+        invLodf = 1 / rate;
+    }
+
+    void setMaxDistance(float dist) {
+        maxDistance_ = dist;
+        keepDistance_ = dist * 1.2;
+    }
+
+    void setMinLODSize(float size) {
+        minLodSize_ = size;
+        minLodVolume_ = size * size * size;
+    }
+
+    void setLODMinDistance(float dist) { lodMinDistance_ = dist; }
+
+//getters
+    std::shared_ptr<GridObject> getObject(int id) const {
+        std::shared_lock<std::shared_mutex> lock(objectsMutex_);
+        auto it = objects_.find(id);
+        if (it != objects_.end()) return it->second;
+        return nullptr;
+    }
+
+    void waitForIdle() {
+        if (std::this_thread::get_id() == workerThread_.get_id()) {
+            return;
+        }
+        std::promise<void> p;
+        auto f = p.get_future();
+        enqueueTask([&p]{ p.set_value(); });
+        f.wait();
+    }
+
+    float getMinLODSize() const { return minLodSize_; }
+
+    
+
+//updates
 
 }
 

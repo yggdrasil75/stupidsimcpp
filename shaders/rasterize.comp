@@ -1,191 +1,160 @@
 #version 450
-layout(local_size_x = 8, local_size_y = 8) in;
+layout(local_size_x = 256) in;
 
-struct GPUCameraData {
+struct GPUMeshTriangle {
+    vec3 v0; float pad0;
+    vec3 v1; float pad1;
+    vec3 v2; float pad2;
+    vec3 n;  
+    uint color;
+    uint materialIdx;
+    float pad3[2];
+};
+
+layout(std430, binding = 2) buffer OutBuffer { float colors[]; };
+
+layout(binding = 3) uniform UBO {
     vec3 origin; float lodMinDist;
     vec3 dir; float invLodf;
     vec3 up; float minVisibility;
     vec3 right; float maxDist;
     vec3 skylight; float tanfovx;
     vec3 bgColor; float tanfovy;
-    int width; int height;
-    int maxBounces; int useLod;
-    float invFogRange; uint frameCount;
-    int skyWidth; int skyHeight;
-    int currentSampleOffset; int dispatchSamples;
-    int globalIllumination; uint nodeCount;
-    uint pointCount; int tileOffsetX;
-    int tileOffsetY; int emissiveCount;
-    int targetSamples;
-};
+    int width; int height; int maxBounces; int useLod;
+    float invFogRange; uint frameCount; int skyWidth; int skyHeight;
+    int currentSampleOffset; int dispatchSamples; int globalIllumination; uint nodeCount;
+    uint pointCount; int tileOffsetX; int tileOffsetY; int emissiveCount;
+    int targetSamples; uint triangleCount; uint pad0;
+} cam;
 
-struct GPURenderNode {
-    vec3 boundsMin; float padding1;
-    vec3 boundsMax; float padding2;
-    vec3 center; float nodeSize;
-    uint isLeaf; uint isLoaded;
-    uint childMask; uint firstPoint;
-    uint pointCount; int lodPoint;
-    uint firstChild; uint padding3;
-};
-
-struct GPUFastRenderData {
-    vec3 position; float size;
-    uint color; uint materialIdx;
-    int objectId; float gasDensity;
-};
-
-layout(std430, binding = 0) readonly buffer NodeBuf { GPURenderNode nodes[]; };
-layout(std430, binding = 1) readonly buffer PointBuf { GPUFastRenderData points[]; };
-layout(std430, binding = 2) writeonly buffer OutBuf { float outData[]; };
-layout(std140, binding = 3) uniform UBO { GPUCameraData cam; };
-
-bool rayBoxIntersect(vec3 ro, vec3 invDir, vec3 boundsMin, vec3 boundsMax, out float tMin, out float tMax) {
-    vec3 t0 = (boundsMin - ro) * invDir;
-    vec3 t1 = (boundsMax - ro) * invDir;
-    vec3 tmin = min(t0, t1);
-    vec3 tmax = max(t0, t1);
-    tMin = max(max(tmin.x, tmin.y), tmin.z);
-    tMax = min(min(tmax.x, tmax.y), tmax.z);
-    return tMax >= max(0.0, tMin);
-}
-
-bool rayCubeIntersect(vec3 ro, vec3 rd, vec3 invDir, GPUFastRenderData pt, out float tOut, out vec3 normal) {
-    float halfSize = pt.size * 0.5;
-    vec3 boundsMin = pt.position - vec3(halfSize);
-    vec3 boundsMax = pt.position + vec3(halfSize);
-    float tMin, tMax;
-    if (rayBoxIntersect(ro, invDir, boundsMin, boundsMax, tMin, tMax)) {
-        if (tMin >= 0.0) {
-            tOut = tMin;
-            vec3 hitPoint = ro + rd * tMin;
-            vec3 localPoint = (hitPoint - pt.position) / halfSize;
-            vec3 absP = abs(localPoint);
-            if (absP.x > absP.y && absP.x > absP.z) normal = vec3(sign(localPoint.x), 0, 0);
-            else if (absP.y > absP.z) normal = vec3(0, sign(localPoint.y), 0);
-            else normal = vec3(0, 0, sign(localPoint.z));
-            return true;
-        }
-    }
-    return false;
-}
-
-vec3 unpackRGB(uint c) {
-    return vec3(float(c & 255), float((c >> 8) & 255), float((c >> 16) & 255)) / 255.0;
-}
+layout(std430, binding = 4) buffer SkyboxBuffer { vec4 skybox[]; };
+layout(std430, binding = 9) buffer MeshBuffer { GPUMeshTriangle triangles[]; };
+layout(std430, binding = 10) buffer DepthBuffer { uint depths[]; };
 
 void main() {
-    int x = int(gl_GlobalInvocationID.x);
-    int y = int(gl_GlobalInvocationID.y);
-    if (x >= cam.width || y >= cam.height) return;
+    uint tid = gl_GlobalInvocationID.x;
+    if (tid >= cam.triangleCount) return;
 
-    float px = (2.0 * (float(x) + 0.5) / float(cam.width) - 1.0) * cam.tanfovx;
-    float py = (1.0 - 2.0 * (float(y) + 0.5) / float(cam.height)) * cam.tanfovy;
+    GPUMeshTriangle tri = triangles[tid];
+
+    // 1. Transform vertices relative to camera
+    vec3 p0 = tri.v0 - cam.origin;
+    vec3 p1 = tri.v1 - cam.origin;
+    vec3 p2 = tri.v2 - cam.origin;
     
-    vec3 rayDir = normalize(cam.dir + cam.right * px + cam.up * py);
-    vec3 invDir = 1.0 / rayDir;
-    int signMask = ((invDir.x < 0.0) ? 1 : 0) | ((invDir.y < 0.0) ? 2 : 0) | ((invDir.z < 0.0) ? 4 : 0);
+    // 2. 3D Backface Culling (crucial to save fill rate)
+    vec3 viewDir = normalize(p0);
+    if (dot(tri.n, viewDir) >= 0.0) return;
 
-    float currentMaxDist = cam.maxDist;
-    vec3 hitColor = cam.bgColor;
-    bool hit = false;
+    // 3. Simple near plane clipping
+    float z0 = dot(p0, cam.dir);
+    float z1 = dot(p1, cam.dir);
+    float z2 = dot(p2, cam.dir);
+    if (z0 <= 0.01 || z1 <= 0.01 || z2 <= 0.01) return;
 
-    if (cam.nodeCount > 0) {
-        float tMinRoot, tMaxRoot;
-        if (rayBoxIntersect(cam.origin, invDir, nodes[0].boundsMin, nodes[0].boundsMax, tMinRoot, tMaxRoot)) {
-            uint stack[64];
-            float tMinStack[64];
-            float tMaxStack[64];
-            int stackPtr = 0;
-            
-            stack[stackPtr] = 0;
-            tMinStack[stackPtr] = max(0.0, tMinRoot);
-            tMaxStack[stackPtr] = min(tMaxRoot, currentMaxDist);
-            stackPtr++;
+    // 4. Project coordinates to the screen
+    vec2 sc0 = vec2(dot(p0, cam.right) / z0, dot(p0, cam.up) / z0);
+    vec2 sc1 = vec2(dot(p1, cam.right) / z1, dot(p1, cam.up) / z1);
+    vec2 sc2 = vec2(dot(p2, cam.right) / z2, dot(p2, cam.up) / z2);
 
-            while (stackPtr > 0) {
-                stackPtr--;
-                uint nodeIdx = stack[stackPtr];
-                float t0 = tMinStack[stackPtr];
-                float t1 = tMaxStack[stackPtr];
+    sc0.x = (sc0.x / cam.tanfovx + 1.0) * 0.5 * float(cam.width);
+    sc0.y = (1.0 - sc0.y / cam.tanfovy) * 0.5 * float(cam.height);
+    
+    sc1.x = (sc1.x / cam.tanfovx + 1.0) * 0.5 * float(cam.width);
+    sc1.y = (1.0 - sc1.y / cam.tanfovy) * 0.5 * float(cam.height);
+    
+    sc2.x = (sc2.x / cam.tanfovx + 1.0) * 0.5 * float(cam.width);
+    sc2.y = (1.0 - sc2.y / cam.tanfovy) * 0.5 * float(cam.height);
 
-                if (t0 > currentMaxDist) continue;
+    // 5. Bounding Box to constrain pixel iteration
+    int minX = max(0, int(floor(min(sc0.x, min(sc1.x, sc2.x)))));
+    int maxX = min(cam.width - 1, int(ceil(max(sc0.x, max(sc1.x, sc2.x)))));
+    int minY = max(0, int(floor(min(sc0.y, min(sc1.y, sc2.y)))));
+    int maxY = min(cam.height - 1, int(ceil(max(sc0.y, max(sc1.y, sc2.y)))));
 
-                GPURenderNode node = nodes[nodeIdx];
+    // Discard off-screen geometry early
+    if (minX > maxX || minY > maxY) return;
 
-                if (node.isLeaf == 0 && node.lodPoint != -1) {
-                    float dist = length(node.center - cam.origin);
-                    if (dist > cam.lodMinDist && (dist / node.nodeSize) > cam.invLodf) {
-                        float tOut; vec3 normal;
-                        if (rayCubeIntersect(cam.origin, rayDir, invDir, points[node.lodPoint], tOut, normal)) {
-                            if (tOut <= currentMaxDist) {
-                                currentMaxDist = tOut;
-                                hitColor = unpackRGB(points[node.lodPoint].color);
-                                hit = true;
-                            }
-                        }
-                        continue;
-                    }
-                }
+    // 6. Setup edge functions
+    vec2 e0 = sc1 - sc0;
+    vec2 e1 = sc2 - sc1;
+    vec2 e2 = sc0 - sc2;
+    
+    float det = e0.x * e1.y - e0.y * e1.x;
+    if (abs(det) < 0.0001) return; // Degenerate geometry cull
+    float signDet = sign(det);
 
-                for (uint i = 0; i < node.pointCount; ++i) {
-                    float tOut; vec3 normal;
-                    if (rayCubeIntersect(cam.origin, rayDir, invDir, points[node.firstPoint + i], tOut, normal)) {
-                        if (tOut <= currentMaxDist) {
-                            currentMaxDist = tOut;
-                            hitColor = unpackRGB(points[node.firstPoint + i].color);
-                            hit = true;
-                        }
-                    }
-                }
+    // 7. Base Lighting Calculations
+    vec3 lightDir = normalize(-cam.dir * 0.2);
+    float diffuse = max(0.0, dot(tri.n, lightDir));
+    float intensity = min(1.0, 0.35 + diffuse * 0.65);
+    vec3 baseColor = vec3(float(tri.color & 255)/255.0, float((tri.color>>8) & 255)/255.0, float((tri.color>>16) & 255)/255.0);
+    vec3 finalColor = baseColor * intensity;
 
-                if (node.isLeaf != 0 || node.isLoaded == 0) continue;
+    // 8. Rasterization Sub-loop
+    for (int y = minY; y <= maxY; ++y) {
+        for (int x = minX; x <= maxX; ++x) {
+            vec2 p = vec2(float(x) + 0.5, float(y) + 0.5);
 
-                vec3 ttt = (node.center - cam.origin) * invDir;
-                int currIdx = ((t0 >= ttt.x) ? 1 : 0) | ((t0 >= ttt.y) ? 2 : 0) | ((t0 >= ttt.z) ? 4 : 0);
+            // Compute Barycentric offsets
+            float w0 = ((p.x - sc1.x) * e1.y - (p.y - sc1.y) * e1.x) * signDet;
+            float w1 = ((p.x - sc2.x) * e2.y - (p.y - sc2.y) * e2.x) * signDet;
+            float w2 = ((p.x - sc0.x) * e0.y - (p.y - sc0.y) * e0.x) * signDet;
+
+            // Inside Triangle Check
+            if (w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0) {
+                float sum = w0 + w1 + w2;
+                float invSum = 1.0 / sum;
+                w0 *= invSum;
+                w1 *= invSum;
+                w2 *= invSum;
+
+                // Evaluate perspective-correct Z
+                float z = 1.0 / (w0 / z0 + w1 / z1 + w2 / z2);
                 
-                float tNext;
-                int childCount = 0;
-                uint cNodes[4]; float cTmin[4]; float cTmax[4];
+                // Pack float to uint to allow exact atomic swap comparisons
+                uint zInt = floatBitsToUint(z);
+                int pidx = y * cam.width + x;
 
-                while (t0 < t1 && t0 <= currentMaxDist) {
-                    float nx = (currIdx & 1) != 0 ? t1 : ttt.x;
-                    float ny = (currIdx & 2) != 0 ? t1 : ttt.y;
-                    float nz = (currIdx & 4) != 0 ? t1 : ttt.z;
-                    tNext = min(min(nx, ny), nz);
-                    
-                    int physIdx = currIdx ^ signMask;
-                    if ((node.childMask & (1 << physIdx)) != 0) {
-                        int childOffset = bitCount(node.childMask & ((1 << physIdx) - 1));
-                        cNodes[childCount] = node.firstChild + childOffset;
-                        cTmin[childCount] = t0;
-                        cTmax[childCount] = tNext;
-                        childCount++;
+                // Robust Depth Test using Atomic Comp Swap (Spinlock replacement)
+                bool writeSuccess = false;
+                uint currentDepthInt = depths[pidx];
+                
+                while (zInt < currentDepthInt) {
+                    uint oldDepthInt = atomicCompSwap(depths[pidx], currentDepthInt, zInt);
+                    if (oldDepthInt == currentDepthInt) {
+                        writeSuccess = true;
+                        break;
                     }
-                    
-                    t0 = tNext;
-                    currIdx |= ((nx <= tNext) ? 1 : 0) | ((ny <= tNext) ? 2 : 0) | ((nz <= tNext) ? 4 : 0);
+                    currentDepthInt = oldDepthInt;
                 }
 
-                for (int i = childCount - 1; i >= 0; --i) {
-                    if (stackPtr < 64) {
-                        stack[stackPtr] = cNodes[i];
-                        tMinStack[stackPtr] = cTmin[i];
-                        tMaxStack[stackPtr] = cTmax[i];
-                        stackPtr++;
+                // If this is the nearest front-facing triangle:
+                if (writeSuccess) {
+                    float fogFactor = clamp((cam.maxDist - z) * cam.invFogRange, cam.minVisibility, 1.0);
+                    
+                    vec3 skyColor = cam.bgColor;
+                    if (cam.skyWidth > 0) {
+                        float px_ndc = (2.0 * p.x / float(cam.width) - 1.0) * cam.tanfovx;
+                        float py_ndc = (1.0 - 2.0 * p.y / float(cam.height)) * cam.tanfovy;
+                        vec3 rd = normalize(cam.dir + cam.right * px_ndc + cam.up * py_ndc);
+                        
+                        float u = 0.5 + atan(rd.z, rd.x) / (2.0 * 3.14159265);
+                        float v = 0.5 - asin(rd.y) / 3.14159265;
+                        int sx = clamp(int(u * cam.skyWidth), 0, cam.skyWidth - 1);
+                        int sy = clamp(int(v * cam.skyHeight), 0, cam.skyHeight - 1);
+                        
+                        skyColor = skybox[sy * cam.skyWidth + sx].rgb;
                     }
+
+                    vec3 blended = mix(skyColor, finalColor, fogFactor);
+
+                    // Write to generic float buffer
+                    colors[pidx * 3 + 0] = blended.r;
+                    colors[pidx * 3 + 1] = blended.g;
+                    colors[pidx * 3 + 2] = blended.b;
                 }
             }
         }
     }
-
-    if (hit) {
-        float fogFactor = clamp((cam.maxDist - currentMaxDist) * cam.invFogRange, cam.minVisibility, 1.0);
-        hitColor = mix(cam.bgColor, hitColor, fogFactor);
-    }
-
-    int idx = (y * cam.width + x) * 3;
-    outData[idx]     = hitColor.r;
-    outData[idx + 1] = hitColor.g;
-    outData[idx + 2] = hitColor.b;
 }

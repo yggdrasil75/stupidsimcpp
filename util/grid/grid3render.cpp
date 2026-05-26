@@ -493,7 +493,7 @@ frame Octree<T, GasT, IndexType, StoragePath>::renderFrameVulkan(const Camera& c
         skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
         width, height, maxBounces, useLod ? 1 : 0, invFogRange, frameCounter_,
         (int)skyW, (int)skyH, 0, 0, globalIllumination ? 1 : 0, 
-        (uint32_t)gpuNodes.size(), (uint32_t)gpuPoints.size(), 0, 0, emissiveCount, samplesPerPixel
+        (uint32_t)gpuNodes.size(), (uint32_t)gpuPoints.size(), 0, 0, emissiveCount, samplesPerPixel, 0, 0
     };
 
     size_t outSize = width * height * 5 * sizeof(float);
@@ -579,6 +579,7 @@ frame Octree<T, GasT, IndexType, StoragePath>::fastRenderFrameVulkan(const Camer
     
     vkCtx.init();
     
+    tl_buffer.updateMesh();
     std::vector<GPUMaterial> gpuMaterials;
     gpuMaterials.reserve(tl_buffer.materials.size());
     for (const auto& m : tl_buffer.materials) {
@@ -615,6 +616,7 @@ frame Octree<T, GasT, IndexType, StoragePath>::fastRenderFrameVulkan(const Camer
     int emissiveCount = gpuLights.size();
     if(gpuPoints.empty()) gpuPoints.push_back(GPUFastRenderData{});
     if(gpuLights.empty()) gpuLights.push_back(0);
+    vkCtx.updateMeshBuffer(tl_buffer.meshCache);
 
     std::vector<GPURenderNode> gpuNodes;
     gpuNodes.reserve(tl_buffer.nodes.size());
@@ -663,7 +665,8 @@ frame Octree<T, GasT, IndexType, StoragePath>::fastRenderFrameVulkan(const Camer
         cam.origin, lodMinDistance_, cam.direction.normalized(), invLodf, cam.up.normalized(), 0.1f, cam.right(), maxDistance_,
         skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
         width, height, 1, 1, invFogRange, frameCounter_++, (int)skyW, (int)skyH, 0, 1, 0, 
-        (uint32_t)gpuNodes.size(), (uint32_t)gpuPoints.size(), 0, 0, emissiveCount, 1
+        (uint32_t)gpuNodes.size(), (uint32_t)gpuPoints.size(), 0, 0, emissiveCount, 1,
+        (uint32_t)tl_buffer.meshCache.size(), 0
     };
 
     size_t outSize = width * height * 3 * sizeof(float);
@@ -674,10 +677,26 @@ frame Octree<T, GasT, IndexType, StoragePath>::fastRenderFrameVulkan(const Camer
 
     VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     vkBeginCommandBuffer(vkCtx.commandBuffer, &beginInfo);
+
+    // Clear depth and color buffers before compute rasterization atomic writes
+    vkCmdFillBuffer(vkCtx.commandBuffer, vkCtx.depthObjBuffer, 0, VK_WHOLE_SIZE, 0x7F7FFFFF); // Effectively infinite depth
+    vkCmdFillBuffer(vkCtx.commandBuffer, vkCtx.outBuffer, 0, VK_WHOLE_SIZE, 0);
+
+    VkMemoryBarrier clearBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    clearBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    clearBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(vkCtx.commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &clearBarrier, 0, nullptr, 0, nullptr);
+
     vkCmdBindPipeline(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.rasterizePipeline);
     vkCmdBindDescriptorSets(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.fastPipelineLayout, 0, 1, &vkCtx.rasterizeDescSet, 0, nullptr);
     
-    vkCmdDispatch(vkCtx.commandBuffer, (width + 7) / 8, (height + 7) / 8, 1);
+    uint32_t triangleCount = tl_buffer.meshCache.size();
+    if (triangleCount > 0) {
+        vkCmdDispatch(vkCtx.commandBuffer, (triangleCount + 255) / 256, 1, 1);
+    } else {
+        vkCmdDispatch(vkCtx.commandBuffer, (width + 7) / 8, (height + 7) / 8, 1);
+    }
+    
     vkEndCommandBuffer(vkCtx.commandBuffer);
 
     VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};

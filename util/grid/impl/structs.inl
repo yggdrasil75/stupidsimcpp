@@ -23,6 +23,7 @@ static constexpr uint8_t DIRTY_BIT = 1 << 2;
 static constexpr uint8_t LOADQUEUED = 1 << 3;
 static constexpr uint8_t SAVEDQUEUED = 1 << 4;
 static constexpr uint8_t KEEPLOADED_BIT = 1 << 5;
+static constexpr uint8_t FAT_BIT = 1 << 6;
 
 static constexpr uint8_t OBJ_ALLOW_PARTIAL_UNLOAD_BIT = 1 << 0;
 
@@ -368,7 +369,7 @@ template<typename T, typename IndexType = uint16_t, GridStoragePath StoragePath 
 struct NodeData_ {
     T data;
     PointType position;
-    int objectId;
+    uint16_t objectId;
     float size;
     Eigen::Vector3f color;
     uint16_t renderMatIdx;
@@ -519,6 +520,9 @@ struct OctreeNode_ {
     bool isKeepLoaded() const {
         return flags.load(std::memory_order_relaxed) & KEEPLOADED_BIT;
     }
+    bool isFat() const {
+        return flags.load(std::memory_order_relaxed) & FAT_BIT;
+    }
 
     void setLeaf(bool v) {
         if (v) flags.fetch_or(LEAF_BIT, std::memory_order_relaxed);
@@ -543,6 +547,10 @@ struct OctreeNode_ {
     void setKeepLoaded(bool v) {
         if (v) flags.fetch_or(KEEPLOADED_BIT, std::memory_order_relaxed);
         else flags.fetch_and(~KEEPLOADED_BIT, std::memory_order_relaxed);
+    }
+    void setFat(bool v) {
+        if (v) flags.fetch_or(FAT_BIT, std::memory_order_relaxed);
+        else flags.fetch_and(~FAT_BIT, std::memory_order_relaxed);
     }
 
     bool contains(const PointType& point) const {

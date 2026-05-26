@@ -35,6 +35,18 @@ struct RenderNode_ {
     OctreeNode_<T, float, IndexType, StoragePath>* originalNode; 
 };
 
+#ifdef VULKAN_SUPPORT
+struct alignas(16) GPUMeshTriangle {
+    Eigen::Vector3f v0; float padding0;
+    Eigen::Vector3f v1; float padding1;
+    Eigen::Vector3f v2; float padding2;
+    Eigen::Vector3f n;  
+    uint32_t color;
+    uint32_t materialIdx;
+    float padding3[2];
+};
+#endif
+
 template<typename T, typename IndexType, GridStoragePath StoragePath>
 struct RenderBuffer_ {
     std::vector<RenderNode_<T, IndexType, StoragePath>> nodes;
@@ -43,12 +55,62 @@ struct RenderBuffer_ {
     std::unordered_map<int, uint32_t> objMaterialOffsets;
     uint32_t defaultMatIdx;
     
+#ifdef VULKAN_SUPPORT
+    std::vector<GPUMeshTriangle> meshCache;
+#endif
+
     void clear() {
         nodes.clear();
         points.clear();
         materials.clear();
         objMaterialOffsets.clear();
     }
+    
+#ifdef VULKAN_SUPPORT
+    void updateMesh() {
+        if (meshCache.size() != points.size() * 12) {
+            meshCache.resize(points.size() * 12);
+        }
+
+        #pragma omp parallel for schedule(static, 128)
+        for (size_t i = 0; i < points.size(); ++i) {
+            const auto& pt = points[i];
+            float hs = pt.size * 0.5f;
+            Eigen::Vector3f p = pt.position;
+            
+            uint32_t r = static_cast<uint32_t>(std::clamp(pt.color.x(), 0.0f, 1.0f) * 255.0f);
+            uint32_t g = static_cast<uint32_t>(std::clamp(pt.color.y(), 0.0f, 1.0f) * 255.0f);
+            uint32_t b = static_cast<uint32_t>(std::clamp(pt.color.z(), 0.0f, 1.0f) * 255.0f);
+            uint32_t c = r | (g << 8) | (b << 16);
+            
+            uint32_t mat = pt.materialIdx;
+
+            Eigen::Vector3f v000(p.x()-hs, p.y()-hs, p.z()-hs);
+            Eigen::Vector3f v100(p.x()+hs, p.y()-hs, p.z()-hs);
+            Eigen::Vector3f v010(p.x()-hs, p.y()+hs, p.z()-hs);
+            Eigen::Vector3f v110(p.x()+hs, p.y()+hs, p.z()-hs);
+            Eigen::Vector3f v001(p.x()-hs, p.y()-hs, p.z()+hs);
+            Eigen::Vector3f v101(p.x()+hs, p.y()-hs, p.z()+hs);
+            Eigen::Vector3f v011(p.x()-hs, p.y()+hs, p.z()+hs);
+            Eigen::Vector3f v111(p.x()+hs, p.y()+hs, p.z()+hs);
+
+            size_t base = i * 12;
+            
+            meshCache[base+0] = {v000, 0, v001, 0, v011, 0, {-1,0,0}, c, mat, {0,0}};
+            meshCache[base+1] = {v000, 0, v011, 0, v010, 0, {-1,0,0}, c, mat, {0,0}};
+            meshCache[base+2] = {v100, 0, v110, 0, v111, 0, {1,0,0},  c, mat, {0,0}};
+            meshCache[base+3] = {v100, 0, v111, 0, v101, 0, {1,0,0},  c, mat, {0,0}};
+            meshCache[base+4] = {v000, 0, v100, 0, v101, 0, {0,-1,0}, c, mat, {0,0}};
+            meshCache[base+5] = {v000, 0, v101, 0, v001, 0, {0,-1,0}, c, mat, {0,0}};
+            meshCache[base+6] = {v010, 0, v011, 0, v111, 0, {0,1,0},  c, mat, {0,0}};
+            meshCache[base+7] = {v010, 0, v111, 0, v110, 0, {0,1,0},  c, mat, {0,0}};
+            meshCache[base+8] = {v000, 0, v010, 0, v110, 0, {0,0,-1}, c, mat, {0,0}};
+            meshCache[base+9] = {v000, 0, v110, 0, v100, 0, {0,0,-1}, c, mat, {0,0}};
+            meshCache[base+10]= {v001, 0, v101, 0, v111, 0, {0,0,1},  c, mat, {0,0}};
+            meshCache[base+11]= {v001, 0, v111, 0, v011, 0, {0,0,1},  c, mat, {0,0}};
+        }
+    }
+#endif
 };
 
 static PointType sampleGGX(const PointType& n, float roughness, uint32_t& state) {
@@ -177,6 +239,8 @@ struct alignas(16) GPUCameraData {
     int tileOffsetY;
     int emissiveCount;
     int targetSamples;
+    uint32_t triangleCount;
+    uint32_t pad0;
 };
 
 struct alignas(16) GPUParticle {
@@ -301,6 +365,7 @@ struct VulkanContext {
     VkBuffer lowResOutBuffer = VK_NULL_HANDLE;
     VkBuffer adaptiveBuffer = VK_NULL_HANDLE;
     VkBuffer materialBuffer = VK_NULL_HANDLE;
+    VkBuffer meshBuffer = VK_NULL_HANDLE;
 
     VkDeviceMemory nodeMem = VK_NULL_HANDLE;
     VkDeviceMemory outMem = VK_NULL_HANDLE;
@@ -314,6 +379,7 @@ struct VulkanContext {
     VkDeviceMemory lowResOutMem = VK_NULL_HANDLE;
     VkDeviceMemory adaptiveMem = VK_NULL_HANDLE;
     VkDeviceMemory materialMem = VK_NULL_HANDLE;
+    VkDeviceMemory meshMem = VK_NULL_HANDLE;
 
     size_t currentNodesCap = 0;
     size_t currentOutCap = 0;
@@ -326,6 +392,7 @@ struct VulkanContext {
     size_t currentLowResOutCap = 0;
     size_t currentAdaptiveCap = 0;
     size_t currentMaterialCap = 0;
+    size_t currentMeshCap = 0;
 
     bool initialized = false;
     bool hasHardwareRT = false;
@@ -498,8 +565,8 @@ struct VulkanContext {
         vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
 
         VkDescriptorPoolSize poolSizes[] = { 
-            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 60},
-            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 8},
+            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 80},
+            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 10},
             {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 6}
         };
         VkDescriptorPoolCreateInfo poolCreateInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -508,7 +575,7 @@ struct VulkanContext {
         poolCreateInfo.maxSets = 10;
         vkCreateDescriptorPool(device, &poolCreateInfo, nullptr, &descriptorPool);
 
-        VkDescriptorSetLayoutBinding bindings[9] = {};
+        VkDescriptorSetLayoutBinding bindings[11] = {};
         for(int i=0; i<6; i++) {
             bindings[i].binding = i;
             bindings[i].descriptorType = i==3 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -531,8 +598,18 @@ struct VulkanContext {
         bindings[8].descriptorCount = 1;
         bindings[8].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
+        bindings[9].binding = 9;
+        bindings[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        bindings[9].descriptorCount = 1;
+        bindings[9].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        bindings[10].binding = 10;
+        bindings[10].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        bindings[10].descriptorCount = 1;
+        bindings[10].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
         VkDescriptorSetLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        layoutInfo.bindingCount = 9;
+        layoutInfo.bindingCount = 11;
         layoutInfo.pBindings = bindings;
 
         vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &fastDescLayout);
@@ -1170,6 +1247,14 @@ struct VulkanContext {
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     }
 
+    void updateMeshBuffer(const std::vector<GPUMeshTriangle>& mesh) {
+        size_t allocSize = std::max((size_t)256, mesh.size() * sizeof(GPUMeshTriangle));
+        size_t dataSize = mesh.size() * sizeof(GPUMeshTriangle);
+        updateDeviceLocalBuffer(meshBuffer, meshMem, currentMeshCap, 
+                                mesh.empty() ? nullptr : mesh.data(), dataSize, allocSize, 
+                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    }
+
     void updateCommonBuffers(size_t outSize, GPUCameraData& camData, const std::vector<GPURenderNode>& nodes = {}) {
         size_t dataSize = nodes.size() * sizeof(GPURenderNode);
         size_t allocSize = std::max((size_t)256, dataSize * sizeof(uint32_t));
@@ -1247,7 +1332,7 @@ struct VulkanContext {
 
         if (hasHardwareRT) buildHardwareAccelerationStructures(points, true);
 
-        VkDescriptorBufferInfo bInfos[8] = { 
+        VkDescriptorBufferInfo bInfos[10] = { 
             {nodeBuffer, 0, VK_WHOLE_SIZE}, 
             {fastPointBuffer, 0, VK_WHOLE_SIZE}, 
             {outBuffer, 0, VK_WHOLE_SIZE}, 
@@ -1255,10 +1340,13 @@ struct VulkanContext {
             {skyboxBuffer, 0, VK_WHOLE_SIZE},
             {lightBuffer, 0, VK_WHOLE_SIZE},
             {adaptiveBuffer, 0, VK_WHOLE_SIZE},
-            {materialBuffer, 0, VK_WHOLE_SIZE}
+            {materialBuffer, 0, VK_WHOLE_SIZE},
+            {meshBuffer, 0, VK_WHOLE_SIZE},
+            {depthObjBuffer, 0, VK_WHOLE_SIZE}
         };
-        VkWriteDescriptorSet writes[8] = {};
-        for(int i=0; i<8; i++) {
+        
+        VkWriteDescriptorSet writes[10] = {};
+        for(int i=0; i<10; i++) {
             writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[i].dstSet = rasterizeDescSet;
             writes[i].dstBinding = (i >= 6) ? i + 1 : i; 
@@ -1266,31 +1354,21 @@ struct VulkanContext {
             writes[i].descriptorType = (i==3) ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             writes[i].pBufferInfo = &bInfos[i];
         }
-        vkUpdateDescriptorSets(device, 8, writes, 0, nullptr);
+        vkUpdateDescriptorSets(device, 10, writes, 0, nullptr);
 
-        VkDescriptorBufferInfo bInfosPbr[8] = { 
-            {nodeBuffer, 0, VK_WHOLE_SIZE}, 
-            {fastPointBuffer, 0, VK_WHOLE_SIZE}, 
-            {depthObjBuffer, 0, VK_WHOLE_SIZE}, 
-            {uboBuffer, 0, VK_WHOLE_SIZE},
-            {skyboxBuffer, 0, VK_WHOLE_SIZE},
-            {lightBuffer, 0, VK_WHOLE_SIZE},
-            {adaptiveBuffer, 0, VK_WHOLE_SIZE},
-            {materialBuffer, 0, VK_WHOLE_SIZE}
-        };
-        VkWriteDescriptorSet writesPbr[8] = {};
-        for(int i=0; i<8; i++) {
+        VkWriteDescriptorSet writesPbr[10] = {};
+        for(int i=0; i<10; i++) {
             writesPbr[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writesPbr[i].dstSet = pbrFastDescSet;
             writesPbr[i].dstBinding = (i >= 6) ? i + 1 : i;
             writesPbr[i].descriptorCount = 1;
             writesPbr[i].descriptorType = (i==3) ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            writesPbr[i].pBufferInfo = &bInfosPbr[i];
+            writesPbr[i].pBufferInfo = &bInfos[i];
         }
-        vkUpdateDescriptorSets(device, 8, writesPbr, 0, nullptr);
+        vkUpdateDescriptorSets(device, 10, writesPbr, 0, nullptr);
 
-        VkWriteDescriptorSet writesMesh[8] = {};
-        for(int i=0; i<8; i++) {
+        VkWriteDescriptorSet writesMesh[10] = {};
+        for(int i=0; i<10; i++) {
             writesMesh[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writesMesh[i].dstSet = meshifyDescSet;
             writesMesh[i].dstBinding = (i >= 6) ? i + 1 : i;
@@ -1298,7 +1376,7 @@ struct VulkanContext {
             writesMesh[i].descriptorType = (i==3) ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             writesMesh[i].pBufferInfo = &bInfos[i];
         }
-        vkUpdateDescriptorSets(device, 8, writesMesh, 0, nullptr);
+        vkUpdateDescriptorSets(device, 10, writesMesh, 0, nullptr);
     }
 
     void updatePBRBuffers(const std::vector<GPUPBRRenderData>& points) {
@@ -1311,7 +1389,7 @@ struct VulkanContext {
 
         if (hasHardwareRT) buildHardwareAccelerationStructures(points, false);
 
-        VkDescriptorBufferInfo bInfos[8] = { 
+        VkDescriptorBufferInfo bInfos[10] = { 
             {nodeBuffer, 0, VK_WHOLE_SIZE}, 
             {pbrPointBuffer, 0, VK_WHOLE_SIZE}, 
             {outBuffer, 0, VK_WHOLE_SIZE}, 
@@ -1319,10 +1397,12 @@ struct VulkanContext {
             {skyboxBuffer, 0, VK_WHOLE_SIZE},
             {lightBuffer, 0, VK_WHOLE_SIZE},
             {adaptiveBuffer, 0, VK_WHOLE_SIZE},
-            {materialBuffer, 0, VK_WHOLE_SIZE}
+            {materialBuffer, 0, VK_WHOLE_SIZE},
+            {meshBuffer, 0, VK_WHOLE_SIZE},
+            {depthObjBuffer, 0, VK_WHOLE_SIZE}
         };
-        int updateCount = 8;
-        VkWriteDescriptorSet writes[8] = {};
+        int updateCount = 10;
+        VkWriteDescriptorSet writes[10] = {};
         for(int i=0; i<updateCount; i++) {
             writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[i].dstSet = pbrDescSet;
