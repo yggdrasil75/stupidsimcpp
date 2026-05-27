@@ -460,7 +460,7 @@ struct OctreeNode_ {
     EulerianGasState_<GasT> gasState;
 
     std::vector<std::shared_ptr<NodeData_<T, IndexType, StoragePath>>> points;
-    std::array<std::unique_ptr<OctreeNode_<T, GasT, IndexType, StoragePath>>, 8> children;
+    std::vector<std::unique_ptr<OctreeNode_<T, GasT, IndexType, StoragePath>>> children;
     PointType center;
     float nodeSize;
     std::atomic<uint8_t> flags;
@@ -468,14 +468,16 @@ struct OctreeNode_ {
     mutable std::shared_ptr<NodeData_<T, IndexType, StoragePath>> lodData;
     mutable std::shared_mutex nodeMutex;
 
-    OctreeNode_(const PointType& min, const PointType& max) : bounds(min,max), flags(0), lodData(nullptr) {
+    OctreeNode_(const PointType& min, const PointType& max, bool fat = false) : bounds(min, max), flags(0), lodData(nullptr) {
         setLeaf(true);
         setLoaded(true);
         setDirty(true);
         setLoadQueued(false);
         setSaveQueued(false);
         setKeepLoaded(false);
-        for (std::unique_ptr<OctreeNode_<T, GasT, IndexType, StoragePath>>& child : children) {
+        setFat(fat);
+        children.resize(isFatNode ? 32768 : 8); 
+        for (auto& child : children) {
             child = nullptr;
         }
         center = (bounds.first + bounds.second) * 0.5;
