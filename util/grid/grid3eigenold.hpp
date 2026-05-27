@@ -133,7 +133,7 @@ namespace Grid {
     }
     */
 
-template<typename T, typename GasT = float, typename IndexType = uint16_t, GridStoragePath StoragePath = ".">
+template<typename T, typename GasT = float, typename IndexType = uint16_t>
 class Octree {
 public:
     using NodeData = NodeData_<T, IndexType, StoragePath>;
@@ -1096,130 +1096,6 @@ private:
     void buildRenderNodeAt(OctreeNode* node, RenderBuffer_<T, IndexType, StoragePath>& buffer, uint32_t nodeIdx, const std::unordered_map<int, std::shared_ptr<GridObject>>& localObjects);
     const RenderData* fastVoxelTraverse(const RenderBuffer_<T, IndexType, StoragePath>& buffer, const Ray& ray, float maxDist);
 public:
-    Octree(const PointType& minBound, const PointType& maxBound, size_t maxPointsPerNode=8, size_t maxDepth = 16) :
-            root_(std::make_unique<OctreeNode>(minBound, maxBound)), maxPointsPerNode(maxPointsPerNode),
-            maxDepth(maxDepth), size(0), skybox_(1024, 1024),
-            streamingQueued_(false) {
-        skybox_.setBackground(backgroundColor_.x(), backgroundColor_.y(), backgroundColor_.z(), 1.0f);
-        startWorkerThread();
-    }
-
-    Octree() : root_(nullptr), maxPointsPerNode(8), maxDepth(16), size(0), skybox_(1024, 1024), streamingQueued_(false) {
-        skybox_.setBackground(backgroundColor_.x(), backgroundColor_.y(), backgroundColor_.z(), 1.0f);
-        startWorkerThread();
-    }
-
-    ~Octree() {
-        stopWorkerThread();
-    }
-    
-    Octree(const Octree& other) : maxDepth(other.maxDepth), size(other.size), maxPointsPerNode(other.maxPointsPerNode),
-            skylight_(other.skylight_), backgroundColor_(other.backgroundColor_), autoOptimize_(other.autoOptimize_.load()),
-            streamingQueued_(false), skybox_(other.skybox_), regionTargetPoints_(other.regionTargetPoints_),
-            minLodSize_(other.minLodSize_), minLodVolume_(other.minLodVolume_) {
-        if (other.root_) root_ = other.root_->clone();
-        
-        {
-            std::shared_lock<std::shared_mutex> lockOther(other.objectsMutex_);
-            std::unique_lock<std::shared_mutex> lockThis(objectsMutex_);
-            for (const auto& pair : other.objects_) {
-                objects_[pair.first] = std::make_shared<GridObject>(*pair.second);
-            }
-        }
-        startWorkerThread();
-    }
-
-    Octree(Octree&& other) noexcept : maxDepth(other.maxDepth), size(other.size), maxPointsPerNode(other.maxPointsPerNode),
-            skylight_(std::move(other.skylight_)), backgroundColor_(std::move(other.backgroundColor_)),
-            autoOptimize_(other.autoOptimize_.load()),
-            streamingQueued_(false), skybox_(std::move(other.skybox_)), regionTargetPoints_(other.regionTargetPoints_),
-            minLodSize_(other.minLodSize_), minLodVolume_(other.minLodVolume_) {
-        other.stopWorkerThread();
-        root_ = std::move(other.root_);
-        
-        {
-            std::unique_lock<std::shared_mutex> lockOther(other.objectsMutex_);
-            std::unique_lock<std::shared_mutex> lockThis(objectsMutex_);
-            objects_ = std::move(other.objects_);
-        }
-        
-        {
-            std::lock_guard<std::mutex> lock(other.taskMutex_);
-            taskQueue_ = std::move(other.taskQueue_);
-        }
-        
-        other.size = 0;
-        startWorkerThread();
-    }
-
-    Octree& operator=(const Octree& other) {
-        if (this == &other) return *this;
-        
-        stopWorkerThread();
-        clear();
-        
-        maxDepth = other.maxDepth;
-        size = other.size;
-        maxPointsPerNode = other.maxPointsPerNode;
-        skylight_ = other.skylight_;
-        backgroundColor_ = other.backgroundColor_;
-        autoOptimize_.store(other.autoOptimize_.load());
-        streamingQueued_.store(false);
-        skybox_ = other.skybox_;
-        regionTargetPoints_ = other.regionTargetPoints_;
-        minLodSize_ = other.minLodSize_;
-        minLodVolume_ = other.minLodVolume_;
-
-        if (other.root_) root_ = other.root_->clone();
-        
-        {
-            std::shared_lock<std::shared_mutex> lockOther(other.objectsMutex_);
-            std::unique_lock<std::shared_mutex> lockThis(objectsMutex_);
-            objects_.clear();
-            for (const auto& pair : other.objects_) {
-                objects_[pair.first] = std::make_shared<GridObject>(*pair.second);
-            }
-        }
-
-        startWorkerThread();
-        return *this;
-    }
-
-    Octree& operator=(Octree&& other) noexcept {
-        if (this == &other) return *this;
-
-        stopWorkerThread();
-        other.stopWorkerThread();
-
-        maxDepth = other.maxDepth;
-        size = other.size;
-        maxPointsPerNode = other.maxPointsPerNode;
-        skylight_ = std::move(other.skylight_);
-        backgroundColor_ = std::move(other.backgroundColor_);
-        autoOptimize_.store(other.autoOptimize_.load());
-        streamingQueued_.store(false);
-        skybox_ = std::move(other.skybox_);
-        regionTargetPoints_ = std::move(other.regionTargetPoints_);
-        minLodSize_ = other.minLodSize_;
-        minLodVolume_ = other.minLodVolume_;
-        
-        root_ = std::move(other.root_);
-        
-        {
-            std::unique_lock<std::shared_mutex> lockOther(other.objectsMutex_);
-            std::unique_lock<std::shared_mutex> lockThis(objectsMutex_);
-            objects_ = std::move(other.objects_);
-        }
-
-        {
-            std::lock_guard<std::mutex> lock(other.taskMutex_);
-            taskQueue_ = std::move(other.taskQueue_);
-        }
-        
-        other.size = 0;
-        startWorkerThread();
-        return *this;
-    }
 
     void enqueueTask(std::function<void()> task) {
         {

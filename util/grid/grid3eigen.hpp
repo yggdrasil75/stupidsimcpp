@@ -5,6 +5,9 @@
 #include "../timing_decorator.hpp"
 #include "../output/frame.hpp"
 #include "camera.hpp"
+#include "impl/structs.inl"
+#include "impl/skybox.inl"
+#include "impl/rendering.inl"
 
 #ifdef SSE
 #include <immintrin.h>
@@ -33,6 +36,7 @@ private:
     std::unique_ptr<OctreeNode> root_;
     long long size;
     uint8_t maxPointsPerNode; //this should likely get tuned based on system, larger might be better or worse for some systems. default 8 for now.
+    uint16_t maxDepth; //if I need more than 65536 then I can start using fat nodes more dynamically.
     /*
     00000001=worker on
     00000010=auto optimize enabled
@@ -40,7 +44,7 @@ private:
     00001000=physics collider dirty (do I actually need this?)
     */
     std::atomic<uint8_t> flags;
-    PointType fatStep;
+    std::string StoragePath = ".";
 
     //skybox
     Skybox skybox_;
@@ -89,6 +93,44 @@ private:
 
 //variable get/set
 public: 
+    //constructors:
+    Octree(const PointType& minBound, const PointType& maxBound, size_t maxPointsPerNode=8, size_t maxDepth = 16, std::string savePath) :
+            root_(std::make_unique<OctreeNode>(minBound, maxBound, true)), maxPointsPerNode(maxPointsPerNode),
+            maxDepth(maxDepth), size(0), skybox_(1024, 1024), StoragePath(savePath) {
+        setQeuueStreaming(false);
+        skybox_.setBackground(backgroundColor_.x(), backgroundColor_.y(), backgroundColor_.z(), 1.0f);
+        startWorkerThread();
+    }
+
+    //default constructor to prevent errors
+    Octree() : root_(nullptr), maxPointsPerNode(8), maxDepth(16), size(0), skybox_(1024, 1024) {
+        setQeuueStreaming(false);
+        skybox_.setBackground(backgroundColor_.x(), backgroundColor_.y(), backgroundColor_.z(), 1.0f);
+        startWorkerThread();
+    }
+
+    //destructor
+    ~Octree() {
+        stopWorkerThread();
+        setQeuueStreaming(false);
+        clear();
+    }
+    
+    //copy constructors
+    Octree(const Octree& other) {
+        other.stopWorkerThread();
+        other.save("./temp");
+        load("./temp");
+        startWorkerThread();
+    }
+
+    Octree(Octree&& other) noexcept {
+        other.stopWorkerThread();
+        other.save("./temp");
+        load("./temp");
+        startWorkerThread();
+    }
+
     //flags:
     bool isWorkerRunning() const {
         return flags.load(std::memory_order_relaxed) & WORKER_ON;
@@ -571,6 +613,8 @@ public:
     
 
 //updates
+
+}
 
 }
 

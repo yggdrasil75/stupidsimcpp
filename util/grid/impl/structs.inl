@@ -38,16 +38,6 @@ using PointType = Eigen::Matrix<float, Dim, 1>;
 using BoundingBox = std::pair<PointType, PointType>;
 namespace fs = std::filesystem;
 
-template<size_t N>
-struct GridStoragePath {
-    char value[N];
-    constexpr GridStoragePath(const char (&str)[N]) {
-        for (size_t i = 0; i < N; ++i) {
-            value[i] = str[i];
-        }
-    }
-};
-
 enum class BodyType : uint8_t {
     STATIC = 0,
     KINEMATIC = 1,
@@ -87,7 +77,7 @@ static inline Eigen::Vector3f unpackRGB9E5(uint32_t c) {
     return Eigen::Vector3f(r, g, b);
 }
 
-template<typename T, typename IndexType = uint16_t, GridStoragePath StoragePath = ".">
+template<typename T, typename IndexType = uint16_t>
 struct PhysicsState_ {
     Eigen::Vector3f velocity{0.0f, 0.0f, 0.0f};
     Eigen::Vector3f force{0.0f, 0.0f, 0.0f};
@@ -264,7 +254,7 @@ struct SPHForcePC {
     float airDensity;
 };
 
-template<typename T, typename IndexType = uint16_t, GridStoragePath StoragePath = ".">
+template<typename T, typename IndexType = uint16_t>
 struct Material_ {
     float emittance; //replace with eigen::vector3f<eigen::half> for chromaticity
     //or use uint32_t r8g8b8i8.
@@ -304,7 +294,7 @@ struct PhysicsMaterial_ {
     }
 };
 
-template<typename T, typename IndexType = uint16_t, GridStoragePath StoragePath = ".">
+template<typename T, typename IndexType = uint16_t>
 struct GridObject_ {
     int id;
     uint8_t objectFlags;
@@ -365,7 +355,7 @@ struct GridObject_ {
     }
 };
 
-template<typename T, typename IndexType = uint16_t, GridStoragePath StoragePath = ".">
+template<typename T, typename IndexType = uint16_t>
 struct NodeData_ {
     T data;
     PointType position;
@@ -454,7 +444,7 @@ struct EulerianGasState_ {
     Eigen::Vector3f color{1.0f, 1.0f, 1.0f};
 };
 
-template<typename T, typename GasT = float, typename IndexType = uint16_t, GridStoragePath StoragePath = ".">
+template<typename T, typename GasT = float, typename IndexType = uint16_t>
 struct OctreeNode_ {
     BoundingBox bounds;
     EulerianGasState_<GasT> gasState;
@@ -476,7 +466,7 @@ struct OctreeNode_ {
         setSaveQueued(false);
         setKeepLoaded(false);
         setFat(fat);
-        children.resize(isFatNode ? 32768 : 8); 
+        children.resize(fat ? 32768 : 8); 
         for (auto& child : children) {
             child = nullptr;
         }
@@ -923,7 +913,7 @@ struct OctreeNode_ {
     }
 };
 
-template<typename T, typename IndexType = uint16_t, GridStoragePath StoragePath = ".">
+template<typename T, typename IndexType = uint16_t>
 struct RayHit_ {
     std::shared_ptr<NodeData_<T, IndexType, StoragePath>> node;
     float distance;
