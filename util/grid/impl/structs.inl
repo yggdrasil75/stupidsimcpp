@@ -288,6 +288,8 @@ struct Material_ {
 struct PhysicsMaterial_ {
     BodyType type = BodyType::STATIC;
     float mass = 1.0f;
+    float restitution = 1.0f;
+    float density = 1.0f;
     
     bool operator==(const PhysicsMaterial_& o) const {
         return type == o.type && mass == o.mass;

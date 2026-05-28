@@ -1137,39 +1137,6 @@ public:
         ensureLOD(root_.get());
     }
 
-    bool set(const T& data, const PointType& pos, bool visible, Eigen::Vector3f color, float size = 0.01f, bool active = true,
-             int objectId = -1, float emittance = 0.0f, float roughness = 1.0f, 
-             float metallic = 0.0f, float transmission = 0.0f, float ior = 1.45f, Eigen::Vector3f absorp = Eigen::Vector3f::Zero(),
-             BodyType bType = BodyType::STATIC, float mass = 1.0f) {
-        
-        auto obj = getOrCreateObject(objectId);
-        Material mat(emittance, roughness, metallic, transmission, ior, absorp);
-        uint16_t rIdx = obj->getOrAddRenderMaterial(mat);
-        
-        PhysicsMaterial_ pmat{bType, mass};
-        uint16_t pIdx = obj->getOrAddPhysicsMaterial(pmat);
-
-        auto pointData = std::make_shared<NodeData>(data, pos, visible, color, size, active, objectId, rIdx, pIdx, bType == BodyType::STATIC);
-        
-        PointType relPos = pos - obj->centerPosition;
-        {
-            std::unique_lock<std::shared_mutex> lock(obj->objMutex);
-            obj->relativeVoxels.push_back({relPos, rIdx, pIdx, size});
-        }
-        
-        ensureBounds(pointData->getCubeBounds());
-        
-        if (insertRecursive(root_.get(), pointData, 0)) {
-            this->size++;
-            if (bType != BodyType::STATIC) {
-                std::lock_guard<std::mutex> lock(physicsMutex_);
-                activePhysicsNodes_.push_back(pointData);
-            }
-            return true;
-        }
-        return false;
-    }
-
     bool setGas(const PointType& pos, const GasT& gasData, float density, const Eigen::Vector3f& velocity = Eigen::Vector3f::Zero(), float pressure = 0.0f) {
         ensureBounds({pos, pos});
         OctreeNode* node = ensureNodeAtDepth(pos, maxDepth);

@@ -118,16 +118,13 @@ public:
     
     //copy constructors
     Octree(const Octree& other) {
-        other.stopWorkerThread();
-        other.save("./temp");
-        load("./temp");
+        deserialize(other.serialize());
         startWorkerThread();
     }
 
     Octree(Octree&& other) noexcept {
         other.stopWorkerThread();
-        other.save("./temp");
-        load("./temp");
+        deserialize(other.serialize());
         startWorkerThread();
     }
 
@@ -167,7 +164,6 @@ public:
         if (v) flags.fetch_or(PHYSICS_COLLIDER_DIRTY, std::memory_order_relaxed);
         else flags.fetch_and(~PHYSICS_COLLIDER_DIRTY, std::memory_order_relaxed);
     }
-
 
 //recursives
     OctreeNode* getHighestCommonNodeRecursive(const PointType Min, const PointType Max, OctreeNode* current) const {
@@ -590,6 +586,54 @@ public:
 
     void setLODMinDistance(float dist) { lodMinDistance_ = dist; }
 
+    insert(NodeData* point) {
+        insertRecursive(root_.get(), point, 0)
+    }
+
+    //color, emittance, absorption: rgb9e5
+    bool insert(const T& data, const PointType& pos, uint32_t color, bool visible = true, float size = 0.01f, bool active = true, int objectId = -1,
+                uint32_t emittance = 0, float roughness = 1.0f, float reflective = 0.0f, float transmission = 0.0f, float ior = 1.45f, 
+                uint32_t absorption = 0, BodyType btype = BodyType::STATIC, float mass = 1.0f, float restitution = 1.0f, float density = 1.0f) {
+        std::shared_ptr<GridObject> obj = getOrCreateObject(objectid);
+        Material rmat(emittance, roughness, reflective, transmission, ior, absorption);
+        uint16_t rIdx = obj->getOrAddRenderMaterial(rmat);
+
+        PhysicsMaterial_ pmat{bType, mass, restitution, density};
+        uint16_t pIdx = obj->getOrAddPhysicsMaterial(pmat);
+
+        auto pointData = std::make_shared<NodeData>(data, pos, visible, color, size, active, objectId, rIdx, bType);
+
+        PointType relPos - pos - obj->centerPosition;
+        {
+            std::unique_lock<std::shared_mutex> lock(obj->objMutex);
+            obj->relativeVoxels.push_back({relPos, rIdx, pIdx, size});
+        }
+
+        if (insertRecursive(root_.get(), pointData, 0)) {
+            this->size++;
+            return true;
+        } else return false;
+    }
+    
+    //fix these defaults later.
+    auto setTerrain = std::bind(insert, std::placeholders::_1, std::placeholders::_2, true, std::placeholders::_3, true, 1, 0, 1, 0.05, 0, 1.45, 0, BodyType::STATIC, 1.0, 0.1, 1.0);
+    auto setWater   = std::bind(insert, std::placeholders::_1, std::placeholders::_2, true, std::placeholders::_3, true, 2, 0, 1, 0.05, 0, 1.45, 0, BodyType::STATIC, 1.0, 0.1, 1.0);
+
+    bool vaporizeObject(const PointType& pos, int objectId, const GasT& gasData, float pressure = 0.0f) {
+        OctreeNode* node = ensureNodeAtDepth(pos, 4);
+        auto point = find(pos, objectId);
+        if (node) {
+            std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
+            node->gasState.data = gasData;
+            node->gasState.density = point.density;
+            node->gasState.pressure = pressure;
+            node->setDirty(true);
+            return true;
+        }
+        return false;
+    }
+
+
 //getters
     std::shared_ptr<GridObject> getObject(int id) const {
         std::shared_lock<std::shared_mutex> lock(objectsMutex_);
@@ -609,7 +653,6 @@ public:
     }
 
     float getMinLODSize() const { return minLodSize_; }
-
     
 
 //updates
