@@ -21,7 +21,7 @@ class Octree {
 public:
     using NodeData = NodeData_<T, IndexType>;
     using OctreeNode = OctreeNode_<T, GasT, IndexType>;
-    using Material = Material_<T, IndexType>;
+    using Material = Material_;
     using RayHit = RayHit_<T, IndexType>;
     using RenderNode = RenderNode_<T, IndexType>;
     using RenderData = RenderData_<T, IndexType>;
@@ -95,17 +95,17 @@ private:
 //variable get/set
 public: 
     //constructors:
-    Octree(const PointType& minBound, const PointType& maxBound, size_t maxPointsPerNode=8, size_t maxDepth = 16, std::string savePath) :
+    Octree(const PointType& minBound, const PointType& maxBound, size_t maxPointsPerNode=8, size_t maxDepth = 16, std::string savePath = ".") :
             root_(std::make_unique<OctreeNode>(minBound, maxBound, true)), maxPointsPerNode(maxPointsPerNode),
             maxDepth(maxDepth), size(0), skybox_(1024, 1024), StoragePath(savePath) {
-        setQeuueStreaming(false);
+        setQueueStreaming(false);
         skybox_.setBackground(backgroundColor_.x(), backgroundColor_.y(), backgroundColor_.z(), 1.0f);
         startWorkerThread();
     }
 
     //default constructor to prevent errors
     Octree() : root_(nullptr), maxPointsPerNode(8), maxDepth(16), size(0), skybox_(1024, 1024) {
-        setQeuueStreaming(false);
+        setQueueStreaming(false);
         skybox_.setBackground(backgroundColor_.x(), backgroundColor_.y(), backgroundColor_.z(), 1.0f);
         startWorkerThread();
     }
@@ -113,7 +113,7 @@ public:
     //destructor
     ~Octree() {
         stopWorkerThread();
-        setQeuueStreaming(false);
+        setQueueStreaming(false);
         clear();
     }
     
@@ -148,41 +148,41 @@ public:
         else flags.fetch_and(~AUTO_OPTIMIZE, std::memory_order_relaxed);
     }
 
-    bool isQeuueStreaming() const {
+    bool isQueueStreaming() const {
         return flags.load(std::memory_order_relaxed) & QUEUE_STREAMING;
     }
 
-    void setQeuueStreaming(bool v) {
+    void setQueueStreaming(bool v) {
         if (v) flags.fetch_or(QUEUE_STREAMING, std::memory_order_relaxed);
         else flags.fetch_and(~QUEUE_STREAMING, std::memory_order_relaxed);
     }
 
-    bool isPhysicColliderDirty() const {
+    bool isPhysicsColliderDirty() const {
         return flags.load(std::memory_order_relaxed) & PHYSICS_COLLIDER_DIRTY;
     }
 
-    void setPhysicColliderDirty(bool v) {
+    void setPhysicsColliderDirty(bool v) {
         if (v) flags.fetch_or(PHYSICS_COLLIDER_DIRTY, std::memory_order_relaxed);
         else flags.fetch_and(~PHYSICS_COLLIDER_DIRTY, std::memory_order_relaxed);
     }
 
 //recursives
-    OctreeNode* getHighestCommonNodeRecursive(const PointType Min, const PointType Max, OctreeNode* current, int& depth) const {
+    OctreeNode* getHighestCommonNodeRecursive(const PointType& Min, const PointType& Max, OctreeNode* current, int& depth) const {
         if (current->isFat()) {
-            uint16_t coct = getFatCellIndex(Min, current);
-            if (coct = getFatCellIndex(Max, current)) {
-                getHighestCommonNodeRecursive(Min, Max, current->children[coct].get(), depth + 1);
+            uint16_t mcell = getFatCellIndex(Min, current);
+            if (mcell == getFatCellIndex(Max, current) && current->children[minCell]) {
+                return getHighestCommonNodeRecursive(Min, Max, current->children[mcell].get(), depth + 1);
             }
         } else {
-            uint8_t coct = getOctant(Min, current->center);
-            if (coct == getOctant(Max, current->center)) {
-                getHighestCommonNodeRecursive(Min, Max, current->children[coct], depth + 1)
+            uint8_t mcell = getOctant(Min, current->center);
+            if (mcell == getOctant(Max, current->center) && current->children[minCell]) {
+                return getHighestCommonNodeRecursive(Min, Max, current->children[mcell], depth + 1)
             }
         }
         return current;
     }
 
-    void splitNodeRecusive(OctreeNode* node, int depth) {
+    void splitNodeRecursive(OctreeNode* node, int depth) {
         if (depth >= maxDepth) return;
         std::vector<std::shared_ptr<NodeData>> keep;
         keep.reserve(node->points.size());
@@ -205,7 +205,7 @@ public:
                 }
             }
 
-            for (const auto& pointData : node->points) {
+            for (auto& pointData : node->points) {
                 BoundingBox cubeBounds = pointData->getCubeBounds();
                 uint16_t targetIndex = getFatCellIndex(pointData->position, node);
                 if (boxContainsBox(node->children[targetIndex]->bounds, cubeBounds)) {
@@ -218,9 +218,9 @@ public:
             node->points = std::move(keep);
             node->setLeaf(false);
 
-            for (int i = 0; i < 32768; ++i) {
+            for (int i = 0; i < 65536; ++i) {
                 if (node->children[i]->points.size() > maxPointsPerNode) {
-                    splitNodeRecusive(node->children[i].get(), depth + 1);
+                    splitNodeRecursive(node->children[i].get(), depth + 1);
                 }
             }
         } else {
@@ -229,7 +229,7 @@ public:
                 node->children[i] = std::make_unique<OctreeNode>(childBounds.first, childBounds.second);
             }
 
-            for (const auto& pointData : node->points) {
+            for (auto& pointData : node->points) {
                 BoundingBox cubeBounds = pointData->getCubeBounds();
                 PointType boundsCenter = (cubeBounds.first + cubeBounds.second) * 0.5f;
                 uint8_t targetIndex = getOctant(boundsCenter, node->center);
@@ -245,7 +245,7 @@ public:
 
             for (int i = 0; i < 8; ++i) {
                 if (node->children[i]->points.size() > maxPointsPerNode) {
-                    splitNodeRecusive(node->children[i].get(), depth + 1);
+                    splitNodeRecursive(node->children[i].get(), depth + 1);
                 }
             }
 
@@ -267,7 +267,7 @@ public:
             std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
             node->points.emplace_back(pointData);
             if (node->points.size() > maxPointsPerNode) {
-                splitNode(node, depth);
+                splitNodeRecursive(node, depth);
             }
             node->setDirty(true);
             return true;
@@ -303,17 +303,45 @@ public:
 
         if (node->isLeaf()) {
             std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
-            splitNodeRecusive(node, depth);
+            splitNodeRecursive(node, depth);
         }
         
         uint16_t idx;
         if (node->isFat()) {
-            idx = getFatCellIndex(point, node);
+            idx = getFatCellIndex(pos, node);
         } else {
             idx = getOctant(pos, node->center);
         }
         
-        return ensureNodeAtDepthRecursive(node->children[octant].get(), pos, depth + 1, targetDepth);
+        return ensureNodeAtDepthRecursive(node->children[idx].get(), pos, depth + 1, targetDepth);
+    }
+
+    std::shared_ptr<NodeData> findRecursive(OctreeNode* node, const PointType& pos, int objectId, float tolerance) {
+        if (!node->contains(pos)) return nullptr;
+        ensureLoaded(node);
+        std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
+        for (const auto& pointData : node->points) {
+            if (pointData->objectId != objectId) continue;
+            float distSq = (pointData->position - pos).squaredNorm();
+            if (distSq <= tolerance * tolerance) {
+                return pointData;
+            }
+        }
+        if (!node->isLeaf()) {
+            uint16_t octant;
+            if (node->isFat()) {
+                octant = getFatCellIndex(pos, node);
+                if (node->children[octant]) {
+                    return findRecursive(node->children[octant].get(), pos, objectId, tolerance);
+                }
+            } else {
+                octant = getOctant(pos, node->center);
+                if (node->children[octant]) {
+                    return findRecursive(node->children[octant].get(), pos, objectId, tolerance);
+                }
+            }
+        }
+        return nullptr;
     }
 
 //tasks
@@ -328,10 +356,8 @@ public:
         enqueueTask([this, node]() {
             {
                 std::shared_lock<std::shared_mutex> nlock(node->nodeMutex);
-                if (node->isLoaded() && node->isSaveQueued()) {
-                    if (node->isDirty()) {
-                        node->saveRegion();
-                    }
+                if (node->isLoaded() && node->isSaveQueued() && node->isDirty()) {
+                    node->saveRegion();
                 }
             }
             node->offload();
@@ -389,16 +415,16 @@ public:
                     std::unique_lock<std::mutex> lock(taskMutex_);
                     auto nextOptimize = lastOptimize + std::chrono::seconds(60);
                     
-                    bool timedOut = !taskCV_.wait_until(lock, nextOptimize, [this] { 
-                        return isWorkerRunning() || !taskQueue_.empty(); 
+                    bool timedOut = !taskCV_.wait_until(lock, nextOptimize, [this] {
+                        return !isWorkerRunning() || !taskQueue_.empty();
                     });
                     
-                    if (isWorkerRunning() && taskQueue_.empty()) return;
+                    if (!isWorkerRunning() && taskQueue_.empty()) return;
                     
                     if (!taskQueue_.empty()) {
                         task = std::move(taskQueue_.front());
                         taskQueue_.pop();
-                    } else if (timedOut && autoOptimize_) {
+                    } else if (timedOut && isAutoOptimizing()) {
                         task = [this]() { this->optimize(); };
                         lastOptimize = std::chrono::steady_clock::now();
                     }
@@ -434,59 +460,63 @@ public:
         if (!current) current = root_.get();
         PointType min = positions[0];
         PointType max = positions[0];
-        for (const auto pos : positions) {
+        for (const auto& pos : positions) {
             min = min.cwiseMin(pos);
             max = max.cwiseMax(pos);
         }
 
-        getHighestCommonNodeRecursive(min, max, current, depth);
-        return current;
+        return getHighestCommonNodeRecursive(min, max, current, depth);
     }
 
-    OctreeNode* getHighestCommonNode(const vector<NodeData_>& nodes, OctreeNode* current = nullptr, int& depth = 0) const {
+    OctreeNode* getHighestCommonNode(const std::vector<std::shared_ptr<NodeData_>>& nodes, OctreeNode* current = nullptr, int& depth = 0) const {
         if (!current) current = root_.get();
         PointType min = nodes[0]->position;
         PointType max = nodes[0]->position;
-        for (auto node : nodes) {
+        for (const auto& node : nodes) {
             min = min.cwiseMin(node->position);
             max = max.cwiseMax(node->position);
         }
-        getHighestCommonNodeRecursive(min, max, current, depth);
-        return current;
+        return getHighestCommonNodeRecursive(min, max, current, depth);
     }
 
     uint8_t getOctant(const PointType& point, const PointType& center) const {
         return (point[0] >= center[0]) | ((point[1] >= center[1]) << 1) | ((point[2] >= center[2]) << 2);
     }
 
-    uint16_t getFatCellIndex(const PointType& point, OctreeNode* node = root_.get()) const {
-        PointType rootMin = node.bounds.first;
+    uint16_t getFatCellIndex(const PointType& point, const OctreeNode* node) const {
+        const PointType& rootMin = node->bounds.first;
         PointType step = (node->bounds.second - node->bounds.first) / 32.0f;
-        uint8_t x = std::clamp(static_cast<uint8_t>((point[0] - rootMin[0]) / step), 0, 31);
-        uint8_t y = std::clamp(static_cast<uint8_t>((point[1] - rootMin[1]) / step), 0, 31);
-        uint8_t z = std::clamp(static_cast<uint8_t>((point[2] - rootMin[2]) / step), 0, 31);
+        uint8_t x = static_cast<uint8_t>(std::clamp((point[0] - rootMin[0]) / step[0]), 0.0f, 31.0f);
+        uint8_t y = static_cast<uint8_t>(std::clamp((point[1] - rootMin[1]) / step[1]), 0.0f, 31.0f);
+        uint8_t z = static_cast<uint8_t>(std::clamp((point[2] - rootMin[2]) / step[2]), 0.0f, 31.0f);
         return mortonEncodeFatNode(x, y, z);
     }
 
     uint16_t mortonEncodeFatNode(uint8_t x, uint8_t y, uint8_t z) {
-        // uint32_t xx = x & 0x1F;
-        // uint32_t yy = y & 0x1F;
-        // uint32_t zz = z & 0x1F;
-        // xx = (xx | (xx << 8)) & 0x100F;
-        // yy = (yy | (yy << 8)) & 0x100F;
-        // zz = (zz | (zz << 8)) & 0x100F;
-        // xx = (xx | (xx << 4)) & 0x10C3;
-        // yy = (yy | (yy << 4)) & 0x10C3;
-        // zz = (zz | (zz << 4)) & 0x10C3;
-        // xx = (xx | (xx << 2)) & 0x1249;
-        // yy = (yy | (yy << 2)) & 0x1249;
-        // zz = (zz | (zz << 2)) & 0x1249;
-        // return xx | (yy << 1) | (zz << 2);
         
+#ifdef SSE
         return _pdep_u32(x, 0x49249) | _pdep_u32(y, 0x49249) << 1 | _pdep_u32(z, 0x49249) << 2;
+
+#else
+        uint32_t xx = x & 0x1F;
+        uint32_t yy = y & 0x1F;
+        uint32_t zz = z & 0x1F;
+        xx = (xx | (xx << 8)) & 0x100F;
+        yy = (yy | (yy << 8)) & 0x100F;
+        zz = (zz | (zz << 8)) & 0x100F;
+        xx = (xx | (xx << 4)) & 0x10C3;
+        yy = (yy | (yy << 4)) & 0x10C3;
+        zz = (zz | (zz << 4)) & 0x10C3;
+        xx = (xx | (xx << 2)) & 0x1249;
+        yy = (yy | (yy << 2)) & 0x1249;
+        zz = (zz | (zz << 2)) & 0x1249;
+        return xx | (yy << 1) | (zz << 2);
+
+#endif
     }
 
     void mortonDecodeFatNode(uint16_t morton, uint8_t *x, uint8_t *y, uint8_t *z) {
+#ifdef SSE
         uint32_t x_pext = _pext_u32(morton, 0x49249);
         uint32_t y_pext = _pext_u32(morton >> 1, 0x49249);
         uint32_t z_pext = _pext_u32(morton >> 2, 0x49249);
@@ -494,22 +524,32 @@ public:
         *x = (uint8_t)x_pext;
         *y = (uint8_t)y_pext;
         *z = (uint8_t)z_pext;
+#else
+        auto compact = [](uint32_t v) -> uint8_t {
+            v &= 0x1249;
+            v = (v ^ (v >> 2)) & 0x10C3;
+            v = (v ^ (v >> 4)) & 0x100F;
+            v = (v ^ (v >> 8)) & 0x001F;
+            return static_cast<uint8_t>(v);
+        };
+        *x = compact(morton);
+        *y = compact(morton >> 1);
+        *z = compact(morton >> 2);
+#endif
     }
 
     BoundingBox createChildBounds(const OctreeNode* node, uint16_t octant) const {
-        if (node.isFat()) {
-            PointType rootMin = node->bounds.first;
+        if (node->isFat()) {
+            const PointType& rootMin = node->bounds.first;
             PointType step = (node->bounds.second - node->bounds.first) / 32.0f;
             uint8_t x, y, z;
-            mortonDecodeFatNode(octant, x, y, z);
+            mortonDecodeFatNode(octant, &x, &y, &z);
             PointType childMin, childMax;
-            childMin[0] = rootMin[0] + x * step;
-            childMin[1] = rootMin[1] + y * step;
-            childMin[2] = rootMin[2] + z * step;
+            childMin[0] = rootMin[0] + x * step[0];
+            childMin[1] = rootMin[1] + y * step[1];
+            childMin[2] = rootMin[2] + z * step[2];
             
-            childMax[0] = childMin[0] + step;
-            childMax[1] = childMin[1] + step;
-            childMax[2] = childMin[2] + step;
+            childMax = childMin + step;
             
             return {childMin, childMax};
         } else {
@@ -576,12 +616,12 @@ public:
 
     void setLODFalloff(float rate) {
         lodFalloffRate_ = rate;
-        invLodf = 1 / rate;
+        invLodf = 1.0f / rate;
     }
 
     void setMaxDistance(float dist) {
         maxDistance_ = dist;
-        keepDistance_ = dist * 1.2;
+        keepDistance_ = dist * 1.2f;
     }
 
     void setMinLODSize(float size) {
@@ -595,23 +635,24 @@ public:
         insertRecursive(root_.get(), point, 0)
     }
 
-    //color, emittance, absorption: rgb9e5
-    bool insert(const T& data, const PointType& pos, uint32_t color, bool visible = true, float size = 0.01f, bool active = true, int objectId = 0,
+    //emittance, absorption: rgb9e5
+    bool insert(const T& data, const PointType& pos, Eigen::Vector3f color, bool visible = true, float size = 0.01f, bool active = true, int objectId = 0,
                 uint32_t emittance = 0, float roughness = 1.0f, float reflective = 0.0f, float transmission = 0.0f, float ior = 1.45f, 
-                uint32_t absorption = 0, BodyType btype = BodyType::STATIC, float mass = 1.0f, float restitution = 1.0f, float density = 1.0f) {
-        std::shared_ptr<GridObject> obj = getOrCreateObject(objectid);
-        Material rmat(emittance, roughness, reflective, transmission, ior, absorption);
-        uint16_t rIdx = obj->getOrAddRenderMaterial(rmat);
+                uint32_t absorption = 0, BodyType bType = BodyType::STATIC, float mass = 1.0f, float restitution = 1.0f, float density = 1.0f) {
+        std::shared_ptr<GridObject> obj = getOrCreateObject(objectId);
+        Material rmat(emittance, roughness, reflective, ior, absorption);
+        IndexType rIdx = obj->getOrAddRenderMaterial(rmat);
 
-        PhysicsMaterial_ pmat{bType, mass, restitution, density};
-        uint16_t pIdx = obj->getOrAddPhysicsMaterial(pmat);
-
-        auto pointData = std::make_shared<NodeData>(data, pos, visible, color, size, active, objectId, rIdx, bType);
+        PhysicsMaterial pmat{bType, mass, restitution, density};
+        IndexType pIdx = obj->getOrAddPhysicsMaterial(pmat);
+        uint8_t tIdx = obj->getOrAddTransmission(transmission);
+        IndexType colorIdx = obj->getOrAddColorIndex(color);
+        auto pointData = std::make_shared<NodeData>(data, pos, visible, colorIdx, size, active, objectId, rIdx, pIdx, tIdx);
 
         PointType relPos = pos - obj->centerPosition;
         {
             std::unique_lock<std::shared_mutex> lock(obj->objMutex);
-            obj->relativeVoxels.push_back({relPos, rIdx, pIdx, size});
+            obj->relativeVoxels.push_back({relPos, rIdx, pIdx, tIdx, size});
         }
 
         if (insertRecursive(root_.get(), pointData, 0)) {
@@ -619,41 +660,44 @@ public:
             return true;
         } else return false;
     }
-    
-    //fix these defaults later.
-    auto setTerrain = std::bind(&Octree::insert, this, std::placeholders::_1, std::placeholders::_2, packRGB9E5(std::placeholders::_3), true, std::placeholders::_4,
-                                true, 1, 0, 1, 0.05, 0, 1.45, 0, BodyType::STATIC, 1.0, 0.1, 1.0);
-    auto setWater   = std::bind(&Octree::insert, this, std::placeholders::_1, std::placeholders::_2, packRGB9E5(std::placeholders::_3), true, 0.001,
-                                true, 2, 0, 0.2, 0.02, 0.95, 1.33, packRGB9E5(0.15, 0.05, 0.01), BodyType::FLUID, 1000 * 0.001, 0.05, 1000.0);
-    
-    bool insert(const T& data, const PointType& pos, Eigen::Vector3f color, bool visible = true, float size = 0.01f, bool active = true, int objectId = -1,
-                Eigen::Vector3f emittance = 0, float roughness = 1.0f, float reflective = 0.0f, float transmission = 0.0f, float ior = 1.45f, 
-                Eigen::Vector3f absorption = 0, BodyType btype = BodyType::STATIC, float mass = 1.0f, float restitution = 1.0f, float density = 1.0f) {
-        insert(data, pos, packRGB9E5(color), visible, size, active, objectId, packRGB9E5(emittance), roughness, reflective, transmission, ior, packRGB9E5(absoprtion), btype, mass, restitution, density);
-    }
 
-    bool bulkInsert(const T& data, vector<PointType> positions, uint32_t color, bool visible = true, float size = 0.01f, bool active = true, int objectId = -1,
+    //fix these defaults later.
+    auto setTerrain = std::bind(&Octree::insert, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3, true, std::placeholders::_4,
+                                true, 1, Eigen::Vector3f::Zero(), 1.0f, 0.05f, 0.0f, 1.45f, Eigen::Vector3f::Zero(), BodyType::STATIC, 1.0f, 0.1f, 1.0f);
+    auto setWater = std::bind(&Octree::insert, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3, true, 0.001f,
+                                true, 2, Eigen::Vector3f::Zero(), 0.2f, 0.02f, 0.95f, 1.33f, Eigen::Vector3f(0.15f, 0.05f, 0.01f), BodyType::FLUID, 1.0f, 0.05f, 1000.0f);
+
+    bool insert(const T& data, const PointType& pos, Eigen::Vector3f color, bool visible = true, float size = 0.01f, bool active = true, int objectId = -1,
+                Eigen::Vector3f emittance = Eigen::Vector3f::Zero(), float roughness = 1.0f, float reflective = 0.0f, float transmission = 0.0f, float ior = 1.45f, 
+                Eigen::Vector3f absorption = Eigen::Vector3f::Zero(), BodyType bType = BodyType::STATIC, float mass = 1.0f, float restitution = 1.0f, float density = 1.0f) {
+        return insert(data, pos, color, visible, size, active, objectId, packRGB9E5(emittance), roughness, reflective, transmission, ior, packRGB9E5(absorption), bType, mass, restitution, density);
+    }
+    
+    bool bulkInsert(const T& data, std::vector<PointType> positions, Eigen::Vector3f color, bool visible = true, float size = 0.01f, bool active = true, int objectId = -1,
                 uint32_t emittance = 0, float roughness = 1.0f, float reflective = 0.0f, float transmission = 0.0f, float ior = 1.45f, 
-                uint32_t absorption = 0, BodyType btype = BodyType::STATIC, float mass = 1.0f, float restitution = 1.0f, float density = 1.0f) {
-        std::shared_ptr<GridObject> obj = getOrCreateObject(objectid);
-        Material rmat(emittance, roughness, reflective, transmission, ior, absorption);
-        uint16_t rIdx = obj->getOrAddRenderMaterial(rmat);
+                uint32_t absorption = 0, BodyType bType = BodyType::STATIC, float mass = 1.0f, float restitution = 1.0f, float density = 1.0f) {
+        std::shared_ptr<GridObject> obj = getOrCreateObject(objectId);
+        Material rmat(emittance, roughness, reflective, ior, absorption);
+        IndexType rIdx = obj->getOrAddRenderMaterial(rmat);
 
         PhysicsMaterial_ pmat{bType, mass, restitution, density};
-        uint16_t pIdx = obj->getOrAddPhysicsMaterial(pmat);
+        IndexType pIdx = obj->getOrAddPhysicsMaterial(pmat);
+        uint8_t tIdx = obj->getOrAddTransmission(transmission);
 
-        int depth;
-        OctreeNode commonNode = getHighestCommonNode(positions, root_.get(), depth);
+        IndexType colorIndex = obj->getOrAddColorIndex(color);
+
+        int depth = 0;
+        OctreeNode* commonNode = getHighestCommonNode(positions, root_.get(), depth);
         std::vector<pointData> points;
         bool anyFailed = false;
         
-        for (auto pos : positions) {
-            auto pointData = std::make_shared<NodeData>(data, pos, visible, color, size, active, objectId, rIdx, bType);
+        for (const auto& pos : positions) {
+            auto pointData = std::make_shared<NodeData>(data, pos, visible, colorIndex, size, active, objectId, rIdx, pIdx, tIdx);
             
             PointType relPos = pos - obj->centerPosition;
             {
                 std::unique_lock<std::shared_mutex> lock(obj->objMutex);
-                obj->relativeVoxels.push_back({relPos, rIdx, pIdx, size});
+                obj->relativeVoxels.push_back({relPos, rIdx, pIdx, tIdx, size});
             }
 
             if (insertRecursive(commonNode, pointData, depth)) {
@@ -701,20 +745,23 @@ public:
     float getMinLODSize() const { return minLodSize_; }
     
     int getRenderMaterialIndex(const PointType& pos, float tolerance = 0.0001f) {
-        auto pt = find(pos, tolerance);
+        auto pt = find(pos, -2, tolerance);
         if (!pt) return -1;
         return pt->renderMatIdx;
     }
 
     int getPhysicsMaterialIndex(const PointType& pos, float tolerance = 0.0001f) {
-        auto pt = find(pos, tolerance);
+        auto pt = find(pos, -2, tolerance);
         if (!pt) return -1;
         return pt->physMatIdx;
     }
-    
+
+    std::shared_ptr<NodeData> find(const PointType& pos, int objectId = -2, float tolerance = EPSILON, OctreeNode* node = root_.get()) {
+        return findRecursive(node, pos, objectId, tolerance);
+    }
 
 //updates
-    bool updateRenderMaterial(int objectId, uint16_t index, const Material& mat) {
+    bool updateRenderMaterial(int objectId, IndexType index, const Material& mat) {
         auto obj = getObject(objectId);
         if (!obj) return false;
         {
@@ -728,7 +775,7 @@ public:
         return true;
     }
 
-    bool updatePhysicsMaterial(int objectId, uint16_t index, const PhysicsMaterial_& pmat) {
+    bool updatePhysicsMaterial(int objectId, IndexType index, const PhysicsMaterial_& pmat) {
         auto obj = getObject(objectId);
         if (!obj) return false;
         {
@@ -745,8 +792,8 @@ public:
         collectNodesByObjectId(root_.get(), objectId, nodes);
         if (nodes.empty()) return false;
 
-        BoundingBox oldBounds = getNodesBounds(nodes);
-        OctreeNode* startNode = getHighestCommonNode(oldBounds, root_.get(), 0);
+        int depth = 0;
+        OctreeNode* startNode = getHighestCommonNode(nodes, root_.get(), depth);
 
         size_t removed = removeObjectRecursive(startNode, objectId);
         size -= removed;
@@ -758,18 +805,26 @@ public:
         return true;
     }
 
-
 //static helpers
     static uint32_t packRGB9E5(const Eigen::Vector3f& color) {
         float maxv = color.maxCoeff();
         int exponent;
         std::frexp(maxv, &exponent);
-        exponent = std::clamp(exponent, -15, 16);
+        exponent = std::clamp(exponent, -16, 15);
         float scale = std::exp2f(-(exponent - 9));
         uint32_t r = std::round(std::clamp(color.x * scale, 0.0f, 511.0f));
         uint32_t g = std::round(std::clamp(color.y * scale, 0.0f, 511.0f));
         uint32_t b = std::round(std::clamp(color.z * scale, 0.0f, 511.0f));
-        return (static_cast<uint32_t>(exponent + 16) << 27) | (b << 18) | (g << 9) | r;
+        return (static_cast<uint32_t>(exponent + 15) << 27) | ((b & 0x1FF) << 18) | ((g & 0x1FF) << 9) | (r & 0x1FF);
+    }
+
+    static Eigen::Vector3f unpackRGB9E5(uint32_t c) {
+        int e = static_cast<int>(c >> 27) - 15;
+        float scale = std::exp2f(e - 9);
+        float r = static_cast<float>((c & 0x1FF)) * scale;
+        float g = static_cast<float>((c >> 9) & 0x1FF) * scale;
+        float b = static_cast<float>((c >> 18) & 0x1FF) * scale;
+        return Eigen::Vector3f(r, g, b);
     }
 
 }

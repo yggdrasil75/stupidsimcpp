@@ -652,27 +652,6 @@ private:
         }
     }
 
-    std::shared_ptr<NodeData> findRecursive(OctreeNode* node, const PointType& pos, float tolerance) {
-        if (!node->contains(pos)) return nullptr;
-        ensureLoaded(node, false);
-        std::lock_guard<std::shared_mutex> lock(node->nodeMutex);
-        
-        for (const auto& pointData : node->points) {
-            float distSq = (pointData->position - pos).squaredNorm();
-            if (distSq <= tolerance * tolerance) {
-                return pointData;
-            }
-        }
-
-        if (!node->isLeaf()) {
-            int octant = getOctant(pos, node->center);
-            if (node->children[octant]) {
-                return findRecursive(node->children[octant].get(), pos, tolerance);
-            }
-        }
-        return nullptr;
-    }
-
     bool removeRecursive(OctreeNode* node, const BoundingBox& bounds, const std::shared_ptr<NodeData>& targetPt) {
         if (!boxIntersectsBox(node->bounds, bounds)) return false;
         ensureLoaded(node, false);
@@ -1201,41 +1180,6 @@ public:
         generateLODs();
     }
 
-    bool importOBJ(int objectId, const std::string& filepath, const T& defaultData, 
-                   float voxelSize = 0.1f, const Eigen::Vector3f& color = {1.0f, 1.0f, 1.0f}) {
-        std::ifstream file(filepath);
-        if (!file.is_open()) return false;
-
-        std::vector<PointType> positions;
-        std::string line;
-        while (std::getline(file, line)) {
-            if (line.length() >= 2 && line[0] == 'v' && line[1] == ' ') {
-                std::istringstream s(line.substr(2));
-                PointType p;
-                s >> p.x() >> p.y() >> p.z();
-                
-                p.x() = std::round(p.x() / voxelSize) * voxelSize;
-                p.y() = std::round(p.y() / voxelSize) * voxelSize;
-                p.z() = std::round(p.z() / voxelSize) * voxelSize;
-
-                positions.push_back(p);
-            }
-        }
-        
-        auto ptLess = [](const PointType& a, const PointType& b) {
-            if (a.x() != b.x()) return a.x() < b.x();
-            if (a.y() != b.y()) return a.y() < b.y();
-            return a.z() < b.z();
-        };
-        std::sort(positions.begin(), positions.end(), ptLess);
-        positions.erase(std::unique(positions.begin(), positions.end(), 
-            [](const PointType& a, const PointType& b) {
-                return (a - b).squaredNorm() < 0.0001f;
-            }), positions.end());
-
-        return insertVoxels(objectId, positions, defaultData, voxelSize, color);
-    }
-
     bool rotateObject(int objectId, const Eigen::Matrix3f& rotation, const PointType& pivot) {
         if (!root_) return false;
         std::vector<std::shared_ptr<NodeData>> nodes;
@@ -1515,15 +1459,6 @@ public:
         in.close();
         std::cout << "successfully loaded grid from " << filename << std::endl;
         return true;
-    }
-
-    std::shared_ptr<NodeData> find(const PointType& pos, float tolerance = EPSILON) {
-        return findRecursive(root_.get(), pos, tolerance);
-    }
-
-    std::shared_ptr<NodeData> findwNode(const PointType& pos, OctreeNode* node, float tolerance = EPSILON) {
-        // node = root_.get();
-        return findRecursive(node, pos, tolerance);
     }
 
     bool inGrid(PointType pos) {
