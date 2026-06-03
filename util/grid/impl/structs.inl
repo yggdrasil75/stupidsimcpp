@@ -1,4 +1,10 @@
 #pragma once
+#include <fstream>
+#include <sstream>
+#include <cmath>
+#include <vector>
+#include <shared_mutex>
+#include <memory>
 
 namespace Grid{
 
@@ -39,6 +45,84 @@ enum class BodyType : uint8_t {
     SOFT = 2,
     FLUID = 3
 };
+
+enum class meshMode : uint8_t {
+    NAIVE = 0, // each voxel = 12 tris
+    GREEDY = 1, // adjacent voxels get merged and then tri
+    MARCHINGCUBES = 2, //marching cubes using the lookup in basicdefines
+    NAIVEMARCHING = 3, //marching cubes without the LUT and more precise instead of rough estimates like the LUT uses
+    SURFACENET = 4, // point splatting the surface (or whatever this is. I dont know)
+    DUALCONTOUR = 5, // ?
+    MANIFOLDCONTOUR = 6, // ??
+    OCCUPANCY = 7, // occupancy network???
+    CUBICMARCHING = 8, // cubic marching cubes
+    METABALLS =9, //?
+    TRANSVOXEL = 10, // for terrain and lod only.
+    DUALMARCHING = 11, //dual marching cubes, combine dual contour and marching cubes
+}
+
+template<typename V>
+inline void writeVal(std::ofstream& out, const V& val) {
+    out.write(reinterpret_cast<const char*>(&val), sizeof(V));
+}
+
+template<typename V>
+inline void readVal(std::ifstream& in, V& val) {
+    in.read(reinterpret_cast<char*>(&val), sizeof(V));
+}
+
+inline void writeVec3(std::ofstream& out, const Eigen::Vector3f& vec) {
+    writeVal(out, vec.x());
+    writeVal(out, vec.y());
+    writeVal(out, vec.z());
+}
+
+inline void readVec3(std::ifstream& in, Eigen::Vector3f& vec) {
+    float x, y, z;
+    readVal(in, x);
+    readVal(in, y);
+    readVal(in, z);
+    vec = Eigen::Vector3f(x, y, z);
+}
+
+inline uint16_t mortonEncodeFatNode(uint8_t x, uint8_t y, uint8_t z) {
+#ifdef SSE
+    return _pdep_u32(x, 0x49249) | (_pdep_u32(y, 0x49249) << 1) | (_pdep_u32(z, 0x49249) << 2);
+#else
+    uint32_t xx = x & 0x1F;
+    uint32_t yy = y & 0x1F;
+    uint32_t zz = z & 0x1F;
+    xx = (xx | (xx << 8)) & 0x100F;
+    yy = (yy | (yy << 8)) & 0x100F;
+    zz = (zz | (zz << 8)) & 0x100F;
+    xx = (xx | (xx << 4)) & 0x10C3;
+    yy = (yy | (yy << 4)) & 0x10C3;
+    zz = (zz | (zz << 4)) & 0x10C3;
+    xx = (xx | (xx << 2)) & 0x1249;
+    yy = (yy | (yy << 2)) & 0x1249;
+    zz = (zz | (zz << 2)) & 0x1249;
+    return static_cast<uint16_t>(xx | (yy << 1) | (zz << 2));
+#endif
+}
+
+inline void mortonDecodeFatNode(uint16_t morton, uint8_t& x, uint8_t& y, uint8_t& z) {
+#ifdef SSE
+    x = static_cast<uint8_t>(_pext_u32(morton, 0x49249));
+    y = static_cast<uint8_t>(_pext_u32(morton >> 1, 0x49249));
+    z = static_cast<uint8_t>(_pext_u32(morton >> 2, 0x49249));
+#else
+    auto compact = [](uint32_t v) -> uint8_t {
+        v &= 0x1249;
+        v = (v ^ (v >> 2)) & 0x10C3;
+        v = (v ^ (v >> 4)) & 0x100F;
+        v = (v ^ (v >> 8)) & 0x001F;
+        return static_cast<uint8_t>(v);
+    };
+    x = compact(morton);
+    y = compact(morton >> 1);
+    z = compact(morton >> 2);
+#endif
+}
 
 struct vec3fh {
     std::size_t operator()(const Eigen::Vector3f& v) const {
@@ -126,6 +210,28 @@ struct physicsMatHash {
     }
 };
 
+template<typename IndexType = uint16_t>
+struct vertex {
+    IndexType cIdx;
+    PointType pos;
+};
+
+struct tri {
+    size_t a, b, c;
+};
+
+struct mesh {
+    std::vector<vertex> vertices;
+    std::vector<tri> tris;
+};
+
+template<typename T, typename IndexType = uint16_t>
+struct PhysicsState_ {
+    Eigen::Vector3f velocity{0.0f, 0.0f, 0.0f};
+    Eigen::Vector3f force{0.0f, 0.0f, 0.0f};
+    float pressure = 0.0f;
+};
+
 template<typename T, typename IndexType = uint16_t>
 struct GridObject_ {
     int id;
@@ -140,14 +246,16 @@ struct GridObject_ {
     std::unordered_map<Material_, IndexType, materialHash> renderMatMap;
     std::vector<PhysicsMaterial_> physicsMaterials;
     std::unordered_map<PhysicsMaterial_, IndexType, physicsMatHash> physicsMatMap;
-
-    std::vector<VoxelRel> relativeVoxels;
-
+    std::vector<PointType> relativeVoxels;
     mutable std::shared_mutex objMutex;
 
+    mesh objMesh;
+
     GridObject_(int objId = -1) : id(objId), flags(OBJ_ALLOW_PARTIAL_UNLOAD_BIT) {
-        transmissionMap.push_back(0.0f);
-        transmissionMap.push_back(1.0f);
+        transmissionTable.push_back(0.0f);
+        transmissionMap[0.0f] = 0;
+        transmissionTable.push_back(1.0f);
+        transmissionMap[1.0f] = 1;
     }
 
     bool isPartialUnloadAllowed() const {
@@ -218,7 +326,7 @@ struct GridObject_ {
             IndexType bestIndex = 0;
             float dist = std::numeric_limits<float>::max();
             for (IndexType i = 0; i < static_cast<IndexType>(renderMaterials.size()); ++i) {
-                float dist2 = (renderMaterials[i] - renderMat).dist();
+                float dist2 = renderMaterials[i].dist(renderMat);
                 if (dist2 < dist) {
                     dist = dist2;
                     bestIndex = i;
@@ -231,28 +339,28 @@ struct GridObject_ {
     IndexType getOrAddPhysicsMaterial(const PhysicsMaterial_& physMat) {
         {
             std::shared_lock<std::shared_mutex> readLock(objMutex);
-            auto a = PhysicsMatMap.find(physMat);
-            if (a != PhysicsMatMap.end()) {
+            auto a = physicsMatMap.find(physMat);
+            if (a != physicsMatMap.end()) {
                 return a->second;
             }
         }
 
         if (physicsMaterials.size() < std::numeric_limits<IndexType>::max()) {
             std::unique_lock<std::shared_mutex> writeLock(objMutex);
-            auto a = PhysicsMatMap.find(physMat);
-            if (a != PhysicsMatMap.end()) {
+            auto a = physicsMatMap.find(physMat);
+            if (a != physicsMatMap.end()) {
                 return a->second;
             }
             IndexType newIndex = static_cast<IndexType>(physicsMaterials.size());
             physicsMaterials.push_back(physMat);
-            PhysicsMatMap[physMat] = newIndex;
+            physicsMatMap[physMat] = newIndex;
             return newIndex;
         } else {
             std::shared_lock<std::shared_mutex> readLock(objMutex);
             IndexType bestIndex = 0;
             float dist = std::numeric_limits<float>::max();
             for (IndexType i = 0; i < static_cast<IndexType>(physicsMaterials.size()); ++i) {
-                float dist2 = physicsMaterials[i].dist(mat);
+                float dist2 = physicsMaterials[i].dist(physMat);
                 if (dist2 < dist) {
                     dist = dist2;
                     bestIndex = i;
@@ -295,6 +403,7 @@ struct GridObject_ {
         }
         return best;
     }
+
     Eigen::Vector3f getColor(IndexType idx) const {
         return colorLookup[idx];
     }
@@ -311,10 +420,476 @@ struct GridObject_ {
         return physicsMaterials[idx];
     }
 
-    PhysicsMaterial_ getTransmission(uint8_t idx) const {
+    float getTransmission(uint8_t idx) const {
         return transmissionTable[idx];
     }
 
+    void setMesh(meshMode mode = meshMode::NAIVE) const {
+        std::unique_lock<std::shared_mutex> lock(objMutex);
+        objMesh.vertices.clear();
+        objMesh.tris.clear();
+
+        if (mode == meshMode::NAIVE) {
+        } else if (mode == meshMode::GREEDY) {
+            //find adjacent nodes and convert to larger cubes
+        } else if (mode == meshMode::MARCHINGCUBES) {
+            //utilize the edgeTable and triTable defined in basicdefines.hpp to generate a smoother mesh
+        } else if (mode == 3) {
+            //naive marching cubes to make even better meshes, but suffering all the slowdowns.
+        }
+    }
+
+};
+
+template<typename T, typename IndexType = uint16_t>
+struct NodeData_ {
+    T data;
+    PointType position;
+    uint16_t objectId;
+    Eigen::half size;
+    IndexType colorIdx;
+    IndexType renderMatIdx;
+    IndexType physMatIdx;
+    uint8_t transmissionIdx;
+    std::atomic<uint8_t> flags;
+    PhysicsState_<T, IndexType> physics;
+    
+    NodeData_(const T& data, const PointType& pos, bool visible, const IndexType colorIdx, float size = 0.01f, bool active = true, IndexType objectId = -1, 
+              IndexType rIdx = 0, IndexType pIdx = 0, uint8_t tIdx = 0, bool staticBit = false) : 
+               data(data), position(pos), objectId(objectId), size(Eigen::half(size)), colorIdx(colorIdx), renderMatIdx(rIdx),
+               physMatIdx(pIdx), transmissionIdx(tIdx) {
+        setActive(active);
+        setVisible(visible);
+        setStatic(staticBit);
+    }
+
+    bool isActive() const {
+        return flags.load(std::memory_order_relaxed) & ACTIVE_BIT;
+    }
+
+    bool isVisible() const {
+        return flags.load(std::memory_order_relaxed) & VISIBLE_BIT;
+    }
+
+    bool isStatic() const {
+        return flags.load(std::memory_order_relaxed) & STATIC_BIT;
+    }
+
+    bool isActiveAndVisible() const {
+        return (flags.load(std::memory_order_relaxed) & (ACTIVE_BIT | VISIBLE_BIT)) != (ACTIVE_BIT | VISIBLE_BIT);
+    }
+
+    void setActive(bool v) {
+        if (v) flags.fetch_or(ACTIVE_BIT, std::memory_order_relaxed);
+        else flags.fetch_and(~ACTIVE_BIT, std::memory_order_relaxed);
+    }
+
+    void setVisible(bool v) {
+        if (v) flags.fetch_or(VISIBLE_BIT, std::memory_order_relaxed);
+        else flags.fetch_and(~VISIBLE_BIT, std::memory_order_relaxed);
+    }
+
+    void setStatic(bool v) {
+        if (v) flags.fetch_or(STATIC_BIT, std::memory_order_relaxed);
+        else flags.fetch_and(~STATIC_BIT, std::memory_order_relaxed);
+    }
+    
+    PointType getHalfSize() const {
+        return PointType(size * 0.5f, size * 0.5f, size * 0.5f);
+    }
+    
+    BoundingBox getCubeBounds() const {
+        PointType halfSize = getHalfSize();
+        return {position - halfSize, position + halfSize};
+    }
+
+
+};
+
+template<typename T, typename IndexType = uint16_t>
+struct OctreeNode_ {
+    std::vector<std::shared_ptr<NodeData_<T, IndexType>>> points;
+    std::vector<std::unique_ptr<OctreeNode_<T, IndexType>>> children;
+    PointType center;
+    Eigen::half nodeSize;
+    std::atomic<uint8_t> flags;
+
+    mutable std::shared_ptr<NodeData_<T, IndexType>> lodData;
+    mutable std::shared_mutex nodeMutex;
+    
+    OctreeNode_(const PointType& min, const PointType& max, bool fat = false) : flags(0), lodData(nullptr) {
+        setLeaf(true);
+        setLoaded(true);
+        setDirty(true);
+        setLoadQueued(false);
+        setSaveQueued(false);
+        setKeepLoaded(false);
+        setFat(fat);
+        children.resize(fat ? 65536 : 8); 
+        for (auto& child : children) {
+            child = nullptr;
+        }
+        center = (min + max) * 0.5;
+        nodeSize = (max - min).norm();
+    }
+
+    bool isLeaf() const {
+        return flags.load(std::memory_order_relaxed) & LEAF_BIT;
+    }
+
+    bool isLoaded() const {
+        return flags.load(std::memory_order_relaxed) & LOADED_BIT;
+    }
+
+    bool isDirty() const {
+        return flags.load(std::memory_order_relaxed) & DIRTY_BIT;
+    }
+
+    bool isQueued() const {
+        return flags.load(std::memory_order_relaxed) & LOADQUEUED;
+    }
+
+    bool isSaveQueued() const {
+        return flags.load(std::memory_order_relaxed) & SAVEDQUEUED;
+    }
+
+    bool isKeepLoaded() const {
+        return flags.load(std::memory_order_relaxed) & KEEPLOADED_BIT;
+    }
+
+    bool isFat() const {
+        return flags.load(std::memory_order_relaxed) & FAT_BIT;
+    }
+
+    void setLeaf(bool v) {
+        if (v) flags.fetch_or(LEAF_BIT, std::memory_order_relaxed);
+        else flags.fetch_and(~LEAF_BIT, std::memory_order_relaxed);
+    }
+
+    void setLoaded(bool v) {
+        if (v) flags.fetch_or(LOADED_BIT, std::memory_order_relaxed);
+        else flags.fetch_and(~LOADED_BIT, std::memory_order_relaxed);
+    }
+
+    void setDirty(bool v) {
+        if (v) flags.fetch_or(DIRTY_BIT, std::memory_order_relaxed);
+        else flags.fetch_and(~DIRTY_BIT, std::memory_order_relaxed);
+    }
+
+    void setLoadQueued(bool v) {
+        if (v) flags.fetch_or(LOADQUEUED, std::memory_order_relaxed);
+        else flags.fetch_and(~LOADQUEUED, std::memory_order_relaxed);
+    }
+
+    void setSaveQueued(bool v) {
+        if (v) flags.fetch_or(SAVEDQUEUED, std::memory_order_relaxed);
+        else flags.fetch_and(~SAVEDQUEUED, std::memory_order_relaxed);
+    }
+
+    void setKeepLoaded(bool v) {
+        if (v) flags.fetch_or(KEEPLOADED_BIT, std::memory_order_relaxed);
+        else flags.fetch_and(~KEEPLOADED_BIT, std::memory_order_relaxed);
+    }
+
+    void setFat(bool v) {
+        if (v) flags.fetch_or(FAT_BIT, std::memory_order_relaxed);
+        else flags.fetch_and(~FAT_BIT, std::memory_order_relaxed);
+    }
+
+    bool contains(const PointType& point) const {
+        float halfsize = nodeSize / 2;
+        return (point[0] >= center[0] - halfsize && point[0] <= center[0] + halfsize &&
+                point[1] >= center[1] - halfsize && point[1] <= center[1] + halfsize &&
+                point[2] >= center[2] - halfsize && point[2] <= center[2] + halfsize);
+    }
+
+    BoundingBox bounds() {
+        float halfsize = nodeSize / 2;
+        return BoundingBox(center - halfsize, center + halfsize);
+    }
+
+    bool isEmpty() const {
+        if (!points.empty()) return false;
+        if (!isLeaf()) {
+            for (auto& child : children) {
+                if (!child) continue;
+                if (!child->isEmpty()) return false;
+            }
+        }
+        return true;
+    }
+
+    std::string getRegionName(const PointType& parentCenter) const {
+        std::ostringstream oss;
+        if (!isFat()) {
+            oss << static_cast<int>(Grid::getOctant(center, parentCenter));
+        } else {
+            float step = static_cast<float>(nodeSize) / 16.0f;
+            uint8_t x = static_cast<uint8_t>(std::clamp((center[0] - parentCenter[0]) / step, 0.0f, 31.0f));
+            uint8_t y = static_cast<uint8_t>(std::clamp((center[1] - parentCenter[1]) / step, 0.0f, 31.0f));
+            uint8_t z = static_cast<uint8_t>(std::clamp((center[2] - parentCenter[2]) / step, 0.0f, 31.0f));
+            oss << mortonEncodeFatNode(x, y, z);
+        }
+        return oss;
+    }
+
+    std::string getRegionPath(const std::string& storagePath, const PointType* parentCenter = nullptr) const {
+        fs::path p(storagePath);
+        if (parentCenter != nullptr) {
+            p /= getRegionName(*parentCenter);
+        }
+        std::error_code ec;
+        fs::create_directories(p, ec);
+        p /= "data.region";
+        return p.string();
+    }
+
+    template<typename D>
+    static void serializeFieldData(std::ofstream& out, const D& data) {
+        if constexpr (is_shared_ptr<D>::value) {
+            bool hasData = (data != nullptr);
+            writeVal(out, hasData);
+            if (hasData) data->serialize(out);
+        } else if constexpr (std::is_pointer_v<D>) {
+            bool hasData = (data != nullptr);
+            writeVal(out, hasData);
+            if (hasData) data->serialize(out);
+        } else if constexpr (std::is_class_v<D>) {
+            data.serialize(out);
+        } else {
+            writeVal(out, data);
+        }
+    }
+    
+    template<typename D>
+    static void deserializeFieldData(std::ifstream& in, D& data) {
+        if constexpr (is_shared_ptr<D>::value) {
+            bool hasData;
+            readVal(in, hasData);
+            if (hasData) {
+                using ElemType = typename D::element_type;
+                data = ElemType::deserialize(in);
+            } else {
+                data = nullptr;
+            }
+        } else if constexpr (std::is_pointer_v<D>) {
+            bool hasData;
+            readVal(in, hasData);
+            if (hasData) {
+                using ElemType = std::remove_pointer_t<D>;
+                data = ElemType::deserialize(in);
+            } else {
+                data = nullptr;
+            }
+        } else if constexpr (std::is_class_v<D>) {
+            data = D::deserialize(in);
+        } else {
+            readVal(in, data);
+        }
+    }
+
+    size_t getSubtreePointCount() const {
+        if (!isLoaded()) return 0;
+        size_t count = points.size();
+        if (!isLeaf()) {
+            for (auto& child : children) {
+                if (!child) continue;
+                count += child->getSubtreePointCount();
+            }
+        }
+        return count;
+    }
+    
+    bool isSubtreeFullyLoaded() const {
+        if (!isLoaded()) return false;
+        if (!isLeaf()) {
+            for (auto& child : children) {
+                if (!child) continue;
+                if (!child->isSubtreeFullyLoaded()) return false;
+            }
+        }
+        return true;
+    }
+
+    void serializeSubtree(std::ofstream& out) const {
+        writeVal(out, flags.load(std::memory_order_relaxed));
+
+        writeVal(out, points.size());
+        for (const auto& pt : points) {
+            serializeFieldData(out, pt->data);
+            writeVec3(out, pt->position);
+            writeVal(out, pt->objectId);
+            writeVal(out, pt->flags.load(std::memory_order_relaxed));
+            writeVal(out, pt->size);
+            writeVal(out, pt->colorIdx);
+            writeVal(out, pt->renderMatIdx);
+            writeVal(out, pt->physMatIdx);
+            writeVal(out, pt->transmissionIdx);
+        }
+
+        if (!isLeaf()) {
+            if (isFat()) {
+                uint16_t activeChildren = 0;
+                for (int i = 0; i < 65536; ++i) if (children[i]) activeChildren++;
+                writeVal(out, activeChildren);
+                for (uint16_t i = 0; i < 65536; ++i) {
+                    if (children[i]) {
+                        writeVal(out, i);
+                        children[i]->serializeSubtree(out);
+                    }
+                }
+            } else {
+                uint8_t childMask = 0;
+                for (int i = 0; i < 8; ++i) if (children[i]) childMask |= (1 << i);
+                writeVal(out, childMask);
+                for (int i = 0; i < 8; ++i) {
+                    if (children[i]) children[i]->serializeSubtree(out);
+                }
+            }
+        }
+    }
+
+    void serialize(std::ofstream& out, size_t regionTargetPoints, const std::string& storagePath, const PointType* parentCenter = nullptr) {
+        bool offloaded = !isLoaded();
+        size_t subPoints = offloaded ? 0 : getSubtreePointCount();
+
+        bool isRegion = offloaded || (subPoints > 0 && (subPoints <= regionTargetPoints || isLeaf()) && isSubtreeFullyLoaded());
+
+        writeVal(out, isRegion);
+
+        if (isRegion) {
+            if (!offloaded && isDirty()) saveRegion(regionTargetPoints, storagePath, parentCenter);
+            return;
+        }
+        serializeSubtree(out);
+    }
+
+    void deserializeSubtree(std::ifstream& in) {
+        uint8_t f1;
+        readVal(in, f1);
+        flags.store(f1, std::memory_order_relaxed);
+
+        size_t pointCount;
+        readVal(in, pointCount);
+        points.reserve(pointCount);
+        for (size_t i = 0; i < pointCount; ++i) {
+            auto pt = std::make_shared<NodeData_<T, IndexType>>();
+            deserializeFieldData(in, pt->data);
+            readVec3(in, pt->position);
+            readVal(in, pt->objectId);
+            uint8_t f;
+            readVal(in, f);
+            pt->flags.store(f, std::memory_order_relaxed);
+            readVal(in, pt->size);
+            readVal(in, pt->colorIdx);
+            readVal(in, pt->renderMatIdx);
+            readVal(in, pt->physMatIdx);
+            readVal(in, pt->transmissionIdx);
+            points.push_back(pt);
+        }
+
+        if (!isLeaf()) {
+            if (isFat()) {
+                uint16_t activeChildren;
+                readVal(in, activeChildren);
+                for (uint16_t k = 0; k < activeChildren; ++k) {
+                    uint16_t i;
+                    readVal(in, i);
+                    PointType childMin, childMax;
+                    const PointType& rootMin = bounds().first;
+                    PointType step = (bounds().second - rootMin) / 32.0f;
+                    uint8_t x, y, z;
+                    mortonDecodeFatNode(i, x, y, z);
+                    childMin = rootMin + PointType(x * step[0], y * step[1], z * step[2]);
+                    childMax = childMin + step;
+                    children[i] = std::make_unique<OctreeNode_<T, IndexType>>(childMin, childMax);
+                    std::lock_guard<std::shared_mutex> lock(children[i]->nodeMutex);
+                    children[i]->deserializeSubtree(in);
+                }
+            } else {
+                uint8_t childMask;
+                readVal(in, childMask);
+                for (int i = 0; i < 8; ++i) {
+                    if ((childMask >> i) & 1) {
+                        PointType childMin, childMax;
+                        for (int d = 0; d < Dim; ++d) {
+                            bool high = (i >> d) & 1;
+                            childMin[d] = high ? center[d] : bounds().first[d];
+                            childMax[d] = high ? bounds().second[d] : center[d];
+                        }
+                        children[i] = std::make_unique<OctreeNode_<T, IndexType>>(childMin, childMax);
+                        std::lock_guard<std::shared_mutex> lock(children[i]->nodeMutex);
+                        children[i]->deserializeSubtree(in);
+                    } else {
+                        children[i] = nullptr;
+                    }
+                }
+            }
+        }
+        setLoaded(true);
+        setDirty(false);
+    }
+
+    void deserialize(std::ifstream& in) {
+        bool isRegion;
+        readVal(in, isRegion);
+
+        if (isRegion) {
+            setLoaded(false);
+            setDirty(false);
+            setLeaf(false);
+            return;
+        }
+
+        deserializeSubtree(in);
+
+    }
+
+    void clearDirtySubtree() {
+        setDirty(false);
+        if (!isLeaf()) {
+            for (auto& child : children) if (child) child->clearDirtySubtree();
+        }
+    }
+
+    bool saveRegion(size_t regionTargetPoints, const std::string& storagePath, const PointType* parentCenter = nullptr) {
+        std::string path = getRegionPath(storagePath, parentCenter);
+        std::ofstream out(path, std::ios::binary);
+        if (!out) return false;
+        serialize(out, regionTargetPoints, storagePath, parentCenter);
+        clearDirtySubtree();
+        return true;
+    }
+
+    bool loadRegion(const std::string& storagePath, const PointType* parentCenter = nullptr) {
+        std::string path = getRegionPath(storagePath, parentCenter);
+        std::ifstream in(path, std::ios::binary);
+        if (in) {
+            deserialize(in);
+            setLoaded(true);
+            return true;
+        }
+        return false;
+    }
+
+    void offload() {
+        std::lock_guard<std::shared_mutex> lock(nodeMutex);
+        if (isDirty()) return;
+        setLoaded(false);
+        for (int i = 0; i < (isFat() ? 65536 : 8); ++i) {
+            children[i].reset();
+        }
+        points.clear();
+        points.shrink_to_fit();
+    }
+};
+
+template<typename T, typename IndexType = uint16_t>
+struct RayHit_ {
+    std::shared_ptr<NodeData_<T, IndexType>> node;
+    float distance;
+    PointType normal;
+    PointType hitPoint;
 };
 
 }
