@@ -5,6 +5,10 @@
 #include <vector>
 #include <shared_mutex>
 #include <memory>
+#include <algorithm>
+#include <mutex>
+#include <type_traits>
+#include <filesystem>
 
 namespace Grid{
 
@@ -37,7 +41,12 @@ template<typename> struct is_shared_ptr : std::false_type {};
 template<typename T> struct is_shared_ptr<std::shared_ptr<T>> : std::true_type {};
 using PointType = Eigen::Matrix<float, Dim, 1>;
 using BoundingBox = std::pair<PointType, PointType>;
-namespace fs = std::filesystem;
+
+template<typename T, typename IndexType = uint16_t>
+struct OctreeNode_;
+
+inline uint16_t mortonEncodeFatNode(uint8_t x, uint8_t y, uint8_t z);
+inline void mortonDecodeFatNode(uint16_t morton, uint8_t& x, uint8_t& y, uint8_t& z);
 
 enum class BodyType : uint8_t {
     STATIC = 0,
@@ -48,17 +57,31 @@ enum class BodyType : uint8_t {
 
 enum class meshMode : uint8_t {
     NAIVE = 0, // each voxel = 12 tris
-    GREEDY = 1, // adjacent voxels get merged and then tri
+    GREEDY = 1, // adjacent voxels get merged and then meshed
     MARCHINGCUBES = 2, //marching cubes using the lookup in basicdefines
-    NAIVEMARCHING = 3, //marching cubes without the LUT and more precise instead of rough estimates like the LUT uses
-    SURFACENET = 4, // point splatting the surface (or whatever this is. I dont know)
-    DUALCONTOUR = 5, // ?
-    MANIFOLDCONTOUR = 6, // ??
-    OCCUPANCY = 7, // occupancy network???
-    CUBICMARCHING = 8, // cubic marching cubes
-    METABALLS =9, //?
-    TRANSVOXEL = 10, // for terrain and lod only.
-    DUALMARCHING = 11, //dual marching cubes, combine dual contour and marching cubes
+    NAIVEMARCHING = 3, //marching cubes without the LUT. because why not.
+    SURFACENET = 4, // use this for terrain. create tris using exposed voxel faces
+    DUALCONTOUR = 5, // uses normals to generate meshes
+    MANIFOLDCONTOUR = 6, // something something normals and better weird shapes (need to actually read the paper)
+    OCCUPANCY = 7, // this uses a forward pass model network trained ahead of time to guess the mesh.
+    CUBICMARCHING = 8, // marching cubes, but with bisections from catmull-rom tricubic sdf, making continuous normals more accurately
+    TRANSVOXEL = 9, // for lod only. I dont know what this is, just that its mentioned as lod only all over.
+    DUALMARCHING = 10, //dual marching cubes, combine dual contour and marching cubes. can this be used to expand cubic? dual cubic marching manifold cubes?
+};
+
+inline uint8_t getOctant(const PointType& point, const PointType& center) {
+    return (point[0] >= center[0]) | ((point[1] >= center[1]) << 1) | ((point[2] >= center[2]) << 2);
+}
+
+template<typename T, typename IndexType = uint16_t>
+uint16_t getFatCellIndex(const PointType& point, const OctreeNode_<T, IndexType>* node) {
+    BoundingBox bounds = node->bounds();
+    const PointType& rootMin = bounds.first;
+    PointType step = (bounds.second - rootMin) / 32.0f;
+    uint8_t x = static_cast<uint8_t>(std::clamp((point[0] - rootMin[0]) / step[0], 0.0f, 31.0f));
+    uint8_t y = static_cast<uint8_t>(std::clamp((point[1] - rootMin[1]) / step[1], 0.0f, 31.0f));
+    uint8_t z = static_cast<uint8_t>(std::clamp((point[2] - rootMin[2]) / step[2], 0.0f, 31.0f));
+    return mortonEncodeFatNode(x, y, z);
 }
 
 template<typename V>
@@ -125,10 +148,19 @@ inline void mortonDecodeFatNode(uint16_t morton, uint8_t& x, uint8_t& y, uint8_t
 }
 
 struct vec3fh {
-    std::size_t operator()(const Eigen::Vector3f& v) const {
-        std::size_t h1 = std::hash<float>()(v.x());
-        std::size_t h2 = std::hash<float>()(v.y());
-        std::size_t h3 = std::hash<float>()(v.z());
+    size_t operator()(const Eigen::Vector3f& v) const {
+        size_t h1 = std::hash<float>()(v.x());
+        size_t h2 = std::hash<float>()(v.y());
+        size_t h3 = std::hash<float>()(v.z());
+        return h1 ^ (h2 << 1) ^ (h3 << 2);
+    }
+};
+
+struct vec3ih {
+    size_t operator()(const Eigen::Vector3i& v) const {
+        size_t h1 = std::hash<int>()(v.x());
+        size_t h2 = std::hash<int>()(v.y());
+        size_t h3 = std::hash<int>()(v.z());
         return h1 ^ (h2 << 1) ^ (h3 << 2);
     }
 };
@@ -220,8 +252,9 @@ struct tri {
     size_t a, b, c;
 };
 
+template<typename IndexType = uint16_t>
 struct mesh {
-    std::vector<vertex> vertices;
+    std::vector<vertex<IndexType>> vertices;
     std::vector<tri> tris;
 };
 
@@ -249,7 +282,7 @@ struct GridObject_ {
     std::vector<PointType> relativeVoxels;
     mutable std::shared_mutex objMutex;
 
-    mesh objMesh;
+    mesh<IndexType> objMesh;
 
     GridObject_(int objId = -1) : id(objId), flags(OBJ_ALLOW_PARTIAL_UNLOAD_BIT) {
         transmissionTable.push_back(0.0f);
@@ -424,21 +457,6 @@ struct GridObject_ {
         return transmissionTable[idx];
     }
 
-    void setMesh(meshMode mode = meshMode::NAIVE) const {
-        std::unique_lock<std::shared_mutex> lock(objMutex);
-        objMesh.vertices.clear();
-        objMesh.tris.clear();
-
-        if (mode == meshMode::NAIVE) {
-        } else if (mode == meshMode::GREEDY) {
-            //find adjacent nodes and convert to larger cubes
-        } else if (mode == meshMode::MARCHINGCUBES) {
-            //utilize the edgeTable and triTable defined in basicdefines.hpp to generate a smoother mesh
-        } else if (mode == 3) {
-            //naive marching cubes to make even better meshes, but suffering all the slowdowns.
-        }
-    }
-
 };
 
 template<typename T, typename IndexType = uint16_t>
@@ -506,7 +524,7 @@ struct NodeData_ {
 
 };
 
-template<typename T, typename IndexType = uint16_t>
+template<typename T, typename IndexType>
 struct OctreeNode_ {
     std::vector<std::shared_ptr<NodeData_<T, IndexType>>> points;
     std::vector<std::unique_ptr<OctreeNode_<T, IndexType>>> children;
@@ -530,7 +548,7 @@ struct OctreeNode_ {
             child = nullptr;
         }
         center = (min + max) * 0.5;
-        nodeSize = (max - min).norm();
+        nodeSize = Eigen::half((max - min).norm());
     }
 
     bool isLeaf() const {
@@ -597,15 +615,16 @@ struct OctreeNode_ {
     }
 
     bool contains(const PointType& point) const {
-        float halfsize = nodeSize / 2;
+        float halfsize = static_cast<float>(nodeSize) * 0.5f;
         return (point[0] >= center[0] - halfsize && point[0] <= center[0] + halfsize &&
                 point[1] >= center[1] - halfsize && point[1] <= center[1] + halfsize &&
                 point[2] >= center[2] - halfsize && point[2] <= center[2] + halfsize);
     }
 
-    BoundingBox bounds() {
-        float halfsize = nodeSize / 2;
-        return BoundingBox(center - halfsize, center + halfsize);
+    BoundingBox bounds() const {
+        float halfsize = static_cast<float>(nodeSize) * 0.5f;
+        PointType hs = PointType::Constant(halfsize);
+        return BoundingBox(center - hs, center + hs);
     }
 
     bool isEmpty() const {
@@ -619,7 +638,7 @@ struct OctreeNode_ {
         return true;
     }
 
-    std::string getRegionName(const PointType& parentCenter) const {
+    std::ostringstream getRegionName(const PointType& parentCenter) const {
         std::ostringstream oss;
         if (!isFat()) {
             oss << static_cast<int>(Grid::getOctant(center, parentCenter));
@@ -634,12 +653,12 @@ struct OctreeNode_ {
     }
 
     std::string getRegionPath(const std::string& storagePath, const PointType* parentCenter = nullptr) const {
-        fs::path p(storagePath);
+        std::filesystem::path p(storagePath);
         if (parentCenter != nullptr) {
             p /= getRegionName(*parentCenter);
         }
         std::error_code ec;
-        fs::create_directories(p, ec);
+        std::filesystem::create_directories(p, ec);
         p /= "data.region";
         return p.string();
     }

@@ -6,6 +6,7 @@
 #include "../output/frame.hpp"
 #include "camera.hpp"
 #include "impl/structs.inl"
+#include "impl/sphkernel.inl"
 #include "impl/skybox.inl"
 #include "impl/rendering.inl"
 
@@ -20,16 +21,16 @@ class Octree {
 //declarations
 public:
     using NodeData = NodeData_<T, IndexType>;
-    using OctreeNode = OctreeNode_<T, GasT, IndexType>;
+    using OctreeNode = OctreeNode_<T, IndexType>;
     using Material = Material_;
     using ExtendedMaterial = ExtendedMaterial_;
     using PhysicsMaterial = PhysicsMaterial_;
     using RayHit = RayHit_<T, IndexType>;
-    using RenderNode = RenderNode_<T, IndexType>;
-    using RenderData = RenderData_<T, IndexType>;
-    using RenderBuffer = RenderBuffer_<T, IndexType>;
+    // using RenderNode = RenderNode_<T, IndexType>;
+    // using RenderData = RenderData_<T, IndexType>;
+    // using RenderBuffer = RenderBuffer_<T, IndexType>;
     using GridObject = GridObject_<T, IndexType>;
-    using EulerianGasState = EulerianGasState_<GasT>;
+    // using EulerianGasState = EulerianGasState_<GasT>;
 
 //variables
 private: 
@@ -172,13 +173,13 @@ public:
     OctreeNode* getHighestCommonNodeRecursive(const PointType& Min, const PointType& Max, OctreeNode* current, int& depth) const {
         if (current->isFat()) {
             uint16_t mcell = getFatCellIndex(Min, current);
-            if (mcell == getFatCellIndex(Max, current) && current->children[minCell]) {
+            if (mcell == getFatCellIndex(Max, current) && current->children[mcell]) {
                 return getHighestCommonNodeRecursive(Min, Max, current->children[mcell].get(), depth + 1);
             }
         } else {
             uint8_t mcell = getOctant(Min, current->center);
-            if (mcell == getOctant(Max, current->center) && current->children[minCell]) {
-                return getHighestCommonNodeRecursive(Min, Max, current->children[mcell].get(), depth + 1)
+            if (mcell == getOctant(Max, current->center) && current->children[mcell]) {
+                return getHighestCommonNodeRecursive(Min, Max, current->children[mcell].get(), depth + 1);
             }
         }
         return current;
@@ -342,7 +343,138 @@ public:
         return nullptr;
     }
 
+    void searchNodeRecursive(OctreeNode* node, const PointType& center, float radiusSq, int objectId, std::vector<std::shared_ptr<NodeData>>& results) {
+        ensureLoaded(node, false);
+        for (const auto& pointData : node->points) {
+            if (!pointData->isActive()) continue;
+            float pointDistSq = (pointData->position - center).squaredNorm();
+            if (pointDistSq <= radiusSq && (pointData->objectId == objectId || objectId < 0)) {
+                results.emplace_back(pointData);
+            }
+        }
+        if (!node->isLeaf()) {
+            for (const auto& child : node->children) {
+                if (child) searchNodeRecursive(child.get(), center, radiusSq, objectId, results);
+            }
+        }
+    }
+
+    void updateStreamingRecursive(OctreeNode* node, const PointType& camPos, const PointType& camDir) {
+        if (!node) return;
+        
+        float minDistSq = 0.0f;
+        float maxDistSq = 0.0f;
+        BoundingBox nodeBounds = node->bounds();
+
+        for(int i = 0; i < Dim; ++i) {
+            float v = camPos[i];
+            float minBound = nodeBounds.first[i];
+            float maxBound = nodeBounds.second[i];
+            
+            float d1 = v - minBound;
+            float d2 = v - maxBound;
+            
+            if(v < minBound) {
+                minDistSq += d1 * d1;
+            } else if(v > maxBound) {
+                minDistSq += d2 * d2;
+            }
+            
+            float maxD = std::max(std::abs(d1), std::abs(d2));
+            maxDistSq += maxD * maxD;
+        }
+
+        bool isBehind = false;
+        PointType maxPoint;
+        maxPoint.x() = (camDir.x() >= 0) ? nodeBounds.second.x() : nodeBounds.first.x();
+        maxPoint.y() = (camDir.y() >= 0) ? nodeBounds.second.y() : nodeBounds.first.y();
+        maxPoint.z() = (camDir.z() >= 0) ? nodeBounds.second.z() : nodeBounds.first.z();
+        
+        if ((maxPoint - camPos).dot(camDir) < -0.05f) {
+            isBehind = true;
+        }
+        
+        float lodDistSq = lodMinDistance_ * lodMinDistance_;
+        float maxDistSq_Max = maxDistance_ * maxDistance_;
+        float keepDistSq = keepDistance_ * keepDistance_;
+        
+        if (maxDistSq <= lodDistSq) {
+            loadSubtreeRecursive(node);
+            return;
+        }
+
+        if (maxDistSq <= maxDistSq_Max && minDistSq > lodDistSq) {
+            loadAndLodSubtreeRecursive(node);
+            return;
+        }
+        
+        if (minDistSq > keepDistSq) {
+            if (!node->isLoaded()) return;
+            size_t subPoints = node->getSubtreePointCount();
+            bool fullyLoaded = node->isSubtreeFullyLoaded();
+
+            if ((subPoints > regionTargetPoints_ || node->isLeaf()) && fullyLoaded) {
+                if (subPoints > 0) lazilyOffload(node);
+                return;
+            }
+            if (!node->isLeaf()){
+                for (int i = 0; i < 8; ++i) {
+                    updateStreamingRecursive(node->children[i].get(), camPos, camDir);
+                }
+            }
+            return;
+        }
+
+        if (minDistSq > lodDistSq) {
+            ensureLOD(node);
+        } else {
+            ensureLoaded(node, true);
+        }
+        if (!node->isLeaf()) {
+            for (int i = 0; i < 8; ++i) {
+                if (node->children[i]) {
+                    updateStreamingRecursive(node->children[i].get(), camPos, camDir);
+                }
+            }
+        }
+    }
+
+    void printStatsRecursive(const OctreeNode* node, size_t depth, size_t& totalNodes, size_t& leafNodes, size_t& actualPoints,
+                             size_t& maxTreeDepth, size_t& maxPointsInLeaf, size_t& minPointsInLeaf, size_t& lodGeneratedNodes, size_t& unloaded) {
+        if (!node) return;
+
+        totalNodes++;
+        maxTreeDepth = std::max(maxTreeDepth, depth);
+        if (!node->isLoaded()) {
+            unloaded++;
+            return;
+        }
+
+        if (node->lodData) lodGeneratedNodes++;
+
+        size_t pts = node->points.size();
+        actualPoints += pts;
+
+        if (node->isLeaf()) {
+            leafNodes++;
+            maxPointsInLeaf = std::max(maxPointsInLeaf, pts);
+            minPointsInLeaf = std::min(minPointsInLeaf, pts);
+        } else {
+            for (const auto& child : node->children) {
+                printStatsRecursive(child.get(), depth + 1, totalNodes, leafNodes, actualPoints, 
+                                    maxTreeDepth, maxPointsInLeaf, minPointsInLeaf, lodGeneratedNodes, unloaded);
+            }
+        }
+    }
 //tasks
+    void enqueueTask(std::function<void()> task) {
+        {
+            std::lock_guard<std::mutex> lock(taskMutex_);
+            taskQueue_.push(std::move(task));
+        }
+        taskCV_.notify_one();
+    }
+
     void lazilyOffload(OctreeNode* node) {
         {
             if (!node->isLoaded() || node->isSaveQueued()) return;
@@ -477,27 +609,13 @@ public:
         return getHighestCommonNodeRecursive(min, max, current, depth);
     }
 
-    uint8_t getOctant(const PointType& point, const PointType& center) const {
-        return (point[0] >= center[0]) | ((point[1] >= center[1]) << 1) | ((point[2] >= center[2]) << 2);
-    }
-
-    uint16_t getFatCellIndex(const PointType& point, const OctreeNode* node) const {
-        BoundingBox bounds = node->bounds();
-        const PointType& rootMin = bounds.first;
-        PointType step = (bounds.second - rootMin) / 32.0f;
-        uint8_t x = static_cast<uint8_t>(std::clamp((point[0] - rootMin[0]) / step[0], 0.0f, 31.0f));
-        uint8_t y = static_cast<uint8_t>(std::clamp((point[1] - rootMin[1]) / step[1], 0.0f, 31.0f));
-        uint8_t z = static_cast<uint8_t>(std::clamp((point[2] - rootMin[2]) / step[2], 0.0f, 31.0f));
-        return mortonEncodeFatNode(x, y, z);
-    }
-
     BoundingBox createChildBounds(const OctreeNode* node, uint16_t octant) const {
         BoundingBox bounds = node->bounds();
         if (node->isFat()) {
             const PointType& rootMin = bounds.first;
             PointType step = (bounds.second - bounds.first) / 32.0f;
             uint8_t x, y, z;
-            mortonDecodeFatNode(octant, &x, &y, &z);
+            mortonDecodeFatNode(octant, x, y, z);
             PointType childMin, childMax;
             childMin[0] = rootMin[0] + x * step[0];
             childMin[1] = rootMin[1] + y * step[1];
@@ -606,7 +724,7 @@ public:
         PointType relPos = pos - obj->centerPosition;
         {
             std::unique_lock<std::shared_mutex> lock(obj->objMutex);
-            obj->relativeVoxels.push_back({relPos, rIdx, pIdx, tIdx, size});
+            obj->relativeVoxels.push_back(relPos);
         }
 
         if (insertRecursive(root_.get(), pointData, 0)) {
@@ -616,10 +734,15 @@ public:
     }
 
     //fix these defaults later.
-    auto setTerrain = std::bind(&Octree::insert, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3, true, std::placeholders::_4,
-                                true, 1, Eigen::Vector3f::Zero(), 1.0f, 0.05f, 0.0f, 1.45f, Eigen::Vector3f::Zero(), BodyType::STATIC, 1.0f, 0.1f, 1.0f);
-    auto setWater = std::bind(&Octree::insert, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3, true, 0.001f,
-                                true, 2, Eigen::Vector3f::Zero(), 0.2f, 0.02f, 0.95f, 1.33f, Eigen::Vector3f(0.15f, 0.05f, 0.01f), BodyType::FLUID, 1.0f, 0.05f, 1000.0f);
+    std::function<bool(const T&, const PointType&, Eigen::Vector3f, bool, float)> setTerrain =
+        [this](const T& d, const PointType& p, Eigen::Vector3f c, bool vis, float sz) {
+            return insert(d, p, c, vis, sz, true, 1, Eigen::Vector3f::Zero(), 1.0f, 0.05f, 0.0f, 1.45f, Eigen::Vector3f::Zero(), BodyType::STATIC, 1.0f, 0.1f, 1.0f);
+        };
+
+    std::function<bool(const T&, const PointType&, Eigen::Vector3f)> setWater =
+        [this](const T& d, const PointType& p, Eigen::Vector3f c) {
+            return insert(d, p, c, true, 0.001f, true, 2, Eigen::Vector3f::Zero(), 0.2f, 0.02f, 0.95f, 1.33f, Eigen::Vector3f(0.15f, 0.05f, 0.01f), BodyType::FLUID, 1.0f, 0.05f, 1000.0f);
+        };
 
     bool insert(const T& data, const PointType& pos, Eigen::Vector3f color, bool visible = true, float size = 0.01f, bool active = true, int objectId = -1,
                 Eigen::Vector3f emittance = Eigen::Vector3f::Zero(), float roughness = 1.0f, float reflective = 0.0f, float transmission = 0.0f, float ior = 1.45f, 
@@ -650,7 +773,7 @@ public:
             PointType relPos = pos - obj->centerPosition;
             {
                 std::unique_lock<std::shared_mutex> lock(obj->objMutex);
-                obj->relativeVoxels.push_back({relPos, rIdx, pIdx, tIdx, size});
+                obj->relativeVoxels.push_back(relPos);
             }
 
             if (insertRecursive(commonNode, pointData, depth)) {
@@ -675,6 +798,31 @@ public:
     //     }
     //     return false;
     // }
+
+    void setSkylight(const Eigen::Vector3f& skylight) { 
+        skylight_ = skylight; 
+    }
+
+    Eigen::Vector3f getSkylight() const { 
+        return skylight_; 
+    }
+
+    void setBackgroundColor(const Eigen::Vector3f& color) { 
+        backgroundColor_ = color; 
+        skybox_.setBackground(color.x(), color.y(), color.z(), 1.0f);
+    }
+
+    Eigen::Vector3f getBackgroundColor() const { 
+        return backgroundColor_; 
+    }
+
+    void setRegionTargetPoints(size_t points) {
+        regionTargetPoints_ = points;
+    }
+
+    size_t getRegionTargetPoints() const {
+        return regionTargetPoints_;
+    }
 
 
 //getters
@@ -709,10 +857,73 @@ public:
         return pt->physMatIdx;
     }
 
-    std::shared_ptr<NodeData> find(const PointType& pos, int objectId = -2, float tolerance = EPSILON, OctreeNode* node = root_.get()) {
+    std::shared_ptr<NodeData> find(const PointType& pos, int objectId = -2, float tolerance = EPSILON, OctreeNode* node = nullptr) {
+        if (!node) node = root_.get();
         return findRecursive(node, pos, objectId, tolerance);
     }
 
+    std::vector<std::shared_ptr<NodeData>> findInRadius(const PointType& center, float radius, int objectid = -2) {
+        std::vector<std::shared_ptr<NodeData>> results;
+        
+        float radiusSq = radius * radius;
+        OctreeNode* startingPoint = getHighestCommonNodeRecursive(center - PointType::Constant(radius), center + PointType::Constant(radius), root_.get(), 0);
+        searchNodeRecursive(startingPoint, center, radiusSq, objectid, results);
+        
+        return results;
+    }
+
+    void printStats(std::ostream& os = std::cout) const {
+        if (!root_) {
+            os << "[Octree Stats] Tree is null/empty." << std::endl;
+            return;
+        }
+
+        size_t totalNodes = 0;
+        size_t leafNodes = 0;
+        size_t actualPoints = 0;
+        size_t maxTreeDepth = 0;
+        size_t maxPointsInLeaf = 0;
+        size_t minPointsInLeaf = std::numeric_limits<size_t>::max();
+        size_t lodGeneratedNodes = 0;
+        size_t unloaded = 0;
+
+        printStatsRecursive(root_.get(), 0, totalNodes, leafNodes, actualPoints, 
+                            maxTreeDepth, maxPointsInLeaf, minPointsInLeaf, lodGeneratedNodes, unloaded);
+
+        if (leafNodes == 0) minPointsInLeaf = 0;
+        double avgPointsPerLeaf = totalNodes > 0 ? (double)actualPoints / totalNodes : 0.0;
+        
+        size_t nodeMem = totalNodes * sizeof(OctreeNode);
+        size_t dataMem = actualPoints * (sizeof(NodeData) + 16); 
+
+        os << "========================================\n";
+        os << "             OCTREE STATS               \n";
+        os << "========================================\n";
+        os << "Config:\n";
+        os << "  Max Depth Allowed : " << maxDepth << "\n";
+        os << "  Max Pts Per Node  : " << maxPointsPerNode << "\n";
+        os << "  LOD Falloff Rate  : " << lodFalloffRate_ << "\n";
+        os << "  LOD Min Distance  : " << lodMinDistance_ << "\n";
+        os << "Structure:\n";
+        os << "  Total Nodes       : " << totalNodes << "\n";
+        os << "  Leaf Nodes        : " << leafNodes << "\n";
+        os << "  Non-Leaf Nodes    : " << (totalNodes - leafNodes) << "\n";
+        os << "  LODs Generated    : " << lodGeneratedNodes << "\n";
+        os << "  Tree Height       : " << maxTreeDepth << "\n";
+        os << "  Unloaded Nodes    : " << unloaded << "\n";
+        os << "Data:\n";
+        os << "  Total Points      : " << size << " (Tracked) / " << actualPoints << " (Counted)\n";
+        os << "  Points/Leaf (Avg) : " << std::fixed << std::setprecision(2) << avgPointsPerLeaf << "\n";
+        os << "  Points/Leaf (Min) : " << minPointsInLeaf << "\n";
+        os << "  Points/Leaf (Max) : " << maxPointsInLeaf << "\n";
+        os << "Bounds:\n";
+        os << "  Min               : [" << root_->bounds().first.transpose() << "]\n";
+        os << "  Max               : [" << root_->bounds().second.transpose() << "]\n";
+        os << "Memory (Approx):\n";
+        os << "  Node Structure    : " << (nodeMem / 1024.0) << " KB\n";
+        os << "  Point Data        : " << (dataMem / 1024.0) << " KB\n";
+        os << "========================================\n" << std::defaultfloat;
+    }
 //updates
     bool updateRenderMaterial(int objectId, IndexType index, const Material& mat) {
         auto obj = getObject(objectId);
@@ -723,7 +934,7 @@ public:
             obj->renderMaterials[index] = mat;
         }
         std::vector<std::shared_ptr<NodeData>> nodes;
-        if (root_) collectNodesByObjectId(root_.get(), objectId, nodes);
+        collectNodesByObjectId(root_.get(), objectId, nodes);
         for (auto& n : nodes) invalidateLODForPoint(n);
         return true;
     }
@@ -739,6 +950,89 @@ public:
         return true;
     }
 
+    bool setMesh(int objectId, meshMode mode = meshMode::NAIVE) {
+        auto obj = getObject(objectId);
+        if (!obj) return false;
+
+        if (mode == meshMode::OCCUPANCY || mode == meshMode::TRANSVOXEL) {
+            throw std::runtime_error("NotImplementedException");
+        }
+
+        std::vector<std::shared_ptr<NodeData>> voxels;
+        collectNodesByObjectId(root_.get(), objectId, voxels);
+
+        voxels.erase(std::remove_if(voxels.begin(), voxels.end(), [](const std::shared_ptr<NodeData>& p) { return !p->isVisible(); }),
+            voxels.end());
+        
+        std::unique_lock<std::shared_mutex> lock(obj->objMutex);
+        obj->objMesh.vertices.clear();
+        obj->objMesh.tris.clear();
+
+        if (mode == meshMode::NAIVE) {
+            for (const auto& pt : voxels) {
+                float h = static_cast<float>(pt->size) * 0.5f;
+                const PointType& o = pt->position;
+                size_t base = obj->objMesh.vertices.size();
+                static const float corners[8][3] = {
+                    {-1,-1,-1},{+1,-1,-1},{+1,+1,-1},{-1,+1,-1},
+                    {-1,-1,+1},{+1,-1,+1},{+1,+1,+1},{-1,+1,+1}
+                };
+                for (auto& c : corners)
+                    obj->objMesh.vertices.push_back({pt->colorIdx, o + PointType(c[0]*h, c[1]*h, c[2]*h)});
+                static const int faces[6][4] = {
+                    {0,1,2,3},{4,5,6,7},{0,1,5,4},
+                    {2,3,7,6},{0,3,7,4},{1,2,6,5}
+                };
+                for (auto& f : faces) {
+                    obj->objMesh.tris.push_back({base+f[0], base+f[1], base+f[2]});
+                    obj->objMesh.tris.push_back({base+f[0], base+f[2], base+f[3]});
+                }
+            }
+        } else if (mode == meshMode::GREEDY) {
+        } else if (mode == meshMode::MARCHINGCUBES) {
+        } else if (mode == meshMode::NAIVEMARCHING) {
+            //naive marching cubes without the LUT
+        } else if (mode == meshMode::SURFACENET) {
+        } else if (mode == meshMode::DUALCONTOUR) {
+        } else if (mode == meshMode::MANIFOLDCONTOUR) {
+        } else if (mode == meshMode::OCCUPANCY) {
+        } else if (mode == meshMode::CUBICMARCHING) {
+        } else if (mode == meshMode::TRANSVOXEL) {
+        } else if (mode == meshMode::DUALMARCHING) {
+        }
+
+        return true;
+    }
+
+    void updateStreaming(const Camera& cam) {
+        if (isQueueStreaming()) return;
+        PointType camPos = cam.origin;
+        PointType camDir = cam.direction;
+        enqueueTask([this, camPos, camDir]() {
+            updateStreamingRecursive(root_.get(), camPos, camDir);
+            setQueueStreaming(false);
+        });
+    }
+    
+    void makeObjectFluid(int objectId, float newMass = -1, BodyType newType = BodyType::FLUID) {
+        std::vector<std::shared_ptr<NodeData>> nodes;
+        collectNodesByObjectId(root_.get(), objectId, nodes);
+        
+        auto obj = getOrCreateObject(objectId);
+        PhysicsMaterial_ pmat{newType, newMass, 1.0, 1.0};
+        
+        uint16_t newIdx = obj->getOrAddPhysicsMaterial(pmat);
+
+        std::lock_guard<std::mutex> lock(physicsMutex_);
+        for (auto& n : nodes) {
+            PhysicsMaterial_ oldPmat = obj->getPhysicsMaterial(n->physMatIdx);
+            if (newMass < 0) {
+                pmat = {newType, oldPmat.mass, oldPmat.restitution, oldPmat.density};
+                newIdx = obj->getOrAddPhysicsMaterial(pmat);
+            }
+            n->physMatIdx = newIdx;
+        }
+    }
 //removals
     bool removeObject(int objectId) {
         std::vector<std::shared_ptr<NodeData>> nodes;
@@ -758,6 +1052,31 @@ public:
         return true;
     }
 
+    void clear() {
+        if (root_) {
+            clearNode(root_.get());
+            root_.reset();
+        }
+
+        size = 0;
+    }
+    
+    void clearNode(OctreeNode* node) {
+        if (!node) return;
+        
+        node->points.clear();
+        node->points.shrink_to_fit();
+        node->lodData = nullptr;
+        
+        for (int i = 0; i < 8; ++i) {
+            if (node->children[i]) {
+                clearNode(node->children[i].get());
+                node->children[i].reset(nullptr);
+            }
+        }
+        
+        node->setLeaf(true);
+    }
 //static helpers
     static uint32_t packRGB9E5(const Eigen::Vector3f& color) {
         float maxv = color.maxCoeff();
@@ -786,9 +1105,17 @@ public:
     void collectNodesByObjectId(OctreeNode* node, int objectId, std::vector<std::shared_ptr<NodeData>>& nodes) const;
     size_t removeObjectRecursive(OctreeNode* node, int objectId);
     void optimize();
+    frame fastRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB);
+    frame blendedRenderFrameVulkan(const Camera& cam, int height, int width, float pbrScale = 0.5f,
+                frame::colormap colorformat = frame::colormap::RGB, int samplesPerPixel = 1,
+                int maxBounces = 4, bool globalIllumination = false, bool useLod = true);
+    frame fastRenderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB);
+    frame renderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB,
+        int samplesPerPixel = 2, int maxBounces = 4, bool globalIllumination = false, bool useLod = true);
+    void stepPhysics(float dt);
 
 
-}
+};
 
 }
 

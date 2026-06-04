@@ -32,8 +32,9 @@ void createBox(Grid::Octree<int>& octree, const Eigen::Vector3f& center, const E
         for (float y = minB.y(); y <= maxB.y(); y += step) {
             for (float z = minB.z(); z <= maxB.z(); z += step) {
                 Eigen::Vector3f pos(x + jitter(rng), y + jitter(rng), z + jitter(rng));
+                Vector3f emittance = albedo * emission;
                 
-                octree.set(1, pos, true, albedo, step, true, oid, emission, roughness, metallic, transmission, ior, absorp, bType, mass);
+                octree.insert(1, pos, albedo, true, step, true, oid, emittance, roughness, metallic, transmission, ior, absorp, bType, mass);
             }
         }
     }
@@ -61,7 +62,7 @@ void createCheckerBox(Grid::Octree<int>& octree, const Eigen::Vector3f& center, 
                 bool isEven = ((cx + cy + cz) % 2 == 0);
                 Eigen::Vector3f albedo = isEven ? color1 : color2;
                 
-                octree.set(1, pos, true, albedo, step, true, 100, 0.0f, 0.8f, 0.2f, 0.2f, 1.45f);
+                octree.insert(1, pos, albedo, true, step, true, 100, Eigen::Vector3f::Zero(), 0.8f, 0.2f, 0.2f, 1.45f);
             }
         }
     }
@@ -69,7 +70,7 @@ void createCheckerBox(Grid::Octree<int>& octree, const Eigen::Vector3f& center, 
 
 enum class TargetState {
     FLUID,
-    GAS,
+    // GAS,
     RIGID
 };
 
@@ -94,10 +95,10 @@ int main() {
     octree.setSkylight(Eigen::Vector3f(0.01f, 0.01f, 0.01f));
     octree.setphys_gravityCenter(Eigen::Vector3f(0.0f, 0.0f, -1000.0f));
     octree.setPhysicsSmoothingRadius(0.2f);
-    octree.setPhysicsGasConstant(100.0f); // Lowered significantly from 2000 for stability
+    // octree.setPhysicsGasConstant(100.0f); // Lowered significantly from 2000 for stability
     octree.setPhysicsVelocityDamping(1.0f); // Higher damping stops infinite scattering
     octree.setPhysicsViscosity(15.0f);
-    octree.setPhysicsAirDensity(1.225f);
+    // octree.setPhysicsAirDensity(1.225f);
     // octree.setPhysicsSurfaceTension(2000.0f);
 
 
@@ -139,9 +140,10 @@ int main() {
                                         y >= minLight.y() && y <= maxLight.y());
 
                     if (isLightArea) {
-                        octree.set(1, pos, true, cWhite, step, true, 10, 15.0f, 0.8f, 0.0f, 0.0f, 1.45f, Eigen::Vector3f::Zero(), Grid::BodyType::STATIC, 1.0f);
+                        
+                        octree.insert(1, pos, cWhite, true, step, true, 10, cWhite, 0.8f, 0.0f, 0.0f, 1.45f, Eigen::Vector3f::Zero(), Grid::BodyType::STATIC, 1.0f);
                     } else {
-                        octree.set(1, pos, true, cBlack, step, true, 100, 0.0f, 0.8f, 0.2f, 0.0f, 1.45f, Eigen::Vector3f::Zero(), Grid::BodyType::STATIC, 1.0f);
+                        octree.insert(1, pos, cBlack, true, step, true, 100, Eigen::Vector3f::Zero(), 0.8f, 0.2f, 0.0f, 1.45f, Eigen::Vector3f::Zero(), Grid::BodyType::STATIC, 1.0f);
                     }
                 }
             }
@@ -217,13 +219,13 @@ int main() {
 
     std::vector<StateEvent> timeline = {
         { 20,   5,  1.0f, false, TargetState::FLUID   }, // Center -> Water
-        { 100,  8,  0.00005f, false, TargetState::GAS }, // Second Blue -> Lighter than air Gas
+        // { 100,  8,  0.00005f, false, TargetState::GAS }, // Second Blue -> Lighter than air Gas
         { 180,  6,  1.2f, false, TargetState::FLUID   }, // Purple 1 -> Heavy Water
         { 260,  9,  0.4f, false, TargetState::RIGID   }, // Purple 2 -> RIGID (Floats lightly in fluid)
         { 340,  3,  8.5f, true,  TargetState::FLUID   }, // Brass -> Molten Brass
         { 420,  2, 10.5f, true,  TargetState::FLUID   }, // Silver -> Molten Silver
         { 500,  1, 19.3f, true,  TargetState::FLUID   }, // Gold -> Molten Gold
-        { 580,  4,  0.001f, false, TargetState::GAS   }, // Red 1 -> heavier GAS
+        // { 580,  4,  0.001f, false, TargetState::GAS   }, // Red 1 -> heavier GAS
         { 660,  7,  0.1f, false, TargetState::FLUID   }  // Red 2 -> fluid
     };
 
@@ -332,7 +334,7 @@ int main() {
     int fluidframeCounter = 0;
     int framesPerView = totalFluidFrames / views.size();
 
-    std::vector<std::weak_ptr<Grid::Octree<int>::NodeData>> trackedWater = octree.getWeakNodesByObjectId(5);
+    std::vector<Grid::Octree<int>::NodeData> trackedWater = octree.collectNodesByObjectId(5);
 
     Camera cam;
     cam.fov = 100;
@@ -350,10 +352,10 @@ int main() {
             for (const auto& event : timeline) {
                 if (fluidframeCounter == event.frameTrigger) {
                     std::cout << ">>> TRIGGERING STATE CHANGE for Object ID: " << event.objectId << std::endl;
-                    if (event.targetState == TargetState::GAS) {
-                        // Vaporize the object into the Eulerian gas field
-                        octree.vaporizeObject(event.objectId, 1.0f);
-                    } else {
+                    // if (event.targetState == TargetState::GAS) {
+                    //     // Vaporize the object into the Eulerian gas field
+                    //     octree.vaporizeObject(event.objectId, 1.0f);
+                    // } else {
                         Grid::BodyType targetType = (event.targetState == TargetState::FLUID) ? Grid::BodyType::FLUID : Grid::BodyType::RIGID;
                         octree.makeObjectFluid(event.objectId, event.mass, targetType);
                         
@@ -361,7 +363,7 @@ int main() {
                             // Make metals glow slightly when molten and adjust PBR values
                             octree.setMaterialByObjectId(event.objectId, 1.5f, 0.2f, 1.0f);
                         }
-                    }
+                    // }
                 }
             }
 

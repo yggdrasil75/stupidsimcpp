@@ -174,7 +174,6 @@ private:
     std::thread workerThread_;
     std::atomic<bool> stopWorker_{false};
     std::atomic<bool> autoOptimize_{true};
-    std::atomic<bool> streamingQueued_{false};
     std::atomic<uint32_t> frameCounter_{0};
 
     float minLodVolume_ = 0.0f;
@@ -572,86 +571,6 @@ private:
         }
     }
 
-    void updateStreamingRecursive(OctreeNode* node, const PointType& camPos, const PointType& camDir) {
-        if (!node) return;
-        
-        float minDistSq = 0.0f;
-        float maxDistSq = 0.0f;
-
-        // if (!node->contains(camPos)) {
-        for(int i = 0; i < Dim; ++i) {
-            float v = camPos[i];
-            float minBound = node->bounds.first[i];
-            float maxBound = node->bounds.second[i];
-            
-            float d1 = v - minBound;
-            float d2 = v - maxBound;
-            
-            if(v < minBound) {
-                minDistSq += d1 * d1;
-            } else if(v > maxBound) {
-                minDistSq += d2 * d2;
-            }
-            
-            float maxD = std::max(std::abs(d1), std::abs(d2));
-            maxDistSq += maxD * maxD;
-        }
-
-        bool isBehind = false;
-        PointType maxPoint;
-        maxPoint.x() = (camDir.x() >= 0) ? node->bounds.second.x() : node->bounds.first.x();
-        maxPoint.y() = (camDir.y() >= 0) ? node->bounds.second.y() : node->bounds.first.y();
-        maxPoint.z() = (camDir.z() >= 0) ? node->bounds.second.z() : node->bounds.first.z();
-        
-        if ((maxPoint - camPos).dot(camDir) < -0.05f) {
-            isBehind = true;
-        }
-        
-        float lodDistSq = lodMinDistance_ * lodMinDistance_;
-        float maxDistSq_max = maxDistance_ * maxDistance_;
-        float keepDistSq = keepDistance_ * keepDistance_;
-        
-        if (maxDistSq <= lodDistSq) {
-            loadSubtreeRecursive(node);
-            return;
-        }
-
-        if (maxDistSq <= maxDistSq_max && minDistSq > lodDistSq) {
-            loadAndLodSubtreeRecursive(node);
-            return;
-        }
-        
-        if (minDistSq > keepDistSq) {
-            if (!node->isLoaded()) return;
-            size_t subPoints = node->getSubtreePointCount();
-            bool fullyLoaded = node->isSubtreeFullyLoaded();
-
-            if ((subPoints > regionTargetPoints_ || node->isLeaf()) && fullyLoaded) {
-                if (subPoints > 0) lazilyOffload(node);
-                return;
-            }
-            if (!node->isLeaf()){
-                for (int i = 0; i < 8; ++i) {
-                    updateStreamingRecursive(node->children[i].get(), camPos, camDir);
-                }
-            }
-            return;
-        }
-
-        if (minDistSq > lodDistSq) {
-            ensureLOD(node);
-        } else {
-            ensureLoaded(node, true);
-        }
-        if (!node->isLeaf()) {
-            for (int i = 0; i < 8; ++i) {
-                if (node->children[i]) {
-                    updateStreamingRecursive(node->children[i].get(), camPos, camDir);
-                }
-            }
-        }
-    }
-
     bool removeRecursive(OctreeNode* node, const BoundingBox& bounds, const std::shared_ptr<NodeData>& targetPt) {
         if (!boxIntersectsBox(node->bounds, bounds)) return false;
         ensureLoaded(node, false);
@@ -693,87 +612,6 @@ private:
             }
         }
         return foundAny;
-    }
-
-    void searchNodeRecursive(OctreeNode* node, const PointType& center, float radiusSq, int objectid, 
-                               std::vector<std::shared_ptr<NodeData>>& results, std::unordered_set<std::shared_ptr<NodeData>>& seen) {
-        PointType closestPoint;
-        for (int i = 0; i < Dim; ++i) {
-            closestPoint[i] = std::max(node->bounds.first[i], std::min(center[i], node->bounds.second[i]));
-        }
-        
-        float distSq = (closestPoint - center).squaredNorm();
-        if (distSq > radiusSq) return;
-        
-        ensureLoaded(node, false);
-        
-        for (const auto& pointData : node->points) {
-            if (!pointData->isActive()) continue;
-            
-            float pointDistSq = (pointData->position - center).squaredNorm();
-            if (pointDistSq <= radiusSq && (pointData->objectId == objectid || objectid == -1)) {
-                if (seen.insert(pointData).second) results.emplace_back(pointData);
-            }
-        }
-        
-        if (!node->isLeaf()) {
-            for (const auto& child : node->children) {
-                if (child) searchNodeRecursive(child.get(), center, radiusSq, objectid, results, seen);
-            }
-        }
-    }
-
-    void searchNode(OctreeNode* node, const PointType& center, float radiusSq, int objectid, 
-                               std::vector<std::shared_ptr<NodeData>>& results) {
-        std::unordered_set<std::shared_ptr<NodeData>> seen;
-        searchNodeRecursive(node, center, radiusSq, objectid, results, seen);
-    }
-    
-    void clearNode(OctreeNode* node) {
-        if (!node) return;
-        
-        node->points.clear();
-        node->points.shrink_to_fit();
-        node->lodData = nullptr;
-        node->gasState = EulerianGasState();
-        
-        for (int i = 0; i < 8; ++i) {
-            if (node->children[i]) {
-                clearNode(node->children[i].get());
-                node->children[i].reset(nullptr);
-            }
-        }
-        
-        node->setLeaf(true);
-    }
-
-    void printStatsRecursive(const OctreeNode* node, size_t depth, size_t& totalNodes, size_t& leafNodes, size_t& actualPoints, 
-                            size_t& maxTreeDepth, size_t& maxPointsInLeaf, size_t& minPointsInLeaf, size_t& lodGeneratedNodes, size_t& unloaded) const {
-        if (!node) return;
-        
-        totalNodes++;
-        maxTreeDepth = std::max(maxTreeDepth, depth);
-
-        if (!node->isLoaded()) {
-            unloaded++;
-            return;
-        }
-
-        if (node->lodData) lodGeneratedNodes++;
-        
-        size_t pts = node->points.size();
-        actualPoints += pts;
-
-        if (node->isLeaf()) {
-            leafNodes++;
-            maxPointsInLeaf = std::max(maxPointsInLeaf, pts);
-            minPointsInLeaf = std::min(minPointsInLeaf, pts);
-        } else {
-            for (const auto& child : node->children) {
-                printStatsRecursive(child.get(), depth + 1, totalNodes, leafNodes, actualPoints, 
-                                    maxTreeDepth, maxPointsInLeaf, minPointsInLeaf, lodGeneratedNodes, unloaded);
-            }
-        }
     }
 
     void optimizeRecursive(OctreeNode* node) {
@@ -1076,40 +914,10 @@ private:
     const RenderData* fastVoxelTraverse(const RenderBuffer_<T, IndexType, StoragePath>& buffer, const Ray& ray, float maxDist);
 public:
 
-    void enqueueTask(std::function<void()> task) {
-        {
-            std::lock_guard<std::mutex> lock(taskMutex_);
-            taskQueue_.push(std::move(task));
-        }
-        taskCV_.notify_one();
-    }
 
     void offloadRegions() {
         if (root_) offloadRecursive(root_.get());
     }
-
-    void setAutoOptimize(bool v) { 
-        autoOptimize_.store(v); 
-    }
-
-    void setSkylight(const Eigen::Vector3f& skylight) { 
-        skylight_ = skylight; 
-    }
-
-    Eigen::Vector3f getSkylight() const { 
-        return skylight_; 
-    }
-
-    void setBackgroundColor(const Eigen::Vector3f& color) { 
-        backgroundColor_ = color; 
-        skybox_.setBackground(color.x(), color.y(), color.z(), 1.0f);
-    }
-
-    Eigen::Vector3f getBackgroundColor() const { 
-        return backgroundColor_; 
-    }
-    void setRegionTargetPoints(size_t points) { regionTargetPoints_ = points; }
-    size_t getRegionTargetPoints() const { return regionTargetPoints_; }
 
     void generateLODs() {
         if (!root_) return;
@@ -1335,18 +1143,6 @@ public:
         });
     }
 
-    void updateStreaming(const Camera& cam) {
-        if (streamingQueued_.exchange(true, std::memory_order_acquire)) return;
-        PointType camPos = cam.origin;
-        PointType camDir = cam.direction.normalized();
-        enqueueTask([this, camPos, camDir]() {
-            if (root_) {
-                updateStreamingRecursive(root_.get(), camPos, camDir);
-            }
-            streamingQueued_.store(false, std::memory_order_release);
-        });
-    }
-
     bool save(const std::string& filename) {
         if (!root_) return false;
 
@@ -1473,39 +1269,6 @@ public:
             return true;
         }
         return false;
-    }
-
-    std::vector<std::shared_ptr<NodeData>> findInRadius(const PointType& center, float radius, int objectid = -1) {
-        std::vector<std::shared_ptr<NodeData>> results;
-        if (!root_) return results;
-        
-        float radiusSq = radius * radius;
-        searchNode(root_.get(), center, radiusSq, objectid, results);
-        
-        return results;
-    }
-    
-    void makeObjectFluid(int objectId, float newMass, BodyType newType = BodyType::FLUID) {
-        std::vector<std::shared_ptr<NodeData>> nodes;
-        collectNodesByObjectId(root_.get(), objectId, nodes);
-        
-        auto obj = getOrCreateObject(objectId);
-        PhysicsMaterial_ pmat{newType, newMass};
-        uint16_t newIdx = obj->getOrAddPhysicsMaterial(pmat);
-
-        std::lock_guard<std::mutex> lock(physicsMutex_);
-        for (auto& n : nodes) {
-            PhysicsMaterial_ oldPmat = obj->getPhysicsMaterial(n->physMatIdx);
-            if (oldPmat.type == BodyType::STATIC && newType != BodyType::STATIC) {
-                activePhysicsNodes_.push_back(n);
-            }
-            n->physMatIdx = newIdx;
-        }
-        physicsCollidersDirty_.store(true);
-    }
-
-    void markPhysicsCollidersDirty() {
-        physicsCollidersDirty_.store(true);
     }
 
     std::vector<std::weak_ptr<NodeData>> getWeakNodesByObjectId(int objectId) {
@@ -2011,69 +1774,7 @@ public:
         }
     }
 
-    void printStats(std::ostream& os = std::cout) const {
-        if (!root_) {
-            os << "[Octree Stats] Tree is null/empty." << std::endl;
-            return;
-        }
-
-        size_t totalNodes = 0;
-        size_t leafNodes = 0;
-        size_t actualPoints = 0;
-        size_t maxTreeDepth = 0;
-        size_t maxPointsInLeaf = 0;
-        size_t minPointsInLeaf = std::numeric_limits<size_t>::max();
-        size_t lodGeneratedNodes = 0;
-        size_t unloaded = 0;
-
-        printStatsRecursive(root_.get(), 0, totalNodes, leafNodes, actualPoints, 
-                            maxTreeDepth, maxPointsInLeaf, minPointsInLeaf, lodGeneratedNodes, unloaded);
-
-        if (leafNodes == 0) minPointsInLeaf = 0;
-        double avgPointsPerLeaf = totalNodes > 0 ? (double)actualPoints / totalNodes : 0.0;
-        
-        size_t nodeMem = totalNodes * sizeof(OctreeNode);
-        size_t dataMem = actualPoints * (sizeof(NodeData) + 16); 
-
-        os << "========================================\n";
-        os << "             OCTREE STATS               \n";
-        os << "========================================\n";
-        os << "Config:\n";
-        os << "  Max Depth Allowed : " << maxDepth << "\n";
-        os << "  Max Pts Per Node  : " << maxPointsPerNode << "\n";
-        os << "  LOD Falloff Rate  : " << lodFalloffRate_ << "\n";
-        os << "  LOD Min Distance  : " << lodMinDistance_ << "\n";
-        os << "Structure:\n";
-        os << "  Total Nodes       : " << totalNodes << "\n";
-        os << "  Leaf Nodes        : " << leafNodes << "\n";
-        os << "  Non-Leaf Nodes    : " << (totalNodes - leafNodes) << "\n";
-        os << "  LODs Generated    : " << lodGeneratedNodes << "\n";
-        os << "  Tree Height       : " << maxTreeDepth << "\n";
-        os << "  Unloaded Nodes    : " << unloaded << "\n";
-        os << "Data:\n";
-        os << "  Total Points      : " << size << " (Tracked) / " << actualPoints << " (Counted)\n";
-        os << "  Points/Leaf (Avg) : " << std::fixed << std::setprecision(2) << avgPointsPerLeaf << "\n";
-        os << "  Points/Leaf (Min) : " << minPointsInLeaf << "\n";
-        os << "  Points/Leaf (Max) : " << maxPointsInLeaf << "\n";
-        os << "Bounds:\n";
-        os << "  Min               : [" << root_->bounds.first.transpose() << "]\n";
-        os << "  Max               : [" << root_->bounds.second.transpose() << "]\n";
-        os << "Memory (Approx):\n";
-        os << "  Node Structure    : " << (nodeMem / 1024.0) << " KB\n";
-        os << "  Point Data        : " << (dataMem / 1024.0) << " KB\n";
-        os << "========================================\n" << std::defaultfloat;
-    }
-
     bool empty() const { return size == 0; }
-
-    void clear() {
-        if (root_) {
-            clearNode(root_.get());
-            root_.reset();
-        }
-        
-        size = 0;
-    }
     
     void getLoadedStatsSafe(const OctreeNode* node, size_t& loadedNodes, size_t& loadedPoints) const {
         if (!node) return;
