@@ -535,6 +535,12 @@ public:
         }
     }
 
+    void ensureLOD(OctreeNode* node) {
+        ensureLoaded(node);
+        std::lock_guard<std::shared_mutex> lock(node->nodeMutex);
+        
+    }
+
     void startWorkerThread() {
         setWorkerRunning(true);
         workerThread_ = std::thread([this]() {
@@ -717,8 +723,8 @@ public:
 
         PhysicsMaterial pmat{bType, mass, restitution, density};
         IndexType pIdx = obj->getOrAddPhysicsMaterial(pmat);
-        uint8_t tIdx = obj->getOrAddTransmission(transmission);
-        IndexType colorIdx = obj->getOrAddColorIndex(color);
+        Eigen::Vector4f albedo = Eigen::Vector4f(color.x, color.y, color.z, transmission);
+        IndexType colorIdx = obj->getOrAddColorIndex(albedo);
         auto pointData = std::make_shared<NodeData>(data, pos, visible, colorIdx, size, active, objectId, rIdx, pIdx, tIdx);
 
         PointType relPos = pos - obj->centerPosition;
@@ -759,9 +765,9 @@ public:
 
         PhysicsMaterial pmat{bType, mass, restitution, density};
         IndexType pIdx = obj->getOrAddPhysicsMaterial(pmat);
-        uint8_t tIdx = obj->getOrAddTransmission(transmission);
 
-        IndexType colorIndex = obj->getOrAddColorIndex(color);
+        Eigen::Vector4f albedo = Eigen::Vector4f(color.x, color.y, color.z, transmission);
+        IndexType colorIndex = obj->getOrAddColorIndex(albedo);
 
         int depth = 0;
         OctreeNode* commonNode = getHighestCommonNode(positions, root_.get(), depth);
@@ -1078,26 +1084,6 @@ public:
         node->setLeaf(true);
     }
 //static helpers
-    static uint32_t packRGB9E5(const Eigen::Vector3f& color) {
-        float maxv = color.maxCoeff();
-        int exponent;
-        std::frexp(maxv, &exponent);
-        exponent = std::clamp(exponent, -16, 15);
-        float scale = std::exp2f(-(exponent - 9));
-        uint32_t r = std::round(std::clamp(color.x() * scale, 0.0f, 511.0f));
-        uint32_t g = std::round(std::clamp(color.y() * scale, 0.0f, 511.0f));
-        uint32_t b = std::round(std::clamp(color.z() * scale, 0.0f, 511.0f));
-        return (static_cast<uint32_t>(exponent + 15) << 27) | ((b & 0x1FF) << 18) | ((g & 0x1FF) << 9) | (r & 0x1FF);
-    }
-
-    static Eigen::Vector3f unpackRGB9E5(uint32_t c) {
-        int e = static_cast<int>(c >> 27) - 15;
-        float scale = std::exp2f(e - 9);
-        float r = static_cast<float>((c & 0x1FF)) * scale;
-        float g = static_cast<float>((c >> 9) & 0x1FF) * scale;
-        float b = static_cast<float>((c >> 18) & 0x1FF) * scale;
-        return Eigen::Vector3f(r, g, b);
-    }
 
 //declarations
     void ensureLOD(OctreeNode* node);

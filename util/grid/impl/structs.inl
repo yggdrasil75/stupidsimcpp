@@ -108,6 +108,22 @@ inline void readVec3(std::ifstream& in, Eigen::Vector3f& vec) {
     vec = Eigen::Vector3f(x, y, z);
 }
 
+inline void writeVec4(std::ofstream& out, const Eigen::Vector4f& vec) {
+    writeVal(out, vec.x());
+    writeVal(out, vec.y());
+    writeVal(out, vec.z());
+    writeVal(out, vec.w());
+}
+
+inline void readVec4(std::ifstream& in, Eigen::Vector4f& vec) {
+    float x, y, z;
+    readVal(in, x);
+    readVal(in, y);
+    readVal(in, z);
+    readVal(in, w);
+    vec = Eigen::Vector4f(x, y, z);
+}
+
 inline uint16_t mortonEncodeFatNode(uint8_t x, uint8_t y, uint8_t z) {
 #ifdef SSE
     return _pdep_u32(x, 0x49249) | (_pdep_u32(y, 0x49249) << 1) | (_pdep_u32(z, 0x49249) << 2);
@@ -156,6 +172,16 @@ struct vec3fh {
     }
 };
 
+struct vec4fh {
+    size_t operator()(const Eigen::Vector4f& v) const {
+        size_t h1 = std::hash<float>()(v.x());
+        size_t h2 = std::hash<float>()(v.y());
+        size_t h3 = std::hash<float>()(v.z());
+        size_t h4 = std::hash<float>()(v.w());
+        return h1 ^ (h2 << 1) ^ (h3 << 2) ^ (h4 << 3);
+    }
+};
+
 struct vec3ih {
     size_t operator()(const Eigen::Vector3i& v) const {
         size_t h1 = std::hash<int>()(v.x());
@@ -164,6 +190,27 @@ struct vec3ih {
         return h1 ^ (h2 << 1) ^ (h3 << 2);
     }
 };
+
+static uint32_t packRGB9E5(const Eigen::Vector3f& color) {
+    float maxv = color.maxCoeff();
+    int exponent;
+    std::frexp(maxv, &exponent);
+    exponent = std::clamp(exponent, -16, 15);
+    float scale = std::exp2f(-(exponent - 9));
+    uint32_t r = std::round(std::clamp(color.x() * scale, 0.0f, 511.0f));
+    uint32_t g = std::round(std::clamp(color.y() * scale, 0.0f, 511.0f));
+    uint32_t b = std::round(std::clamp(color.z() * scale, 0.0f, 511.0f));
+    return (static_cast<uint32_t>(exponent + 15) << 27) | ((b & 0x1FF) << 18) | ((g & 0x1FF) << 9) | (r & 0x1FF);
+}
+
+static Eigen::Vector3f unpackRGB9E5(uint32_t c) {
+    int e = static_cast<int>(c >> 27) - 15;
+    float scale = std::exp2f(e - 9);
+    float r = static_cast<float>((c & 0x1FF)) * scale;
+    float g = static_cast<float>((c >> 9) & 0x1FF) * scale;
+    float b = static_cast<float>((c >> 18) & 0x1FF) * scale;
+    return Eigen::Vector3f(r, g, b);
+}
 
 struct Material_ {
     uint32_t chromaticity;
@@ -270,10 +317,8 @@ struct GridObject_ {
     int id;
     std::atomic<uint8_t> flags;
     PointType centerPosition = PointType::Zero();
-    std::vector<Eigen::Vector3f> colorLookup;
-    std::unordered_map<Eigen::Vector3f, IndexType, vec3fh> colorMap;
-    std::vector<float> transmissionTable;
-    std::unordered_map<float, uint8_t> transmissionMap;
+    std::vector<Eigen::Vector4f> colorLookup;
+    std::unordered_map<Eigen::Vector4f, IndexType, vec4fh> colorMap;
     std::vector<Material_> renderMaterials;
     std::vector<ExtendedMaterial_> extendedRenderMaterials;
     std::unordered_map<Material_, IndexType, materialHash> renderMatMap;
@@ -284,12 +329,7 @@ struct GridObject_ {
 
     mesh<IndexType> objMesh;
 
-    GridObject_(int objId = -1) : id(objId), flags(OBJ_ALLOW_PARTIAL_UNLOAD_BIT) {
-        transmissionTable.push_back(0.0f);
-        transmissionMap[0.0f] = 0;
-        transmissionTable.push_back(1.0f);
-        transmissionMap[1.0f] = 1;
-    }
+    GridObject_(int objId = -1) : id(objId), flags(OBJ_ALLOW_PARTIAL_UNLOAD_BIT) { }
 
     bool isPartialUnloadAllowed() const {
         return flags.load(std::memory_order_relaxed) & OBJ_ALLOW_PARTIAL_UNLOAD_BIT;
@@ -300,7 +340,7 @@ struct GridObject_ {
         else flags.fetch_and(~OBJ_ALLOW_PARTIAL_UNLOAD_BIT, std::memory_order_relaxed);
     }
 
-    IndexType getOrAddColorIndex(const Eigen::Vector3f& color) {
+    IndexType getOrAddColorIndex(const Eigen::Vector4f& color) {
         {
             std::shared_lock<std::shared_mutex> readLock(objMutex);
             auto a = colorMap.find(color);
@@ -403,41 +443,7 @@ struct GridObject_ {
         }
     }
 
-    uint8_t getOrAddTransmission(float t) {
-        t = std::clamp(t, 0.0f, 1.0f);
-
-        {
-            std::shared_lock<std::shared_mutex> readLock(objMutex);
-            auto it = transmissionMap.find(t);
-            if (it != transmissionMap.end()) return it->second;
-        }
-
-        {
-            std::unique_lock<std::shared_mutex> writeLock(objMutex);
-            auto it = transmissionMap.find(t);
-            if (it != transmissionMap.end()) return it->second;
-
-            if (transmissionTable.size() < (256 - 2)) {
-                uint8_t idx = static_cast<uint8_t>(2 + transmissionTable.size());
-                transmissionTable.push_back(t);
-                transmissionMap[t] = idx;
-                return idx;
-            }
-        }
-        std::shared_lock<std::shared_mutex> readLock(objMutex);
-        uint8_t best = 2;
-        float bestDist = std::numeric_limits<float>::max();
-        for (size_t i = 0; i < transmissionTable.size(); ++i) {
-            float d = std::abs(transmissionTable[i] - t);
-            if (d < bestDist) {
-                bestDist = d;
-                best = static_cast<uint8_t>(2 + i);
-            }
-        }
-        return best;
-    }
-
-    Eigen::Vector3f getColor(IndexType idx) const {
+    Eigen::Vector4f getColor(IndexType idx) const {
         return colorLookup[idx];
     }
 
@@ -453,10 +459,6 @@ struct GridObject_ {
         return physicsMaterials[idx];
     }
 
-    float getTransmission(uint8_t idx) const {
-        return transmissionTable[idx];
-    }
-
 };
 
 template<typename T, typename IndexType = uint16_t>
@@ -468,14 +470,13 @@ struct NodeData_ {
     IndexType colorIdx;
     IndexType renderMatIdx;
     IndexType physMatIdx;
-    uint8_t transmissionIdx;
     std::atomic<uint8_t> flags;
     PhysicsState_<T, IndexType> physics;
     
     NodeData_(const T& data, const PointType& pos, bool visible, const IndexType colorIdx, float size = 0.01f, bool active = true, IndexType objectId = -1, 
               IndexType rIdx = 0, IndexType pIdx = 0, uint8_t tIdx = 0, bool staticBit = false) : 
                data(data), position(pos), objectId(objectId), size(Eigen::half(size)), colorIdx(colorIdx), renderMatIdx(rIdx),
-               physMatIdx(pIdx), transmissionIdx(tIdx) {
+               physMatIdx(pIdx) {
         setActive(active);
         setVisible(visible);
         setStatic(staticBit);
@@ -743,7 +744,6 @@ struct OctreeNode_ {
             writeVal(out, pt->colorIdx);
             writeVal(out, pt->renderMatIdx);
             writeVal(out, pt->physMatIdx);
-            writeVal(out, pt->transmissionIdx);
         }
 
         if (!isLeaf()) {
@@ -803,7 +803,6 @@ struct OctreeNode_ {
             readVal(in, pt->colorIdx);
             readVal(in, pt->renderMatIdx);
             readVal(in, pt->physMatIdx);
-            readVal(in, pt->transmissionIdx);
             points.push_back(pt);
         }
 
