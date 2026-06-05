@@ -538,7 +538,36 @@ public:
     void ensureLOD(OctreeNode* node) {
         ensureLoaded(node);
         std::lock_guard<std::shared_mutex> lock(node->nodeMutex);
-        
+        // if (node-isEmpty()) return;
+        // if (node->points.size() == 1 && node->isLeaf()) {
+        //     node->lodData = node->points[0];
+        // }
+        // std::shared_ptr<GridObject> lodObj = getOrCreateObject(3);
+        // if (!node->points.empty()) {
+        //     auto lod = std::make_shared<NodeData>();
+        //     Eigen::Vector3f averagePosition = node->center;
+        //     Eigen::Vector3f avgEmittance = Eigen::Vector3f::Zero();
+        //     Eigen::Vector3f avgAbsorption = Eigen::Vector3f::Zero();
+        //     float averageRoughness = 0;
+        //     float averageReflective = 0;
+        //     float averageIOR = 0;
+            
+        //     double totalSize = 0;
+        //     for (const auto& pt : points) {
+        //         if (!pt->isActiveAndVisible()) continue;
+        //         std::shared_ptr<GridObject> tempObj = getObject(pt->objectId);
+        //         averagePosition += pt->position * pt->size;
+        //         totalSize += pt->size;
+        //         Material rmat = tempObj->getRenderMaterial(pt->rIdx);
+        //         avgEmittance += unpackRGB9E5(rmat.chromaticity);
+        //         avgAbsorption += unpackRGB9E5(rmat.absorption);
+        //         averageRoughness += rmat.roughness;
+        //         averageReflective += rmat.reflective;
+        //         averageIOR += rmat.ior;
+        //     }
+        //     averagePosition = averagePosition / totalSize;
+        // }
+        ///TODO: put the lod generation in the object instead?
     }
 
     void startWorkerThread() {
@@ -669,7 +698,7 @@ public:
 
 //setters
     std::shared_ptr<GridObject> getOrCreateObject(int id) {
-        // 0 is "common junk", -1 is next, 1 is immobile terrain, and 2 is mobile terrain (water, topsoil)
+        // 0 is "common junk", -1 is next, 1 is immobile terrain, and 2 is mobile terrain (water, topsoil), 3 is lod
         if (id < 0) {
             id = nextObjId++;
         }
@@ -1086,7 +1115,6 @@ public:
 //static helpers
 
 //declarations
-    void ensureLOD(OctreeNode* node);
     void invalidateLODForPoint(const std::shared_ptr<NodeData>& n);
     void collectNodesByObjectId(OctreeNode* node, int objectId, std::vector<std::shared_ptr<NodeData>>& nodes) const;
     size_t removeObjectRecursive(OctreeNode* node, int objectId);
