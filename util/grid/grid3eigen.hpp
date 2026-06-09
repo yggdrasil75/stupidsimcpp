@@ -1217,6 +1217,7 @@ public:
         if (isQueueStreaming()) return;
         PointType camPos = cam.origin;
         PointType camDir = cam.direction;
+        setQueueStreaming(true);
         enqueueTask([this, camPos, camDir]() {
             updateStreamingRecursive(root_.get(), camPos, camDir);
             setQueueStreaming(false);
@@ -1286,7 +1287,14 @@ public:
         node->points.clear();
         node->points.shrink_to_fit();
         node->lodData = nullptr;
-        
+        if (node->isFat()) {
+            for (int i = 0; i < 65536; ++i) {
+                if (node->children[i]) {
+                    clearNode(node->children[i].get());
+                    node->children[i].reset(nullptr);
+                }
+            }
+        }
         for (int i = 0; i < 8; ++i) {
             if (node->children[i]) {
                 clearNode(node->children[i].get());
