@@ -551,26 +551,6 @@ private:
         }
     }
 
-    void loadSubtreeRecursive(OctreeNode* node) {
-        if (!node) return;
-        ensureLoaded(node, true);
-        if (!node->isLeaf()) {
-            for (int i = 0; i < 8; ++i) {
-                loadSubtreeRecursive(node->children[i].get());
-            }
-        }
-    }
-
-    void loadAndLodSubtreeRecursive(OctreeNode* node) {
-        if (!node) return;
-        ensureLOD(node);
-        if (!node->isLeaf()) {
-            for (int i = 0; i < 8; ++i) {
-                loadAndLodSubtreeRecursive(node->children[i].get());
-            }
-        }
-    }
-
     bool removeRecursive(OctreeNode* node, const BoundingBox& bounds, const std::shared_ptr<NodeData>& targetPt) {
         if (!boxIntersectsBox(node->bounds, bounds)) return false;
         ensureLoaded(node, false);
@@ -612,77 +592,6 @@ private:
             }
         }
         return foundAny;
-    }
-
-    void optimizeRecursive(OctreeNode* node) {
-        if (!node) return;
-        if (!node->isLoaded()) return; 
-
-        if (node->isLeaf()) {
-            return;
-        }
-
-        std::array<OctreeNode*, 8> safeChildren = {nullptr};
-        {
-            std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
-            for (int i = 0; i < 8; ++i) safeChildren[i] = node->children[i].get();
-        }
-
-        for (int i = 0; i < 8; ++i) {
-            if (safeChildren[i]) {
-                optimizeRecursive(safeChildren[i]);
-            }
-        }
-
-        bool childrenAreLeaves = true;
-        {
-            std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
-            for (int i = 0; i < 8; ++i) {
-                if (node->children[i] && !node->children[i]->isLeaf()) {
-                    childrenAreLeaves = false;
-                    break;
-                }
-            }
-        }
-
-        if (childrenAreLeaves) {
-            std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
-            bool stillLeaves = true;
-            for (int i = 0; i < 8; ++i) {
-                if (node->children[i] && !node->children[i]->isLeaf()) {
-                    stillLeaves = false;
-                    break;
-                }
-            }
-            
-            if (stillLeaves) {
-                std::vector<std::shared_ptr<NodeData>> allPoints = node->points;
-                for (int i = 0; i < 8; ++i) {
-                    if (node->children[i]) {
-                        std::shared_lock<std::shared_mutex> childLock(node->children[i]->nodeMutex);
-                        allPoints.insert(allPoints.end(), node->children[i]->points.begin(), node->children[i]->points.end());
-                    }
-                }
-
-                std::sort(allPoints.begin(), allPoints.end(), [](const std::shared_ptr<NodeData>& a, const std::shared_ptr<NodeData>& b) {
-                    return a.get() < b.get();
-                });
-                allPoints.erase(std::unique(allPoints.begin(), allPoints.end(), [](const std::shared_ptr<NodeData>& a, const std::shared_ptr<NodeData>& b) {
-                    return a.get() == b.get();
-                }), allPoints.end());
-
-                if (allPoints.size() <= maxPointsPerNode) {
-                    node->points = std::move(allPoints);
-                    for (int i = 0; i < 8; ++i) {
-                        node->children[i].reset(nullptr);
-                    }
-                    node->setLeaf(true);
-                    node->setDirty(true);
-                    
-                    node->lodData = nullptr;
-                }
-            }
-        }
     }
 
     void offloadRecursive(OctreeNode* node) {
@@ -779,34 +688,6 @@ private:
         normal[minAxis] = sign;
         return true;
     }
-
-    void collectNodesByObjectIdRecursive(OctreeNode* node, int id,
-          std::vector<std::shared_ptr<NodeData>>& results,
-          std::unordered_set<std::shared_ptr<NodeData>>& seen) {
-        if (!node) return;
-        ensureLoaded(node);
-        
-        for (const auto& pt : node->points) {
-            if (pt->isActive() && (id == -1 || pt->objectId == id)) {
-                if (seen.insert(pt).second) {
-                    results.push_back(pt);
-                }
-            }
-        }
-        if (!node->isLeaf()) {
-            for (const auto& child : node->children) {
-                if (child) {
-                    collectNodesByObjectIdRecursive(child.get(), id, results, seen);
-                }
-            }
-        }
-    }
-
-    void collectNodesByObjectId(OctreeNode* node, int id, std::vector<std::shared_ptr<NodeData>>& results) {
-        std::unordered_set<std::shared_ptr<NodeData>> seen;
-        collectNodesByObjectIdRecursive(node, id, results, seen);
-    }
-
     bool raycastRecursive(OctreeNode* node, const Ray& ray, float tMin, float tMax, float& maxDist, RayHit& hit, const std::shared_ptr<NodeData>& ignoreNode, bool hitOnlySolid, bool resolvePenetration, const std::unordered_map<int, std::shared_ptr<GridObject>>& localObjects) {
         if (!node->isLoaded()) {
             ensureLoaded(node, true);

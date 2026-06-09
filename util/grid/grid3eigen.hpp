@@ -1,5 +1,16 @@
 #ifndef g3eigen
 #define g3eigen
+#include <atomic>
+#include <condition_variable>
+#include <functional>
+#include <map>
+#include <mutex>
+#include <queue>
+#include <shared_mutex>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <vector>
 
 #include "../../eigen/Eigen/Dense"
 #include "../timing_decorator.hpp"
@@ -171,17 +182,19 @@ public:
 
 //recursives
     OctreeNode* getHighestCommonNodeRecursive(const PointType& Min, const PointType& Max, OctreeNode* current, int& depth) const {
+        depth++;
         if (current->isFat()) {
             uint16_t mcell = getFatCellIndex(Min, current);
             if (mcell == getFatCellIndex(Max, current) && current->children[mcell]) {
-                return getHighestCommonNodeRecursive(Min, Max, current->children[mcell].get(), depth + 1);
+                return getHighestCommonNodeRecursive(Min, Max, current->children[mcell].get(), depth);
             }
         } else {
             uint8_t mcell = getOctant(Min, current->center);
             if (mcell == getOctant(Max, current->center) && current->children[mcell]) {
-                return getHighestCommonNodeRecursive(Min, Max, current->children[mcell].get(), depth + 1);
+                return getHighestCommonNodeRecursive(Min, Max, current->children[mcell].get(), depth);
             }
         }
+        depth--;
         return current;
     }
 
@@ -263,8 +276,8 @@ public:
             node->lodData = nullptr;
         }
 
+        std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
         if (node->isLeaf()) {
-            std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
             node->points.emplace_back(pointData);
             if (node->points.size() > maxPointsPerNode) {
                 splitNodeRecursive(node, depth);
@@ -272,6 +285,7 @@ public:
             node->setDirty(true);
             return true;
         } else {
+            lock.unlock();
             bool insertedInChild = false;
             OctreeNode* targetChild = nullptr;
             
@@ -418,8 +432,14 @@ public:
                 return;
             }
             if (!node->isLeaf()){
-                for (int i = 0; i < 8; ++i) {
-                    updateStreamingRecursive(node->children[i].get(), camPos, camDir);
+                if (node->isFat()) {
+                    for (int i = 0; i < 65536; ++i) {
+                        updateStreamingRecursive(node->children[i].get(), camPos, camDir);
+                    }
+                } else {
+                    for (int i = 0; i < 8; ++i) {
+                        updateStreamingRecursive(node->children[i].get(), camPos, camDir);
+                    }
                 }
             }
             return;
@@ -440,7 +460,7 @@ public:
     }
 
     void printStatsRecursive(const OctreeNode* node, size_t depth, size_t& totalNodes, size_t& leafNodes, size_t& actualPoints,
-                             size_t& maxTreeDepth, size_t& maxPointsInLeaf, size_t& minPointsInLeaf, size_t& lodGeneratedNodes, size_t& unloaded) {
+                             size_t& maxTreeDepth, size_t& maxPointsInLeaf, size_t& minPointsInLeaf, size_t& lodGeneratedNodes, size_t& unloaded) const {
         if (!node) return;
 
         totalNodes++;
@@ -466,6 +486,118 @@ public:
             }
         }
     }
+
+    void loadSubtreeRecursive(OctreeNode* node) {
+        if (!node) return;
+        ensureLoaded(node, true);
+        if (!node->isLeaf()) {
+            for (int i = 0; i < 8; ++i) {
+                loadSubtreeRecursive(node->children[i].get());
+            }
+        }
+    }
+
+    void loadAndLodSubtreeRecursive(OctreeNode* node) {
+        if (!node) return;
+        ensureLOD(node);
+        if (!node->isLeaf()) {
+            for (int i = 0; i < 8; ++i) {
+                loadAndLodSubtreeRecursive(node->children[i].get());
+            }
+        }
+    }
+
+    void optimizeRecursive(OctreeNode* node) {
+        if (!node) return;
+        if (!node->isLoaded() || node->isLeaf()) return;
+
+        if (node->isFat()) {
+            std::array<OctreeNode*, 65536> safeChildren = {nullptr};
+            {
+                std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
+                for (int i = 0; i < 65536; ++i) safeChildren[i] = node->children[i].get();
+            }
+
+            for (auto sc : safeChildren) {
+                optimizeRecursive(sc);
+            }
+
+            bool childrenAreLeaves = true;
+            {
+                std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
+                for (auto sc : safeChildren) {
+                    if (sc && !sc->isLeaf()) {
+                        childrenAreLeaves = false;
+                        break;
+                    }
+                }
+            }
+
+            if (childrenAreLeaves) {
+                std::vector<std::shared_ptr<NodeData>> allPoints = node->points;
+                for (auto sc : safeChildren) {
+                    if (sc) {
+                        std::shared_lock<std::shared_mutex> childLock(sc->nodeMutex);
+                        allPoints.insert(allPoints.end(), sc->points.begin(), sc->points.end());
+                    }
+                }
+
+                if (allPoints.size() <= maxPointsPerNode) {
+                    node->points = std::move(allPoints);
+                    for (int i = 0; i < 65536; ++i) {
+                        node->children[i].reset();
+                    }
+                    node->setLeaf(true);
+                    node->setDirty(true);
+                    
+                    node->lodData = nullptr;
+                }
+            }
+        } else {
+            std::array<OctreeNode*, 8> safeChildren = {nullptr};
+            {
+                std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
+                for (int i = 0; i < 8; ++i) safeChildren[i] = node->children[i].get();
+            }
+
+            for (auto sc : safeChildren) {
+                optimizeRecursive(sc);
+            }
+
+            bool childrenAreLeaves = true;
+            {
+                std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
+                for (auto sc : safeChildren) {
+                    if (sc && !sc->isLeaf()) {
+                        childrenAreLeaves = false;
+                        break;
+                    }
+                }
+            }
+
+            if (childrenAreLeaves) {
+                std::vector<std::shared_ptr<NodeData>> allPoints = node->points;
+                for (auto sc : safeChildren) {
+                    if (sc) {
+                        std::shared_lock<std::shared_mutex> childLock(sc->nodeMutex);
+                        allPoints.insert(allPoints.end(), sc->points.begin(), sc->points.end());
+                    }
+                }
+
+                if (allPoints.size() <= maxPointsPerNode) {
+                    node->points = std::move(allPoints);
+                    for (int i = 0; i < 8; ++i) {
+                        node->children[i].reset();
+                    }
+                    node->setLeaf(true);
+                    node->setDirty(true);
+                    
+                    node->lodData = nullptr;
+                }
+            }
+        }
+    }
+
 //tasks
     void enqueueTask(std::function<void()> task) {
         {
@@ -487,7 +619,7 @@ public:
             {
                 std::shared_lock<std::shared_mutex> nlock(node->nodeMutex);
                 if (node->isLoaded() && node->isSaveQueued() && node->isDirty()) {
-                    node->saveRegion();
+                    node->saveRegion(regionTargetPoints_, StoragePath);
                 }
             }
             node->offload();
@@ -752,9 +884,9 @@ public:
 
         PhysicsMaterial pmat{bType, mass, restitution, density};
         IndexType pIdx = obj->getOrAddPhysicsMaterial(pmat);
-        Eigen::Vector4f albedo = Eigen::Vector4f(color.x, color.y, color.z, transmission);
+        Eigen::Vector4f albedo = Eigen::Vector4f(color.x(), color.y(), color.z(), transmission);
         IndexType colorIdx = obj->getOrAddColorIndex(albedo);
-        auto pointData = std::make_shared<NodeData>(data, pos, visible, colorIdx, size, active, objectId, rIdx, pIdx, tIdx);
+        auto pointData = std::make_shared<NodeData>(data, pos, visible, colorIdx, size, active, objectId, rIdx, pIdx);
 
         PointType relPos = pos - obj->centerPosition;
         {
@@ -795,7 +927,7 @@ public:
         PhysicsMaterial pmat{bType, mass, restitution, density};
         IndexType pIdx = obj->getOrAddPhysicsMaterial(pmat);
 
-        Eigen::Vector4f albedo = Eigen::Vector4f(color.x, color.y, color.z, transmission);
+        Eigen::Vector4f albedo = Eigen::Vector4f(color.x(), color.y(), color.z(), transmission);
         IndexType colorIndex = obj->getOrAddColorIndex(albedo);
 
         int depth = 0;
@@ -803,7 +935,7 @@ public:
         bool anyFailed = false;
         
         for (const auto& pos : positions) {
-            auto pointData = std::make_shared<NodeData>(data, pos, visible, colorIndex, size, active, objectId, rIdx, pIdx, tIdx);
+            auto pointData = std::make_shared<NodeData>(data, pos, visible, colorIndex, size, active, objectId, rIdx, pIdx);
             
             PointType relPos = pos - obj->centerPosition;
             {
@@ -859,6 +991,19 @@ public:
         return regionTargetPoints_;
     }
 
+    void setMaterialByObjectId(int objectId, Eigen::Vector3f chromaticity, float roughness, float reflective, float ior, Eigen::Vector3f absorption) {
+        auto obj = getOrCreateObject(objectId);
+        {
+            std::unique_lock<std::shared_mutex> lock(obj->objMutex);
+            Material newmat = Material({packRGB9E5(chromaticity), roughness, reflective, ior, packRGB9E5(absorption)});
+            IndexType id = obj->getOrAddRenderMaterial(newmat);
+            std::vector<std::shared_ptr<NodeData>> points;
+            collectPointsByObjectId(objectId, points);
+            for (auto& pt : points) {
+                pt->renderMatIdx = id;
+            }
+        }
+    }
 
 //getters
     std::shared_ptr<GridObject> getObject(int id) const {
@@ -901,7 +1046,8 @@ public:
         std::vector<std::shared_ptr<NodeData>> results;
         
         float radiusSq = radius * radius;
-        OctreeNode* startingPoint = getHighestCommonNodeRecursive(center - PointType::Constant(radius), center + PointType::Constant(radius), root_.get(), 0);
+        int depth = 0;
+        OctreeNode* startingPoint = getHighestCommonNodeRecursive(center - PointType::Constant(radius), center + PointType::Constant(radius), root_.get(), depth);
         searchNodeRecursive(startingPoint, center, radiusSq, objectid, results);
         
         return results;
@@ -959,6 +1105,34 @@ public:
         os << "  Point Data        : " << (dataMem / 1024.0) << " KB\n";
         os << "========================================\n" << std::defaultfloat;
     }
+    
+    void collectPointsByObjectId(int id, std::vector<std::shared_ptr<NodeData>>& results) {
+        auto obj = getObject(id);
+        if (!obj) return;
+        
+        std::vector<PointType> absolutePositions;
+        {
+            std::shared_lock<std::shared_mutex> lock(obj->objMutex);
+            if (obj->relativeVoxels.empty()) return;
+            
+            absolutePositions.reserve(obj->relativeVoxels.size());
+            for (const auto& relPos : obj->relativeVoxels) {
+                absolutePositions.push_back(obj->centerPosition + relPos);
+            }
+        }
+        int depth = 0;
+        OctreeNode* commonNode = getHighestCommonNode(absolutePositions, root_.get(), depth);
+        results.reserve(absolutePositions.size());
+        
+        for (const auto& absPos : absolutePositions) {
+            auto pt = find(absPos, id, EPSILON, commonNode);
+            
+            if (pt && pt->isActive()) {
+                results.push_back(pt);
+            }
+        }
+    }
+
 //updates
     bool updateRenderMaterial(int objectId, IndexType index, const Material& mat) {
         auto obj = getObject(objectId);
@@ -969,7 +1143,7 @@ public:
             obj->renderMaterials[index] = mat;
         }
         std::vector<std::shared_ptr<NodeData>> nodes;
-        collectNodesByObjectId(root_.get(), objectId, nodes);
+        collectPointsByObjectId(objectId, nodes);
         for (auto& n : nodes) invalidateLODForPoint(n);
         return true;
     }
@@ -994,7 +1168,7 @@ public:
         }
 
         std::vector<std::shared_ptr<NodeData>> voxels;
-        collectNodesByObjectId(root_.get(), objectId, voxels);
+        collectPointsByObjectId(objectId, voxels);
 
         voxels.erase(std::remove_if(voxels.begin(), voxels.end(), [](const std::shared_ptr<NodeData>& p) { return !p->isVisible(); }),
             voxels.end());
@@ -1051,7 +1225,7 @@ public:
     
     void makeObjectFluid(int objectId, float newMass = -1, BodyType newType = BodyType::FLUID) {
         std::vector<std::shared_ptr<NodeData>> nodes;
-        collectNodesByObjectId(root_.get(), objectId, nodes);
+        collectPointsByObjectId(objectId, nodes);
         
         auto obj = getOrCreateObject(objectId);
         PhysicsMaterial_ pmat{newType, newMass, 1.0, 1.0};
@@ -1068,10 +1242,20 @@ public:
             n->physMatIdx = newIdx;
         }
     }
+
+    void generateLODs() {
+        if (!root_) return;
+        ensureLOD(root_.get());
+    }
+
+    void optimize() {
+        optimizeRecursive(root_.get());
+        generateLODs();
+    }
 //removals
     bool removeObject(int objectId) {
         std::vector<std::shared_ptr<NodeData>> nodes;
-        collectNodesByObjectId(root_.get(), objectId, nodes);
+        collectPointsByObjectId(objectId, nodes);
         if (nodes.empty()) return false;
 
         int depth = 0;
@@ -1090,7 +1274,7 @@ public:
     void clear() {
         if (root_) {
             clearNode(root_.get());
-            root_.reset();
+            // root_.reset();
         }
 
         size = 0;
@@ -1116,9 +1300,7 @@ public:
 
 //declarations
     void invalidateLODForPoint(const std::shared_ptr<NodeData>& n);
-    void collectNodesByObjectId(OctreeNode* node, int objectId, std::vector<std::shared_ptr<NodeData>>& nodes) const;
     size_t removeObjectRecursive(OctreeNode* node, int objectId);
-    void optimize();
     frame fastRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB);
     frame blendedRenderFrameVulkan(const Camera& cam, int height, int width, float pbrScale = 0.5f,
                 frame::colormap colorformat = frame::colormap::RGB, int samplesPerPixel = 1,

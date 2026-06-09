@@ -32,7 +32,7 @@ void createBox(Grid::Octree<int>& octree, const Eigen::Vector3f& center, const E
         for (float y = minB.y(); y <= maxB.y(); y += step) {
             for (float z = minB.z(); z <= maxB.z(); z += step) {
                 Eigen::Vector3f pos(x + jitter(rng), y + jitter(rng), z + jitter(rng));
-                Vector3f emittance = albedo * emission;
+                Eigen::Vector3f emittance = albedo * emission;
                 
                 octree.insert(1, pos, albedo, true, step, true, oid, emittance, roughness, metallic, transmission, ior, absorp, bType, mass);
             }
@@ -334,7 +334,7 @@ int main() {
     int fluidframeCounter = 0;
     int framesPerView = totalFluidFrames / views.size();
 
-    std::vector<Grid::Octree<int>::NodeData> trackedWater = octree.collectNodesByObjectId(5);
+    // std::vector<Grid::Octree<int>::NodeData> trackedWater = octree.collectNodesByObjectId(5);
 
     Camera cam;
     cam.fov = 100;
@@ -361,7 +361,7 @@ int main() {
                         
                         if (event.isMoltenMetal) {
                             // Make metals glow slightly when molten and adjust PBR values
-                            octree.setMaterialByObjectId(event.objectId, 1.5f, 0.2f, 1.0f);
+                            octree.setMaterialByObjectId(event.objectId, Eigen::Vector3f::Constant(1.5f), 0.2f, 1.0f, 1.45f, Eigen::Vector3f::Zero());
                         }
                     // }
                 }

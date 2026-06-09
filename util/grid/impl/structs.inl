@@ -9,6 +9,9 @@
 #include <mutex>
 #include <type_traits>
 #include <filesystem>
+#include <atomic>
+#include <limits>
+#include <unordered_map>
 
 namespace Grid{
 
@@ -116,12 +119,12 @@ inline void writeVec4(std::ofstream& out, const Eigen::Vector4f& vec) {
 }
 
 inline void readVec4(std::ifstream& in, Eigen::Vector4f& vec) {
-    float x, y, z;
+    float x, y, z, w;
     readVal(in, x);
     readVal(in, y);
     readVal(in, z);
     readVal(in, w);
-    vec = Eigen::Vector4f(x, y, z);
+    vec = Eigen::Vector4f(x, y, z, w);
 }
 
 inline uint16_t mortonEncodeFatNode(uint8_t x, uint8_t y, uint8_t z) {
@@ -258,6 +261,12 @@ struct ExtendedMaterial_ {
     float dispersionB = 0.0f;
     Eigen::Vector3f emissionPeak = Eigen::Vector3f::Zero();
     Eigen::Vector3f emissionBandwidth = Eigen::Vector3f::Zero();
+    ///TODO: determine if I want these SSS related things.
+    // float clearcoat = 0.0f;
+    // float clearcoatRoughness = 0.0f;
+    // float sheen = 0.0f;
+    // float anisotropy = 0.0f;
+    // float anisotropyRotation = 0.0f;
 };
 
 struct PhysicsMaterial_ {
@@ -473,10 +482,11 @@ struct NodeData_ {
     std::atomic<uint8_t> flags;
     PhysicsState_<T, IndexType> physics;
     
+    NodeData_() : flags(0) {}
     NodeData_(const T& data, const PointType& pos, bool visible, const IndexType colorIdx, float size = 0.01f, bool active = true, IndexType objectId = -1, 
-              IndexType rIdx = 0, IndexType pIdx = 0, uint8_t tIdx = 0, bool staticBit = false) : 
+              IndexType rIdx = 0, IndexType pIdx = 0, bool staticBit = false) : 
                data(data), position(pos), objectId(objectId), size(Eigen::half(size)), colorIdx(colorIdx), renderMatIdx(rIdx),
-               physMatIdx(pIdx) {
+               physMatIdx(pIdx), flags(0) {
         setActive(active);
         setVisible(visible);
         setStatic(staticBit);
@@ -625,7 +635,7 @@ struct OctreeNode_ {
     BoundingBox bounds() const {
         float halfsize = static_cast<float>(nodeSize) * 0.5f;
         PointType hs = PointType::Constant(halfsize);
-        return BoundingBox(center - hs, center + hs);
+        return BoundingBox({center - hs, center + hs});
     }
 
     bool isEmpty() const {
@@ -639,7 +649,7 @@ struct OctreeNode_ {
         return true;
     }
 
-    std::ostringstream getRegionName(const PointType& parentCenter) const {
+    std::string getRegionName(const PointType& parentCenter) const {
         std::ostringstream oss;
         if (!isFat()) {
             oss << static_cast<int>(Grid::getOctant(center, parentCenter));
@@ -650,7 +660,7 @@ struct OctreeNode_ {
             uint8_t z = static_cast<uint8_t>(std::clamp((center[2] - parentCenter[2]) / step, 0.0f, 31.0f));
             oss << mortonEncodeFatNode(x, y, z);
         }
-        return oss;
+        return oss.str();
     }
 
     std::string getRegionPath(const std::string& storagePath, const PointType* parentCenter = nullptr) const {
@@ -751,7 +761,7 @@ struct OctreeNode_ {
                 uint16_t activeChildren = 0;
                 for (int i = 0; i < 65536; ++i) if (children[i]) activeChildren++;
                 writeVal(out, activeChildren);
-                for (uint16_t i = 0; i < 65536; ++i) {
+                for (int i = 0; i < 65536; ++i) {
                     if (children[i]) {
                         writeVal(out, i);
                         children[i]->serializeSubtree(out);
