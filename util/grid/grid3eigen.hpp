@@ -931,8 +931,8 @@ public:
 
     bool insert(const T& data, const PointType& pos, Eigen::Vector3f color, bool visible = true, float size = 0.01f, bool active = true, int objectId = -1,
                 Eigen::Vector3f emittance = Eigen::Vector3f::Zero(), float roughness = 1.0f, float reflective = 0.0f, float transmission = 0.0f, float ior = 1.45f, 
-                Eigen::Vector3f absorption = Eigen::Vector3f::Zero(), BodyType bType = BodyType::STATIC, float mass = 1.0f, float restitution = 1.0f, float density = 1.0f) {
-        return insert(data, pos, color, visible, size, active, objectId, packRGB9E5(emittance), roughness, reflective, transmission, ior, packRGB9E5(absorption), bType, mass, restitution, density);
+                Eigen::Vector3f absorption = Eigen::Vector3f::Zero(), BodyType bType = BodyType::STATIC, float mass = 1.0f, float restitution = 1.0f, float density = 1.0f, bool staticb = false) {
+        return insert(data, pos, color, visible, size, active, objectId, packRGB9E5(emittance), roughness, reflective, transmission, ior, packRGB9E5(absorption), bType, mass, restitution, density, staticb);
     }
     
     bool bulkInsert(const T& data, std::vector<PointType> positions, Eigen::Vector3f color, bool visible = true, float size = 0.01f, bool active = true, int objectId = -1,
@@ -1349,7 +1349,87 @@ public:
     }
 //static helpers
 
+    bool rayBoxIntersect(const Ray& ray, const BoundingBox& box, float& tMin, float& tMax) const {
+        float tx1 = (box.first[0] - ray.origin[0]) * ray.invDir[0];
+        float tx2 = (box.second[0] - ray.origin[0]) * ray.invDir[0];
+
+        tMin = std::min(tx1, tx2);
+        tMax = std::max(tx1, tx2);
+
+        float ty1 = (box.first[1] - ray.origin[1]) * ray.invDir[1];
+        float ty2 = (box.second[1] - ray.origin[1]) * ray.invDir[1];
+
+        tMin = std::max(tMin, std::min(ty1, ty2));
+        tMax = std::min(tMax, std::max(ty1, ty2));
+
+        float tz1 = (box.first[2] - ray.origin[2]) * ray.invDir[2];
+        float tz2 = (box.second[2] - ray.origin[2]) * ray.invDir[2];
+
+        tMin = std::max(tMin, std::min(tz1, tz2));
+        tMax = std::min(tMax, std::max(tz1, tz2));
+
+        return tMax >= std::max(0.0f, tMin);
+    }
+
+    bool rayCubeIntersect(const Ray& ray, const BoundingBox& box, float& t, PointType& normal) {
+        float t0x = (box.first[0] - ray.origin[0]) * ray.invDir[0];
+        float t1x = (box.second[0] - ray.origin[0]) * ray.invDir[0];
+        if (ray.invDir[0] < 0.0f) std::swap(t0x, t1x);
+
+        float t0y = (box.first[1] - ray.origin[1]) * ray.invDir[1];
+        float t1y = (box.second[1] - ray.origin[1]) * ray.invDir[1];
+        if (ray.invDir[1] < 0.0f) std::swap(t0y, t1y);
+
+        float t0z = (box.first[2] - ray.origin[2]) * ray.invDir[2];
+        float t1z = (box.second[2] - ray.origin[2]) * ray.invDir[2];
+        if (ray.invDir[2] < 0.0f) std::swap(t0z, t1z);
+
+        float tMin = std::max({t0x, t0y, t0z});
+        float tMax = std::min({t1x, t1y, t1z});
+
+        if (tMax < std::max(0.0f, tMin) || tMax < 0.0f) {
+            return false;
+        }
+
+        t = tMin < 0.0f ? tMax : tMin;
+        
+        pointType hitPoint = ray.origin + ray.dir * t;
+        
+        PointType dMin = (hitPoint - box.first).cwiseAbs();
+        PointType dMax = (hitPoint - box.second).cwiseAbs();
+        
+        float minDist = std::numeric_limits<float>::max();
+        int minAxis = 0;
+        float sign = 1.0f;
+
+        for (int i = 0; i < Dim; ++i) {
+            if (dMin[i] < minDist) {
+                minDist = dMin[i];
+                minAxis = i;
+                sign = -1.0f;
+            }
+            if (dMax[i] < minDist) {
+                minDist = dMax[i];
+                minAxis = i;
+                sign = 1.0f;
+            }
+        }
+        
+        normal = PointType::Zero();
+        normal[minAxis] = sign;
+        return true;
+    }
+
+    inline float edgeFn(float ax, float ay, float bx, float by, float px, float py) {
+        return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
+    }
+
 //declarations
+    RasterBuffers softwareRasterize(const Camera& cam, int height, int width, uint8_t passFlags);
+    frame renderDepthMap(const Camera& cam, int height, int width);
+    frame renderNormalMap(const Camera& cam, int height, int width);
+    std::vector<int> renderObjectMap(const Camera& cam, int height, int width);
+
     void invalidateLODForPoint(const std::shared_ptr<NodeData>& n);
     size_t removeObjectRecursive(OctreeNode* node, int objectId);
     frame fastRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB);
@@ -1360,7 +1440,6 @@ public:
     frame renderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB,
         int samplesPerPixel = 2, int maxBounces = 4, bool globalIllumination = false, bool useLod = true);
     void stepPhysics(float dt);
-
 
 };
 

@@ -296,22 +296,6 @@ public:
         skybox_.bakeBody(id);
     }
 private:
-    
-    struct Ray {
-        PointType origin;
-        PointType dir;
-        PointType invDir;
-        uint8_t sign[3];
-        uint8_t signMask;
-        Ray(const PointType& orig, const PointType& dir) : origin(orig), dir(dir) {
-            invDir = dir.cwiseInverse();
-            sign[0] = (invDir[0] < 0);
-            sign[1] = (invDir[1] < 0);
-            sign[2] = (invDir[2] < 0);
-            signMask = (sign[0] | sign[1] << 1 | sign[2] << 2);
-        }
-    };
-
     bool invalidateNodeLODRecursive(OctreeNode* node, const BoundingBox& bounds) {
         if (!boxIntersectsBox(node->bounds, bounds)) return false;
         ensureLoaded(node);
@@ -616,78 +600,6 @@ private:
         }
     }
 
-    bool rayBoxIntersect(const Ray& ray, const BoundingBox& box, float& tMin, float& tMax) const {
-        float tx1 = (box.first[0] - ray.origin[0]) * ray.invDir[0];
-        float tx2 = (box.second[0] - ray.origin[0]) * ray.invDir[0];
-
-        tMin = std::min(tx1, tx2);
-        tMax = std::max(tx1, tx2);
-
-        float ty1 = (box.first[1] - ray.origin[1]) * ray.invDir[1];
-        float ty2 = (box.second[1] - ray.origin[1]) * ray.invDir[1];
-
-        tMin = std::max(tMin, std::min(ty1, ty2));
-        tMax = std::min(tMax, std::max(ty1, ty2));
-
-        float tz1 = (box.first[2] - ray.origin[2]) * ray.invDir[2];
-        float tz2 = (box.second[2] - ray.origin[2]) * ray.invDir[2];
-
-        tMin = std::max(tMin, std::min(tz1, tz2));
-        tMax = std::min(tMax, std::max(tz1, tz2));
-
-        return tMax >= std::max(0.0f, tMin);
-    }
-
-    bool rayCubeIntersect(const Ray& ray, const RenderData* cube, float& t, PointType& normal, PointType& hitPoint, float* tExit = nullptr) const {
-        float t0x = (cube->boundsMin[0] - ray.origin[0]) * ray.invDir[0];
-        float t1x = (cube->boundsMax[0] - ray.origin[0]) * ray.invDir[0];
-        if (ray.invDir[0] < 0.0f) std::swap(t0x, t1x);
-
-        float t0y = (cube->boundsMin[1] - ray.origin[1]) * ray.invDir[1];
-        float t1y = (cube->boundsMax[1] - ray.origin[1]) * ray.invDir[1];
-        if (ray.invDir[1] < 0.0f) std::swap(t0y, t1y);
-
-        float t0z = (cube->boundsMin[2] - ray.origin[2]) * ray.invDir[2];
-        float t1z = (cube->boundsMax[2] - ray.origin[2]) * ray.invDir[2];
-        if (ray.invDir[2] < 0.0f) std::swap(t0z, t1z);
-
-        float tMin = std::max({t0x, t0y, t0z});
-        float tMax = std::min({t1x, t1y, t1z});
-
-        if (tExit) *tExit = tMax;
-
-        if (tMax < std::max(0.0f, tMin) || tMax < 0.0f) {
-            return false;
-        }
-
-        t = tMin < 0.0f ? tMax : tMin;
-        
-        hitPoint = ray.origin + ray.dir * t;
-        
-        PointType dMin = (hitPoint - cube->boundsMin).cwiseAbs();
-        PointType dMax = (hitPoint - cube->boundsMax).cwiseAbs();
-        
-        float minDist = std::numeric_limits<float>::max();
-        int minAxis = 0;
-        float sign = 1.0f;
-
-        for (int i = 0; i < Dim; ++i) {
-            if (dMin[i] < minDist) {
-                minDist = dMin[i];
-                minAxis = i;
-                sign = -1.0f;
-            }
-            if (dMax[i] < minDist) {
-                minDist = dMax[i];
-                minAxis = i;
-                sign = 1.0f;
-            }
-        }
-        
-        normal = PointType::Zero();
-        normal[minAxis] = sign;
-        return true;
-    }
     bool raycastRecursive(OctreeNode* node, const Ray& ray, float tMin, float tMax, float& maxDist, RayHit& hit, const std::shared_ptr<NodeData>& ignoreNode, bool hitOnlySolid, bool resolvePenetration, const std::unordered_map<int, std::shared_ptr<GridObject>>& localObjects) {
         if (!node->isLoaded()) {
             ensureLoaded(node, true);

@@ -39,7 +39,7 @@ void createBox(Grid::Octree<int>& octree, const Eigen::Vector3f& center, const E
             }
         }
     }
-    octree.bulkinsert(1, positions, albedo, true, step, true, oid, emittance, roughness, metallic, transmission, ior, absorp, bType, mass, 1.0, 1.0, false);
+    octree.bulkInsert(1, positions, albedo, true, step, true, oid, emittance, roughness, metallic, transmission, ior, absorp, bType, mass, 1.0, 1.0, false);
 }
 
 // Helper function to create a checkerboard pattern volume
@@ -72,8 +72,8 @@ void createCheckerBox(Grid::Octree<int>& octree, const Eigen::Vector3f& center, 
             }
         }
     }
-    octree.bulkinsert(1, positionsblack, color1, true, step, true, 100, Eigen::Vector3f::Zero(), 0.8f, 0.2f, 0.2f, 1.45f, Eigen::Vector3f::Zero(), Grid::BodyType::STATIC, 1.0, 1.0, 1.0, true);
-    octree.bulkinsert(1, positionswhite, color2, true, step, true, 100, Eigen::Vector3f::Zero(), 0.8f, 0.2f, 0.2f, 1.45f, Eigen::Vector3f::Zero(), Grid::BodyType::STATIC, 1.0, 1.0, 1.0, true);
+    octree.bulkInsert(1, positionsblack, color1, true, step, true, 100, Eigen::Vector3f::Zero(), 0.8f, 0.2f, 0.2f, 1.45f, Eigen::Vector3f::Zero(), Grid::BodyType::STATIC, 1.0, 1.0, 1.0, true);
+    octree.bulkInsert(1, positionswhite, color2, true, step, true, 100, Eigen::Vector3f::Zero(), 0.8f, 0.2f, 0.2f, 1.45f, Eigen::Vector3f::Zero(), Grid::BodyType::STATIC, 1.0, 1.0, 1.0, true);
 }
 
 enum class TargetState {
