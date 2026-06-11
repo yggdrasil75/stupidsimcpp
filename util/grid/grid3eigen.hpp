@@ -57,7 +57,7 @@ private:
     00000100=queue streaming
     00001000=physics collider dirty (do I actually need this?)
     */
-    std::atomic<uint8_t> flags;
+    std::atomic<uint8_t> flags{0};
     std::string StoragePath = ".";
     int nextObjId = 3;
 
@@ -183,6 +183,7 @@ public:
 //recursives
     OctreeNode* getHighestCommonNodeRecursive(const PointType& Min, const PointType& Max, OctreeNode* current, int& depth) const {
         depth++;
+        std::shared_lock<std::shared_mutex> lock(current->nodeMutex);
         if (current->isFat()) {
             uint16_t mcell = getFatCellIndex(Min, current);
             if (mcell == getFatCellIndex(Max, current) && current->children[mcell]) {
@@ -199,14 +200,16 @@ public:
     }
 
     void splitNodeRecursive(OctreeNode* node, int depth) {
+        // std::cout << "splitting node at depth: " << depth << std::endl;
         if (depth >= maxDepth) return;
         std::vector<std::shared_ptr<NodeData>> keep;
         keep.reserve(node->points.size());
+        std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
 
         if (node->isFat()) {
             PointType rootMin = node->bounds().first;
             PointType step = (node->bounds().second - node->bounds().first) / 32.0f;
-            #pragma omp parallel for collapse(3)
+            // #pragma omp parallel for collapse(3)
             for (uint8_t z = 0; z < 32; ++z) {
                 for (uint8_t y = 0; y < 32; ++y) {
                     for (uint8_t x = 0; x < 32; ++x) {
@@ -267,6 +270,7 @@ public:
     }
 
     bool insertRecursive(OctreeNode* node, const std::shared_ptr<NodeData>& pointData, int depth) {
+        // std::cout << "inserting recursively at depth: " << depth << std::endl;
         ensureLoaded(node);
         BoundingBox cubeBounds = pointData->getCubeBounds();
         if (!boxContainsBox(node->bounds(), cubeBounds)) return false;
@@ -280,7 +284,9 @@ public:
         if (node->isLeaf()) {
             node->points.emplace_back(pointData);
             if (node->points.size() > maxPointsPerNode) {
+                lock.unlock();
                 splitNodeRecursive(node, depth);
+                lock.lock();
             }
             node->setDirty(true);
             return true;
@@ -315,7 +321,7 @@ public:
         if (depth >= targetDepth || depth >= maxDepth) return node;
 
         if (node->isLeaf()) {
-            std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
+            // std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
             splitNodeRecursive(node, depth);
         }
         
@@ -359,6 +365,7 @@ public:
 
     void searchNodeRecursive(OctreeNode* node, const PointType& center, float radiusSq, int objectId, std::vector<std::shared_ptr<NodeData>>& results) {
         ensureLoaded(node, false);
+        std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
         for (const auto& pointData : node->points) {
             if (!pointData->isActive()) continue;
             float pointDistSq = (pointData->position - center).squaredNorm();
@@ -374,6 +381,7 @@ public:
     }
 
     void updateStreamingRecursive(OctreeNode* node, const PointType& camPos, const PointType& camDir) {
+        // std::cout << "updating streaming" << std::endl;
         if (!node) return;
         
         float minDistSq = 0.0f;
@@ -432,6 +440,7 @@ public:
                 return;
             }
             if (!node->isLeaf()){
+                std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
                 if (node->isFat()) {
                     for (int i = 0; i < 65536; ++i) {
                         updateStreamingRecursive(node->children[i].get(), camPos, camDir);
@@ -450,6 +459,7 @@ public:
         } else {
             ensureLoaded(node, true);
         }
+        std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
         if (!node->isLeaf()) {
             for (int i = 0; i < 8; ++i) {
                 if (node->children[i]) {
@@ -470,6 +480,7 @@ public:
             return;
         }
 
+        std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
         if (node->lodData) lodGeneratedNodes++;
 
         size_t pts = node->points.size();
@@ -490,8 +501,10 @@ public:
     void loadSubtreeRecursive(OctreeNode* node) {
         if (!node) return;
         ensureLoaded(node, true);
+        std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
         if (!node->isLeaf()) {
-            for (int i = 0; i < 8; ++i) {
+            int count = node->isFat() ? 65536 : 8;
+            for (int i = 0; i < count; ++i) {
                 loadSubtreeRecursive(node->children[i].get());
             }
         }
@@ -500,8 +513,10 @@ public:
     void loadAndLodSubtreeRecursive(OctreeNode* node) {
         if (!node) return;
         ensureLOD(node);
+        std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
         if (!node->isLeaf()) {
-            for (int i = 0; i < 8; ++i) {
+            int count = node->isFat() ? 65536 : 8;
+            for (int i = 0; i < count; ++i) {
                 loadAndLodSubtreeRecursive(node->children[i].get());
             }
         }
@@ -509,7 +524,7 @@ public:
 
     void optimizeRecursive(OctreeNode* node) {
         if (!node) return;
-        if (!node->isLoaded() || node->isLeaf()) return;
+        if (!node->isLoaded() || node->isLeaf() || !node->isKeepLoaded()) return;
 
         if (node->isFat()) {
             std::array<OctreeNode*, 65536> safeChildren = {nullptr};
@@ -534,6 +549,7 @@ public:
             }
 
             if (childrenAreLeaves) {
+                std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
                 std::vector<std::shared_ptr<NodeData>> allPoints = node->points;
                 for (auto sc : safeChildren) {
                     if (sc) {
@@ -576,6 +592,7 @@ public:
             }
 
             if (childrenAreLeaves) {
+                std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
                 std::vector<std::shared_ptr<NodeData>> allPoints = node->points;
                 for (auto sc : safeChildren) {
                     if (sc) {
@@ -777,6 +794,7 @@ public:
     }
 
     BoundingBox createChildBounds(const OctreeNode* node, uint16_t octant) const {
+        // std::cout << "Creating child bounds" << std::endl;
         BoundingBox bounds = node->bounds();
         if (node->isFat()) {
             const PointType& rootMin = bounds.first;
@@ -877,7 +895,7 @@ public:
     //emittance, absorption: rgb9e5
     bool insert(const T& data, const PointType& pos, Eigen::Vector3f color, bool visible = true, float size = 0.01f, bool active = true, int objectId = 0,
                 uint32_t emittance = 0, float roughness = 1.0f, float reflective = 0.0f, float transmission = 0.0f, float ior = 1.45f, 
-                uint32_t absorption = 0, BodyType bType = BodyType::STATIC, float mass = 1.0f, float restitution = 1.0f, float density = 1.0f) {
+                uint32_t absorption = 0, BodyType bType = BodyType::STATIC, float mass = 1.0f, float restitution = 1.0f, float density = 1.0f, bool staticb = false) {
         std::shared_ptr<GridObject> obj = getOrCreateObject(objectId);
         Material rmat(emittance, roughness, reflective, ior, absorption);
         IndexType rIdx = obj->getOrAddRenderMaterial(rmat);
@@ -886,7 +904,7 @@ public:
         IndexType pIdx = obj->getOrAddPhysicsMaterial(pmat);
         Eigen::Vector4f albedo = Eigen::Vector4f(color.x(), color.y(), color.z(), transmission);
         IndexType colorIdx = obj->getOrAddColorIndex(albedo);
-        auto pointData = std::make_shared<NodeData>(data, pos, visible, colorIdx, size, active, objectId, rIdx, pIdx);
+        auto pointData = std::make_shared<NodeData>(data, pos, visible, colorIdx, size, active, objectId, rIdx, pIdx, staticb);
 
         PointType relPos = pos - obj->centerPosition;
         {
@@ -903,7 +921,7 @@ public:
     //fix these defaults later.
     std::function<bool(const T&, const PointType&, Eigen::Vector3f, bool, float)> setTerrain =
         [this](const T& d, const PointType& p, Eigen::Vector3f c, bool vis, float sz) {
-            return insert(d, p, c, vis, sz, true, 1, Eigen::Vector3f::Zero(), 1.0f, 0.05f, 0.0f, 1.45f, Eigen::Vector3f::Zero(), BodyType::STATIC, 1.0f, 0.1f, 1.0f);
+            return insert(d, p, c, vis, sz, true, 1, Eigen::Vector3f::Zero(), 1.0f, 0.05f, 0.0f, 1.45f, Eigen::Vector3f::Zero(), BodyType::STATIC, 1.0f, 0.1f, 1.0f, true);
         };
 
     std::function<bool(const T&, const PointType&, Eigen::Vector3f)> setWater =
@@ -919,7 +937,7 @@ public:
     
     bool bulkInsert(const T& data, std::vector<PointType> positions, Eigen::Vector3f color, bool visible = true, float size = 0.01f, bool active = true, int objectId = -1,
                 uint32_t emittance = 0, float roughness = 1.0f, float reflective = 0.0f, float transmission = 0.0f, float ior = 1.45f, 
-                uint32_t absorption = 0, BodyType bType = BodyType::STATIC, float mass = 1.0f, float restitution = 1.0f, float density = 1.0f) {
+                uint32_t absorption = 0, BodyType bType = BodyType::STATIC, float mass = 1.0f, float restitution = 1.0f, float density = 1.0f, bool staticb = false) {
         std::shared_ptr<GridObject> obj = getOrCreateObject(objectId);
         Material rmat(emittance, roughness, reflective, ior, absorption);
         IndexType rIdx = obj->getOrAddRenderMaterial(rmat);
@@ -932,10 +950,11 @@ public:
 
         int depth = 0;
         OctreeNode* commonNode = getHighestCommonNode(positions, root_.get(), depth);
+        commonNode.setKeepLoaded(true);
         bool anyFailed = false;
         
         for (const auto& pos : positions) {
-            auto pointData = std::make_shared<NodeData>(data, pos, visible, colorIndex, size, active, objectId, rIdx, pIdx);
+            auto pointData = std::make_shared<NodeData>(data, pos, visible, colorIndex, size, active, objectId, rIdx, pIdx, staticb);
             
             PointType relPos = pos - obj->centerPosition;
             {
@@ -947,7 +966,8 @@ public:
                 this->size++;
             } else anyFailed = true;
         }
-        //returns true for success, so inverts anyfailed.
+        
+        commonNode.setKeepLoaded(false);
         return !anyFailed;
     }
 
@@ -1058,6 +1078,7 @@ public:
             os << "[Octree Stats] Tree is null/empty." << std::endl;
             return;
         }
+        std::cout << "printing stats " << std::endl;
 
         size_t totalNodes = 0;
         size_t leafNodes = 0;
@@ -1198,16 +1219,26 @@ public:
                 }
             }
         } else if (mode == meshMode::GREEDY) {
+            throw std::runtime_error("NotImplementedException");
         } else if (mode == meshMode::MARCHINGCUBES) {
+            throw std::runtime_error("NotImplementedException");
         } else if (mode == meshMode::NAIVEMARCHING) {
+            throw std::runtime_error("NotImplementedException");
             //naive marching cubes without the LUT
         } else if (mode == meshMode::SURFACENET) {
+            throw std::runtime_error("NotImplementedException");
         } else if (mode == meshMode::DUALCONTOUR) {
+            throw std::runtime_error("NotImplementedException");
         } else if (mode == meshMode::MANIFOLDCONTOUR) {
+            throw std::runtime_error("NotImplementedException");
         } else if (mode == meshMode::OCCUPANCY) {
+            throw std::runtime_error("NotImplementedException");
         } else if (mode == meshMode::CUBICMARCHING) {
+            throw std::runtime_error("NotImplementedException");
         } else if (mode == meshMode::TRANSVOXEL) {
+            throw std::runtime_error("NotImplementedException");
         } else if (mode == meshMode::DUALMARCHING) {
+            throw std::runtime_error("NotImplementedException");
         }
 
         return true;
@@ -1248,10 +1279,21 @@ public:
         if (!root_) return;
         ensureLOD(root_.get());
     }
+    
+    void generateMeshes() {
+        for (auto [id, obj] : objects_) {
+            // if (id == 1) setMesh(obj, meshMode::SURFACENET); //terrain.
+            if (id == 2) continue; //terrain fluids.
+            // setMesh(obj, meshMode::GREEDY);
+            //since the others arent in yet, just naive:
+            setMesh(obj, meshMode::NAIVE);
+        }
+    }
 
     void optimize() {
         optimizeRecursive(root_.get());
         generateLODs();
+        generateMeshes();
     }
 //removals
     bool removeObject(int objectId) {
@@ -1284,6 +1326,7 @@ public:
     void clearNode(OctreeNode* node) {
         if (!node) return;
         
+        std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
         node->points.clear();
         node->points.shrink_to_fit();
         node->lodData = nullptr;

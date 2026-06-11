@@ -27,17 +27,19 @@ void createBox(Grid::Octree<int>& octree, const Eigen::Vector3f& center, const E
     Eigen::Vector3f maxB = center + halfSize;
     static std::mt19937 rng(1337);
     std::uniform_real_distribution<float> jitter(-0.02f, 0.02f);
+    std::vector<Eigen::Vector3f> positions;
+    Eigen::Vector3f emittance = albedo * emission;
     
     for (float x = minB.x(); x <= maxB.x(); x += step) {
         for (float y = minB.y(); y <= maxB.y(); y += step) {
             for (float z = minB.z(); z <= maxB.z(); z += step) {
                 Eigen::Vector3f pos(x + jitter(rng), y + jitter(rng), z + jitter(rng));
-                Eigen::Vector3f emittance = albedo * emission;
+                positions.push_back(pos);
                 
-                octree.insert(1, pos, albedo, true, step, true, oid, emittance, roughness, metallic, transmission, ior, absorp, bType, mass);
             }
         }
     }
+    octree.bulkinsert(1, positions, albedo, true, step, true, oid, emittance, roughness, metallic, transmission, ior, absorp, bType, mass, 1.0, 1.0, false);
 }
 
 // Helper function to create a checkerboard pattern volume
@@ -47,6 +49,8 @@ void createCheckerBox(Grid::Octree<int>& octree, const Eigen::Vector3f& center, 
     Eigen::Vector3f halfSize = size / 2.0f;
     Eigen::Vector3f minB = center - halfSize;
     Eigen::Vector3f maxB = center + halfSize;
+    std::vector<Eigen::Vector3f> positionsblack;
+    std::vector<Eigen::Vector3f> positionswhite;
     
     for (float x = minB.x(); x <= maxB.x(); x += step) {
         for (float y = minB.y(); y <= maxB.y(); y += step) {
@@ -60,12 +64,16 @@ void createCheckerBox(Grid::Octree<int>& octree, const Eigen::Vector3f& center, 
                 
                 // 3D Checkerboard logic
                 bool isEven = ((cx + cy + cz) % 2 == 0);
-                Eigen::Vector3f albedo = isEven ? color1 : color2;
+                if (isEven) positionsblack.push_back(pos);
+                else positionswhite.push_back(pos);
+                // Eigen::Vector3f albedo = isEven ? color1 : color2;
                 
-                octree.insert(1, pos, albedo, true, step, true, 100, Eigen::Vector3f::Zero(), 0.8f, 0.2f, 0.2f, 1.45f);
+                // octree.insert(1, pos, albedo, true, step, true, 100, Eigen::Vector3f::Zero(), 0.8f, 0.2f, 0.2f, 1.45f);
             }
         }
     }
+    octree.bulkinsert(1, positionsblack, color1, true, step, true, 100, Eigen::Vector3f::Zero(), 0.8f, 0.2f, 0.2f, 1.45f, Eigen::Vector3f::Zero(), Grid::BodyType::STATIC, 1.0, 1.0, 1.0, true);
+    octree.bulkinsert(1, positionswhite, color2, true, step, true, 100, Eigen::Vector3f::Zero(), 0.8f, 0.2f, 0.2f, 1.45f, Eigen::Vector3f::Zero(), Grid::BodyType::STATIC, 1.0, 1.0, 1.0, true);
 }
 
 enum class TargetState {
