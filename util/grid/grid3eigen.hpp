@@ -1433,7 +1433,11 @@ public:
     frame renderDepthMap(const Camera& cam, int height, int width);
     frame renderNormalMap(const Camera& cam, int height, int width);
     frame renderObjectMap(const Camera& cam, int height, int width);
+    frame renderColorMap(const Camera& cam, int height, int width);
     Eigen::Vector3f traceVoxelRay(const PointType& origin, const PointType& dir, float minT, float maxT, const Eigen::Vector3f& bgColor);
+
+    bool ddaNode(const OctreeNode* node, const Ray& ray, const PointType& dir, float tEnter, float tExit,
+                float minT, float maxT, Eigen::Vector3f& accum, float& transmittance);
 
     void invalidateLODForPoint(const std::shared_ptr<NodeData>& n);
     size_t removeObjectRecursive(OctreeNode* node, int objectId);

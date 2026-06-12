@@ -239,7 +239,7 @@ int main() {
 
     Eigen::Vector3f target(0.0f, 0.0f, 0.5f);
     frame out;
-    frame depthOut;
+    frame rasterOut;
     frame normalOut;
     frame objectOut;
     std::string filename;
@@ -258,9 +258,9 @@ int main() {
         filename = "output/fast_cpurender_" + view.name + ".bmp";
         BMPWriter::saveBMP(filename, out);
         
-        // depthOut = octree.renderDepthMap(cam, height, width);
-        // filename = "output/fast_depthrender_" + view.name + ".bmp";
-        // BMPWriter::saveBMP(filename, depthOut);
+        rasterOut = octree.renderColorMap(cam, height, width);
+        filename = "output/fast_rasterRender_" + view.name + ".bmp";
+        BMPWriter::saveBMP(filename, rasterOut);
         
         normalOut = octree.renderNormalMap(cam, height, width);
         filename = "output/fast_normalrender_" + view.name + ".bmp";

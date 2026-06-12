@@ -160,6 +160,13 @@ frame Octree<T, GasT, IndexType>::renderDepthMap(const Camera& cam, int height, 
 }
 
 template<typename T, typename GasT, typename IndexType>
+frame Octree<T, GasT, IndexType>::renderColorMap(const Camera& cam, int height, int width) {
+    frame out(width, height, frame::colormap::RGB);
+    rasterize(cam, height, width, &out, nullptr, nullptr, nullptr);
+    return out;
+}
+
+template<typename T, typename GasT, typename IndexType>
 frame Octree<T, GasT, IndexType>::renderNormalMap(const Camera& cam, int height, int width) {
     frame out(width, height, frame::colormap::RGB);
     rasterize(cam, height, width, nullptr, nullptr, &out, nullptr);
@@ -174,37 +181,53 @@ frame Octree<T, GasT, IndexType>::renderObjectMap(const Camera& cam, int height,
 }
 
 template<typename T, typename GasT, typename IndexType>
-Eigen::Vector3f Octree<T, GasT, IndexType>::traceVoxelRay(const PointType& origin, const PointType& dir, float minT, float maxT, const Eigen::Vector3f& bgColor) {
-    // TIME_FUNCTION;                                                    
-    if (!root_ || maxT <= minT) return bgColor;
+bool Octree<T, GasT, IndexType>::ddaNode(const OctreeNode* node, const Ray& ray, const PointType& dir,
+            float tEnter, float tExit, float minT, float maxT, Eigen::Vector3f& accum, float& transmittance) {
+    if (!node->points.empty()) {
+        PointType hitNormal;
+        for (const auto& nd : node->points) {
+            if (!nd || !nd->isVisible()) continue;
+            float tHit;
+            if (!rayCubeIntersect(ray, nd->getCubeBounds(), tHit, hitNormal)) continue;
+            if (tHit < minT || tHit > maxT) continue;
+            Eigen::Vector4f rgba = Eigen::Vector4f::Ones();
+            if (auto obj = getObject(static_cast<int>(nd->objectId))) {
+                std::shared_lock<std::shared_mutex> ol(obj->objMutex);
+                rgba = obj->getColor(nd->colorIdx);
+            }
+            float lambert = std::max(0.2f, hitNormal.dot(-dir));
+            float alpha = 1.0f - std::clamp(rgba.w(), 0.0f, 1.0f);
+            accum += transmittance * alpha * (rgba.template head<3>() * lambert);
+            transmittance *= (1.0f - alpha);
+            if (transmittance <= 0.01f) return false;
+        }
+    }
 
-    const BoundingBox rootBounds = root_->bounds();
-    const PointType gridMin = rootBounds.first;
-    const PointType gridMax = rootBounds.second;
-    const PointType cellSize = (gridMax - gridMin) / 32.0f;
+    if (node->isLeaf()) return true;
 
-    Ray ray(origin, dir);
+    const bool fat = node->isFat();
+    const int N = fat ? 32 : 2;
+    const BoundingBox b = node->bounds();
+    const PointType gridMin = b.first;
+    const PointType cellSize = (b.second - b.first) / static_cast<float>(N);
 
-    float tEnter, tExit;
-    if (!rayBoxIntersect(ray, rootBounds, minT, maxT)) return bgColor;
-
-    PointType entry = origin + dir * std::max(minT, 0.0f);
+    PointType entry = ray.origin + dir * std::max(tEnter, 0.0f);
     int cell[3];
     int step[3];
     float tMaxA[3];
     float tDelta[3];
     for (int i = 0; i < 3; ++i) {
         float local = (entry[i] - gridMin[i]) / cellSize[i];
-        cell[i] = std::clamp((int)std::floor(local), 0, 31);
+        cell[i] = std::clamp((int)std::floor(local), 0, N - 1);
         if (dir[i] > 0.0f) {
             step[i] = 1;
             float nextBoundary = gridMin[i] + (cell[i] + 1) * cellSize[i];
-            tMaxA[i] = minT + (nextBoundary - entry[i]) * ray.invDir[i];
+            tMaxA[i] = tEnter + (nextBoundary - entry[i]) * ray.invDir[i];
             tDelta[i] = cellSize[i] * ray.invDir[i];
         } else if (dir[i] < 0.0f) {
             step[i] = -1;
             float nextBoundary = gridMin[i] + cell[i] * cellSize[i];
-            tMaxA[i] = minT + (nextBoundary - entry[i]) * ray.invDir[i];
+            tMaxA[i] = tEnter + (nextBoundary - entry[i]) * ray.invDir[i];
             tDelta[i] = -cellSize[i] * ray.invDir[i];
         } else {
             step[i] = 0;
@@ -213,49 +236,41 @@ Eigen::Vector3f Octree<T, GasT, IndexType>::traceVoxelRay(const PointType& origi
         }
     }
 
-    Eigen::Vector3f accum = Eigen::Vector3f::Zero();
-    float transmittance = 1.0f;
-    const float cellRadius = cellSize.norm() * 0.5f;
-    PointType hitNormal;
-
-    float tCurrent = minT;
-    while (tCurrent <= maxT && transmittance > 0.01f) {
-        PointType cellCenter = gridMin + PointType((cell[0] + 0.5f) * cellSize[0], (cell[1] + 0.5f) * cellSize[1], (cell[2] + 0.5f) * cellSize[2]);
-        std::vector<std::shared_ptr<NodeData>> candidates = findInRadius(cellCenter, cellRadius);
-
-        for (const auto& nd : candidates) {
-            if (!nd) continue;
-            // if (skipObjects.count(static_cast<int>(nd->objectId))) continue;
-            if (!nd->isVisible()) continue;
-
-            float tHit;
-            if (!rayCubeIntersect(ray, nd->getCubeBounds(), tHit, hitNormal)) continue;
-            if (tHit < minT || tHit > maxT) continue;
-
-            Eigen::Vector4f rgba = Eigen::Vector4f::Ones();
-            if (auto obj = getObject(static_cast<int>(nd->objectId))) {
-                std::shared_lock<std::shared_mutex> ol(obj->objMutex);
-                rgba = obj->getColor(nd->colorIdx);
-            }
-            float lambert = std::max(0.2f, hitNormal.dot(-dir));
-            Eigen::Vector3f voxelColor = rgba.template head<3>() * lambert;
-
-            float alpha = 1.0f - std::clamp(rgba.w(), 0.0f, 1.0f);
-            accum += transmittance * alpha * voxelColor;
-            transmittance *= (1.0f - alpha);
-            if (transmittance <= 0.01f) break;
-        }
-        if (transmittance <= 0.01f) break;
-
+    float t0 = tEnter;
+    while (transmittance > 0.01f) {
         int axis = 0;
         if (tMaxA[1] < tMaxA[axis]) axis = 1;
         if (tMaxA[2] < tMaxA[axis]) axis = 2;
+        float t1 = std::min(tMaxA[axis], tExit);
+
+        uint16_t index = fat ? mortonEncodeFatNode((uint8_t)cell[0], (uint8_t)cell[1], (uint8_t)cell[2])
+                             : (uint16_t)(cell[0] | (cell[1] << 1) | (cell[2] << 2));
+        const auto& child = node->children[index];
+        if (child) {
+            if (!ddaNode(child.get(), ray, dir, t0, t1, minT, maxT, accum, transmittance)) return false;
+        }
+
+        if (tMaxA[axis] >= tExit) break;
+        t0 = tMaxA[axis];
         cell[axis] += step[axis];
-        if (cell[axis] < 0 || cell[axis] > 31) break;
-        tCurrent = tMaxA[axis];
+        if (cell[axis] < 0 || cell[axis] >= N) break;
         tMaxA[axis] += tDelta[axis];
     }
+    return true;
+}
 
+template<typename T, typename GasT, typename IndexType>
+Eigen::Vector3f Octree<T, GasT, IndexType>::traceVoxelRay(const PointType& origin, const PointType& dir, float minT, float maxT, const Eigen::Vector3f& bgColor) {
+    // TIME_FUNCTION;
+    if (!root_ || maxT <= minT) return bgColor;
+
+    Ray ray(origin, dir);
+    float tEnter = minT, tExit = maxT;
+    if (!rayBoxIntersect(ray, root_->bounds(), tEnter, tExit)) return bgColor;
+
+    Eigen::Vector3f accum = Eigen::Vector3f::Zero();
+    float transmittance = 1.0f;
+    ddaNode(root_.get(), ray, dir, tEnter, tExit, minT, maxT, accum, transmittance);
     return accum + transmittance * bgColor;
 }
 
