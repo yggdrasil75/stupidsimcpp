@@ -175,7 +175,7 @@ frame Octree<T, GasT, IndexType>::renderObjectMap(const Camera& cam, int height,
 
 template<typename T, typename GasT, typename IndexType>
 Eigen::Vector3f Octree<T, GasT, IndexType>::traceVoxelRay(const PointType& origin, const PointType& dir, float minT, float maxT, const Eigen::Vector3f& bgColor) {
-    TIME_FUNCTION;                                                    
+    // TIME_FUNCTION;                                                    
     if (!root_ || maxT <= minT) return bgColor;
 
     const BoundingBox rootBounds = root_->bounds();
@@ -186,24 +186,9 @@ Eigen::Vector3f Octree<T, GasT, IndexType>::traceVoxelRay(const PointType& origi
     Ray ray(origin, dir);
 
     float tEnter, tExit;
-    {
-        float t0x = (gridMin[0] - origin[0]) * ray.invDir[0];
-        float t1x = (gridMax[0] - origin[0]) * ray.invDir[0];
-        if (ray.invDir[0] < 0.0f) std::swap(t0x, t1x);
-        float t0y = (gridMin[1] - origin[1]) * ray.invDir[1];
-        float t1y = (gridMax[1] - origin[1]) * ray.invDir[1];
-        if (ray.invDir[1] < 0.0f) std::swap(t0y, t1y);
-        float t0z = (gridMin[2] - origin[2]) * ray.invDir[2];
-        float t1z = (gridMax[2] - origin[2]) * ray.invDir[2];
-        if (ray.invDir[2] < 0.0f) std::swap(t0z, t1z);
-        tEnter = std::max({t0x, t0y, t0z});
-        tExit  = std::min({t1x, t1y, t1z});
-    }
-    tEnter = std::max(tEnter, minT);
-    tExit  = std::min(tExit, maxT);
-    if (tExit < tEnter) return bgColor;
+    if (!rayBoxIntersect(ray, rootBounds, minT, maxT)) return bgColor;
 
-    PointType entry = origin + dir * std::max(tEnter, 0.0f);
+    PointType entry = origin + dir * std::max(minT, 0.0f);
     int cell[3];
     int step[3];
     float tMaxA[3];
@@ -214,12 +199,12 @@ Eigen::Vector3f Octree<T, GasT, IndexType>::traceVoxelRay(const PointType& origi
         if (dir[i] > 0.0f) {
             step[i] = 1;
             float nextBoundary = gridMin[i] + (cell[i] + 1) * cellSize[i];
-            tMaxA[i] = tEnter + (nextBoundary - entry[i]) * ray.invDir[i];
+            tMaxA[i] = minT + (nextBoundary - entry[i]) * ray.invDir[i];
             tDelta[i] = cellSize[i] * ray.invDir[i];
         } else if (dir[i] < 0.0f) {
             step[i] = -1;
             float nextBoundary = gridMin[i] + cell[i] * cellSize[i];
-            tMaxA[i] = tEnter + (nextBoundary - entry[i]) * ray.invDir[i];
+            tMaxA[i] = minT + (nextBoundary - entry[i]) * ray.invDir[i];
             tDelta[i] = -cellSize[i] * ray.invDir[i];
         } else {
             step[i] = 0;
@@ -233,8 +218,8 @@ Eigen::Vector3f Octree<T, GasT, IndexType>::traceVoxelRay(const PointType& origi
     const float cellRadius = cellSize.norm() * 0.5f;
     PointType hitNormal;
 
-    float tCurrent = tEnter;
-    while (tCurrent <= tExit && transmittance > 0.01f) {
+    float tCurrent = minT;
+    while (tCurrent <= maxT && transmittance > 0.01f) {
         PointType cellCenter = gridMin + PointType((cell[0] + 0.5f) * cellSize[0], (cell[1] + 0.5f) * cellSize[1], (cell[2] + 0.5f) * cellSize[2]);
         std::vector<std::shared_ptr<NodeData>> candidates = findInRadius(cellCenter, cellRadius);
 
@@ -245,7 +230,7 @@ Eigen::Vector3f Octree<T, GasT, IndexType>::traceVoxelRay(const PointType& origi
 
             float tHit;
             if (!rayCubeIntersect(ray, nd->getCubeBounds(), tHit, hitNormal)) continue;
-            if (tHit < tEnter || tHit > tExit) continue;
+            if (tHit < minT || tHit > maxT) continue;
 
             Eigen::Vector4f rgba = Eigen::Vector4f::Ones();
             if (auto obj = getObject(static_cast<int>(nd->objectId))) {
@@ -323,15 +308,29 @@ frame Octree<T, GasT, IndexType>::fastRenderFrame(const Camera& cam, int height,
     const float f = 1.0f / std::tan(cam.fovRad() / 2.0f);
     const float nearPlane = 0.1f;
 
-    #pragma omp parallel for collapse(2)
+    float inv_width = 1.0f / width;
+    float inv_height = 1.0f / height;
+    float two_over_width = 2.0f * inv_width;
+    float two_over_height = 2.0f * inv_height;
+    float one_minus_inv_height = 1.0f - inv_height;
+    float ax = two_over_width;
+    float bx = inv_width - 1.0f;
+    float ay = -two_over_height;
+    float by = one_minus_inv_height;
+    Eigen::Vector3f Rx = camRight * (aspect * two_over_width);
+    Eigen::Vector3f Ry = camUp * (-two_over_height);
+    Eigen::Vector3f C0 = camRight * (aspect * (inv_width - 1.0f)) + camUp * (1.0f - inv_height) + camFwd * f;
+
+    #pragma omp parallel for schedule(dynamic, 128) collapse(2)
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
-            size_t pix = static_cast<size_t>(y) * width + x;
-            size_t base = pix * channels;
+            int pix = y * width + x;
+            int base = pix * channels;
 
-            float ndc_x = (x + 0.5f) / width * 2.0f - 1.0f;
-            float ndc_y = 1.0f - (y + 0.5f) / height * 2.0f;
-            Eigen::Vector3f dir = (camRight * (ndc_x * aspect) + camUp * ndc_y + camFwd * f).normalized();
+            float ndc_x = ax * x + bx;
+            float ndc_y = ay * y + by;
+            // Eigen::Vector3f dir = (camRight * (ndc_x * aspect) + camUp * ndc_y + camFwd * f).normalized();
+            Eigen::Vector3f dir = (Rx * x + Ry * y + C0).normalized();
 
             Eigen::Vector3f sky = skybox_.sampleVector(dir);
             Eigen::Vector3f color = sky;
@@ -344,7 +343,7 @@ frame Octree<T, GasT, IndexType>::fastRenderFrame(const Camera& cam, int height,
                 float transmission = rasterColor[cb + 3] / 255.0f;
                 color = surf * (1.0f - transmission) + sky * transmission;
             }
-            float traceMax = haveRaster ? rasterDepth : maxDistance_;
+            float traceMax = std::max(rasterDepth, maxDistance_);
             color = traceVoxelRay(camOrigin, dir, nearPlane, traceMax, color);
 
             uint8_t r8 = static_cast<uint8_t>(std::clamp(color.x() * 255.0f, 0.0f, 255.0f));

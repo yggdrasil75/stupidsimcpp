@@ -194,8 +194,8 @@ int main() {
     octree.setMaxDistance(4096);
 
     // 3. Setup rendering loop
-    int width = 128;
-    int height = 128;
+    int width = 512;
+    int height = 512;
     
     const float fps = 30.0f;
     const float durationPerSegment = 10.0f;
@@ -258,9 +258,9 @@ int main() {
         filename = "output/fast_cpurender_" + view.name + ".bmp";
         BMPWriter::saveBMP(filename, out);
         
-        depthOut = octree.renderDepthMap(cam, height, width);
-        filename = "output/fast_depthrender_" + view.name + ".bmp";
-        BMPWriter::saveBMP(filename, depthOut);
+        // depthOut = octree.renderDepthMap(cam, height, width);
+        // filename = "output/fast_depthrender_" + view.name + ".bmp";
+        // BMPWriter::saveBMP(filename, depthOut);
         
         normalOut = octree.renderNormalMap(cam, height, width);
         filename = "output/fast_normalrender_" + view.name + ".bmp";
