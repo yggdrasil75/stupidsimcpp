@@ -10,6 +10,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "../../eigen/Eigen/Dense"
@@ -936,10 +937,10 @@ public:
     }
     
     bool bulkInsert(const T& data, std::vector<PointType> positions, Eigen::Vector3f color, bool visible = true, float size = 0.01f, bool active = true, int objectId = -1,
-                uint32_t emittance = 0, float roughness = 1.0f, float reflective = 0.0f, float transmission = 0.0f, float ior = 1.45f, 
-                uint32_t absorption = 0, BodyType bType = BodyType::STATIC, float mass = 1.0f, float restitution = 1.0f, float density = 1.0f, bool staticb = false) {
+                Eigen::Vector3f emittance = 0, float roughness = 1.0f, float reflective = 0.0f, float transmission = 0.0f, float ior = 1.45f, 
+                Eigen::Vector3f absorption = 0, BodyType bType = BodyType::STATIC, float mass = 1.0f, float restitution = 1.0f, float density = 1.0f, bool staticb = false) {
         std::shared_ptr<GridObject> obj = getOrCreateObject(objectId);
-        Material rmat(emittance, roughness, reflective, ior, absorption);
+        Material rmat(packRGB9E5(emittance), roughness, reflective, ior, packRGB9E5(absorption));
         IndexType rIdx = obj->getOrAddRenderMaterial(rmat);
 
         PhysicsMaterial pmat{bType, mass, restitution, density};
@@ -950,7 +951,7 @@ public:
 
         int depth = 0;
         OctreeNode* commonNode = getHighestCommonNode(positions, root_.get(), depth);
-        commonNode.setKeepLoaded(true);
+        commonNode->setKeepLoaded(true);
         bool anyFailed = false;
         
         for (const auto& pos : positions) {
@@ -967,7 +968,7 @@ public:
             } else anyFailed = true;
         }
         
-        commonNode.setKeepLoaded(false);
+        commonNode->setKeepLoaded(false);
         return !anyFailed;
     }
 
@@ -1286,7 +1287,7 @@ public:
             if (id == 2) continue; //terrain fluids.
             // setMesh(obj, meshMode::GREEDY);
             //since the others arent in yet, just naive:
-            setMesh(obj, meshMode::NAIVE);
+            setMesh(id, meshMode::NAIVE);
         }
     }
 
@@ -1393,7 +1394,7 @@ public:
 
         t = tMin < 0.0f ? tMax : tMin;
         
-        pointType hitPoint = ray.origin + ray.dir * t;
+        PointType hitPoint = ray.origin + ray.dir * t;
         
         PointType dMin = (hitPoint - box.first).cwiseAbs();
         PointType dMax = (hitPoint - box.second).cwiseAbs();
@@ -1425,10 +1426,13 @@ public:
     }
 
 //declarations
-    RasterBuffers softwareRasterize(const Camera& cam, int height, int width, uint8_t passFlags);
+    void rasterize(const Camera& cam, int height, int width, frame* colorOut, frame* depthOut,
+                       frame* normalOut, frame* objectOut, std::vector<float>* linearDepth = nullptr);
     frame renderDepthMap(const Camera& cam, int height, int width);
     frame renderNormalMap(const Camera& cam, int height, int width);
-    std::vector<int> renderObjectMap(const Camera& cam, int height, int width);
+    frame renderObjectMap(const Camera& cam, int height, int width);
+    Eigen::Vector3f traceVoxelRay(const PointType& origin, const PointType& dir, float minT, float maxT,
+                const std::unordered_set<int>& skipObjects, const Eigen::Vector3f& bgColor);
 
     void invalidateLODForPoint(const std::shared_ptr<NodeData>& n);
     size_t removeObjectRecursive(OctreeNode* node, int objectId);
