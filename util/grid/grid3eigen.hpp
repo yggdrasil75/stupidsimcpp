@@ -912,6 +912,7 @@ public:
             std::unique_lock<std::shared_mutex> lock(obj->objMutex);
             obj->relativeVoxels.push_back(relPos);
         }
+        obj->setMeshClean(false);
 
         if (insertRecursive(root_.get(), pointData, 0)) {
             this->size++;
@@ -969,6 +970,7 @@ public:
         }
         
         commonNode->setKeepLoaded(false);
+        obj->setMeshClean(false);
         return !anyFailed;
     }
 
@@ -1184,6 +1186,7 @@ public:
     bool setMesh(int objectId, meshMode mode = meshMode::NAIVE) {
         TIME_FUNCTION;
         auto obj = getObject(objectId);
+        if (obj->isMeshClean()) return true;
         if (!obj) return false;
 
         if (mode == meshMode::OCCUPANCY || mode == meshMode::TRANSVOXEL) {
@@ -1244,6 +1247,7 @@ public:
         }
 
         // std::cout << "done meshing" << std::endl;
+        obj->setMeshClean(true);
         return true;
     }
 
@@ -1435,6 +1439,7 @@ public:
     frame renderObjectMap(const Camera& cam, int height, int width);
     frame renderColorMap(const Camera& cam, int height, int width);
     Eigen::Vector3f traceVoxelRay(const PointType& origin, const PointType& dir, float minT, float maxT, const Eigen::Vector3f& bgColor);
+    bool skipPaths() const;
 
     bool ddaNode(const OctreeNode* node, const Ray& ray, const PointType& dir, float tEnter, float tExit,
                 float minT, float maxT, Eigen::Vector3f& accum, float& transmittance);

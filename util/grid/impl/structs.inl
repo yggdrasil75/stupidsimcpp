@@ -33,6 +33,7 @@ static constexpr uint8_t FAT_BIT = 1 << 6;
 
 //object flag bits
 static constexpr uint8_t OBJ_ALLOW_PARTIAL_UNLOAD_BIT = 1 << 0;
+static constexpr uint8_t OBJ_MESH_CLEAN_BIT = 1 << 1;
 
 //grid flag bits
 static constexpr uint8_t WORKER_ON = 1 << 0;
@@ -347,6 +348,14 @@ struct GridObject_ {
     void setPartialUnloadAllowed(bool v) {
         if (v) flags.fetch_or(OBJ_ALLOW_PARTIAL_UNLOAD_BIT, std::memory_order_relaxed);
         else flags.fetch_and(~OBJ_ALLOW_PARTIAL_UNLOAD_BIT, std::memory_order_relaxed);
+    }
+    bool isMeshClean() const {
+        return flags.load(std::memory_order_relaxed) & OBJ_MESH_CLEAN_BIT;
+    }
+
+    void setMeshClean(bool v) {
+        if (v) flags.fetch_or(OBJ_MESH_CLEAN_BIT, std::memory_order_relaxed);
+        else flags.fetch_and(~OBJ_MESH_CLEAN_BIT, std::memory_order_relaxed);
     }
 
     IndexType getOrAddColorIndex(const Eigen::Vector4f& color) {

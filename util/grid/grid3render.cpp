@@ -258,6 +258,13 @@ bool Octree<T, GasT, IndexType>::ddaNode(const OctreeNode* node, const Ray& ray,
     }
     return true;
 }
+template<typename T, typename GasT, typename IndexType>
+bool Octree<T, GasT, IndexType>::skipPaths() const {
+    for (auto [id, obj] : objects_) {
+        if (!obj->isMeshClean()) return false;
+    }
+    return true;
+}
 
 template<typename T, typename GasT, typename IndexType>
 Eigen::Vector3f Octree<T, GasT, IndexType>::traceVoxelRay(const PointType& origin, const PointType& dir, float minT, float maxT, const Eigen::Vector3f& bgColor) {
@@ -278,6 +285,7 @@ template<typename T, typename GasT, typename IndexType>
 frame Octree<T, GasT, IndexType>::fastRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat) {
     TIME_FUNCTION;
     updateStreaming(cam);
+    generateMeshes();
     frame outFrame(width, height, colorformat);
 
     size_t channels;
@@ -336,6 +344,7 @@ frame Octree<T, GasT, IndexType>::fastRenderFrame(const Camera& cam, int height,
     Eigen::Vector3f Ry = camUp * (-two_over_height);
     Eigen::Vector3f C0 = camRight * (aspect * (inv_width - 1.0f)) + camUp * (1.0f - inv_height) + camFwd * f;
 
+    const bool rasterOnly = !skipPaths();
     #pragma omp parallel for schedule(dynamic, 128) collapse(2)
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
@@ -352,15 +361,23 @@ frame Octree<T, GasT, IndexType>::fastRenderFrame(const Camera& cam, int height,
 
             float rasterDepth = linearDepth[pix];
             bool haveRaster = (rasterDepth != std::numeric_limits<float>::max());
+            float transmission = 1.0f;
             if (haveRaster) {
                 size_t cb = pix * 4;
                 Eigen::Vector3f surf(rasterColor[cb] / 255.0f, rasterColor[cb + 1] / 255.0f, rasterColor[cb + 2] / 255.0f);
-                float transmission = rasterColor[cb + 3] / 255.0f;
+                transmission = rasterColor[cb + 3] / 255.0f;
                 color = surf * (1.0f - transmission) + sky * transmission;
             }
-            float traceMax = std::max(rasterDepth, maxDistance_);
-            color = traceVoxelRay(camOrigin, dir, nearPlane, traceMax, color);
-
+            float cosFwd = dir.dot(camFwd);
+            float traceMax = maxDistance_;
+            if (haveRaster && cosFwd > 1e-4f) {
+                float rasterT = rasterDepth / cosFwd;
+                traceMax = std::min(traceMax, rasterT - 1e-3f);
+            }
+            bool skipTrace = haveRaster && transmission <= 0.0f && !rasterOnly;
+            if (!skipTrace && traceMax > nearPlane) {
+                color = traceVoxelRay(camOrigin, dir, nearPlane, traceMax, color);
+            }
             uint8_t r8 = static_cast<uint8_t>(std::clamp(color.x() * 255.0f, 0.0f, 255.0f));
             uint8_t g8 = static_cast<uint8_t>(std::clamp(color.y() * 255.0f, 0.0f, 255.0f));
             uint8_t b8 = static_cast<uint8_t>(std::clamp(color.z() * 255.0f, 0.0f, 255.0f));

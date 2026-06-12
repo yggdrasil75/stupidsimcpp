@@ -276,154 +276,154 @@ int main() {
     }
     FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
 
-    for (const auto& view : views) {
-        ScopedFunctionTimer meh("Slow Section");
-        std::cout << "\nRendering view from " << view.name << " direction (Slow "<< samples <<" Samples Pass)..." << std::endl;
+    // for (const auto& view : views) {
+    //     ScopedFunctionTimer meh("Slow Section");
+    //     std::cout << "\nRendering view from " << view.name << " direction (Slow "<< samples <<" Samples Pass)..." << std::endl;
         
-        Camera cam;
-        cam.origin = view.origin;
-        cam.direction = (target - view.origin).normalized();
-        cam.up = view.up;
+    //     Camera cam;
+    //     cam.origin = view.origin;
+    //     cam.direction = (target - view.origin).normalized();
+    //     cam.up = view.up;
         
-        out = octree.renderFrameVulkan(cam, height, width, frame::colormap::RGB, samples, bounces, false, true);
-        filename = "output/slow_vulkanrender_" + view.name + ".bmp";
-        BMPWriter::saveBMP(filename, out);
-        std::cout << "slow done" << std::endl;
+    //     out = octree.renderFrameVulkan(cam, height, width, frame::colormap::RGB, samples, bounces, false, true);
+    //     filename = "output/slow_vulkanrender_" + view.name + ".bmp";
+    //     BMPWriter::saveBMP(filename, out);
+    //     std::cout << "slow done" << std::endl;
 
-        out = octree.blendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, blendedsamples, bounces, false, true);
-        filename = "output/slow_blendrender_" + view.name + ".bmp";
-        BMPWriter::saveBMP(filename, out);
-        std::cout << "blended done" << std::endl;
-    }
-    FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
+    //     out = octree.blendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, blendedsamples, bounces, false, true);
+    //     filename = "output/slow_blendrender_" + view.name + ".bmp";
+    //     BMPWriter::saveBMP(filename, out);
+    //     std::cout << "blended done" << std::endl;
+    // }
+    // FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
 
-    std::vector<frame> videoFrames;
-    const int totalFrames = framesPerSegment * views.size();
-    videoFrames.reserve(totalFrames);
-    int frameCounter = 0;
+    // std::vector<frame> videoFrames;
+    // const int totalFrames = framesPerSegment * views.size();
+    // videoFrames.reserve(totalFrames);
+    // int frameCounter = 0;
 
-    std::cout << "\nStarting video render..." << std::endl;
-    std::cout << "Total frames to render: " << totalFrames << std::endl;
+    // std::cout << "\nStarting video render..." << std::endl;
+    // std::cout << "Total frames to render: " << totalFrames << std::endl;
 
+    // // for (size_t i = 0; i < views.size(); ++i) {
+    // //     ScopedFunctionTimer meh("Video");
+    // //     const View& startView = views[i];
+    // //     const View& endView = views[(i + 1) % views.size()]; // Loop back to the first view at the end
+
+    // //     std::cout << "\nAnimating segment: " << startView.name << " -> " << endView.name << std::endl;
+
+    // //     for (int j = 0; j < framesPerSegment; ++j) {
+    // //         if (frameCounter < -1) {
+    // //             frameCounter++;
+    // //             continue;
+    // //         }
+    // //         frameCounter++;
+    // //         float t = static_cast<float>(j) / static_cast<float>(framesPerSegment);
+
+    // //         Eigen::Vector3f currentOrigin = startView.origin * (1.0f - t) + endView.origin * t;
+            
+    // //         Eigen::Vector3f currentUp = (startView.up * (1.0f - t) + endView.up * t).normalized();
+            
+    // //         Camera cam;
+    // //         cam.origin = currentOrigin;
+    // //         cam.up = currentUp;
+    // //         cam.direction = (target - cam.origin).normalized();
+            
+    // //         std::cout << "Rendering video frame " << frameCounter << "/" << totalFrames << "..." << std::endl;
+    // //         // frame out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
+    // //         frame out = octree.blendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, videosamples, bounces, false);
+    // //         // frame out = octree.renderFrameVulkan(cam, height, width, frame::colormap::RGB, videosamples, bounces, false, true);
+    // //         // videoFrames.push_back(std::move(out));
+    // //         std::string debugFilename = "output/materialframes/debug_material_" + std::to_string(frameCounter) + ".bmp";
+    // //         BMPWriter::saveBMP(debugFilename, out);
+    // //     }
+    // // }
+    // // FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
+
+    // // std::cout << "\nAll frames rendered. Saving video file..." << std::endl;
+    // // std::string videoFilename = "output/material_test_video.y4m";
+    
+    // // y4mWriter::save(videoFilename, videoFrames, fps);
+    // // if (AVIWriter::saveAVIFromCompressedFrames(videoFilename, std::move(videoFrames), width, height, fps)) {
+    // //     std::cout << "Video saved successfully to " << videoFilename << std::endl;
+    // // } else {
+    // //     std::cerr << "Error: Failed to save video!" << std::endl;
+    // // }
+
+    // std::cout << "\nStarting DYNAMIC FLUID video render (Time flows!)..." << std::endl;
+    
+    // std::vector<frame> fluidVideoFrames;
+
+    // fluidVideoFrames.reserve(totalFluidFrames);
+    // int fluidframeCounter = 0;
+    // int framesPerView = totalFluidFrames / views.size();
+
+    // // std::vector<Grid::Octree<int>::NodeData> trackedWater = octree.collectNodesByObjectId(5);
+
+    // Camera cam;
+    // cam.fov = 100;
     // for (size_t i = 0; i < views.size(); ++i) {
-    //     ScopedFunctionTimer meh("Video");
+    //     ScopedFunctionTimer meh("Fluid");
     //     const View& startView = views[i];
     //     const View& endView = views[(i + 1) % views.size()]; // Loop back to the first view at the end
 
     //     std::cout << "\nAnimating segment: " << startView.name << " -> " << endView.name << std::endl;
 
-    //     for (int j = 0; j < framesPerSegment; ++j) {
-    //         if (frameCounter < -1) {
-    //             frameCounter++;
-    //             continue;
+    //     for (int j = 0; j < framesPerView; ++j) {
+    //         fluidframeCounter++;
+            
+    //         // Check if it's time to melt a block
+    //         for (const auto& event : timeline) {
+    //             if (fluidframeCounter == event.frameTrigger) {
+    //                 std::cout << ">>> TRIGGERING STATE CHANGE for Object ID: " << event.objectId << std::endl;
+    //                 // if (event.targetState == TargetState::GAS) {
+    //                 //     // Vaporize the object into the Eulerian gas field
+    //                 //     octree.vaporizeObject(event.objectId, 1.0f);
+    //                 // } else {
+    //                     Grid::BodyType targetType = (event.targetState == TargetState::FLUID) ? Grid::BodyType::FLUID : Grid::BodyType::RIGID;
+    //                     octree.makeObjectFluid(event.objectId, event.mass, targetType);
+                        
+    //                     if (event.isMoltenMetal) {
+    //                         // Make metals glow slightly when molten and adjust PBR values
+    //                         octree.setMaterialByObjectId(event.objectId, Eigen::Vector3f::Constant(1.5f), 0.2f, 1.0f, 1.45f, Eigen::Vector3f::Zero());
+    //                     }
+    //                 // }
+    //             }
     //         }
-    //         frameCounter++;
-    //         float t = static_cast<float>(j) / static_cast<float>(framesPerSegment);
 
-    //         Eigen::Vector3f currentOrigin = startView.origin * (1.0f - t) + endView.origin * t;
-            
-    //         Eigen::Vector3f currentUp = (startView.up * (1.0f - t) + endView.up * t).normalized();
-            
-    //         Camera cam;
-    //         cam.origin = currentOrigin;
-    //         cam.up = currentUp;
+    //         // if (fluidframeCounter >= 10 && fluidframeCounter <= 200) {
+    //         //     for (auto& wp : trackedWater) {
+    //         //         if (auto sp = wp.lock()) {
+    //         //             sp->size += 0.0005f;
+    //         //             sp->physics.mass += 0.0005f;
+    //         //         }
+    //         //     }
+    //         // }
+
+    //         // Step physics
+    //         for (int s = 0; s < physicsSubsteps; ++s) {
+    //             octree.stepPhysics(subDt);
+    //         }
+
+    //         // Interpolate camera
+    //         float t = static_cast<float>(j) / static_cast<float>(framesPerView);
+    //         cam.origin = startView.origin * (1.0f - t) + endView.origin * t;
+    //         cam.up = (startView.up * (1.0f - t) + endView.up * t).normalized();
     //         cam.direction = (target - cam.origin).normalized();
             
-    //         std::cout << "Rendering video frame " << frameCounter << "/" << totalFrames << "..." << std::endl;
+    //         std::cout << "Rendering video frame " << fluidframeCounter << "/" << totalFluidFrames << "..." << std::endl;
+
+    //         // 3. Render
     //         // frame out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
-    //         frame out = octree.blendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, videosamples, bounces, false);
-    //         // frame out = octree.renderFrameVulkan(cam, height, width, frame::colormap::RGB, videosamples, bounces, false, true);
-    //         // videoFrames.push_back(std::move(out));
-    //         std::string debugFilename = "output/materialframes/debug_material_" + std::to_string(frameCounter) + ".bmp";
+    //         // frame out = octree.blendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, videosamples, bounces, false, true);
+    //         frame out = octree.renderFrameVulkan(cam, height, width, frame::colormap::RGB, videosamples, bounces, true, false);
+    //         // fluidVideoFrames.push_back(out);
+
+    //         // saving to video is dumb so just gonna export here and then convert.
+    //         std::string debugFilename = "output/fluidframes/debug_fluid_" + std::to_string(fluidframeCounter) + ".bmp";
     //         BMPWriter::saveBMP(debugFilename, out);
     //     }
     // }
-    // FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
-
-    // std::cout << "\nAll frames rendered. Saving video file..." << std::endl;
-    // std::string videoFilename = "output/material_test_video.y4m";
-    
-    // y4mWriter::save(videoFilename, videoFrames, fps);
-    // if (AVIWriter::saveAVIFromCompressedFrames(videoFilename, std::move(videoFrames), width, height, fps)) {
-    //     std::cout << "Video saved successfully to " << videoFilename << std::endl;
-    // } else {
-    //     std::cerr << "Error: Failed to save video!" << std::endl;
-    // }
-
-    std::cout << "\nStarting DYNAMIC FLUID video render (Time flows!)..." << std::endl;
-    
-    std::vector<frame> fluidVideoFrames;
-
-    fluidVideoFrames.reserve(totalFluidFrames);
-    int fluidframeCounter = 0;
-    int framesPerView = totalFluidFrames / views.size();
-
-    // std::vector<Grid::Octree<int>::NodeData> trackedWater = octree.collectNodesByObjectId(5);
-
-    Camera cam;
-    cam.fov = 100;
-    for (size_t i = 0; i < views.size(); ++i) {
-        ScopedFunctionTimer meh("Fluid");
-        const View& startView = views[i];
-        const View& endView = views[(i + 1) % views.size()]; // Loop back to the first view at the end
-
-        std::cout << "\nAnimating segment: " << startView.name << " -> " << endView.name << std::endl;
-
-        for (int j = 0; j < framesPerView; ++j) {
-            fluidframeCounter++;
-            
-            // Check if it's time to melt a block
-            for (const auto& event : timeline) {
-                if (fluidframeCounter == event.frameTrigger) {
-                    std::cout << ">>> TRIGGERING STATE CHANGE for Object ID: " << event.objectId << std::endl;
-                    // if (event.targetState == TargetState::GAS) {
-                    //     // Vaporize the object into the Eulerian gas field
-                    //     octree.vaporizeObject(event.objectId, 1.0f);
-                    // } else {
-                        Grid::BodyType targetType = (event.targetState == TargetState::FLUID) ? Grid::BodyType::FLUID : Grid::BodyType::RIGID;
-                        octree.makeObjectFluid(event.objectId, event.mass, targetType);
-                        
-                        if (event.isMoltenMetal) {
-                            // Make metals glow slightly when molten and adjust PBR values
-                            octree.setMaterialByObjectId(event.objectId, Eigen::Vector3f::Constant(1.5f), 0.2f, 1.0f, 1.45f, Eigen::Vector3f::Zero());
-                        }
-                    // }
-                }
-            }
-
-            // if (fluidframeCounter >= 10 && fluidframeCounter <= 200) {
-            //     for (auto& wp : trackedWater) {
-            //         if (auto sp = wp.lock()) {
-            //             sp->size += 0.0005f;
-            //             sp->physics.mass += 0.0005f;
-            //         }
-            //     }
-            // }
-
-            // Step physics
-            for (int s = 0; s < physicsSubsteps; ++s) {
-                octree.stepPhysics(subDt);
-            }
-
-            // Interpolate camera
-            float t = static_cast<float>(j) / static_cast<float>(framesPerView);
-            cam.origin = startView.origin * (1.0f - t) + endView.origin * t;
-            cam.up = (startView.up * (1.0f - t) + endView.up * t).normalized();
-            cam.direction = (target - cam.origin).normalized();
-            
-            std::cout << "Rendering video frame " << fluidframeCounter << "/" << totalFluidFrames << "..." << std::endl;
-
-            // 3. Render
-            // frame out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
-            // frame out = octree.blendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, videosamples, bounces, false, true);
-            frame out = octree.renderFrameVulkan(cam, height, width, frame::colormap::RGB, videosamples, bounces, true, false);
-            // fluidVideoFrames.push_back(out);
-
-            // saving to video is dumb so just gonna export here and then convert.
-            std::string debugFilename = "output/fluidframes/debug_fluid_" + std::to_string(fluidframeCounter) + ".bmp";
-            BMPWriter::saveBMP(debugFilename, out);
-        }
-    }
 
     // std::string fluidVideoFilename = "output/material_fluid_video.y4m";
     // y4mWriter::save(fluidVideoFilename, fluidVideoFrames, fps);
