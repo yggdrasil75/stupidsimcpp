@@ -1,9 +1,11 @@
 #include "grid3eigen.hpp"
+#include "../timing_decorator.hpp"
 namespace Grid {
 
 template<typename T, typename GasT, typename IndexType>
 void Octree<T, GasT, IndexType>::rasterize(const Camera& cam, int height, int width, frame* colorOut, frame* depthOut,
             frame* normalOut, frame* objectOut, std::vector<float>* linearDepth) {
+    TIME_FUNCTION;
     const size_t pixels = static_cast<size_t>(width) * height;
 
     std::vector<float> zBuffer(pixels, std::numeric_limits<float>::max());
@@ -17,7 +19,6 @@ void Octree<T, GasT, IndexType>::rasterize(const Camera& cam, int height, int wi
                   (colorOut->colorFormat == frame::colormap::B) ? 1 : 3;
         colorBuf.assign(pixels * colorCh, 0.0f);
     }
-    if (colorOut) colorBuf.assign(pixels * 3, 0.0f);
     if (normalOut) normalBuf.assign(pixels * 3, 0.0f);
     if (objectOut) objectBuf.assign(pixels, -1);
 
@@ -175,6 +176,7 @@ frame Octree<T, GasT, IndexType>::renderObjectMap(const Camera& cam, int height,
 template<typename T, typename GasT, typename IndexType>
 Eigen::Vector3f Octree<T, GasT, IndexType>::traceVoxelRay(const PointType& origin, const PointType& dir, float minT, float maxT,
                                                     const std::unordered_set<int>& skipObjects, const Eigen::Vector3f& bgColor) {
+    TIME_FUNCTION;                                                    
     if (!root_ || maxT <= minT) return bgColor;
 
     const BoundingBox rootBounds = root_->bounds();
@@ -275,6 +277,7 @@ Eigen::Vector3f Octree<T, GasT, IndexType>::traceVoxelRay(const PointType& origi
 
 template<typename T, typename GasT, typename IndexType>
 frame Octree<T, GasT, IndexType>::fastRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat) {
+    TIME_FUNCTION;
     updateStreaming(cam);
     frame outFrame(width, height, colorformat);
 

@@ -194,8 +194,8 @@ int main() {
     octree.setMaxDistance(4096);
 
     // 3. Setup rendering loop
-    int width = 512;
-    int height = 512;
+    int width = 128;
+    int height = 128;
     
     const float fps = 30.0f;
     const float durationPerSegment = 10.0f;
@@ -239,7 +239,11 @@ int main() {
 
     Eigen::Vector3f target(0.0f, 0.0f, 0.5f);
     frame out;
+    frame depthOut;
+    frame normalOut;
+    frame objectOut;
     std::string filename;
+    octree.optimize();
 
     for (const auto& view : views) {
         ScopedFunctionTimer meh("Fast section");
@@ -250,13 +254,25 @@ int main() {
         cam.direction = (target - view.origin).normalized();
         cam.up = view.up;
         
-        // out = octree.fastRenderFrame(cam, height, width, frame::colormap::RGB);
-        // filename = "output/fast_cpurender_" + view.name + ".bmp";
-        // BMPWriter::saveBMP(filename, out);
-        
-        out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
-        filename = "output/fast_vulkanrender_" + view.name + ".bmp";
+        out = octree.fastRenderFrame(cam, height, width, frame::colormap::RGB);
+        filename = "output/fast_cpurender_" + view.name + ".bmp";
         BMPWriter::saveBMP(filename, out);
+        
+        depthOut = octree.renderDepthMap(cam, height, width);
+        filename = "output/fast_cpurender_" + view.name + ".bmp";
+        BMPWriter::saveBMP(filename, depthOut);
+        
+        normalOut = octree.renderNormalMap(cam, height, width);
+        filename = "output/fast_cpurender_" + view.name + ".bmp";
+        BMPWriter::saveBMP(filename, normalOut);
+        
+        objectOut = octree.renderObjectMap(cam, height, width);
+        filename = "output/fast_cpurender_" + view.name + ".bmp";
+        BMPWriter::saveBMP(filename, objectOut);
+        
+        // out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
+        // filename = "output/fast_vulkanrender_" + view.name + ".bmp";
+        // BMPWriter::saveBMP(filename, out);
     }
     FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
 

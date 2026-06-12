@@ -1182,6 +1182,7 @@ public:
     }
 
     bool setMesh(int objectId, meshMode mode = meshMode::NAIVE) {
+        TIME_FUNCTION;
         auto obj = getObject(objectId);
         if (!obj) return false;
 
@@ -1242,6 +1243,7 @@ public:
             throw std::runtime_error("NotImplementedException");
         }
 
+        // std::cout << "done meshing" << std::endl;
         return true;
     }
 
