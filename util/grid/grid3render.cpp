@@ -174,8 +174,7 @@ frame Octree<T, GasT, IndexType>::renderObjectMap(const Camera& cam, int height,
 }
 
 template<typename T, typename GasT, typename IndexType>
-Eigen::Vector3f Octree<T, GasT, IndexType>::traceVoxelRay(const PointType& origin, const PointType& dir, float minT, float maxT,
-                                                    const std::unordered_set<int>& skipObjects, const Eigen::Vector3f& bgColor) {
+Eigen::Vector3f Octree<T, GasT, IndexType>::traceVoxelRay(const PointType& origin, const PointType& dir, float minT, float maxT, const Eigen::Vector3f& bgColor) {
     TIME_FUNCTION;                                                    
     if (!root_ || maxT <= minT) return bgColor;
 
@@ -241,7 +240,7 @@ Eigen::Vector3f Octree<T, GasT, IndexType>::traceVoxelRay(const PointType& origi
 
         for (const auto& nd : candidates) {
             if (!nd) continue;
-            if (skipObjects.count(static_cast<int>(nd->objectId))) continue;
+            // if (skipObjects.count(static_cast<int>(nd->objectId))) continue;
             if (!nd->isVisible()) continue;
 
             float tHit;
@@ -301,17 +300,18 @@ frame Octree<T, GasT, IndexType>::fastRenderFrame(const Camera& cam, int height,
     frame objectFrame(width, height, frame::colormap::RGBA);
     std::vector<float> linearDepth;
     rasterize(cam, height, width, &colorFrame, nullptr, nullptr, &objectFrame, &linearDepth);
+    std::cout << "done in rasterizer" << std::endl;
 
     const std::vector<uint8_t>& rasterColor = colorFrame.getData();
     const std::vector<uint8_t>& objData = objectFrame.getData();
-
-    std::unordered_set<int> meshed;
     const size_t pixels = static_cast<size_t>(width) * height;
-    for (size_t i = 0; i < pixels; ++i) {
-        uint32_t v = static_cast<uint32_t>(objData[i * 4]) | (static_cast<uint32_t>(objData[i * 4 + 1]) << 8) |
-                     (static_cast<uint32_t>(objData[i * 4 + 2]) << 16) | (static_cast<uint32_t>(objData[i * 4 + 3]) << 24);
-        if (v != 0xFFFFFFFFu) meshed.insert(static_cast<int>(v));
-    }
+
+    // std::unordered_set<int> meshed;
+    // for (size_t i = 0; i < pixels; ++i) {
+    //     uint32_t v = static_cast<uint32_t>(objData[i * 4]) | (static_cast<uint32_t>(objData[i * 4 + 1]) << 8) |
+    //                  (static_cast<uint32_t>(objData[i * 4 + 2]) << 16) | (static_cast<uint32_t>(objData[i * 4 + 3]) << 24);
+    //     if (v != 0xFFFFFFFFu) meshed.insert(static_cast<int>(v));
+    // }
 
     std::vector<uint8_t> frameData(pixels * channels, 0);
 
@@ -345,7 +345,7 @@ frame Octree<T, GasT, IndexType>::fastRenderFrame(const Camera& cam, int height,
                 color = surf * (1.0f - transmission) + sky * transmission;
             }
             float traceMax = haveRaster ? rasterDepth : maxDistance_;
-            color = traceVoxelRay(camOrigin, dir, nearPlane, traceMax, meshed, color);
+            color = traceVoxelRay(camOrigin, dir, nearPlane, traceMax, color);
 
             uint8_t r8 = static_cast<uint8_t>(std::clamp(color.x() * 255.0f, 0.0f, 255.0f));
             uint8_t g8 = static_cast<uint8_t>(std::clamp(color.y() * 255.0f, 0.0f, 255.0f));
@@ -353,15 +353,17 @@ frame Octree<T, GasT, IndexType>::fastRenderFrame(const Camera& cam, int height,
 
             if (channels >= 3) {
                 if (colorformat == frame::colormap::RGB || colorformat == frame::colormap::RGBA) {
-                    frameData[base] = r8; frameData[base + 1] = g8; frameData[base + 2] = b8;
+                    frameData[base] = r8;
+                    frameData[base + 1] = g8;
+                    frameData[base + 2] = b8;
                 } else {
-                    frameData[base] = b8; frameData[base + 1] = g8; frameData[base + 2] = r8;
+                    frameData[base] = b8;
+                    frameData[base + 1] = g8;
+                    frameData[base + 2] = r8;
                 }
                 if (channels == 4) frameData[base + 3] = 255;
             } else {
-                frameData[base] = static_cast<uint8_t>(std::clamp(
-                    0.2126f * color.x() * 255.0f + 0.7152f * color.y() * 255.0f + 0.0722f * color.z() * 255.0f,
-                    0.0f, 255.0f));
+                frameData[base] = static_cast<uint8_t>(std::clamp(0.2126f * color.x() * 255.0f + 0.7152f * color.y() * 255.0f + 0.0722f * color.z() * 255.0f, 0.0f, 255.0f));
             }
         }
     }

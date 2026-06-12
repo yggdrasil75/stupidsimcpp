@@ -259,15 +259,15 @@ int main() {
         BMPWriter::saveBMP(filename, out);
         
         depthOut = octree.renderDepthMap(cam, height, width);
-        filename = "output/fast_cpurender_" + view.name + ".bmp";
+        filename = "output/fast_depthrender_" + view.name + ".bmp";
         BMPWriter::saveBMP(filename, depthOut);
         
         normalOut = octree.renderNormalMap(cam, height, width);
-        filename = "output/fast_cpurender_" + view.name + ".bmp";
+        filename = "output/fast_normalrender_" + view.name + ".bmp";
         BMPWriter::saveBMP(filename, normalOut);
         
         objectOut = octree.renderObjectMap(cam, height, width);
-        filename = "output/fast_cpurender_" + view.name + ".bmp";
+        filename = "output/fast_objectrender_" + view.name + ".bmp";
         BMPWriter::saveBMP(filename, objectOut);
         
         // out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
