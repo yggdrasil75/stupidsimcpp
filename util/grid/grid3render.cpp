@@ -2,8 +2,8 @@
 #include "../timing_decorator.hpp"
 namespace Grid {
 
-template<typename T, typename GasT, typename IndexType>
-void Octree<T, GasT, IndexType>::rasterize(const Camera& cam, int height, int width, frame* colorOut, frame* depthOut,
+template<typename T, typename IndexType>
+void Octree<T, IndexType>::rasterize(const Camera& cam, int height, int width, frame* colorOut, frame* depthOut,
             frame* normalOut, frame* objectOut, std::vector<float>* linearDepth) {
     TIME_FUNCTION;
     const size_t pixels = static_cast<size_t>(width) * height;
@@ -152,137 +152,108 @@ void Octree<T, GasT, IndexType>::rasterize(const Camera& cam, int height, int wi
     if (linearDepth) *linearDepth = std::move(zBuffer);
 }
 
-template<typename T, typename GasT, typename IndexType>
-frame Octree<T, GasT, IndexType>::renderDepthMap(const Camera& cam, int height, int width) {
+template<typename T, typename IndexType>
+frame Octree<T, IndexType>::renderDepthMap(const Camera& cam, int height, int width) {
     frame out(width, height, frame::colormap::B);
     rasterize(cam, height, width, nullptr, &out, nullptr, nullptr);
     return out;
 }
 
-template<typename T, typename GasT, typename IndexType>
-frame Octree<T, GasT, IndexType>::renderColorMap(const Camera& cam, int height, int width) {
+template<typename T, typename IndexType>
+frame Octree<T, IndexType>::renderColorMap(const Camera& cam, int height, int width) {
     frame out(width, height, frame::colormap::RGB);
     rasterize(cam, height, width, &out, nullptr, nullptr, nullptr);
     return out;
 }
 
-template<typename T, typename GasT, typename IndexType>
-frame Octree<T, GasT, IndexType>::renderNormalMap(const Camera& cam, int height, int width) {
+template<typename T, typename IndexType>
+frame Octree<T, IndexType>::renderNormalMap(const Camera& cam, int height, int width) {
     frame out(width, height, frame::colormap::RGB);
     rasterize(cam, height, width, nullptr, nullptr, &out, nullptr);
     return out;
 }
 
-template<typename T, typename GasT, typename IndexType>
-frame Octree<T, GasT, IndexType>::renderObjectMap(const Camera& cam, int height, int width) {
+template<typename T, typename IndexType>
+frame Octree<T, IndexType>::renderObjectMap(const Camera& cam, int height, int width) {
     frame out(width, height, frame::colormap::RGBA);
     rasterize(cam, height, width, nullptr, nullptr, nullptr, &out);
     return out;
 }
 
-template<typename T, typename GasT, typename IndexType>
-bool Octree<T, GasT, IndexType>::ddaNode(const OctreeNode* node, const Ray& ray, const PointType& dir,
-            float tEnter, float tExit, float minT, float maxT, Eigen::Vector3f& accum, float& transmittance) {
-    if (!node->points.empty()) {
-        PointType hitNormal;
-        for (const auto& nd : node->points) {
-            if (!nd || !nd->isVisible()) continue;
-            float tHit;
-            if (!rayCubeIntersect(ray, nd->getCubeBounds(), tHit, hitNormal)) continue;
-            if (tHit < minT || tHit > maxT) continue;
-            Eigen::Vector4f rgba = Eigen::Vector4f::Ones();
-            if (auto obj = getObject(static_cast<int>(nd->objectId))) {
-                std::shared_lock<std::shared_mutex> ol(obj->objMutex);
-                rgba = obj->getColor(nd->colorIdx);
-            }
-            float lambert = std::max(0.2f, hitNormal.dot(-dir));
-            float alpha = 1.0f - std::clamp(rgba.w(), 0.0f, 1.0f);
-            accum += transmittance * alpha * (rgba.template head<3>() * lambert);
-            transmittance *= (1.0f - alpha);
-            if (transmittance <= 0.01f) return false;
-        }
-    }
-
-    if (node->isLeaf()) return true;
-
-    const bool fat = node->isFat();
-    const int N = fat ? 32 : 2;
-    const BoundingBox b = node->bounds();
-    const PointType gridMin = b.first;
-    const PointType cellSize = (b.second - b.first) / static_cast<float>(N);
-
-    PointType entry = ray.origin + dir * std::max(tEnter, 0.0f);
-    int cell[3];
-    int step[3];
-    float tMaxA[3];
-    float tDelta[3];
-    for (int i = 0; i < 3; ++i) {
-        float local = (entry[i] - gridMin[i]) / cellSize[i];
-        cell[i] = std::clamp((int)std::floor(local), 0, N - 1);
-        if (dir[i] > 0.0f) {
-            step[i] = 1;
-            float nextBoundary = gridMin[i] + (cell[i] + 1) * cellSize[i];
-            tMaxA[i] = tEnter + (nextBoundary - entry[i]) * ray.invDir[i];
-            tDelta[i] = cellSize[i] * ray.invDir[i];
-        } else if (dir[i] < 0.0f) {
-            step[i] = -1;
-            float nextBoundary = gridMin[i] + cell[i] * cellSize[i];
-            tMaxA[i] = tEnter + (nextBoundary - entry[i]) * ray.invDir[i];
-            tDelta[i] = -cellSize[i] * ray.invDir[i];
-        } else {
-            step[i] = 0;
-            tMaxA[i] = std::numeric_limits<float>::max();
-            tDelta[i] = std::numeric_limits<float>::max();
-        }
-    }
-
-    float t0 = tEnter;
-    while (transmittance > 0.01f) {
-        int axis = 0;
-        if (tMaxA[1] < tMaxA[axis]) axis = 1;
-        if (tMaxA[2] < tMaxA[axis]) axis = 2;
-        float t1 = std::min(tMaxA[axis], tExit);
-
-        uint16_t index = fat ? mortonEncodeFatNode((uint8_t)cell[0], (uint8_t)cell[1], (uint8_t)cell[2])
-                             : (uint16_t)(cell[0] | (cell[1] << 1) | (cell[2] << 2));
-        const auto& child = node->children[index];
-        if (child) {
-            if (!ddaNode(child.get(), ray, dir, t0, t1, minT, maxT, accum, transmittance)) return false;
-        }
-
-        if (tMaxA[axis] >= tExit) break;
-        t0 = tMaxA[axis];
-        cell[axis] += step[axis];
-        if (cell[axis] < 0 || cell[axis] >= N) break;
-        tMaxA[axis] += tDelta[axis];
-    }
-    return true;
-}
-template<typename T, typename GasT, typename IndexType>
-bool Octree<T, GasT, IndexType>::skipPaths() const {
-    for (auto [id, obj] : objects_) {
-        if (!obj->isMeshClean()) return false;
-    }
-    return true;
-}
-
-template<typename T, typename GasT, typename IndexType>
-Eigen::Vector3f Octree<T, GasT, IndexType>::traceVoxelRay(const PointType& origin, const PointType& dir, float minT, float maxT, const Eigen::Vector3f& bgColor) {
-    // TIME_FUNCTION;
-    if (!root_ || maxT <= minT) return bgColor;
-
+template<typename T, typename IndexType>
+Eigen::Vector3f Octree<T, IndexType>::traceVoxelRay(const PointType& origin, const PointType& dir, float minT, float maxT, const Eigen::Vector3f& bgColor) {
     Ray ray(origin, dir);
-    float tEnter = minT, tExit = maxT;
-    if (!rayBoxIntersect(ray, root_->bounds(), tEnter, tExit)) return bgColor;
+    Eigen::Vector3f outColor = Eigen::Vector3f::Zero();
+    float tranm = 0.0f;
+    if (rayBoxIntersect(ray, root->bounds, minT, maxT)) {
+        float currentMaxDist = maxT;
+        StackItem stack[32768];
+        int stackPtr = 0;
+        stack[stackPtr++] = {0, std::max(0.0f, minT), maxT};
 
-    Eigen::Vector3f accum = Eigen::Vector3f::Zero();
-    float transmittance = 1.0f;
-    ddaNode(root_.get(), ray, dir, tEnter, tExit, minT, maxT, accum, transmittance);
-    return accum + transmittance * bgColor;
+        while(stackPtr > 0 && tranm < 1) {
+            StackItem current = stack[--stackPtr];
+            if (current.tMin > currentMaxDist) continue;
+            const RenderNode_<T, IndexType>& node = buffer.nodes[current.nodeIdx];
+            if (!node.isLoaded && node.originalNode) {
+                ensureLoaded(node.originalNode, true);
+            }
+
+            for (uint32_t i = 0; i < node.pointCount; ++i) {
+                const RenderData_<T, IndexType>& pt = buffer.poitns[node.firstPoint + 1];
+                float t;
+                PointType n, h;
+                if (rayCubeIntersect(ray, &pt, t, n, f)) {
+                    if (t >= 0 && t <= currentMaxDist && t <= current.tMax + 0.001f) {
+                        currentMaxDist = t;
+                        hit = &pt;
+                        tranm += hit->color.w();
+                        outColor += hit->color.head<3>() * hit->color.w()
+                    }
+                }
+            }
+
+            if (node.isLeaf || !node.isLoaded) continue;
+            float t0 = current.tMin;
+            float t1 = current.tMax;
+
+            Eigen::Vector3f ttt = (node.center - ray.origin).cwiseProduct(ray.invDir);
+            int currIdx = ((t0 >= ttt.x()) ? 1 : 0) | ((t0 >= ttt.y()) ? 2 : 0) | ((t0 >= ttt.z()) ? 4 : 0);
+
+            ChildInterval children[4];
+            int childCount = 0;
+            
+            while(t0 < t1 && t0 <= currentMaxDist) {
+                Eigen::Vector3f next_t;
+                next_t[0] = (currIdx & 1) ? t1 : ttt[0];
+                next_t[1] = (currIdx & 2) ? t1 : ttt[1];
+                next_t[2] = (currIdx & 4) ? t1 : ttt[2];
+
+                float tNext = next_t.minCoeff();
+                
+                int physIdx = currIdx ^ ray.signMask;
+                if (node.childMask & (1 << physIdx)) {
+                    int childOffset = countBits(node.childMask & ((1 << physIdx) - 1));
+                    children[childCount++] = {node.firstChild + childOffset, t0, tNext};
+                }
+                
+                t0 = tNext;
+                currIdx |= ((next_t[0] <= tNext) ? 1 : 0) | ((next_t[1] <= tNext) ? 2 : 0) | ((next_t[2] <= tNext) ? 4 : 0);
+            }
+
+            // if (stackPtr + childCount > 256) continue;
+
+            for (int i = childCount - 1; i >= 0; --i) {
+                stack[stackPtr++] = {children[i].nodeIdx, children[i].tMin, children[i].tMax};
+            }
+
+        }
+    }
+    return outColor;
 }
 
-template<typename T, typename GasT, typename IndexType>
-frame Octree<T, GasT, IndexType>::fastRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat) {
+template<typename T, typename IndexType>
+frame Octree<T, IndexType>::fastRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat) {
     TIME_FUNCTION;
     updateStreaming(cam);
     generateMeshes();
@@ -313,13 +284,6 @@ frame Octree<T, GasT, IndexType>::fastRenderFrame(const Camera& cam, int height,
     const std::vector<uint8_t>& rasterColor = colorFrame.getData();
     const std::vector<uint8_t>& objData = objectFrame.getData();
     const size_t pixels = static_cast<size_t>(width) * height;
-
-    // std::unordered_set<int> meshed;
-    // for (size_t i = 0; i < pixels; ++i) {
-    //     uint32_t v = static_cast<uint32_t>(objData[i * 4]) | (static_cast<uint32_t>(objData[i * 4 + 1]) << 8) |
-    //                  (static_cast<uint32_t>(objData[i * 4 + 2]) << 16) | (static_cast<uint32_t>(objData[i * 4 + 3]) << 24);
-    //     if (v != 0xFFFFFFFFu) meshed.insert(static_cast<int>(v));
-    // }
 
     std::vector<uint8_t> frameData(pixels * channels, 0);
 
@@ -405,8 +369,8 @@ frame Octree<T, GasT, IndexType>::fastRenderFrame(const Camera& cam, int height,
 
 #ifdef VULKAN_SUPPORT
 
-template<typename T, typename GasT, typename IndexType>
-frame Octree<T, GasT, IndexType>::renderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat, int samplesPerPixel,
+template<typename T, typename IndexType>
+frame Octree<T, IndexType>::renderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat, int samplesPerPixel,
                 int maxBounces, bool globalIllumination, bool useLod) {
     updateStreaming(cam);
     frame outFrame(width, height, colorformat);
@@ -415,8 +379,8 @@ frame Octree<T, GasT, IndexType>::renderFrameVulkan(const Camera& cam, int heigh
     return outFrame;
 }
 
-template<typename T, typename GasT, typename IndexType>
-frame Octree<T, GasT, IndexType>::fastRenderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat) {
+template<typename T, typename IndexType>
+frame Octree<T, IndexType>::fastRenderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat) {
     updateStreaming(cam);
     frame outFrame(width, height, colorformat);
 
@@ -424,8 +388,8 @@ frame Octree<T, GasT, IndexType>::fastRenderFrameVulkan(const Camera& cam, int h
     return outFrame;
 }
 
-template<typename T, typename GasT, typename IndexType>
-frame Octree<T, GasT, IndexType>::blendedRenderFrameVulkan(const Camera& cam, int height, int width, float pbrScale,
+template<typename T, typename IndexType>
+frame Octree<T, IndexType>::blendedRenderFrameVulkan(const Camera& cam, int height, int width, float pbrScale,
                 frame::colormap colorformat, int samplesPerPixel, int maxBounces, bool globalIllumination, bool useLod) {
     updateStreaming(cam);
     frame outFrame(width, height, colorformat);

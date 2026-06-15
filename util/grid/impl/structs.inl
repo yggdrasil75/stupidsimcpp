@@ -338,8 +338,17 @@ struct GridObject_ {
     mutable std::shared_mutex objMutex;
 
     mesh<IndexType> objMesh;
+    meshMode preferredMesh = meshMode::NAIVE;
 
     GridObject_(int objId = -1) : id(objId), flags(OBJ_ALLOW_PARTIAL_UNLOAD_BIT) { }
+
+    meshMode getPreferredMesh() const {
+        return preferredMesh;
+    }
+
+    void setPreferredMesh(meshMode mode) {
+        preferredMesh = mode;
+    }
 
     bool isPartialUnloadAllowed() const {
         return flags.load(std::memory_order_relaxed) & OBJ_ALLOW_PARTIAL_UNLOAD_BIT;

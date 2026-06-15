@@ -48,6 +48,7 @@ SRC += $(IMGUI_DIR)/imgui.cpp $(IMGUI_DIR)/imgui_demo.cpp $(IMGUI_DIR)/imgui_dra
 SRC += $(IMGUI_DIR)/backends/imgui_impl_glfw.cpp $(IMGUI_DIR)/backends/imgui_impl_opengl3.cpp
 SRC += $(SRC_DIR)/stb_image.cpp
 SRC += $(GRID_DIR)/grid3render.cpp
+SRC += $(GRID_DIR)/grid3mesh.cpp
 SRC += $(GRID_DIR)/grid3physics.cpp
 OBJS = $(addprefix $(OBJ_DIR)/, $(addsuffix .o, $(basename $(notdir $(SRC)))))
 UNAME_S := $(shell uname -s)

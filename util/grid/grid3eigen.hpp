@@ -21,6 +21,7 @@
 #include "impl/sphkernel.inl"
 #include "impl/skybox.inl"
 #include "impl/rendering.inl"
+#include "impl/meshing.inl"
 
 #ifdef SSE
 #include <immintrin.h>
@@ -38,11 +39,13 @@ public:
     using ExtendedMaterial = ExtendedMaterial_;
     using PhysicsMaterial = PhysicsMaterial_;
     using RayHit = RayHit_<T, IndexType>;
-    // using RenderNode = RenderNode_<T, IndexType>;
-    // using RenderData = RenderData_<T, IndexType>;
-    // using RenderBuffer = RenderBuffer_<T, IndexType>;
+    using RenderNode = RenderNode_<T, IndexType>;
+    using RenderData = RenderData_<T, IndexType>;
+    using RenderBuffer = RenderBuffer_<T, IndexType>;
     using GridObject = GridObject_<T, IndexType>;
     // using EulerianGasState = EulerianGasState_<GasT>;
+    using MeshVoxels = std::vector<std::shared_ptr<NodeData>>;
+    
 
 //variables
 private: 
@@ -115,6 +118,11 @@ public:
             maxDepth(maxDepth), size(0), skybox_(1024, 1024), StoragePath(savePath) {
         setQueueStreaming(false);
         skybox_.setBackground(backgroundColor_.x(), backgroundColor_.y(), backgroundColor_.z(), 1.0f);
+        auto terrain = getOrCreateObject(1);
+        terrain->setPreferredMesh(meshMode::SURFACENET);
+        auto terrainWater = getOrCreateObject(2);
+        terrainWater->setPreferredMesh(meshMode::MANIFOLDCONTOUR);
+        
         startWorkerThread();
     }
 
@@ -1186,8 +1194,8 @@ public:
     bool setMesh(int objectId, meshMode mode = meshMode::NAIVE) {
         TIME_FUNCTION;
         auto obj = getObject(objectId);
-        if (obj->isMeshClean()) return true;
         if (!obj) return false;
+        if (obj->isMeshClean()) return true;
 
         if (mode == meshMode::OCCUPANCY || mode == meshMode::TRANSVOXEL) {
             throw std::runtime_error("NotImplementedException");
@@ -1203,52 +1211,36 @@ public:
         obj->objMesh.vertices.clear();
         obj->objMesh.tris.clear();
 
-        if (mode == meshMode::NAIVE) {
-            for (const auto& pt : voxels) {
-                float h = static_cast<float>(pt->size) * 0.5f;
-                const PointType& o = pt->position;
-                size_t base = obj->objMesh.vertices.size();
-                static const float corners[8][3] = {
-                    {-1,-1,-1},{+1,-1,-1},{+1,+1,-1},{-1,+1,-1},
-                    {-1,-1,+1},{+1,-1,+1},{+1,+1,+1},{-1,+1,+1}
-                };
-                for (auto& c : corners)
-                    obj->objMesh.vertices.push_back({pt->colorIdx, o + PointType(c[0]*h, c[1]*h, c[2]*h)});
-                static const int faces[6][4] = {
-                    {0,1,2,3},{4,5,6,7},{0,1,5,4},
-                    {2,3,7,6},{0,3,7,4},{1,2,6,5}
-                };
-                for (auto& f : faces) {
-                    obj->objMesh.tris.push_back({base+f[0], base+f[1], base+f[2]});
-                    obj->objMesh.tris.push_back({base+f[0], base+f[2], base+f[3]});
-                }
-            }
-        } else if (mode == meshMode::GREEDY) {
-            throw std::runtime_error("NotImplementedException");
-        } else if (mode == meshMode::MARCHINGCUBES) {
-            throw std::runtime_error("NotImplementedException");
-        } else if (mode == meshMode::NAIVEMARCHING) {
-            throw std::runtime_error("NotImplementedException");
-            //naive marching cubes without the LUT
-        } else if (mode == meshMode::SURFACENET) {
-            throw std::runtime_error("NotImplementedException");
-        } else if (mode == meshMode::DUALCONTOUR) {
-            throw std::runtime_error("NotImplementedException");
-        } else if (mode == meshMode::MANIFOLDCONTOUR) {
-            throw std::runtime_error("NotImplementedException");
-        } else if (mode == meshMode::OCCUPANCY) {
-            throw std::runtime_error("NotImplementedException");
-        } else if (mode == meshMode::CUBICMARCHING) {
-            throw std::runtime_error("NotImplementedException");
-        } else if (mode == meshMode::TRANSVOXEL) {
-            throw std::runtime_error("NotImplementedException");
-        } else if (mode == meshMode::DUALMARCHING) {
-            throw std::runtime_error("NotImplementedException");
+        switch (mode) {
+            case meshMode::NAIVE:          mesh_naive(*obj, voxels); break;
+            case meshMode::GREEDY:         mesh_greedy(*obj, voxels); break;
+            case meshMode::MARCHINGCUBES:  mesh_marchingCubes(*obj, voxels, false); break;
+            case meshMode::NAIVEMARCHING:  mesh_marchingCubes(*obj, voxels, true); break;
+            case meshMode::SURFACENET:     mesh_surfaceNet(*obj, voxels); break;
+            case meshMode::DUALCONTOUR:    mesh_dualContour(*obj, voxels, false); break;
+            case meshMode::MANIFOLDCONTOUR:mesh_dualContour(*obj, voxels, true); break;
+            case meshMode::CUBICMARCHING:  mesh_cubicMarching(*obj, voxels); break;
+            case meshMode::DUALMARCHING:   mesh_dualMarching(*obj, voxels); break;
+            case meshMode::OCCUPANCY:
+            case meshMode::TRANSVOXEL:
+            default:
+                throw std::runtime_error("NotImplementedException");
         }
 
         // std::cout << "done meshing" << std::endl;
         obj->setMeshClean(true);
         return true;
+    }
+
+    bool setMesh(int objectId) {
+        auto obj = getObject(objectId);
+        if (!obj) return false;
+        return setMesh(objectId, obj->getPreferredMesh());
+    }
+
+    void setObjectMeshMode(int objectId, meshMode mode) {
+        auto obj = getOrCreateObject(objectId);
+        obj->setPreferredMesh(mode);
     }
 
     void updateStreaming(const Camera& cam) {
@@ -1289,11 +1281,7 @@ public:
     
     void generateMeshes() {
         for (auto [id, obj] : objects_) {
-            // if (id == 1) setMesh(obj, meshMode::SURFACENET); //terrain.
-            if (id == 2) continue; //terrain fluids.
-            // setMesh(obj, meshMode::GREEDY);
-            //since the others arent in yet, just naive:
-            setMesh(id, meshMode::NAIVE);
+            setMesh(id, obj->getPreferredMesh());
         }
     }
 
@@ -1455,6 +1443,21 @@ public:
         int samplesPerPixel = 2, int maxBounces = 4, bool globalIllumination = false, bool useLod = true);
     void stepPhysics(float dt);
 
+    
+    struct MeshGrid { PointType origin; float cellSize; };
+    std::shared_ptr<NodeData> meshVoxelAt(const MeshGrid& g, const Eigen::Vector3i& k,
+                                          int objectId, OctreeNode* ancestor);
+    OctreeNode* meshAncestor(const MeshVoxels& voxels);
+    static float pickCellSize(const MeshVoxels& voxels);
+    static void latticeBounds(const MeshVoxels& voxels, float cellSize,
+                              PointType& origin, Eigen::Vector3i& outMin, Eigen::Vector3i& outMax);
+    void mesh_naive(GridObject& obj, const MeshVoxels& voxels);
+    void mesh_greedy(GridObject& obj, const MeshVoxels& voxels);
+    void mesh_marchingCubes(GridObject& obj, const MeshVoxels& voxels, bool naiveNoLUT);
+    void mesh_surfaceNet(GridObject& obj, const MeshVoxels& voxels);
+    void mesh_dualContour(GridObject& obj, const MeshVoxels& voxels, bool manifold);
+    void mesh_cubicMarching(GridObject& obj, const MeshVoxels& voxels);
+    void mesh_dualMarching(GridObject& obj, const MeshVoxels& voxels);
 };
 
 }

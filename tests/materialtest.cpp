@@ -72,8 +72,8 @@ void createCheckerBox(Grid::Octree<int>& octree, const Eigen::Vector3f& center, 
             }
         }
     }
-    octree.bulkInsert(1, positionsblack, color1, true, step, true, 100, Eigen::Vector3f::Zero(), 0.8f, 0.2f, 0.2f, 1.45f, Eigen::Vector3f::Zero(), Grid::BodyType::STATIC, 1.0, 1.0, 1.0, true);
-    octree.bulkInsert(1, positionswhite, color2, true, step, true, 100, Eigen::Vector3f::Zero(), 0.8f, 0.2f, 0.2f, 1.45f, Eigen::Vector3f::Zero(), Grid::BodyType::STATIC, 1.0, 1.0, 1.0, true);
+    octree.bulkInsert(1, positionsblack, color1, true, step, true, 1, Eigen::Vector3f::Zero(), 0.8f, 0.2f, 0.2f, 1.45f, Eigen::Vector3f::Zero(), Grid::BodyType::STATIC, 1.0, 1.0, 1.0, true);
+    octree.bulkInsert(1, positionswhite, color2, true, step, true, 1, Eigen::Vector3f::Zero(), 0.8f, 0.2f, 0.2f, 1.45f, Eigen::Vector3f::Zero(), Grid::BodyType::STATIC, 1.0, 1.0, 1.0, true);
 }
 
 enum class TargetState {
@@ -172,19 +172,19 @@ int main() {
     float mass = 1.0f;
 
     // LAYER 1: Metals
-    createBox(octree, Eigen::Vector3f(-sp, -sp, 0.0f), size, cGold,   0.0f, 0.08f, 0.99f, 0.0f, 1.45f, Eigen::Vector3f(0,0,0), 1, initType, mass);
-    createBox(octree, Eigen::Vector3f(  0, -sp, 0.0f), size, cSilver, 0.0f, 0.08f, 0.99f, 0.0f, 1.45f, Eigen::Vector3f(0,0,0), 2, initType, mass);
-    createBox(octree, Eigen::Vector3f( sp, -sp, 0.0f), size, cBrass,  0.0f, 0.08f, 0.99f, 0.0f, 1.45f, Eigen::Vector3f(0,0,0), 3, initType, mass);
+    createBox(octree, Eigen::Vector3f(-sp, -sp, 0.0f), size, cGold,   0.0f, 0.08f, 0.99f, 0.0f, 1.45f, Eigen::Vector3f(0,0,0), 3, initType, mass);
+    createBox(octree, Eigen::Vector3f(  0, -sp, 0.0f), size, cSilver, 0.0f, 0.08f, 0.99f, 0.0f, 1.45f, Eigen::Vector3f(0,0,0), 4, initType, mass);
+    createBox(octree, Eigen::Vector3f( sp, -sp, 0.0f), size, cBrass,  0.0f, 0.08f, 0.99f, 0.0f, 1.45f, Eigen::Vector3f(0,0,0), 5, initType, mass);
 
     // LAYER 2: Opaque
-    createBox(octree, Eigen::Vector3f(-sp,  0,  0.0f), size, cRed,    0.0f, 0.05f, 0.0f, 0.0f, 2.4f, Eigen::Vector3f(0,0,0), 4, initType, mass, 0.5);
-    createBox(octree, Eigen::Vector3f(  0,  0,  0.0f), size, cBlue,   0.0f, 0.05f, 0.0f, 0.0f, 2.4f, Eigen::Vector3f(0,0,0), 5, initType, mass, 0.1);
-    createBox(octree, Eigen::Vector3f( sp,  0,  0.0f), size, cPurple, 0.0f, 0.05f, 0.0f, 0.0f, 2.4f, Eigen::Vector3f(0,0,0), 6, initType, mass, 0.5);
+    createBox(octree, Eigen::Vector3f(-sp,  0,  0.0f), size, cRed,    0.0f, 0.05f, 0.0f, 0.0f, 2.4f, Eigen::Vector3f(0,0,0), 6, initType, mass, 0.5);
+    createBox(octree, Eigen::Vector3f(  0,  0,  0.0f), size, cBlue,   0.0f, 0.05f, 0.0f, 0.0f, 2.4f, Eigen::Vector3f(0,0,0), 7, initType, mass, 0.1);
+    createBox(octree, Eigen::Vector3f( sp,  0,  0.0f), size, cPurple, 0.0f, 0.05f, 0.0f, 0.0f, 2.4f, Eigen::Vector3f(0,0,0), 8, initType, mass, 0.5);
 
     // LAYER 3: Glass
-    createBox(octree, Eigen::Vector3f(-sp,  sp, 0.0f), size, cRed,    0.0f, 0.01f, 0.0f, 0.99f, 1.5f, Eigen::Vector3f(0.05f, 0.8f, 0.8f), 7, initType, mass, 0.5);
-    createBox(octree, Eigen::Vector3f(  0,  sp, 0.0f), size, cBlue,   0.0f, 0.01f, 0.0f, 0.99f, 1.5f, Eigen::Vector3f(0.8f, 0.8f, 0.05f), 8, initType, mass, 0.5);
-    createBox(octree, Eigen::Vector3f( sp,  sp, 0.0f), size, cPurple, 0.0f, 0.01f, 0.0f, 0.99f, 1.5f, Eigen::Vector3f(0.4f, 1.2f, 0.4f), 9, initType, mass, 0.5);
+    createBox(octree, Eigen::Vector3f(-sp,  sp, 0.0f), size, cRed,    0.0f, 0.01f, 0.0f, 0.99f, 1.5f, Eigen::Vector3f(0.05f, 0.8f, 0.8f), 9, initType, mass, 0.5);
+    createBox(octree, Eigen::Vector3f(  0,  sp, 0.0f), size, cBlue,   0.0f, 0.01f, 0.0f, 0.99f, 1.5f, Eigen::Vector3f(0.8f, 0.8f, 0.05f), 10, initType, mass, 0.5);
+    createBox(octree, Eigen::Vector3f( sp,  sp, 0.0f), size, cPurple, 0.0f, 0.01f, 0.0f, 0.99f, 1.5f, Eigen::Vector3f(0.4f, 1.2f, 0.4f), 11, initType, mass, 0.5);
 
     std::cout << "Optimizing and Generating LODs..." << std::endl;
     // octree.generateLODs();
