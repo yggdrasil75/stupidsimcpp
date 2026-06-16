@@ -577,7 +577,7 @@ struct OctreeNode_ {
             child = nullptr;
         }
         center = (min + max) * 0.5;
-        nodeSize = Eigen::half((max - min).norm());
+        nodeSize = Eigen::half((max - min).maxCoeff());
     }
 
     bool isLeaf() const {

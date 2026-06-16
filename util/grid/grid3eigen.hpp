@@ -119,9 +119,9 @@ public:
         setQueueStreaming(false);
         skybox_.setBackground(backgroundColor_.x(), backgroundColor_.y(), backgroundColor_.z(), 1.0f);
         auto terrain = getOrCreateObject(1);
-        terrain->setPreferredMesh(meshMode::SURFACENET);
+        // terrain->setPreferredMesh(meshMode::SURFACENET);
         auto terrainWater = getOrCreateObject(2);
-        terrainWater->setPreferredMesh(meshMode::MANIFOLDCONTOUR);
+        // terrainWater->setPreferredMesh(meshMode::MANIFOLDCONTOUR);
         
         startWorkerThread();
     }
@@ -470,7 +470,8 @@ public:
         }
         std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
         if (!node->isLeaf()) {
-            for (int i = 0; i < 8; ++i) {
+            const int childCount = node->isFat() ? 65536 : 8;
+            for (int i = 0; i < childCount; ++i) {
                 if (node->children[i]) {
                     updateStreamingRecursive(node->children[i].get(), camPos, camDir);
                 }
@@ -1429,12 +1430,9 @@ public:
     Eigen::Vector3f traceVoxelRay(const PointType& origin, const PointType& dir, float minT, float maxT, const Eigen::Vector3f& bgColor);
     bool skipPaths() const;
 
-    bool ddaNode(const OctreeNode* node, const Ray& ray, const PointType& dir, float tEnter, float tExit,
-                float minT, float maxT, Eigen::Vector3f& accum, float& transmittance);
-
     void invalidateLODForPoint(const std::shared_ptr<NodeData>& n);
     size_t removeObjectRecursive(OctreeNode* node, int objectId);
-    frame fastRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB);
+    frame fastRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB, bool rasterOnly = false);
     frame blendedRenderFrameVulkan(const Camera& cam, int height, int width, float pbrScale = 0.5f,
                 frame::colormap colorformat = frame::colormap::RGB, int samplesPerPixel = 1,
                 int maxBounces = 4, bool globalIllumination = false, bool useLod = true);

@@ -10,6 +10,7 @@
 #include "../util/grid/camera.hpp"
 #include "../util/grid/grid3eigen.hpp"
 #include "../util/grid/grid3render.cpp"
+#include "../util/grid/grid3mesh.cpp"
 #include "../util/grid/grid3physics.cpp"
 #include "../util/output/frame.hpp"
 #include "../util/output/bmpwriter.hpp"
@@ -149,9 +150,9 @@ int main() {
 
                     if (isLightArea) {
                         
-                        octree.insert(1, pos, cWhite, true, step, true, 10, cWhite, 0.8f, 0.0f, 0.0f, 1.45f, Eigen::Vector3f::Zero(), Grid::BodyType::STATIC, 1.0f);
+                        octree.insert(1, pos, cWhite, true, step, true, 1, cWhite, 0.8f, 0.0f, 0.0f, 1.45f, Eigen::Vector3f::Zero(), Grid::BodyType::STATIC, 1.0f);
                     } else {
-                        octree.insert(1, pos, cBlack, true, step, true, 100, Eigen::Vector3f::Zero(), 0.8f, 0.2f, 0.0f, 1.45f, Eigen::Vector3f::Zero(), Grid::BodyType::STATIC, 1.0f);
+                        octree.insert(1, pos, cBlack, true, step, true, 1, Eigen::Vector3f::Zero(), 0.8f, 0.2f, 0.0f, 1.45f, Eigen::Vector3f::Zero(), Grid::BodyType::STATIC, 1.0f);
                     }
                 }
             }
