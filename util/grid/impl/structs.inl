@@ -246,7 +246,6 @@ struct SPHForcePC {
     float airDensity;
 };
 
-template<typename T, typename IndexType = uint16_t>
 struct Material_ {
     float emittance; //replace with eigen::vector3f<eigen::half> for chromaticity
     //or use uint32_t r8g8b8i8.
@@ -293,13 +292,17 @@ struct GridObject_ {
     PointType centerPosition = PointType::Zero();
     float maxGasVoxelSize = 0.0f;
 
-    std::vector<Material_<T, IndexType>> renderMaterials;
+    // std::vector<Material_<T, IndexType>> renderMaterials;
+    std::vector<Material_> renderMaterials;
+    std::unordered_map<Material_, IndexType, materialHash> renderMatMap;
     std::vector<PhysicsMaterial_> physicsMaterials;
+    std::unordered_map<PhysicsMaterial_, IndexType, physicsMatHash> physicsMatMap;
+    // std::vector<PhysicsMaterial_> physicsMaterials;
 
     struct VoxelRel {
         PointType relPos;
-        uint16_t renderMatIdx;
-        uint16_t physMatIdx;
+        IndexType renderMatIdx;
+        IndexType physMatIdx;
         float size;
     };
     std::vector<VoxelRel> relativeVoxels;
@@ -316,34 +319,80 @@ struct GridObject_ {
         else objectFlags &= ~OBJ_ALLOW_PARTIAL_UNLOAD_BIT;
     }
 
-    uint16_t getOrAddRenderMaterial(const Material_<T, IndexType>& mat) {
-        std::unique_lock<std::shared_mutex> lock(objMutex);
-        for (size_t i = 0; i < renderMaterials.size(); ++i) {
-            if (renderMaterials[i] == mat) return static_cast<uint16_t>(i);
+    IndexType getOrAddRenderMaterial(const Material_& renderMat) {
+        {
+            std::shared_lock<std::shared_mutex> readLock(objMutex);
+            auto a = renderMatMap.find(renderMat);
+            if (a != renderMatMap.end()) {
+                return a->second;
+            }
         }
-        renderMaterials.push_back(mat);
-        return static_cast<uint16_t>(renderMaterials.size() - 1);
+
+        if (renderMaterials.size() < std::numeric_limits<IndexType>::max()) {
+            std::unique_lock<std::shared_mutex> writeLock(objMutex);
+            auto a = renderMatMap.find(renderMat);
+            if (a != renderMatMap.end()) {
+                return a->second;
+            }
+            IndexType newIndex = static_cast<IndexType>(renderMaterials.size());
+            renderMaterials.push_back(renderMat);
+            renderMatMap[renderMat] = newIndex;
+            return newIndex;
+        } else {
+            std::shared_lock<std::shared_mutex> readLock(objMutex);
+            IndexType bestIndex = 0;
+            float dist = std::numeric_limits<float>::max();
+            for (IndexType i = 0; i < static_cast<IndexType>(renderMaterials.size()); ++i) {
+                float dist2 = renderMaterials[i].dist(renderMat);
+                if (dist2 < dist) {
+                    dist = dist2;
+                    bestIndex = i;
+                }
+            }
+            return bestIndex;
+        }
     }
 
-    uint16_t getOrAddPhysicsMaterial(const PhysicsMaterial_& pmat) {
-        std::unique_lock<std::shared_mutex> lock(objMutex);
-        for (size_t i = 0; i < physicsMaterials.size(); ++i) {
-            if (physicsMaterials[i] == pmat) return static_cast<uint16_t>(i);
+    IndexType getOrAddPhysicsMaterial(const PhysicsMaterial_& pmat) {
+        {
+            std::shared_lock<std::shared_mutex> readLock(objMutex);
+            auto a = physicsMatMap.find(physMat);
+            if (a != physicsMatMap.end()) {
+                return a->second;
+            }
         }
-        physicsMaterials.push_back(pmat);
-        return static_cast<uint16_t>(physicsMaterials.size() - 1);
+
+        if (physicsMaterials.size() < std::numeric_limits<IndexType>::max()) {
+            std::unique_lock<std::shared_mutex> writeLock(objMutex);
+            auto a = physicsMatMap.find(physMat);
+            if (a != physicsMatMap.end()) {
+                return a->second;
+            }
+            IndexType newIndex = static_cast<IndexType>(physicsMaterials.size());
+            physicsMaterials.push_back(physMat);
+            physicsMatMap[physMat] = newIndex;
+            return newIndex;
+        } else {
+            std::shared_lock<std::shared_mutex> readLock(objMutex);
+            IndexType bestIndex = 0;
+            float dist = std::numeric_limits<float>::max();
+            for (IndexType i = 0; i < static_cast<IndexType>(physicsMaterials.size()); ++i) {
+                float dist2 = physicsMaterials[i].dist(physMat);
+                if (dist2 < dist) {
+                    dist = dist2;
+                    bestIndex = i;
+                }
+            }
+            return bestIndex;
+        }
     }
     
-    Material_<T, IndexType> getRenderMaterial(uint16_t idx) const {
-        std::shared_lock<std::shared_mutex> lock(objMutex);
-        if (idx < renderMaterials.size()) return renderMaterials[idx];
-        return Material_<T, IndexType>();
+    Material_<T, IndexType> getRenderMaterial(IndexType idx) const {
+        return renderMaterials[idx];
     }
     
-    PhysicsMaterial_ getPhysicsMaterial(uint16_t idx) const {
-        std::shared_lock<std::shared_mutex> lock(objMutex);
-        if (idx < physicsMaterials.size()) return physicsMaterials[idx];
-        return PhysicsMaterial_();
+    PhysicsMaterial_ getPhysicsMaterial(IndexType idx) const {
+        return physicsMaterials[idx];
     }
 };
 
@@ -354,13 +403,13 @@ struct NodeData_ {
     int objectId;
     float size;
     Eigen::Vector3f color;
-    uint16_t renderMatIdx;
-    uint16_t physMatIdx;
+    IndexType renderMatIdx;
+    IndexType physMatIdx;
     std::atomic<uint8_t> flags;
     PhysicsState_<T, IndexType> physics;
 
     NodeData_(const T& data, const PointType& pos, bool visible, const Eigen::Vector3f& color, float size = 0.01f,
-                bool active = true, int objectId = -1, uint16_t rIdx = 0, uint16_t pIdx = 0, bool staticbit = 0) 
+                bool active = true, int objectId = -1, IndexType rIdx = 0, IndexType pIdx = 0, bool staticbit = 0) 
             : data(data), position(pos), objectId(objectId), size(size), 
                 color(color), renderMatIdx(rIdx), physMatIdx(pIdx), flags(0) {
         setActive(active);
