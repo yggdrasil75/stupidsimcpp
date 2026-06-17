@@ -6,6 +6,7 @@
 #include <vector>
 #include <mutex>
 #include <shared_mutex>
+#include <unordered_map>
 
 namespace Grid{
 
@@ -252,18 +253,17 @@ struct Material_ {
     // or a reasonable option: rgb9e5 GL_RGB9_E5
     float roughness;
     float metallic; //rename to reflective or something
-    float transmission;
     float ior;
     Eigen::Vector3f absorption;
     //bandwidth?
     //dispersion?
 
-    Material_(float e = 0.0f, float r = 1.0f, float m = 0.0f, float t = 0.0f, float i = 1.45f, Eigen::Vector3f a = Eigen::Vector3f::Zero())
-        : emittance(e), roughness(r), metallic(m), transmission(t), ior(i), absorption(a) {}
+    Material_(float e = 0.0f, float r = 1.0f, float m = 0.0f, float i = 1.45f, Eigen::Vector3f a = Eigen::Vector3f::Zero())
+        : emittance(e), roughness(r), metallic(m), ior(i), absorption(a) {}
 
     bool operator==(const Material_& o) const {
         return emittance == o.emittance && roughness == o.roughness &&
-               metallic == o.metallic && transmission == o.transmission &&
+               metallic == o.metallic &&
                ior == o.ior && absorption == o.absorption;
     }
     
@@ -271,17 +271,57 @@ struct Material_ {
         if (emittance != o.emittance) return emittance < o.emittance;
         if (roughness != o.roughness) return roughness < o.roughness;
         if (metallic != o.metallic) return metallic < o.metallic;
-        if (transmission != o.transmission) return transmission < o.transmission;
         return ior < o.ior;
+    }
+
+    float dist(const Material_& o) const {
+        float dr = roughness - o.roughness;
+        float dm = metallic - o.metallic;
+        float di = ior - o.ior;
+        float empenalty = emittance - o.emittance;
+        float absPenalty = (absorption != o.absorption) ? 0.5f : 0.0f;
+        return dr*dr + dm*dm + di*di + empenalty + absPenalty;
     }
 };
 
 struct PhysicsMaterial_ {
     BodyType type = BodyType::STATIC;
     float mass = 1.0f;
+    ///TODO: restitution, density
     
     bool operator==(const PhysicsMaterial_& o) const {
         return type == o.type && mass == o.mass;
+    }
+
+    float dist(const PhysicsMaterial_& o) const {
+        float dm = mass - o.mass;
+        // float dr = restitution - o.restitution;
+        // float dd = density - o.density;
+        float typePenalty = (type != o.type) ? 10.0f : 0.0f;
+        return dm*dm + typePenalty;
+    }
+};
+
+struct materialHash {
+    size_t operator()(const Material_& m) const {
+        std::hash<float> hf;
+        size_t h = hf(m.emittance);
+        h ^= hf(m.roughness) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= hf(m.metallic) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= hf(m.ior) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= hf(m.absorption.x()) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= hf(m.absorption.y()) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= hf(m.absorption.z()) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        return h;
+    }
+};
+
+struct physicsMatHash {
+    size_t operator()(const PhysicsMaterial_& m) const {
+        std::hash<float> hf;
+        size_t h = std::hash<uint8_t>()(static_cast<uint8_t>(m.type));
+        h ^= hf(m.mass) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        return h;
     }
 };
 
@@ -292,7 +332,7 @@ struct GridObject_ {
     PointType centerPosition = PointType::Zero();
     float maxGasVoxelSize = 0.0f;
 
-    // std::vector<Material_<T, IndexType>> renderMaterials;
+    // std::vector<Material_> renderMaterials;
     std::vector<Material_> renderMaterials;
     std::unordered_map<Material_, IndexType, materialHash> renderMatMap;
     std::vector<PhysicsMaterial_> physicsMaterials;
@@ -356,7 +396,7 @@ struct GridObject_ {
     IndexType getOrAddPhysicsMaterial(const PhysicsMaterial_& pmat) {
         {
             std::shared_lock<std::shared_mutex> readLock(objMutex);
-            auto a = physicsMatMap.find(physMat);
+            auto a = physicsMatMap.find(pmat);
             if (a != physicsMatMap.end()) {
                 return a->second;
             }
@@ -364,20 +404,20 @@ struct GridObject_ {
 
         if (physicsMaterials.size() < std::numeric_limits<IndexType>::max()) {
             std::unique_lock<std::shared_mutex> writeLock(objMutex);
-            auto a = physicsMatMap.find(physMat);
+            auto a = physicsMatMap.find(pmat);
             if (a != physicsMatMap.end()) {
                 return a->second;
             }
             IndexType newIndex = static_cast<IndexType>(physicsMaterials.size());
-            physicsMaterials.push_back(physMat);
-            physicsMatMap[physMat] = newIndex;
+            physicsMaterials.push_back(pmat);
+            physicsMatMap[pmat] = newIndex;
             return newIndex;
         } else {
             std::shared_lock<std::shared_mutex> readLock(objMutex);
             IndexType bestIndex = 0;
             float dist = std::numeric_limits<float>::max();
             for (IndexType i = 0; i < static_cast<IndexType>(physicsMaterials.size()); ++i) {
-                float dist2 = physicsMaterials[i].dist(physMat);
+                float dist2 = physicsMaterials[i].dist(pmat);
                 if (dist2 < dist) {
                     dist = dist2;
                     bestIndex = i;
@@ -387,7 +427,7 @@ struct GridObject_ {
         }
     }
     
-    Material_<T, IndexType> getRenderMaterial(IndexType idx) const {
+    Material_ getRenderMaterial(IndexType idx) const {
         return renderMaterials[idx];
     }
     
@@ -402,13 +442,13 @@ struct NodeData_ {
     PointType position;
     int objectId;
     float size;
-    Eigen::Vector3f color;
+    Eigen::Vector4f color;
     IndexType renderMatIdx;
     IndexType physMatIdx;
     std::atomic<uint8_t> flags;
     PhysicsState_<T, IndexType> physics;
 
-    NodeData_(const T& data, const PointType& pos, bool visible, const Eigen::Vector3f& color, float size = 0.01f,
+    NodeData_(const T& data, const PointType& pos, bool visible, const Eigen::Vector4f& color, float size = 0.01f,
                 bool active = true, int objectId = -1, IndexType rIdx = 0, IndexType pIdx = 0, bool staticbit = 0) 
             : data(data), position(pos), objectId(objectId), size(size), 
                 color(color), renderMatIdx(rIdx), physMatIdx(pIdx), flags(0) {
@@ -417,7 +457,7 @@ struct NodeData_ {
         setStatic(staticbit);
     }
     
-    NodeData_() : objectId(-1), size(0.0f), color(Eigen::Vector3f::Zero()), renderMatIdx(0), physMatIdx(0), flags(0) {}
+    NodeData_() : objectId(-1), size(0.0f), color(Eigen::Vector4f::Zero()), renderMatIdx(0), physMatIdx(0), flags(0) {}
 
     NodeData_(const NodeData_& other) : data(other.data), position(other.position), objectId(other.objectId), size(other.size),
             color(other.color), renderMatIdx(other.renderMatIdx), physMatIdx(other.physMatIdx), flags(other.flags.load(std::memory_order_relaxed)), physics(other.physics) {}
@@ -586,7 +626,7 @@ struct OctreeNode_ {
         return oss.str();
     }
 
-    std::string getRegionPath(std::string storagepath) const {
+    std::string getRegionPath(const std::string storagepath) const {
         int64_t cx = static_cast<int64_t>(std::floor(center.x()));
         int64_t cy = static_cast<int64_t>(std::floor(center.y()));
         int64_t cz = static_cast<int64_t>(std::floor(center.z()));
@@ -627,6 +667,22 @@ struct OctreeNode_ {
         readVal(in, y);
         readVal(in, z);
         vec = Eigen::Vector3f(x, y, z);
+    }
+
+    static void writeVec4(std::ofstream& out, const Eigen::Vector4f& vec) {
+        writeVal(out, vec.x());
+        writeVal(out, vec.y());
+        writeVal(out, vec.z());
+        writeVal(out, vec.w());
+    }
+
+    static void readVec4(std::ifstream& in, Eigen::Vector4f& vec) {
+        float x, y, z, w;
+        readVal(in, x);
+        readVal(in, y);
+        readVal(in, z);
+        readVal(in, w);
+        vec = Eigen::Vector4f(x, y, z, w);
     }
 
     static void serializeData(std::ofstream& out, const T& data) {
@@ -703,7 +759,7 @@ struct OctreeNode_ {
             writeVal(out, pt->objectId);
             writeVal(out, pt->flags.load(std::memory_order_relaxed));
             writeVal(out, pt->size);
-            writeVec3(out, pt->color);
+            writeVec4(out, pt->color);
             writeVal(out, pt->renderMatIdx);
             writeVal(out, pt->physMatIdx);
         }
@@ -735,7 +791,7 @@ struct OctreeNode_ {
             readVal(in, f);
             pt->flags.store(f, std::memory_order_relaxed);
             readVal(in, pt->size);
-            readVec3(in, pt->color);
+            readVec4(in, pt->color);
             readVal(in, pt->renderMatIdx);
             readVal(in, pt->physMatIdx);
             points.push_back(pt);
@@ -771,7 +827,7 @@ struct OctreeNode_ {
         }
     }
 
-    bool saveRegion(std::string storagepath) {
+    bool saveRegion(const std::string storagepath) {
         std::string path = getRegionPath(storagepath);
         std::ofstream out(path, std::ios::binary);
         if (!out) return false;
@@ -780,7 +836,7 @@ struct OctreeNode_ {
         return true;
     }
 
-    bool loadRegion(std::string storagepath) {
+    bool loadRegion(const std::string storagepath) {
         std::string path = getRegionPath(storagepath);
         std::ifstream in(path, std::ios::binary);
         if (in) {
@@ -823,7 +879,7 @@ struct OctreeNode_ {
             writeVal(out, pt->objectId);
             writeVal(out, pt->flags.load(std::memory_order_relaxed));
             writeVal(out, pt->size);
-            writeVec3(out, pt->color);
+            writeVec4(out, pt->color);
             writeVal(out, pt->renderMatIdx);
             writeVal(out, pt->physMatIdx);
         }
@@ -865,7 +921,7 @@ struct OctreeNode_ {
             readVal(in, f);
             pt->flags.store(f, std::memory_order_relaxed);
             readVal(in, pt->size);
-            readVec3(in, pt->color);
+            readVec4(in, pt->color);
             readVal(in, pt->renderMatIdx);
             readVal(in, pt->physMatIdx);
             points.push_back(pt);

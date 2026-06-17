@@ -9,7 +9,7 @@ template<typename T, typename IndexType>
 struct RenderData_ {
     PointType position;
     float size;
-    Eigen::Vector3f color;
+    Eigen::Vector4f color;
     uint32_t materialIdx;
     PointType boundsMin;
     PointType boundsMax;
@@ -39,7 +39,7 @@ template<typename T, typename IndexType>
 struct RenderBuffer_ {
     std::vector<RenderNode_<T, IndexType>> nodes;
     std::vector<RenderData_<T, IndexType>> points;
-    std::vector<Material_<T, IndexType>> materials;
+    std::vector<Material_> materials;
     std::unordered_map<int, uint32_t> objMaterialOffsets;
     uint32_t defaultMatIdx;
     

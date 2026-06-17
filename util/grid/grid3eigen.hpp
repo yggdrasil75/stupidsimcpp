@@ -93,7 +93,7 @@ class Octree {
 public:
     using NodeData = NodeData_<T, IndexType>;
     using OctreeNode = OctreeNode_<T, IndexType>;
-    using Material = Material_<T, IndexType>;
+    using Material = Material_;
     using RayHit = RayHit_<T, IndexType>;
     using RenderNode = RenderNode_<T, IndexType>;
     using RenderData = RenderData_<T, IndexType>;
@@ -692,7 +692,7 @@ private:
         }
 
         Eigen::Vector3f avgPos = Eigen::Vector3f::Zero();
-        Eigen::Vector3f avgColor = Eigen::Vector3f::Zero();
+        Eigen::Vector4f avgColor = Eigen::Vector4f::Zero();
         float avgEmittance = 0.0;
         float avgRoughness = 0.0;
         float avgMetallic = 0.0;
@@ -716,7 +716,6 @@ private:
             avgEmittance += mat.emittance * v;
             avgRoughness += mat.roughness * v;
             avgMetallic += mat.metallic * v;
-            avgTransmission += mat.transmission * v;
             avgIor += mat.ior * v;
             count++;
         };
@@ -741,7 +740,7 @@ private:
 
             lod->color = (avgColor * invVol);
             Material avgMat(avgEmittance * invVol, avgRoughness * invVol, avgMetallic * invVol,
-                            avgTransmission * invVol, avgIor * invVol);
+                            avgIor * invVol);
             
             auto obj = getOrCreateObject(-1);
             lod->renderMatIdx = obj->getOrAddRenderMaterial(avgMat);
@@ -1316,6 +1315,14 @@ public:
     ~Octree() {
         stopWorkerThread();
     }
+
+    void setGridStoragePath(const std::string& path) {
+        storagepath = path;
+    }
+
+    const std::string& getGridStoragePath() const {
+        return storagepath;
+    }
     
     Octree(const Octree& other) : maxDepth(other.maxDepth), size(other.size), maxPointsPerNode(other.maxPointsPerNode),
             skylight_(other.skylight_), backgroundColor_(other.backgroundColor_), autoOptimize_(other.autoOptimize_.load()),
@@ -1486,13 +1493,14 @@ public:
              BodyType bType = BodyType::STATIC, float mass = 1.0f) {
         
         auto obj = getOrCreateObject(objectId);
-        Material mat(emittance, roughness, metallic, transmission, ior, absorp);
+        Material mat(emittance, roughness, metallic, ior, absorp);
         uint16_t rIdx = obj->getOrAddRenderMaterial(mat);
         
         PhysicsMaterial_ pmat{bType, mass};
         uint16_t pIdx = obj->getOrAddPhysicsMaterial(pmat);
+        Eigen::Vector4f color4(color.x(), color.y(), color.z(), std::clamp(1.0f - transmission, 0.0f, 1.0f));
 
-        auto pointData = std::make_shared<NodeData>(data, pos, visible, color, size, active, objectId, rIdx, pIdx, bType == BodyType::STATIC);
+        auto pointData = std::make_shared<NodeData>(data, pos, visible, color4, size, active, objectId, rIdx, pIdx, bType == BodyType::STATIC);
         
         PointType relPos = pos - obj->centerPosition;
         {
@@ -1521,16 +1529,17 @@ public:
                       Eigen::Vector3f absorp = Eigen::Vector3f::Zero()) {
         if (!root_) return false;
         auto obj = getOrCreateObject(objectId);
-        Material mat(emittance, roughness, metallic, transmission, ior, absorp);
+        Material mat(emittance, roughness, metallic, ior, absorp);
         uint16_t rIdx = obj->getOrAddRenderMaterial(mat);
         PhysicsMaterial_ pmat{bType, mass};
         uint16_t pIdx = obj->getOrAddPhysicsMaterial(pmat);
 
+        Eigen::Vector4f color4(color.x(), color.y(), color.z(), std::clamp(1.0f - transmission, 0.0f, 1.0f));
         std::vector<std::shared_ptr<NodeData>> newPhysNodes;
         bool allInserted = true;
         
         for (const auto& pos : positions) {
-            auto pointData = std::make_shared<NodeData>(defaultData, pos, true, color, voxelSize, true, objectId, rIdx, pIdx, bType == BodyType::STATIC);
+            auto pointData = std::make_shared<NodeData>(defaultData, pos, true, color4, voxelSize, true, objectId, rIdx, pIdx, bType == BodyType::STATIC);
             
             PointType relPos = pos - obj->centerPosition;
             {
@@ -1612,7 +1621,9 @@ public:
         {
             std::unique_lock<std::shared_mutex> lock(obj->objMutex);
             if (index >= obj->renderMaterials.size()) return false;
+            obj->renderMaterialIndex.erase(obj->renderMaterials[index]);
             obj->renderMaterials[index] = mat;
+            obj->renderMaterialIndex[mat] = index;
         }
         std::vector<std::shared_ptr<NodeData>> nodes;
         if (root_) collectNodesByObjectId(root_.get(), objectId, nodes);
@@ -1626,7 +1637,9 @@ public:
         {
             std::unique_lock<std::shared_mutex> lock(obj->objMutex);
             if (index >= obj->physicsMaterials.size()) return false;
+            obj->physicsMaterialIndex.erase(obj->physicsMaterials[index]);
             obj->physicsMaterials[index] = pmat;
+            obj->physicsMaterialIndex[pmat] = index;
         }
         markPhysicsCollidersDirty();
         return true;
@@ -1786,13 +1799,14 @@ public:
              BodyType bType = BodyType::STATIC, float mass = 1.0f) {
         enqueueTask([this, data, pos, visible, color, size, active, objectId, emittance, roughness, metallic, transmission, ior, absorp, bType, mass]() {
             auto obj = getOrCreateObject(objectId);
-            Material mat(emittance, roughness, metallic, transmission, ior, absorp);
+            Material mat(emittance, roughness, metallic, ior, absorp);
             uint16_t rIdx = obj->getOrAddRenderMaterial(mat);
             
             PhysicsMaterial_ pmat{bType, mass};
             uint16_t pIdx = obj->getOrAddPhysicsMaterial(pmat);
 
-            auto pointData = std::make_shared<NodeData>(data, pos, visible, color, size, active, objectId, rIdx, pIdx, bType == BodyType::STATIC);
+            Eigen::Vector4f color4(color.x(), color.y(), color.z(), std::clamp(1.0f - transmission, 0.0f, 1.0f));
+            auto pointData = std::make_shared<NodeData>(data, pos, visible, color4, size, active, objectId, rIdx, pIdx, bType == BodyType::STATIC);
             
             ensureBounds(pointData->getCubeBounds());
             
@@ -2035,7 +2049,9 @@ public:
         pointData->position = newPos;
         pointData->setVisible(newVisible);
         
-        if (newColor != Eigen::Vector3f(1.0f, 1.0f, 1.0f)) pointData->color = newColor;
+        if (newColor != Eigen::Vector3f(1.0f, 1.0f, 1.0f)) {
+            pointData->color.template head<3>() = newColor;
+        }
         if (newSize > 0) pointData->size = newSize;
         pointData->setActive(newActive);
         pointData->objectId = targetObjId;
@@ -2046,7 +2062,7 @@ public:
         if (newEmittance >= 0) mat.emittance = newEmittance;
         if (newRoughness >= 0) mat.roughness = newRoughness;
         if (newMetallic >= 0) mat.metallic = newMetallic;
-        if (newTransmission >= 0) mat.transmission = newTransmission;
+        if (newTransmission >= 0) pointData->color.w() = std::clamp(1.0f - newTransmission, 0.0f, 1.0f);
         if (newIor >= 0) mat.ior = newIor;
         
         pointData->renderMatIdx = obj->getOrAddRenderMaterial(mat);
@@ -2146,7 +2162,7 @@ public:
     bool setColor(const PointType& pos, Eigen::Vector3f color, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
-        pointData->color = color;
+        pointData->color.template head<3>() = color;
         invalidateLODForPoint(pointData);
         return true;
     }
@@ -2158,7 +2174,7 @@ public:
             if (!pointData) return;
             {
                 std::lock_guard<std::shared_mutex> lock(node->nodeMutex);
-                pointData->color = color;
+                pointData->color.template head<3>() = color;
             }
             invalidateLODForPoint(pointData);
             return;
@@ -2201,10 +2217,7 @@ public:
     bool setTransmission(const PointType& pos, float transmission, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
-        auto obj = getOrCreateObject(pointData->objectId);
-        Material mat = obj->getRenderMaterial(pointData->renderMatIdx);
-        mat.transmission = transmission;
-        pointData->renderMatIdx = obj->getOrAddRenderMaterial(mat);
+        pointData->color.w() = std::clamp(1.0f - transmission, 0.0f, 1.0f);
         invalidateLODForPoint(pointData);
         return true;
     }
@@ -2434,9 +2447,7 @@ public:
             for(int i=0; i<6; ++i) {
                 auto neighbor = find(node->position + dirs[i] * node->size, checkRad);
                 if(neighbor && neighbor->objectId == objectId && neighbor->isActive()) {
-                    auto nObj = getObject(neighbor->objectId);
-                    Material nMat = nObj ? nObj->getRenderMaterial(neighbor->renderMatIdx) : Material();
-                    if (nMat.transmission < 0.01f) {
+                    if (neighbor->color.w() > 0.99f) {
                         hiddenSides++;
                     }
                 }

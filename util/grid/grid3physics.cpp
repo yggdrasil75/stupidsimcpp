@@ -376,24 +376,25 @@ void Octree<T, IndexType>::stepPhysics(float dt) {
                     float oldVol = oldSize * oldSize * oldSize;
                     float ratio = oldVol / V_new; 
                     
-                    Material_<T, IndexType> rMat = obj->getRenderMaterial(node->renderMatIdx);
+                    Material_ rMat = obj->getRenderMaterial(node->renderMatIdx);
                     
                     rMat.absorption *= ratio;
                     rMat.emittance *= ratio;
 
                     float lengthRatio = oldSize / currentSize;
                     float sqLengthRatio = lengthRatio * lengthRatio;
-                    float tr = std::max(rMat.transmission, 0.001f);
-                    rMat.transmission = std::pow(tr, sqLengthRatio);
+                    float tr = std::max(1.0f - node->color.w(), 0.001f);
+                    float newTr = std::pow(tr, sqLengthRatio);
 
-                    rMat.transmission = std::round(rMat.transmission * 100.0f) / 100.0f;
+                    newTr = std::round(newTr * 100.0f) / 100.0f;
                     rMat.absorption.x() = std::round(rMat.absorption.x() * 100.0f) / 100.0f;
                     rMat.absorption.y() = std::round(rMat.absorption.y() * 100.0f) / 100.0f;
                     rMat.absorption.z() = std::round(rMat.absorption.z() * 100.0f) / 100.0f;
                     
+                    node->color.w() = std::clamp(1.0f - newTr, 0.0f, 1.0f);
                     node->renderMatIdx = obj->getOrAddRenderMaterial(rMat);
                     
-                    if (rMat.transmission >= 0.99f && rMat.absorption.norm() < 0.05f) {
+                    if (newTr >= 0.99f && rMat.absorption.norm() < 0.05f) {
                         node->setActive(false);
                         node->setVisible(false);
                     }
@@ -468,7 +469,7 @@ void Octree<T, IndexType>::stepPhysics(float dt) {
             }
         }
 
-        this->update(gm.oldPos, gm.newPos, gm.node->data, gm.node->isVisible(), gm.node->color, 
+        this->update(gm.oldPos, gm.newPos, gm.node->data, gm.node->isVisible(), gm.node->color.template head<3>(), 
                      gm.newSize, gm.node->isActive(), gm.node->objectId, 
                      -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, EPSILON);
     }
@@ -476,12 +477,13 @@ void Octree<T, IndexType>::stepPhysics(float dt) {
     for (auto& split : pendingGasSplits) {
         if (this->remove(split.oldPos, EPSILON)) {
             auto obj = this->getObject(split.parent->objectId);
-            Material_<T, IndexType> rMat = obj ? obj->getRenderMaterial(split.parent->renderMatIdx) : Material_<T, IndexType>();
+            Material_ rMat = obj ? obj->getRenderMaterial(split.parent->renderMatIdx) : Material_();
             float newMass = fastMats[split.parent->objectId + 1][split.parent->physMatIdx].mass * 0.125f;
 
             for (auto& c : split.children) {
-                this->set(split.parent->data, c.pos, split.parent->isVisible(), split.parent->color, c.size, split.parent->isActive(), split.parent->objectId,
-                          rMat.emittance, rMat.roughness, rMat.metallic, rMat.transmission, rMat.ior, rMat.absorption,
+                float parentTransmission = std::clamp(1.0f - split.parent->color.w(), 0.0f, 1.0f);
+                this->set(split.parent->data, c.pos, split.parent->isVisible(), split.parent->color.template head<3>(), c.size, split.parent->isActive(), split.parent->objectId,
+                          rMat.emittance, rMat.roughness, rMat.metallic, parentTransmission, rMat.ior, rMat.absorption,
                           BodyType::GAS, newMass);
                 
                 if (auto n = this->find(c.pos, EPSILON)) {

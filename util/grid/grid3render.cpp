@@ -21,7 +21,7 @@ void Octree<T, IndexType>::buildRender(RenderBuffer_<T, IndexType>& buffer) {
         }
     }
     buffer.defaultMatIdx = buffer.materials.size();
-    buffer.materials.push_back(Material_<T, IndexType>());
+    buffer.materials.push_back(Material_());
 
     buildRenderNodeAt(root_.get(), buffer, 0, localObjects);
 }
@@ -286,21 +286,23 @@ frame Octree<T, IndexType>::fastRenderFrame(const Camera& cam, int height, int w
                 PointType normal, hitPoint;
 
                 rayCubeIntersect(ray, hit, t, normal, hitPoint);
-                color = hit->color;
-                Material_<T, IndexType> objMat = shared_buffer.materials[hit->materialIdx];
+                Eigen::Vector3f hitColor = hit->color.template head<3>();
+                float alpha = hit->color.w();
+                Material_ objMat = shared_buffer.materials[hit->materialIdx];
                 
                 if (objMat.emittance > 0.0f) {
-                    color = color * objMat.emittance;
+                    hitColor = hitColor * objMat.emittance;
                 } else {
                     float diffuse = std::max(0.0f, normal.dot(globalLightDir));
                     float ambient = 0.35f;
                     float intensity = std::min(1.0f, ambient + diffuse * 0.65f);
-                    color = color * intensity;
+                    hitColor = hitColor * intensity;
                 }
                 
                 float fogFactor = std::clamp((maxDistance_ - t) * invMaxMin, minVisibility, 1.0f);
                 
-                color = color * fogFactor + skybox_.sampleVector(rayDir) * (1.0f - fogFactor);
+                hitColor = hitColor * fogFactor + skybox_.sampleVector(rayDir) * (1.0f - fogFactor);
+                color = hitColor * alpha + color * (1.0f - alpha);
             }
 
             color = color.cwiseMax(0.0f).cwiseMin(1.0f);
@@ -324,13 +326,20 @@ static inline uint32_t packRGB8(const Eigen::Vector3f& c) {
     return r | (g << 8) | (b << 16);
 }
 
-static inline uint32_t packMaterialProps(float roughness, float metallic, float transmission, float ior) {
+static inline uint32_t packRGBA8(const Eigen::Vector4f& c) {
+    uint32_t r = static_cast<uint32_t>(std::clamp(c.x(), 0.0f, 1.0f) * 255.0f);
+    uint32_t g = static_cast<uint32_t>(std::clamp(c.y(), 0.0f, 1.0f) * 255.0f);
+    uint32_t b = static_cast<uint32_t>(std::clamp(c.z(), 0.0f, 1.0f) * 255.0f);
+    uint32_t a = static_cast<uint32_t>(std::clamp(c.w(), 0.0f, 1.0f) * 255.0f);
+    return r | (g << 8) | (b << 16) | (a << 24);
+}
+
+static inline uint32_t packMaterialProps(float roughness, float metallic, float ior) {
     uint32_t r8 = static_cast<uint32_t>(std::clamp(roughness, 0.0f, 1.0f) * 255.0f);
     uint32_t m8 = static_cast<uint32_t>(std::clamp(metallic, 0.0f, 1.0f) * 255.0f);
-    uint32_t t8 = static_cast<uint32_t>(std::clamp(transmission, 0.0f, 1.0f) * 255.0f);
     float mappedIor = (std::clamp(ior, 1.0f, 2.5f) - 1.0f) / 1.5f;
     uint32_t i8 = static_cast<uint32_t>(std::clamp(mappedIor, 0.0f, 1.0f) * 255.0f);
-    return r8 | (m8 << 8) | (t8 << 16) | (i8 << 24);
+    return r8 | (m8 << 8) | (i8 << 24);
 }
 
 struct PointSort {
@@ -355,7 +364,7 @@ frame Octree<T, IndexType>::renderFrameVulkan(const Camera& cam, int height, int
     for (const auto& m : tl_buffer.materials) {
         gpuMaterials.push_back({
             m.emittance,
-            packMaterialProps(m.roughness, m.metallic, m.transmission, m.ior),
+            packMaterialProps(m.roughness, m.metallic, m.ior),
             packRGB8(m.absorption),
             0
         });
@@ -413,7 +422,7 @@ frame Octree<T, IndexType>::renderFrameVulkan(const Camera& cam, int height, int
         const auto& p = tl_buffer.points[sp.idx];
         
         gpuPoints.push_back({
-            p.position, p.size, packRGB8(p.color), p.materialIdx, p.objectId, p.isGas
+            p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId, p.isGas
         });
 
         if (tl_buffer.materials[p.materialIdx].emittance > 0.0f) {
@@ -542,7 +551,7 @@ frame Octree<T, IndexType>::fastRenderFrameVulkan(const Camera& cam, int height,
     for (const auto& m : tl_buffer.materials) {
         gpuMaterials.push_back({
             m.emittance,
-            packMaterialProps(m.roughness, m.metallic, m.transmission, m.ior),
+            packMaterialProps(m.roughness, m.metallic, m.ior),
             packRGB8(m.absorption),
             0
         });
@@ -562,7 +571,7 @@ frame Octree<T, IndexType>::fastRenderFrameVulkan(const Camera& cam, int height,
         if(isLodPoint[i]) continue;
         const auto& p = tl_buffer.points[i];
         
-        gpuPoints.push_back({p.position, p.size, packRGB8(p.color), p.materialIdx, p.objectId, p.isGas});
+        gpuPoints.push_back({p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId, p.isGas});
         
         if (tl_buffer.materials[p.materialIdx].emittance > 0.0f) {
             gpuLights.push_back(gpuPoints.size() - 1);
@@ -666,7 +675,7 @@ frame Octree<T, IndexType>::blendedRenderFrameVulkan(const Camera& cam, int heig
     for (const auto& m : tl_buffer.materials) {
         gpuMaterials.push_back({
             m.emittance,
-            packMaterialProps(m.roughness, m.metallic, m.transmission, m.ior),
+            packMaterialProps(m.roughness, m.metallic, m.ior),
             packRGB8(m.absorption),
             0
         });
@@ -726,10 +735,10 @@ frame Octree<T, IndexType>::blendedRenderFrameVulkan(const Camera& cam, int heig
         const auto& p = tl_buffer.points[sp.idx];
         
         gpuPBRPoints.push_back({
-            p.position, p.size, packRGB8(p.color), p.materialIdx, p.objectId, p.isGas
+            p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId, p.isGas
         });
         gpuFastPoints.push_back({
-            p.position, p.size, packRGB8(p.color), p.materialIdx, p.objectId, p.isGas
+            p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId, p.isGas
         });
 
         if (tl_buffer.materials[p.materialIdx].emittance > 0.0f) {
