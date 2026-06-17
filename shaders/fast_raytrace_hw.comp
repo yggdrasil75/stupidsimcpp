@@ -5,6 +5,7 @@ layout(local_size_x = 8, local_size_y = 8) in;
 #define PI 3.14159265359
 const float EPS = 1e-8;
 const float LARGE = 1e30;
+#define MAX_HITS 16 
 
 struct GPURenderNode {
     vec3 boundsMin;
@@ -101,8 +102,11 @@ Ray makeRay(vec3 o, vec3 d) {
     return r;
 }
 
-vec3 unpackRGB8(uint c) {
-    return vec3(float(c & 0xFF) / 255.0, float((c >> 8) & 0xFF) / 255.0, float((c >> 16) & 0xFF) / 255.0);
+vec4 unpackRGBA8(uint c) {
+    return vec4(float(c & 0xFF) / 255.0, 
+                float((c >> 8) & 0xFF) / 255.0, 
+                float((c >> 16) & 0xFF) / 255.0, 
+                float((c >> 24) & 0xFF) / 255.0);
 }
 
 bool rayBoxIntersect(Ray ray, vec3 bMin, vec3 bMax, out float tMin, out float tMax) {
@@ -179,28 +183,59 @@ vec3 sampleSkybox(vec3 d) {
     return skyPixels[idx].rgb;
 }
 
-int voxelTraverse(Ray ray, out int hitIndex, out float outT, out vec3 outNormal) {
+struct HitData {
+    int id;
+    float t;
+    vec3 normal;
+};
+
+int voxelTraverse(Ray ray, out HitData hits[MAX_HITS]) {
     rayQueryEXT rq;
     rayQueryInitializeEXT(rq, tlas, gl_RayFlagsNoneEXT, 0xFF, ray.origin, 0.0, ray.dir, cam.maxDist);
 
+    int hitCount = 0;
     while(rayQueryProceedEXT(rq)) {
         if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionAABBEXT) {
             int ptIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
             float t;
             vec3 n;
             if (rayCubeIntersect(ray, points[ptIdx], t, n) && t >= 0.0 && t <= cam.maxDist) {
-                rayQueryGenerateIntersectionEXT(rq, t);
+                if (hitCount < MAX_HITS) {
+                    hits[hitCount].id = ptIdx;
+                    hits[hitCount].t = t;
+                    hits[hitCount].normal = n;
+                    hitCount++;
+                } else {
+                    // Evict and replace the furthest hit stored thus far
+                    int maxIdx = 0;
+                    float maxT = hits[0].t;
+                    for (int i = 1; i < MAX_HITS; i++) {
+                        if (hits[i].t > maxT) {
+                            maxT = hits[i].t;
+                            maxIdx = i;
+                        }
+                    }
+                    if (t < maxT) {
+                        hits[maxIdx].id = ptIdx;
+                        hits[maxIdx].t = t;
+                        hits[maxIdx].normal = n;
+                    }
+                }
             }
         }
     }
-    if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionGeneratedEXT) {
-        hitIndex = rayQueryGetIntersectionPrimitiveIndexEXT(rq, true);
-        outT = rayQueryGetIntersectionTEXT(rq, true);
-        float dummyT;
-        rayCubeIntersect(ray, points[hitIndex], dummyT, outNormal);
-        return 1;
+    
+    for (int i = 0; i < hitCount - 1; i++) {
+        for (int j = 0; j < hitCount - i - 1; j++) {
+            if (hits[j].t > hits[j + 1].t) {
+                HitData temp = hits[j];
+                hits[j] = hits[j + 1];
+                hits[j + 1] = temp;
+            }
+        }
     }
-    return 0;
+    
+    return hitCount;
 }
 
 void main() {
@@ -213,35 +248,57 @@ void main() {
     vec3 rayDir = normalize(cam.dir + cam.right * px + cam.up * py);
     Ray ray = makeRay(cam.origin, rayDir);
 
-    vec3 finalColor = cam.bgColor;
-    int hitIndex;
-    float t;
-    vec3 normal;
-    int hitResult = voxelTraverse(ray, hitIndex, t, normal);
+    HitData hits[MAX_HITS];
+    int hitCount = voxelTraverse(ray, hits);
 
     float depthOut = 1e30;
     float objIdOut = -1.0;
+    
+    vec4 finalColor = vec4(0.0, 0.0, 0.0, 1.0);
+    int prevOid = -1;
 
-    if (hitResult == 1) {
-        GPUFastRenderData hitData = points[hitIndex];
+    for (int i = 0; i < hitCount; i++) {
+        if (finalColor.a <= 0.0) break;
+        
+        GPUFastRenderData hitData = points[hits[i].id];
+         
+        if (prevOid == hitData.objectId) continue;
+        prevOid = hitData.objectId;
+        
+        vec4 albedo = unpackRGBA8(hitData.color);
         GPUMaterial mat = materials[hitData.materialIdx];
 
-        vec3 albedo = unpackRGB8(hitData.color);
         vec3 surfaceColor;
         if (mat.emittance > 0.0) {
-            surfaceColor = albedo * mat.emittance;
+            surfaceColor = albedo.rgb * mat.emittance;
         } else {
             vec3 lightDir = normalize(-cam.dir);
-            float diffuse = max(0.0, dot(normal, lightDir));
-            surfaceColor = albedo * min(1.0, 0.35 + diffuse * 0.65);
+            float diffuse = max(0.0, dot(hits[i].normal, lightDir));
+            surfaceColor = albedo.rgb * min(1.0, 0.35 + diffuse * 0.65);
         }
-        float fogT = clamp((t - cam.lodMinDist) * cam.invFogRange, 0.0, 1.0);
-        finalColor = mix(cam.bgColor, surfaceColor, mix(1.0, cam.minVisibility, fogT));
-        depthOut = t;
-        objIdOut = float(hitData.objectId);
+        
+        float fogFactor = clamp((cam.maxDist - hits[i].t) * cam.invFogRange, cam.minVisibility, 1.0);
+        vec3 skyColor = sampleSkybox(rayDir);
+        
+        surfaceColor = surfaceColor * fogFactor + skyColor * (1.0 - fogFactor);
+        float alpha = albedo.a;
+        
+        finalColor.rgb += surfaceColor * (1-alpha) * (1.0 - finalColor.a);
+        finalColor.a -= alpha;
+
+        if (i == 0) {
+            depthOut = hits[i].t;
+            objIdOut = float(hitData.objectId);
+        }
     }
     
-    finalColor = clamp(finalColor, 0.0, 1.0);
+    if (finalColor.a < 1.0) {
+        vec3 skyColor = sampleSkybox(rayDir);
+        finalColor.rgb += skyColor * (1.0 - finalColor.a);
+    }
+    
+    finalColor.rgb = clamp(finalColor.rgb, 0.0, 1.0);
+
     uint idx = (coord.y * cam.width + coord.x) * 5;
     pixels[idx] = finalColor.r;
     pixels[idx + 1] = finalColor.g;

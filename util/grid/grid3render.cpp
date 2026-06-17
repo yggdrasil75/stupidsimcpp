@@ -44,7 +44,7 @@ void Octree<T, IndexType>::buildRenderNodeAt(OctreeNode_<T, IndexType>* node, Re
     if (isLoaded) {
         for (const auto& pt : node->points) {
             if (!pt->isActive() || !pt->isVisible()) continue; 
-            RenderData_<T, IndexType> rd;
+            RenderData_ rd;
             rd.position = pt->position;
             rd.size = pt->size;
             rd.color = pt->color;
@@ -75,7 +75,7 @@ void Octree<T, IndexType>::buildRenderNodeAt(OctreeNode_<T, IndexType>* node, Re
     
     rnode.lodPoint = -1;
     if (node->lodData) {
-        RenderData_<T, IndexType> ld;
+        RenderData_ ld;
         ld.position = node->lodData->position;
         ld.size = node->lodData->size;
         ld.color = node->lodData->color;
@@ -133,9 +133,10 @@ void Octree<T, IndexType>::buildRenderNodeAt(OctreeNode_<T, IndexType>* node, Re
 }
 
 template<typename T, typename IndexType>
-const RenderData_<T, IndexType>* Octree<T, IndexType>::fastVoxelTraverse(const RenderBuffer_<T, IndexType>& buffer, const Ray& ray, float maxDist) {
-    const RenderData_<T, IndexType>* hit = nullptr;
-    if (buffer.nodes.empty()) return hit;
+std::vector<RenderData_*> Octree<T, IndexType>::fastVoxelTraverse(const RenderBuffer_<T, IndexType>& buffer, const Ray& ray, float maxDist) {
+    std::vector<RenderData_*> hits;
+    RenderData_* hit = nullptr;
+    if (buffer.nodes.empty()) return std::vector<RenderData_*>({hit});
     float tMin, tMax;
     BoundingBox rootBounds(buffer.nodes[0].boundsMin, buffer.nodes[0].boundsMax);
     if (rayBoxIntersect(ray, rootBounds, tMin, tMax)) {
@@ -169,7 +170,7 @@ const RenderData_<T, IndexType>* Octree<T, IndexType>::fastVoxelTraverse(const R
                     PointType n, h;
                     if (rayCubeIntersect(ray, &buffer.points[node.lodPoint], t, n, h)) {
                         if (t >= 0 && t <= currentMaxDist) {
-                            hit = &buffer.points[node.lodPoint];
+                            hits.emplace_back(const_cast<RenderData_*>(&buffer.points[node.lodPoint]));
                             currentMaxDist = t;
                         }
                     }
@@ -178,13 +179,13 @@ const RenderData_<T, IndexType>* Octree<T, IndexType>::fastVoxelTraverse(const R
             }
 
             for (uint32_t i = 0; i < node.pointCount; ++i) {
-                const RenderData_<T, IndexType>& pt = buffer.points[node.firstPoint + i];
+                const RenderData_& pt = buffer.points[node.firstPoint + i];
                 float t;
                 PointType n, h;
                 if (rayCubeIntersect(ray, &pt, t, n, h)) {
                     if (t >= 0 && t <= currentMaxDist && t <= current.tMax + 0.001f) {
                         currentMaxDist = t;
-                        hit = &pt;
+                        hits.emplace_back(const_cast<RenderData_*>(&pt));
                     }
                 }
             }
@@ -230,7 +231,7 @@ const RenderData_<T, IndexType>* Octree<T, IndexType>::fastVoxelTraverse(const R
             }
         }
     }
-    return hit;
+    return hits;
 }
 
 template<typename T, typename IndexType>
@@ -274,35 +275,49 @@ frame Octree<T, IndexType>::fastRenderFrame(const Camera& cam, int height, int w
             PointType rayDir = dir + (right * px) + (up * py);
             rayDir.normalize();
 
-            Eigen::Vector3f color = skybox_.sampleVector(rayDir);
+            Eigen::Vector3f scolor = skybox_.sampleVector(rayDir);
+            Eigen::Vector3f color = Eigen::Vector3f(0.0f, 0.0f, 0.0f);
+            float accumAlpha = 0.0f;
             Ray ray(origin, rayDir);
             
-            const RenderData_<T, IndexType>* hit = nullptr;
-            if (x % 10 == 0 && y % 10 == 0) hit = fastVoxelTraverse(shared_buffer, ray, maxDistance_);
-            else hit = fastVoxelTraverse(shared_buffer, ray, maxDistance_);
-            
-            if (hit != nullptr) {
-                float t = 0.0f;
-                PointType normal, hitPoint;
+            // const RenderData_* hit = nullptr;
+            std::vector<RenderData_*> hits = fastVoxelTraverse(shared_buffer, ray, maxDistance_);
 
-                rayCubeIntersect(ray, hit, t, normal, hitPoint);
-                Eigen::Vector3f hitColor = hit->color.template head<3>();
-                float alpha = hit->color.w();
-                Material_ objMat = shared_buffer.materials[hit->materialIdx];
-                
-                if (objMat.emittance > 0.0f) {
-                    hitColor = hitColor * objMat.emittance;
-                } else {
-                    float diffuse = std::max(0.0f, normal.dot(globalLightDir));
-                    float ambient = 0.35f;
-                    float intensity = std::min(1.0f, ambient + diffuse * 0.65f);
-                    hitColor = hitColor * intensity;
+            int prevOid = -1;
+
+            for (auto hit : hits) {
+                if (accumAlpha >= 0.99f) break;
+                if (hit != nullptr) {
+                    if (prevOid == -1) prevOid = hit->objectId;
+                    else if (prevOid == hit->objectId) continue;
+                    float t = 0.0f;
+                    PointType normal, hitPoint;
+
+                    rayCubeIntersect(ray, hit, t, normal, hitPoint);
+                    Eigen::Vector3f hitColor = hit->color.template head<3>();
+                    float alpha = hit->color.w();
+                    Material_ objMat = shared_buffer.materials[hit->materialIdx];
+                    
+                    if (objMat.emittance > 0.0f) {
+                        hitColor = hitColor * objMat.emittance;
+                    } else {
+                        float diffuse = std::max(0.0f, normal.dot(globalLightDir));
+                        float ambient = 0.35f;
+                        float intensity = std::min(1.0f, ambient + diffuse * 0.65f);
+                        hitColor = hitColor * intensity;
+                    }
+                    
+                    float fogFactor = std::clamp((maxDistance_ - t) * invMaxMin, minVisibility, 1.0f);
+                    
+                    hitColor = hitColor * fogFactor + scolor * (1.0f - fogFactor);
+                    
+                    color += hitColor * alpha * (1.0f - accumAlpha);
+                    accumAlpha += alpha * (1.0f - accumAlpha);
                 }
-                
-                float fogFactor = std::clamp((maxDistance_ - t) * invMaxMin, minVisibility, 1.0f);
-                
-                hitColor = hitColor * fogFactor + skybox_.sampleVector(rayDir) * (1.0f - fogFactor);
-                color = hitColor * alpha + color * (1.0f - alpha);
+            }
+            
+            if (accumAlpha < 1.0f) {
+                color += scolor * (1.0f - accumAlpha);
             }
 
             color = color.cwiseMax(0.0f).cwiseMin(1.0f);

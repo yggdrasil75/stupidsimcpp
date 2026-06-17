@@ -96,7 +96,7 @@ public:
     using Material = Material_;
     using RayHit = RayHit_<T, IndexType>;
     using RenderNode = RenderNode_<T, IndexType>;
-    using RenderData = RenderData_<T, IndexType>;
+    using RenderData = RenderData_;
     using RenderBuffer = RenderBuffer_<T, IndexType>;
     using GridObject = GridObject_<T, IndexType>;
 
@@ -1297,7 +1297,7 @@ private:
 
     void buildRender(RenderBuffer_<T, IndexType>& buffer);
     void buildRenderNodeAt(OctreeNode* node, RenderBuffer_<T, IndexType>& buffer, uint32_t nodeIdx, const std::unordered_map<int, std::shared_ptr<GridObject>>& localObjects);
-    const RenderData* fastVoxelTraverse(const RenderBuffer_<T, IndexType>& buffer, const Ray& ray, float maxDist);
+    std::vector<RenderData*> fastVoxelTraverse(const RenderBuffer_<T, IndexType>& buffer, const Ray& ray, float maxDist);
 public:
     Octree(const PointType& minBound, const PointType& maxBound, std::string storagepath, size_t maxPointsPerNode=8, size_t maxDepth = 16) :
             root_(std::make_unique<OctreeNode>(minBound, maxBound)), maxPointsPerNode(maxPointsPerNode),

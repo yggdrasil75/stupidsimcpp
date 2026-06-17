@@ -5,7 +5,6 @@
 
 namespace Grid {
 
-template<typename T, typename IndexType>
 struct RenderData_ {
     PointType position;
     float size;
@@ -38,7 +37,7 @@ struct RenderNode_ {
 template<typename T, typename IndexType>
 struct RenderBuffer_ {
     std::vector<RenderNode_<T, IndexType>> nodes;
-    std::vector<RenderData_<T, IndexType>> points;
+    std::vector<RenderData_> points;
     std::vector<Material_> materials;
     std::unordered_map<int, uint32_t> objMaterialOffsets;
     uint32_t defaultMatIdx;
