@@ -428,11 +428,15 @@ struct GridObject_ {
     }
     
     Material_ getRenderMaterial(IndexType idx) const {
-        return renderMaterials[idx];
+        std::shared_lock<std::shared_mutex> lock(objMutex);
+        if (idx < renderMaterials.size()) return renderMaterials[idx];
+        return Material_();
     }
     
     PhysicsMaterial_ getPhysicsMaterial(IndexType idx) const {
-        return physicsMaterials[idx];
+        std::shared_lock<std::shared_mutex> lock(objMutex);
+        if (idx < physicsMaterials.size()) return physicsMaterials[idx];
+        return PhysicsMaterial_();
     }
 };
 
