@@ -30,16 +30,6 @@ using PointType = Eigen::Matrix<float, Dim, 1>;
 using BoundingBox = std::pair<PointType, PointType>;
 namespace fs = std::filesystem;
 
-template<size_t N>
-struct GridStoragePath {
-    char value[N];
-    constexpr GridStoragePath(const char (&str)[N]) {
-        for (size_t i = 0; i < N; ++i) {
-            value[i] = str[i];
-        }
-    }
-};
-
 enum class BodyType : uint8_t {
     STATIC = 0,
     KINEMATIC = 1,
@@ -79,7 +69,7 @@ static inline Eigen::Vector3f unpackRGB9E5(uint32_t c) {
     return Eigen::Vector3f(r, g, b);
 }
 
-template<typename T, typename IndexType = uint16_t, GridStoragePath StoragePath = ".">
+template<typename T, typename IndexType = uint16_t>
 struct PhysicsState_ {
     Eigen::Vector3f velocity{0.0f, 0.0f, 0.0f};
     Eigen::Vector3f force{0.0f, 0.0f, 0.0f};
@@ -256,7 +246,7 @@ struct SPHForcePC {
     float airDensity;
 };
 
-template<typename T, typename IndexType = uint16_t, GridStoragePath StoragePath = ".">
+template<typename T, typename IndexType = uint16_t>
 struct Material_ {
     float emittance; //replace with eigen::vector3f<eigen::half> for chromaticity
     //or use uint32_t r8g8b8i8.
@@ -296,14 +286,14 @@ struct PhysicsMaterial_ {
     }
 };
 
-template<typename T, typename IndexType = uint16_t, GridStoragePath StoragePath = ".">
+template<typename T, typename IndexType = uint16_t>
 struct GridObject_ {
     int id;
     uint8_t objectFlags;
     PointType centerPosition = PointType::Zero();
     float maxGasVoxelSize = 0.0f;
 
-    std::vector<Material_<T, IndexType, StoragePath>> renderMaterials;
+    std::vector<Material_<T, IndexType>> renderMaterials;
     std::vector<PhysicsMaterial_> physicsMaterials;
 
     struct VoxelRel {
@@ -326,7 +316,7 @@ struct GridObject_ {
         else objectFlags &= ~OBJ_ALLOW_PARTIAL_UNLOAD_BIT;
     }
 
-    uint16_t getOrAddRenderMaterial(const Material_<T, IndexType, StoragePath>& mat) {
+    uint16_t getOrAddRenderMaterial(const Material_<T, IndexType>& mat) {
         std::unique_lock<std::shared_mutex> lock(objMutex);
         for (size_t i = 0; i < renderMaterials.size(); ++i) {
             if (renderMaterials[i] == mat) return static_cast<uint16_t>(i);
@@ -344,10 +334,10 @@ struct GridObject_ {
         return static_cast<uint16_t>(physicsMaterials.size() - 1);
     }
     
-    Material_<T, IndexType, StoragePath> getRenderMaterial(uint16_t idx) const {
+    Material_<T, IndexType> getRenderMaterial(uint16_t idx) const {
         std::shared_lock<std::shared_mutex> lock(objMutex);
         if (idx < renderMaterials.size()) return renderMaterials[idx];
-        return Material_<T, IndexType, StoragePath>();
+        return Material_<T, IndexType>();
     }
     
     PhysicsMaterial_ getPhysicsMaterial(uint16_t idx) const {
@@ -357,7 +347,7 @@ struct GridObject_ {
     }
 };
 
-template<typename T, typename IndexType = uint16_t, GridStoragePath StoragePath = ".">
+template<typename T, typename IndexType = uint16_t>
 struct NodeData_ {
     T data;
     PointType position;
@@ -367,7 +357,7 @@ struct NodeData_ {
     uint16_t renderMatIdx;
     uint16_t physMatIdx;
     std::atomic<uint8_t> flags;
-    PhysicsState_<T, IndexType, StoragePath> physics;
+    PhysicsState_<T, IndexType> physics;
 
     NodeData_(const T& data, const PointType& pos, bool visible, const Eigen::Vector3f& color, float size = 0.01f,
                 bool active = true, int objectId = -1, uint16_t rIdx = 0, uint16_t pIdx = 0, bool staticbit = 0) 
@@ -434,16 +424,16 @@ struct NodeData_ {
     }
 };
 
-template<typename T, typename IndexType = uint16_t, GridStoragePath StoragePath = ".">
+template<typename T, typename IndexType = uint16_t>
 struct OctreeNode_ {
     BoundingBox bounds;
-    std::vector<std::shared_ptr<NodeData_<T, IndexType, StoragePath>>> points;
-    std::array<std::unique_ptr<OctreeNode_<T, IndexType, StoragePath>>, 8> children;
+    std::vector<std::shared_ptr<NodeData_<T, IndexType>>> points;
+    std::array<std::unique_ptr<OctreeNode_<T, IndexType>>, 8> children;
     PointType center;
     float nodeSize;
     std::atomic<uint8_t> flags;
     
-    mutable std::shared_ptr<NodeData_<T, IndexType, StoragePath>> lodData;
+    mutable std::shared_ptr<NodeData_<T, IndexType>> lodData;
     mutable std::shared_mutex nodeMutex;
 
     OctreeNode_(const PointType& min, const PointType& max) : bounds(min,max), flags(0), lodData(nullptr) {
@@ -453,15 +443,15 @@ struct OctreeNode_ {
         setLoadQueued(false);
         setSaveQueued(false);
         setKeepLoaded(false);
-        for (std::unique_ptr<OctreeNode_<T, IndexType, StoragePath>>& child : children) {
+        for (std::unique_ptr<OctreeNode_<T, IndexType>>& child : children) {
             child = nullptr;
         }
         center = (bounds.first + bounds.second) * 0.5;
         nodeSize = (bounds.second - bounds.first).norm();
     }
 
-    std::unique_ptr<OctreeNode_<T, IndexType, StoragePath>> clone() const {
-        auto newNode = std::make_unique<OctreeNode_<T, IndexType, StoragePath>>(bounds.first, bounds.second);
+    std::unique_ptr<OctreeNode_<T, IndexType>> clone() const {
+        auto newNode = std::make_unique<OctreeNode_<T, IndexType>>(bounds.first, bounds.second);
         newNode->flags.store(flags.load(std::memory_order_relaxed), std::memory_order_relaxed);
         
         newNode->points = points;
@@ -547,13 +537,13 @@ struct OctreeNode_ {
         return oss.str();
     }
 
-    std::string getRegionPath() const {
+    std::string getRegionPath(std::string storagepath) const {
         int64_t cx = static_cast<int64_t>(std::floor(center.x()));
         int64_t cy = static_cast<int64_t>(std::floor(center.y()));
         int64_t cz = static_cast<int64_t>(std::floor(center.z()));
         int64_t s = static_cast<int64_t>(std::floor(nodeSize));
         
-        fs::path p(StoragePath.value);
+        fs::path p(storagepath);
         p /= std::to_string(s);
         p /= std::to_string(cx);
         p /= std::to_string(cy);
@@ -688,7 +678,7 @@ struct OctreeNode_ {
         readVal(in, pointCount);
         points.reserve(pointCount);
         for (size_t i = 0; i < pointCount; ++i) {
-            auto pt = std::make_shared<NodeData_<T, IndexType, StoragePath>>();
+            auto pt = std::make_shared<NodeData_<T, IndexType>>();
             deserializeData(in, pt->data);
             readVec3(in, pt->position);
             readVal(in, pt->objectId);
@@ -713,7 +703,7 @@ struct OctreeNode_ {
                         childMin[d] = high ? center[d] : bounds.first[d];
                         childMax[d] = high ? bounds.second[d] : center[d];
                     }
-                    children[i] = std::make_unique<OctreeNode_<T, IndexType, StoragePath>>(childMin, childMax);
+                    children[i] = std::make_unique<OctreeNode_<T, IndexType>>(childMin, childMax);
                     std::lock_guard<std::shared_mutex> lock(children[i]->nodeMutex);
                     children[i]->deserializeSubtree(in);
                 } else {
@@ -732,8 +722,8 @@ struct OctreeNode_ {
         }
     }
 
-    bool saveRegion() {
-        std::string path = getRegionPath();
+    bool saveRegion(std::string storagepath) {
+        std::string path = getRegionPath(storagepath);
         std::ofstream out(path, std::ios::binary);
         if (!out) return false;
         serializeSubtree(out);
@@ -741,8 +731,8 @@ struct OctreeNode_ {
         return true;
     }
 
-    bool loadRegion() {
-        std::string path = getRegionPath();
+    bool loadRegion(std::string storagepath) {
+        std::string path = getRegionPath(storagepath);
         std::ifstream in(path, std::ios::binary);
         if (in) {
             deserializeSubtree(in);
@@ -763,7 +753,7 @@ struct OctreeNode_ {
         points.shrink_to_fit();
     }
 
-    void serialize(std::ofstream& out, size_t regionTargetPoints) {
+    void serialize(std::ofstream& out, size_t regionTargetPoints, std::string storagepath) {
         bool offloaded = !isLoaded();
         size_t subPoints = offloaded ? 0 : getSubtreePointCount();
 
@@ -772,7 +762,7 @@ struct OctreeNode_ {
         writeVal(out, isRegion);
 
         if (isRegion) {
-            if (!offloaded && isDirty()) saveRegion();
+            if (!offloaded && isDirty()) saveRegion(storagepath);
             return;
         }
 
@@ -818,7 +808,7 @@ struct OctreeNode_ {
         readVal(in, pointCount);
         points.reserve(pointCount);
         for (size_t i = 0; i < pointCount; ++i) {
-            auto pt = std::make_shared<NodeData_<T, IndexType, StoragePath>>();
+            auto pt = std::make_shared<NodeData_<T, IndexType>>();
             deserializeData(in, pt->data);
             readVec3(in, pt->position);
             readVal(in, pt->objectId);
@@ -843,7 +833,7 @@ struct OctreeNode_ {
                         childMin[d] = high ? center[d] : bounds.first[d];
                         childMax[d] = high ? bounds.second[d] : center[d];
                     }
-                    children[i] = std::make_unique<OctreeNode_<T, IndexType, StoragePath>>(childMin, childMax);
+                    children[i] = std::make_unique<OctreeNode_<T, IndexType>>(childMin, childMax);
                     children[i]->deserialize(in, regionTargetPoints);
                 } else {
                     children[i] = nullptr;
@@ -855,9 +845,9 @@ struct OctreeNode_ {
     }
 };
 
-template<typename T, typename IndexType = uint16_t, GridStoragePath StoragePath = ".">
+template<typename T, typename IndexType = uint16_t>
 struct RayHit_ {
-    std::shared_ptr<NodeData_<T, IndexType, StoragePath>> node;
+    std::shared_ptr<NodeData_<T, IndexType>> node;
     float distance;
     PointType normal;
     PointType hitPoint;

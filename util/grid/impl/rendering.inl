@@ -5,7 +5,7 @@
 
 namespace Grid {
 
-template<typename T, typename IndexType, GridStoragePath StoragePath>
+template<typename T, typename IndexType>
 struct RenderData_ {
     PointType position;
     float size;
@@ -17,7 +17,7 @@ struct RenderData_ {
     uint32_t isGas;
 };
 
-template<typename T, typename IndexType, GridStoragePath StoragePath>
+template<typename T, typename IndexType>
 struct RenderNode_ {
     PointType boundsMin;
     PointType boundsMax;
@@ -32,14 +32,14 @@ struct RenderNode_ {
     int32_t lodPoint;
     uint32_t firstChild;
     
-    OctreeNode_<T, IndexType, StoragePath>* originalNode;
+    OctreeNode_<T, IndexType>* originalNode;
 };
 
-template<typename T, typename IndexType, GridStoragePath StoragePath>
+template<typename T, typename IndexType>
 struct RenderBuffer_ {
-    std::vector<RenderNode_<T, IndexType, StoragePath>> nodes;
-    std::vector<RenderData_<T, IndexType, StoragePath>> points;
-    std::vector<Material_<T, IndexType, StoragePath>> materials;
+    std::vector<RenderNode_<T, IndexType>> nodes;
+    std::vector<RenderData_<T, IndexType>> points;
+    std::vector<Material_<T, IndexType>> materials;
     std::unordered_map<int, uint32_t> objMaterialOffsets;
     uint32_t defaultMatIdx;
     

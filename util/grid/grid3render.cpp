@@ -1,13 +1,13 @@
 #include "grid3eigen.hpp"
 namespace Grid {
 
-template<typename T, typename IndexType, GridStoragePath StoragePath>
-void Octree<T, IndexType, StoragePath>::buildRender(RenderBuffer_<T, IndexType, StoragePath>& buffer) {
+template<typename T, typename IndexType>
+void Octree<T, IndexType>::buildRender(RenderBuffer_<T, IndexType>& buffer) {
     buffer.clear();
     if (!root_) return;
     buffer.nodes.emplace_back();
 
-    std::unordered_map<int, std::shared_ptr<GridObject_<T, IndexType, StoragePath>>> localObjects;
+    std::unordered_map<int, std::shared_ptr<GridObject_<T, IndexType>>> localObjects;
     {
         std::shared_lock<std::shared_mutex> lock(objectsMutex_);
         localObjects = objects_;
@@ -21,17 +21,17 @@ void Octree<T, IndexType, StoragePath>::buildRender(RenderBuffer_<T, IndexType, 
         }
     }
     buffer.defaultMatIdx = buffer.materials.size();
-    buffer.materials.push_back(Material_<T, IndexType, StoragePath>());
+    buffer.materials.push_back(Material_<T, IndexType>());
 
     buildRenderNodeAt(root_.get(), buffer, 0, localObjects);
 }
 
-template<typename T, typename IndexType, GridStoragePath StoragePath>
-void Octree<T, IndexType, StoragePath>::buildRenderNodeAt(OctreeNode_<T, IndexType, StoragePath>* node, RenderBuffer_<T, IndexType, StoragePath>& buffer, uint32_t nodeIdx, const std::unordered_map<int, std::shared_ptr<GridObject>>& localObjects) {
+template<typename T, typename IndexType>
+void Octree<T, IndexType>::buildRenderNodeAt(OctreeNode_<T, IndexType>* node, RenderBuffer_<T, IndexType>& buffer, uint32_t nodeIdx, const std::unordered_map<int, std::shared_ptr<GridObject>>& localObjects) {
     std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
     bool isLoaded = node->isLoaded();
     
-    RenderNode_<T, IndexType, StoragePath> rnode;
+    RenderNode_<T, IndexType> rnode;
     rnode.boundsMin = node->bounds.first;
     rnode.boundsMax = node->bounds.second;
     rnode.center = node->center;
@@ -44,7 +44,7 @@ void Octree<T, IndexType, StoragePath>::buildRenderNodeAt(OctreeNode_<T, IndexTy
     if (isLoaded) {
         for (const auto& pt : node->points) {
             if (!pt->isActive() || !pt->isVisible()) continue; 
-            RenderData_<T, IndexType, StoragePath> rd;
+            RenderData_<T, IndexType> rd;
             rd.position = pt->position;
             rd.size = pt->size;
             rd.color = pt->color;
@@ -75,7 +75,7 @@ void Octree<T, IndexType, StoragePath>::buildRenderNodeAt(OctreeNode_<T, IndexTy
     
     rnode.lodPoint = -1;
     if (node->lodData) {
-        RenderData_<T, IndexType, StoragePath> ld;
+        RenderData_<T, IndexType> ld;
         ld.position = node->lodData->position;
         ld.size = node->lodData->size;
         ld.color = node->lodData->color;
@@ -132,9 +132,9 @@ void Octree<T, IndexType, StoragePath>::buildRenderNodeAt(OctreeNode_<T, IndexTy
     buffer.nodes[nodeIdx] = rnode;
 }
 
-template<typename T, typename IndexType, GridStoragePath StoragePath>
-const RenderData_<T, IndexType, StoragePath>* Octree<T, IndexType, StoragePath>::fastVoxelTraverse(const RenderBuffer_<T, IndexType, StoragePath>& buffer, const Ray& ray, float maxDist) {
-    const RenderData_<T, IndexType, StoragePath>* hit = nullptr;
+template<typename T, typename IndexType>
+const RenderData_<T, IndexType>* Octree<T, IndexType>::fastVoxelTraverse(const RenderBuffer_<T, IndexType>& buffer, const Ray& ray, float maxDist) {
+    const RenderData_<T, IndexType>* hit = nullptr;
     if (buffer.nodes.empty()) return hit;
     float tMin, tMax;
     BoundingBox rootBounds(buffer.nodes[0].boundsMin, buffer.nodes[0].boundsMax);
@@ -156,7 +156,7 @@ const RenderData_<T, IndexType, StoragePath>* Octree<T, IndexType, StoragePath>:
             StackItem current = stack[--stackPtr];
             if (current.tMin > currentMaxDist) continue;
             
-            const RenderNode_<T, IndexType, StoragePath>& node = buffer.nodes[current.nodeIdx];
+            const RenderNode_<T, IndexType>& node = buffer.nodes[current.nodeIdx];
 
             if (!node.isLoaded && node.originalNode) {
                 ensureLoaded(node.originalNode, true);
@@ -178,7 +178,7 @@ const RenderData_<T, IndexType, StoragePath>* Octree<T, IndexType, StoragePath>:
             }
 
             for (uint32_t i = 0; i < node.pointCount; ++i) {
-                const RenderData_<T, IndexType, StoragePath>& pt = buffer.points[node.firstPoint + i];
+                const RenderData_<T, IndexType>& pt = buffer.points[node.firstPoint + i];
                 float t;
                 PointType n, h;
                 if (rayCubeIntersect(ray, &pt, t, n, h)) {
@@ -233,14 +233,14 @@ const RenderData_<T, IndexType, StoragePath>* Octree<T, IndexType, StoragePath>:
     return hit;
 }
 
-template<typename T, typename IndexType, GridStoragePath StoragePath>
-frame Octree<T, IndexType, StoragePath>::fastRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat) {
+template<typename T, typename IndexType>
+frame Octree<T, IndexType>::fastRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat) {
     // TIME_FUNCTION;
     updateStreaming(cam);
     
-    thread_local RenderBuffer_<T, IndexType, StoragePath> tl_buffer;
+    thread_local RenderBuffer_<T, IndexType> tl_buffer;
     buildRender(tl_buffer);
-    const RenderBuffer_<T, IndexType, StoragePath>& shared_buffer = tl_buffer;
+    const RenderBuffer_<T, IndexType>& shared_buffer = tl_buffer;
 
     PointType origin = cam.origin;
     PointType dir = cam.direction.normalized();
@@ -277,7 +277,7 @@ frame Octree<T, IndexType, StoragePath>::fastRenderFrame(const Camera& cam, int 
             Eigen::Vector3f color = skybox_.sampleVector(rayDir);
             Ray ray(origin, rayDir);
             
-            const RenderData_<T, IndexType, StoragePath>* hit = nullptr;
+            const RenderData_<T, IndexType>* hit = nullptr;
             if (x % 10 == 0 && y % 10 == 0) hit = fastVoxelTraverse(shared_buffer, ray, maxDistance_);
             else hit = fastVoxelTraverse(shared_buffer, ray, maxDistance_);
             
@@ -287,7 +287,7 @@ frame Octree<T, IndexType, StoragePath>::fastRenderFrame(const Camera& cam, int 
 
                 rayCubeIntersect(ray, hit, t, normal, hitPoint);
                 color = hit->color;
-                Material_<T, IndexType, StoragePath> objMat = shared_buffer.materials[hit->materialIdx];
+                Material_<T, IndexType> objMat = shared_buffer.materials[hit->materialIdx];
                 
                 if (objMat.emittance > 0.0f) {
                     color = color * objMat.emittance;
@@ -339,8 +339,8 @@ struct PointSort {
     bool operator<(const PointSort& o) const { return morton < o.morton; }
 };
 
-template<typename T, typename IndexType, GridStoragePath StoragePath>
-frame Octree<T, IndexType, StoragePath>::renderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat, int samplesPerPixel,
+template<typename T, typename IndexType>
+frame Octree<T, IndexType>::renderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat, int samplesPerPixel,
                 int maxBounces, bool globalIllumination, bool useLod) {
     TIME_FUNCTION;
     updateStreaming(cam);
@@ -527,8 +527,8 @@ frame Octree<T, IndexType, StoragePath>::renderFrameVulkan(const Camera& cam, in
     return outFrame;
 }
 
-template<typename T, typename IndexType, GridStoragePath StoragePath>
-frame Octree<T, IndexType, StoragePath>::fastRenderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat) {
+template<typename T, typename IndexType>
+frame Octree<T, IndexType>::fastRenderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat) {
     // TIME_FUNCTION;
     updateStreaming(cam);
     // optimize();
@@ -650,8 +650,8 @@ frame Octree<T, IndexType, StoragePath>::fastRenderFrameVulkan(const Camera& cam
     return outFrame;
 }
 
-template<typename T, typename IndexType, GridStoragePath StoragePath>
-frame Octree<T, IndexType, StoragePath>::blendedRenderFrameVulkan(const Camera& cam, int height, int width, float pbrScale,
+template<typename T, typename IndexType>
+frame Octree<T, IndexType>::blendedRenderFrameVulkan(const Camera& cam, int height, int width, float pbrScale,
                 frame::colormap colorformat, int samplesPerPixel, int maxBounces, bool globalIllumination, bool useLod) {
     TIME_FUNCTION;
     updateStreaming(cam);

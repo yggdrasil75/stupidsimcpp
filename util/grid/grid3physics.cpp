@@ -2,33 +2,33 @@
 
 namespace Grid {
 
-template<typename T, typename IndexType, GridStoragePath StoragePath>
+template<typename T, typename IndexType>
 struct FluidMoveAction {
-    std::shared_ptr<NodeData_<T, IndexType, StoragePath>> node;
+    std::shared_ptr<NodeData_<T, IndexType>> node;
     PointType oldPos;
     PointType newPos;
 };
 
-template<typename T, typename IndexType, GridStoragePath StoragePath>
+template<typename T, typename IndexType>
 struct GasMoveAction {
-    std::shared_ptr<NodeData_<T, IndexType, StoragePath>> node;
+    std::shared_ptr<NodeData_<T, IndexType>> node;
     PointType oldPos;
     PointType newPos;
     float newSize;
 };
 
-template<typename T, typename IndexType, GridStoragePath StoragePath>
+template<typename T, typename IndexType>
 struct GasSplitChildDef {
     PointType pos;
     float size;
     Eigen::Vector3f vel;
 };
 
-template<typename T, typename IndexType, GridStoragePath StoragePath>
+template<typename T, typename IndexType>
 struct GasSplitAction {
     PointType oldPos;
-    std::shared_ptr<NodeData_<T, IndexType, StoragePath>> parent;
-    std::vector<GasSplitChildDef<T, IndexType, StoragePath>> children;
+    std::shared_ptr<NodeData_<T, IndexType>> parent;
+    std::vector<GasSplitChildDef<T, IndexType>> children;
 };
 
 struct Vec3iHash {
@@ -37,8 +37,8 @@ struct Vec3iHash {
     }
 };
 
-template<typename T, typename IndexType, GridStoragePath StoragePath>
-void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
+template<typename T, typename IndexType>
+void Octree<T, IndexType>::stepPhysics(float dt) {
 
     if (!root_ || dt <= 0.0f) return;
 
@@ -93,9 +93,9 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
         }
     }
 
-    std::vector<FluidMoveAction<T, IndexType, StoragePath>> pendingFluidMoves;
-    std::vector<GasMoveAction<T, IndexType, StoragePath>> pendingGasMoves;
-    std::vector<GasSplitAction<T, IndexType, StoragePath>> pendingGasSplits;
+    std::vector<FluidMoveAction<T, IndexType>> pendingFluidMoves;
+    std::vector<GasMoveAction<T, IndexType>> pendingGasMoves;
+    std::vector<GasSplitAction<T, IndexType>> pendingGasSplits;
 
     if (!sphNodes.empty()) {
         float h = phys_smoothingRadius;
@@ -359,7 +359,7 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
             }
 
             if (myPmat.type == BodyType::FLUID) {
-                FluidMoveAction<T, IndexType, StoragePath> fm;
+                FluidMoveAction<T, IndexType> fm;
                 fm.node = node;
                 fm.oldPos = node->position;
                 fm.newPos = node->position + node->physics.velocity * dt;
@@ -376,7 +376,7 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
                     float oldVol = oldSize * oldSize * oldSize;
                     float ratio = oldVol / V_new; 
                     
-                    Material_<T, IndexType, StoragePath> rMat = obj->getRenderMaterial(node->renderMatIdx);
+                    Material_<T, IndexType> rMat = obj->getRenderMaterial(node->renderMatIdx);
                     
                     rMat.absorption *= ratio;
                     rMat.emittance *= ratio;
@@ -400,7 +400,7 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
                 }
 
                 if (currentSize >= maxGasSize && node->isActive()) {
-                    GasSplitAction<T, IndexType, StoragePath> split;
+                    GasSplitAction<T, IndexType> split;
                     split.oldPos = node->position;
                     split.parent = node;
                     
@@ -409,7 +409,7 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
                         for (int dy : {-1, 1}) {
                             for (int dz : {-1, 1}) {
                                 PointType offset(dx * newSize * 0.5f, dy * newSize * 0.5f, dz * newSize * 0.5f);
-                                GasSplitChildDef<T, IndexType, StoragePath> c;
+                                GasSplitChildDef<T, IndexType> c;
                                 c.pos = node->position + offset;
                                 c.size = newSize;
                                 c.vel = node->physics.velocity + offset.normalized() * (phys_gasExpansionRate * 0.5f);
@@ -419,7 +419,7 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
                     }
                     pendingGasSplits.push_back(split);
                 } else {
-                    GasMoveAction<T, IndexType, StoragePath> gm;
+                    GasMoveAction<T, IndexType> gm;
                     gm.node = node;
                     gm.oldPos = node->position;
                     gm.newPos = node->position + node->physics.velocity * dt;
@@ -434,7 +434,7 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
     for (size_t i = 0; i < pendingFluidMoves.size(); ++i) {
         auto& move_act = pendingFluidMoves[i];
         
-        RayHit_<T, IndexType, StoragePath> hit;
+        RayHit_<T, IndexType> hit;
         PointType diff = move_act.newPos - move_act.oldPos;
         float dist = diff.norm();
         if (dist > 1e-5f) {
@@ -453,7 +453,7 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
     }
 
     for (auto& gm : pendingGasMoves) {
-        RayHit_<T, IndexType, StoragePath> hit;
+        RayHit_<T, IndexType> hit;
         PointType diff = gm.newPos - gm.oldPos;
         float dist = diff.norm();
         if (dist > 1e-5f) {
@@ -476,7 +476,7 @@ void Octree<T, IndexType, StoragePath>::stepPhysics(float dt) {
     for (auto& split : pendingGasSplits) {
         if (this->remove(split.oldPos, EPSILON)) {
             auto obj = this->getObject(split.parent->objectId);
-            Material_<T, IndexType, StoragePath> rMat = obj ? obj->getRenderMaterial(split.parent->renderMatIdx) : Material_<T, IndexType, StoragePath>();
+            Material_<T, IndexType> rMat = obj ? obj->getRenderMaterial(split.parent->renderMatIdx) : Material_<T, IndexType>();
             float newMass = fastMats[split.parent->objectId + 1][split.parent->physMatIdx].mass * 0.125f;
 
             for (auto& c : split.children) {

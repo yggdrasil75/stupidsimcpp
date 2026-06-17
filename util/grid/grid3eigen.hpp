@@ -88,17 +88,17 @@ namespace Grid {
     */
 
 
-template<typename T, typename IndexType = uint16_t, GridStoragePath StoragePath = ".">
+template<typename T, typename IndexType = uint16_t>
 class Octree {
 public:
-    using NodeData = NodeData_<T, IndexType, StoragePath>;
-    using OctreeNode = OctreeNode_<T, IndexType, StoragePath>;
-    using Material = Material_<T, IndexType, StoragePath>;
-    using RayHit = RayHit_<T, IndexType, StoragePath>;
-    using RenderNode = RenderNode_<T, IndexType, StoragePath>;
-    using RenderData = RenderData_<T, IndexType, StoragePath>;
-    using RenderBuffer = RenderBuffer_<T, IndexType, StoragePath>;
-    using GridObject = GridObject_<T, IndexType, StoragePath>;
+    using NodeData = NodeData_<T, IndexType>;
+    using OctreeNode = OctreeNode_<T, IndexType>;
+    using Material = Material_<T, IndexType>;
+    using RayHit = RayHit_<T, IndexType>;
+    using RenderNode = RenderNode_<T, IndexType>;
+    using RenderData = RenderData_<T, IndexType>;
+    using RenderBuffer = RenderBuffer_<T, IndexType>;
+    using GridObject = GridObject_<T, IndexType>;
 
 private:
     int countBits(uint8_t mask) const {
@@ -137,6 +137,7 @@ private:
 
     std::vector<std::weak_ptr<NodeData>> activePhysicsNodes_;
     std::mutex physicsMutex_;
+    std::string storagepath = ".";
 
     float phys_smoothingRadius = 0.2f;
     float phys_restDensity = 1000.0f;
@@ -191,7 +192,7 @@ private:
                 std::shared_lock<std::shared_mutex> nlock(node->nodeMutex);
                 if (node->isLoaded() && node->isSaveQueued()) {
                     if (node->isDirty()) {
-                        node->saveRegion();
+                        node->saveRegion(storagepath);
                     }
                 }
             }
@@ -219,7 +220,7 @@ private:
                 {
                     std::unique_lock<std::shared_mutex> nlock(node->nodeMutex);
                     if (!node->isLoaded()) {
-                        node->loadRegion();
+                        node->loadRegion(storagepath);
                         justLoaded = node->isLoaded();
                     }
                     node->setLoadQueued(false);
@@ -232,7 +233,7 @@ private:
         } else {
             {
                 std::unique_lock<std::shared_mutex> nlock(node->nodeMutex);
-                if (!node->isLoaded()) node->loadRegion();
+                if (!node->isLoaded()) node->loadRegion(storagepath);
                 node->setLoadQueued(false);
             }
             if (node->isLoaded()) {
@@ -1080,7 +1081,7 @@ private:
         if (subPoints > 0 && (subPoints <= regionTargetPoints_ || node->isLeaf()) && fullyLoaded) {
             if (node->isDirty()) {
                 std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
-                node->saveRegion();
+                node->saveRegion(storagepath);
             }
             node->offload();
             return;
@@ -1295,13 +1296,13 @@ private:
         return hitSomething;
     }
 
-    void buildRender(RenderBuffer_<T, IndexType, StoragePath>& buffer);
-    void buildRenderNodeAt(OctreeNode* node, RenderBuffer_<T, IndexType, StoragePath>& buffer, uint32_t nodeIdx, const std::unordered_map<int, std::shared_ptr<GridObject>>& localObjects);
-    const RenderData* fastVoxelTraverse(const RenderBuffer_<T, IndexType, StoragePath>& buffer, const Ray& ray, float maxDist);
+    void buildRender(RenderBuffer_<T, IndexType>& buffer);
+    void buildRenderNodeAt(OctreeNode* node, RenderBuffer_<T, IndexType>& buffer, uint32_t nodeIdx, const std::unordered_map<int, std::shared_ptr<GridObject>>& localObjects);
+    const RenderData* fastVoxelTraverse(const RenderBuffer_<T, IndexType>& buffer, const Ray& ray, float maxDist);
 public:
-    Octree(const PointType& minBound, const PointType& maxBound, size_t maxPointsPerNode=8, size_t maxDepth = 16) :
+    Octree(const PointType& minBound, const PointType& maxBound, std::string storagepath, size_t maxPointsPerNode=8, size_t maxDepth = 16) :
             root_(std::make_unique<OctreeNode>(minBound, maxBound)), maxPointsPerNode(maxPointsPerNode),
-            maxDepth(maxDepth), size(0), skybox_(1024, 1024),
+            maxDepth(maxDepth), size(0), skybox_(1024, 1024), storagepath(storagepath),
             streamingQueued_(false) {
         skybox_.setBackground(backgroundColor_.x(), backgroundColor_.y(), backgroundColor_.z(), 1.0f);
         startWorkerThread();
