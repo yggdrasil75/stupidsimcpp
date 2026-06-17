@@ -307,7 +307,11 @@ frame Octree<T, GasT, IndexType>::fastRenderFrame(const Camera& cam, int height,
     const Eigen::Vector3f camUp = cam.up;
     const Eigen::Vector3f camFwd = cam.forward();
     const Eigen::Vector3f camOrigin = cam.origin;
-    const float aspect = static_cast<float>(width) / static_cast<float>(height);
+    const float aspect = static_cast<float>(width) / height;
+    const float fovRad = cam.fovRad();
+    const float tanHalfFov = tan(fovRad * 0.5f);
+    const float tanfovy = tanHalfFov;
+    const float tanfovx = tanHalfFov * aspect;
     const float f = 1.0f / std::tan(cam.fovRad() / 2.0f);
     const float nearPlane = 0.1f;
 
@@ -330,8 +334,9 @@ frame Octree<T, GasT, IndexType>::fastRenderFrame(const Camera& cam, int height,
             int pix = y * width + x;
             int base = pix * channels;
 
-            float ndc_x = ax * x + bx;
-            float ndc_y = ay * y + by;
+
+            float ndc_x = (2.0f * (x + 0.5f) / width - 1.0f) * tanfovx;
+            float ndc_y = (1.0f - 2.0f * (y + 0.5f) / height) * tanfovy;
             Eigen::Vector3f dir = (Rx * x + Ry * y + C0).normalized();
 
             Eigen::Vector3f sky = skybox_.sampleVector(dir);
