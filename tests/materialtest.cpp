@@ -250,26 +250,26 @@ int main() {
     }
     FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
 
-    // for (const auto& view : views) {
-    //     ScopedFunctionTimer meh("Slow Section");
-    //     std::cout << "\nRendering view from " << view.name << " direction (Slow "<< samples <<" Samples Pass)..." << std::endl;
+    for (const auto& view : views) {
+        ScopedFunctionTimer meh("Slow Section");
+        std::cout << "\nRendering view from " << view.name << " direction (Slow "<< samples <<" Samples Pass)..." << std::endl;
         
-    //     Camera cam;
-    //     cam.origin = view.origin;
-    //     cam.direction = (target - view.origin).normalized();
-    //     cam.up = view.up;
+        Camera cam;
+        cam.origin = view.origin;
+        cam.direction = (target - view.origin).normalized();
+        cam.up = view.up;
         
-    //     frame out = octree.renderFrameVulkan(cam, height, width, frame::colormap::RGB, samples, bounces, false, true);
-    //     std::string filename = "output/slow_vulkanrender_" + view.name + ".bmp";
-    //     BMPWriter::saveBMP(filename, out);
-    //     std::cout << "slow done" << std::endl;
+        frame out = octree.renderFrameVulkan(cam, height, width, frame::colormap::RGB, samples, bounces, false, true);
+        std::string filename = "output/slow_vulkanrender_" + view.name + ".bmp";
+        BMPWriter::saveBMP(filename, out);
+        std::cout << "slow done" << std::endl;
 
-    //     out = octree.blendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, blendedsamples, bounces, false, true);
-    //     filename = "output/slow_blendrender_" + view.name + ".bmp";
-    //     BMPWriter::saveBMP(filename, out);
-    //     std::cout << "blended done" << std::endl;
-    // }
-    // FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
+        out = octree.blendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, blendedsamples, bounces, false, true);
+        filename = "output/slow_blendrender_" + view.name + ".bmp";
+        BMPWriter::saveBMP(filename, out);
+        std::cout << "blended done" << std::endl;
+    }
+    FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
 
     std::vector<frame> videoFrames;
     const int totalFrames = framesPerSegment * views.size();
