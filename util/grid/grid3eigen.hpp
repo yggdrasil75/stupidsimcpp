@@ -1488,9 +1488,8 @@ public:
     }
 
     bool set(const T& data, const PointType& pos, bool visible, Eigen::Vector3f color, float size = 0.01f, bool active = true,
-             int objectId = -1, float emittance = 0.0f, float roughness = 1.0f, 
-             float metallic = 0.0f, float transmission = 0.0f, float ior = 1.45f, Eigen::Vector3f absorp = Eigen::Vector3f::Zero(),
-             BodyType bType = BodyType::STATIC, float mass = 1.0f) {
+             int objectId = -1, float emittance = 0.0f, float roughness = 1.0f, float metallic = 0.0f, float transmission = 0.0f,
+             float ior = 1.45f, Eigen::Vector3f absorp = Eigen::Vector3f::Zero(), BodyType bType = BodyType::STATIC, float mass = 1.0f) {
         
         auto obj = getOrCreateObject(objectId);
         Material mat(emittance, roughness, metallic, ior, absorp);

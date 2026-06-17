@@ -135,8 +135,8 @@ void Octree<T, IndexType>::buildRenderNodeAt(OctreeNode_<T, IndexType>* node, Re
 template<typename T, typename IndexType>
 std::vector<RenderData_*> Octree<T, IndexType>::fastVoxelTraverse(const RenderBuffer_<T, IndexType>& buffer, const Ray& ray, float maxDist) {
     std::vector<RenderData_*> hits;
-    RenderData_* hit = nullptr;
-    if (buffer.nodes.empty()) return std::vector<RenderData_*>({hit});
+    if (buffer.nodes.empty()) return hits;
+    std::vector<float> tv;
     float tMin, tMax;
     BoundingBox rootBounds(buffer.nodes[0].boundsMin, buffer.nodes[0].boundsMax);
     if (rayBoxIntersect(ray, rootBounds, tMin, tMax)) {
@@ -171,7 +171,8 @@ std::vector<RenderData_*> Octree<T, IndexType>::fastVoxelTraverse(const RenderBu
                     if (rayCubeIntersect(ray, &buffer.points[node.lodPoint], t, n, h)) {
                         if (t >= 0 && t <= currentMaxDist) {
                             hits.emplace_back(const_cast<RenderData_*>(&buffer.points[node.lodPoint]));
-                            currentMaxDist = t;
+                            tv.emplace_back(t);
+                            // currentMaxDist = t;
                         }
                     }
                     continue;
@@ -186,6 +187,7 @@ std::vector<RenderData_*> Octree<T, IndexType>::fastVoxelTraverse(const RenderBu
                     if (t >= 0 && t <= currentMaxDist && t <= current.tMax + 0.001f) {
                         currentMaxDist = t;
                         hits.emplace_back(const_cast<RenderData_*>(&pt));
+                        tv.emplace_back(t);
                     }
                 }
             }
@@ -230,6 +232,15 @@ std::vector<RenderData_*> Octree<T, IndexType>::fastVoxelTraverse(const RenderBu
                 stack[stackPtr++] = {children[i].nodeIdx, children[i].tMin, children[i].tMax};
             }
         }
+    }
+    std::vector<std::pair<RenderData_*, float>> zipped;
+    zipped.reserve(hits.size());
+    for (std::size_t i = 0; i < hits.size(); ++i)
+        zipped.emplace_back(hits[i], tv[i]);
+    std::sort(zipped.begin(), zipped.end(), [](const auto& a, const auto& b) {return a.second < b.second;});
+    for (std::size_t i = 0; i < zipped.size(); ++i) {
+        hits[i] = zipped[i].first;
+        tv[i] = zipped[i].second;
     }
     return hits;
 }
@@ -284,36 +295,47 @@ frame Octree<T, IndexType>::fastRenderFrame(const Camera& cam, int height, int w
             std::vector<RenderData_*> hits = fastVoxelTraverse(shared_buffer, ray, maxDistance_);
 
             int prevOid = -1;
+            bool hasPrev = false;
 
             for (auto hit : hits) {
                 if (accumAlpha >= 0.99f) break;
-                if (hit != nullptr) {
-                    if (prevOid == -1) prevOid = hit->objectId;
-                    else if (prevOid == hit->objectId) continue;
-                    float t = 0.0f;
-                    PointType normal, hitPoint;
+                if (hit == nullptr) continue;
+                float t = 0.0f;
+                float tExit = 0.0f;
+                PointType normal, hitPoint;
 
-                    rayCubeIntersect(ray, hit, t, normal, hitPoint);
-                    Eigen::Vector3f hitColor = hit->color.template head<3>();
-                    float alpha = hit->color.w();
-                    Material_ objMat = shared_buffer.materials[hit->materialIdx];
-                    
-                    if (objMat.emittance > 0.0f) {
-                        hitColor = hitColor * objMat.emittance;
-                    } else {
-                        float diffuse = std::max(0.0f, normal.dot(globalLightDir));
-                        float ambient = 0.35f;
-                        float intensity = std::min(1.0f, ambient + diffuse * 0.65f);
-                        hitColor = hitColor * intensity;
-                    }
-                    
-                    float fogFactor = std::clamp((maxDistance_ - t) * invMaxMin, minVisibility, 1.0f);
-                    
-                    hitColor = hitColor * fogFactor + scolor * (1.0f - fogFactor);
-                    
-                    color += hitColor * alpha * (1.0f - accumAlpha);
-                    accumAlpha += alpha * (1.0f - accumAlpha);
+                rayCubeIntersect(ray, hit, t, normal, hitPoint, &tExit);
+                Eigen::Vector3f hitColor = hit->color.template head<3>();
+                float alpha = hit->color.w();
+                Material_ objMat = shared_buffer.materials[hit->materialIdx];
+
+                float coverage;
+                if (hasPrev && hit->objectId == prevOid) {
+                    float extent = std::max(tExit - t, EPSILON);
+                    float thickness = std::max(0.0f, tExit - t) / extent;
+                    float trPerUnit = std::clamp(1.0f - alpha, 0.0f, 1.0f);
+                    coverage = 1.0f - std::pow(trPerUnit, thickness);
+                } else {
+                    coverage = alpha;
                 }
+                
+                if (objMat.emittance > 0.0f) {
+                    hitColor = hitColor * objMat.emittance;
+                } else {
+                    float diffuse = std::max(0.0f, normal.dot(globalLightDir));
+                    float ambient = 0.35f;
+                    float intensity = std::min(1.0f, ambient + diffuse * 0.65f);
+                    hitColor = hitColor * intensity;
+                }
+                
+                float fogFactor = std::clamp((maxDistance_ - t) * invMaxMin, minVisibility, 1.0f);
+                
+                hitColor = hitColor * fogFactor + scolor * (1.0f - fogFactor);
+                
+                color += hitColor * coverage * (1.0f - accumAlpha);
+                accumAlpha += coverage * (1.0f - accumAlpha);
+                prevOid = hit->objectId;
+                hasPrev = true;
             }
             
             if (accumAlpha < 1.0f) {
