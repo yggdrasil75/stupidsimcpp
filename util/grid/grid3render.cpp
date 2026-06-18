@@ -132,21 +132,6 @@ void Octree<T, IndexType>::buildRenderNodeAt(OctreeNode_<T, IndexType>* node, Re
     buffer.nodes[nodeIdx] = rnode;
 }
 
-struct StackItem {
-    uint32_t nodeIdx;
-    float tMin;
-    float tMax;
-};
-
-struct ChildInterval {
-    uint32_t nodeIdx;
-    float tMin;
-    float tMax;
-    bool operator<(const ChildInterval& o) const {
-        return tMin > o.tMin;
-    }
-};
-
 template<typename T, typename IndexType>
 std::vector<RenderData_*> Octree<T, IndexType>::fastVoxelTraverse(const RenderBuffer_<T, IndexType>& buffer, const Ray& ray, float maxDist) {
     std::vector<RenderData_*> hits;
@@ -154,95 +139,113 @@ std::vector<RenderData_*> Octree<T, IndexType>::fastVoxelTraverse(const RenderBu
     std::vector<float> tv;
     float tMin, tMax;
     BoundingBox rootBounds(buffer.nodes[0].boundsMin, buffer.nodes[0].boundsMax);
-    if (!rayBoxIntersect(ray, rootBounds, tMin, tMax)) return hits;
-    
-    tMax = std::min(tMax, maxDist);
-    float currentMaxDist = maxDist;
-    StackItem stack[256];
-    int stackPtr = 0;
-    stack[stackPtr++] = {0, std::max(0.0f, tMin), tMax};
+    if (rayBoxIntersect(ray, rootBounds, tMin, tMax)) {
+        tMax = std::min(tMax, maxDist);
+        float currentMaxDist = maxDist;
+        
+        struct StackItem {
+            uint32_t nodeIdx;
+            float tMin;
+            float tMax;
+        };
+        
+        StackItem stack[256];
+        int stackPtr = 0;
+        stack[stackPtr++] = {0, std::max(0.0f, tMin), tMax};
 
-    while (stackPtr > 0) {
-        StackItem current = stack[--stackPtr];
-        if (current.tMin > currentMaxDist) continue;
+        while(stackPtr > 0) {
+            StackItem current = stack[--stackPtr];
+            if (current.tMin > currentMaxDist) continue;
+            
+            const RenderNode_<T, IndexType>& node = buffer.nodes[current.nodeIdx];
 
-        const RenderNode_<T, IndexType>& node = buffer.nodes[current.nodeIdx];
-        if (!node.isLoaded && node.originalNode) {
-            ensureLoaded(node.originalNode, true);
-        }
+            if (!node.isLoaded && node.originalNode) {
+                ensureLoaded(node.originalNode, true);
+            }
 
-        if (!node.isLeaf && node.lodPoint != -1) {
-            float dist = (node.center - ray.origin).norm();
-            if (dist > lodMinDistance_ && (dist / node.nodeSize) > invLodf) {
+            if (!node.isLeaf && node.lodPoint != -1) {
+                float dist = (node.center - ray.origin).norm();
+                if (dist > lodMinDistance_ && (dist / node.nodeSize) > invLodf) {
+                    float t;
+                    PointType n, h;
+                    if (rayCubeIntersect(ray, &buffer.points[node.lodPoint], t, n, h)) {
+                        if (t >= 0 && t <= currentMaxDist) {
+                            hits.emplace_back(const_cast<RenderData_*>(&buffer.points[node.lodPoint]));
+                            tv.emplace_back(t);
+                            if (buffer.points[node.lodPoint].color.w() >= 0.9f) {
+                                currentMaxDist = std::min(currentMaxDist, t);
+                            }
+                        }
+                    }
+                    continue;
+                }
+            }
+
+            for (uint32_t i = 0; i < node.pointCount; ++i) {
+                const RenderData_& pt = buffer.points[node.firstPoint + i];
                 float t;
                 PointType n, h;
-                if (rayCubeIntersect(ray, &buffer.points[node.lodPoint], t, n, h)) {
+                if (rayCubeIntersect(ray, &pt, t, n, h)) {
                     if (t >= 0 && t <= currentMaxDist) {
-                        hits.emplace_back(const_cast<RenderData_*>(&buffer.points[node.lodPoint]));
+                        hits.emplace_back(const_cast<RenderData_*>(&pt));
                         tv.emplace_back(t);
-                        if (buffer.points[node.lodPoint].color.w() >= 0.99f) {
+                        if (pt.color.w() >= 0.9f) {
                             currentMaxDist = std::min(currentMaxDist, t);
                         }
                     }
                 }
-                continue;
             }
-        }
 
-        for (uint32_t i = 0; i < node.pointCount; ++i) {
-            const RenderData_& pt = buffer.points[node.firstPoint + i];
-            float t;
-            PointType n, h;
-            if (rayCubeIntersect(ray, &pt, t, n, h)) {
-                if (t >= 0 && t <= currentMaxDist) {
-                    hits.emplace_back(const_cast<RenderData_*>(&pt));
-                    tv.emplace_back(t);
-                    if (pt.color.w() >= 0.99f) {
-                        currentMaxDist = std::min(currentMaxDist, t);
-                    }
-                }
-            }
-        }
+            if (node.isLeaf || !node.isLoaded) continue;
 
-        if (node.isLeaf || !node.isLoaded) continue;
+            float t0 = current.tMin;
+            float t1 = current.tMax;
 
-        float t0 = current.tMin;
-        float t1 = current.tMax;
+            Eigen::Vector3f ttt = (node.center - ray.origin).cwiseProduct(ray.invDir);
+            int currIdx = ((t0 >= ttt.x()) ? 1 : 0) | ((t0 >= ttt.y()) ? 2 : 0) | ((t0 >= ttt.z()) ? 4 : 0);
+            
+            struct ChildInterval {
+                uint32_t nodeIdx;
+                float tMin;
+                float tMax;
+            };
+            ChildInterval children[4];
+            int childCount = 0;
 
-        Eigen::Vector3f ttt = (node.center - ray.origin).cwiseProduct(ray.invDir);
-        int currIdx = ((t0 >= ttt.x()) ? 1 : 0) | ((t0 >= ttt.y()) ? 2 : 0) | ((t0 >= ttt.z()) ? 4 : 0);
-        
+            while(t0 < t1 && t0 <= currentMaxDist) {
+                Eigen::Vector3f next_t;
+                next_t[0] = (currIdx & 1) ? t1 : ttt[0];
+                next_t[1] = (currIdx & 2) ? t1 : ttt[1];
+                next_t[2] = (currIdx & 4) ? t1 : ttt[2];
 
-        ChildInterval children[8];
-        int hitCount = 0;
-
-        uint32_t cidx = 0;
-        for (int i = 0; i < 8; ++i) {
-            if (node.childMask & (1 << i)) {
-                uint32_t childIdx = node.firstChild + cidx;
-                const auto& childNode = buffer.nodes[childIdx];
+                float tNext = next_t.minCoeff();
                 
-                float ctMin, ctMax;
-                BoundingBox cb = {childNode.boundsMin, childNode.boundsMax};
-                if (this->rayBoxIntersect(ray, cb, ctMin, ctMax)) {
-                    if (ctMax >= 0.0f && ctMin <= maxDist) {
-                        children[hitCount++] = {childIdx, std::max(0.0f, ctMin), ctMax};
-                    }
+                int physIdx = currIdx ^ ray.signMask;
+                if (node.childMask & (1 << physIdx)) {
+                    int childOffset = countBits(node.childMask & ((1 << physIdx) - 1));
+                    children[childCount++] = {node.firstChild + childOffset, t0, tNext};
                 }
-                cidx++;
+                
+                t0 = tNext;
+                currIdx |= ((next_t[0] <= tNext) ? 1 : 0) | ((next_t[1] <= tNext) ? 2 : 0) | ((next_t[2] <= tNext) ? 4 : 0);
             }
-        }
 
-        if (hitCount > 0) {
-            std::sort(children, children + hitCount);
-            if (stackPtr + hitCount <= 256) {
-                for (int i = 0; i < hitCount; ++i) {
-                    stack[stackPtr++] = {children[i].nodeIdx, children[i].tMin, children[i].tMax};
-                }
+            if (stackPtr + childCount > 256) continue;
+
+            for (int i = childCount - 1; i >= 0; --i) {
+                stack[stackPtr++] = {children[i].nodeIdx, children[i].tMin, children[i].tMax};
             }
         }
     }
-
+    std::vector<std::pair<RenderData_*, float>> zipped;
+    zipped.reserve(hits.size());
+    for (std::size_t i = 0; i < hits.size(); ++i)
+        zipped.emplace_back(hits[i], tv[i]);
+    std::sort(zipped.begin(), zipped.end(), [](const auto& a, const auto& b) {return a.second < b.second;});
+    for (std::size_t i = 0; i < zipped.size(); ++i) {
+        hits[i] = zipped[i].first;
+        tv[i] = zipped[i].second;
+    }
     return hits;
 }
 
@@ -261,70 +264,99 @@ frame Octree<T, IndexType>::fastRenderFrame(const Camera& cam, int height, int w
     PointType right = cam.right();
     
     frame outFrame(width, height, colorformat);
-    std::vector<float> colorBuffer(width * height * 3, 0.0f);
+    std::vector<float> colorBuffer;
+    colorBuffer.resize(width * height * 3);
 
     const float aspect = static_cast<float>(width) / height;
     const float fovRad = cam.fovRad();
     const float tanHalfFov = tan(fovRad * 0.5f);
     const float tanfovy = tanHalfFov;
     const float tanfovx = tanHalfFov * aspect;
-    float invFogRange = 1.0f / std::max(0.001f, maxDistance_ - lodMinDistance_);
-
-    #pragma omp parallel for schedule(dynamic)
+    
+    const PointType globalLightDir = (-cam.direction * 0.2f).normalized();
+    const float minVisibility = 0.1f;
+    float maxmin = (maxDistance_ - lodMinDistance_);
+    float invMaxMin = 1 / maxmin;
+    
+    #pragma omp parallel for schedule(dynamic, 128) collapse(2)
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
-            float px = (2.0f * ((x + 0.5f) / width) - 1.0f) * tanHalfFov * aspect;
-            float py = (1.0f - 2.0f * ((y + 0.5f) / height)) * tanHalfFov;
-            
-            PointType rayDir = (cam.direction.normalized() + cam.right() * px + cam.up.normalized() * py).normalized();
-            Ray ray(cam.origin, rayDir);
+            int pidx = (y * width + x);
+            int idx = pidx * 3;
 
-            float closestDist = maxDistance_;
-            RenderData_* closestHit = nullptr;
-            PointType hitNormal;
-
-            auto hits = fastVoxelTraverse(shared_buffer, ray, maxDistance_);
+            float px = (2.0f * (x + 0.5f) / width - 1.0f) * tanfovx;
+            float py = (1.0f - 2.0f * (y + 0.5f) / height) * tanfovy;
             
-            for (auto* pt : hits) {
-                float t; PointType n, hp;
-                if (rayCubeIntersect(ray, pt, t, n, hp)) {
-                    if (t >= 0 && t < closestDist) {
-                        if (pt->color.w() > 0.01f) {
-                            closestDist = t;
-                            closestHit = pt;
-                            hitNormal = n;
-                        }
+            PointType rayDir = dir + (right * px) + (up * py);
+            rayDir.normalize();
+
+            Eigen::Vector3f scolor = skybox_.sampleVector(rayDir);
+            Eigen::Vector3f color = Eigen::Vector3f(0.0f, 0.0f, 0.0f);
+            float accumAlpha = 0.0f;
+            Ray ray(origin, rayDir);
+            
+            // const RenderData_* hit = nullptr;
+            std::vector<RenderData_*> hits = fastVoxelTraverse(shared_buffer, ray, maxDistance_);
+
+            int prevOid = -1;
+            bool hasPrev = false;
+
+            for (auto hit : hits) {
+                if (accumAlpha >= 0.99f) break;
+                if (hit == nullptr) continue;
+                float t = 0.0f;
+                float tExit = 0.0f;
+                PointType normal, hitPoint;
+
+                rayCubeIntersect(ray, hit, t, normal, hitPoint, &tExit);
+                Eigen::Vector3f hitColor = hit->color.template head<3>();
+                float alpha = hit->color.w();
+                Material_ objMat = shared_buffer.materials[hit->materialIdx];
+
+                float coverage;
+                bool isInternalVoxel = (hasPrev && hit->objectId == prevOid);
+                if (isInternalVoxel) {
+                    float thickness = tExit - t;
+                    float trPerUnit = std::clamp(1.0f - alpha, 0.0f, 1.0f);
+                    coverage = 1.0f - std::pow(trPerUnit, thickness);
+                } else {
+                    coverage = alpha;
+                }
+                
+                if (objMat.emittance > 0.0f) {
+                    hitColor = hitColor * objMat.emittance;
+                } else {
+                    float diffuse = 0.0f;
+                    float ambient = 0.35f;
+                    if (!isInternalVoxel) {
+                        diffuse = std::max(0.0f, normal.dot(globalLightDir));
                     }
+                    float intensity = std::min(1.0f, ambient + diffuse * 0.65f);
+                    hitColor = hitColor * intensity;
                 }
+                
+                float fogFactor = std::clamp((maxDistance_ - t) * invMaxMin, minVisibility, 1.0f);
+                
+                hitColor = hitColor * fogFactor + scolor * (1.0f - fogFactor);
+                
+                color += hitColor * coverage * (1.0f - accumAlpha);
+                accumAlpha += coverage * (1.0f - accumAlpha);
+                prevOid = hit->objectId;
+                hasPrev = true;
+            }
+            
+            if (accumAlpha < 0.99f) {
+                color += scolor * (1.0f - accumAlpha);
             }
 
-            Eigen::Vector3f pixelColor = backgroundColor_;
+            color = color.cwiseMax(0.0f).cwiseMin(1.0f);
 
-            if (closestHit) {
-                Eigen::Vector3f hitColor = closestHit->color.head<3>();
-                
-                float ambient = 0.4f;
-                PointType lightDir = PointType(0.3f, 0.8f, 0.2f).normalized();
-                float diffuse = std::max(0.0f, hitNormal.dot(lightDir));
-                
-                pixelColor = hitColor.cwiseProduct(skylight_ + Eigen::Vector3f::Constant(ambient + diffuse * 0.6f));
-                
-                float fogFactor = std::clamp((closestDist - lodMinDistance_) * invFogRange, 0.0f, 1.0f);
-                pixelColor = pixelColor * (1.0f - fogFactor) + backgroundColor_ * fogFactor;
-            } else {
-                pixelColor = skybox_.sampleVector(rayDir);
-                if (pixelColor == Eigen::Vector3f::Zero()) {
-                    pixelColor = backgroundColor_;
-                }
-            }
-
-            int idx = (y * width + x) * 3;
-            colorBuffer[idx]     = std::clamp(pixelColor.x(), 0.0f, 1.0f);
-            colorBuffer[idx + 1] = std::clamp(pixelColor.y(), 0.0f, 1.0f);
-            colorBuffer[idx + 2] = std::clamp(pixelColor.z(), 0.0f, 1.0f);
+            colorBuffer[idx    ] = color[0];
+            colorBuffer[idx + 1] = color[1];
+            colorBuffer[idx + 2] = color[2];
         }
     }
-
+    
     outFrame.setData(colorBuffer, frame::colormap::RGB);
     return outFrame;
 }
