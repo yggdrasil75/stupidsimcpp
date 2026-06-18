@@ -172,7 +172,9 @@ std::vector<RenderData_*> Octree<T, IndexType>::fastVoxelTraverse(const RenderBu
                         if (t >= 0 && t <= currentMaxDist) {
                             hits.emplace_back(const_cast<RenderData_*>(&buffer.points[node.lodPoint]));
                             tv.emplace_back(t);
-                            // currentMaxDist = t;
+                            if (buffer.points[node.lodPoint].color.w() >= 0.99f) {
+                                currentMaxDist = std::min(currentMaxDist, t);
+                            }
                         }
                     }
                     continue;
@@ -184,10 +186,12 @@ std::vector<RenderData_*> Octree<T, IndexType>::fastVoxelTraverse(const RenderBu
                 float t;
                 PointType n, h;
                 if (rayCubeIntersect(ray, &pt, t, n, h)) {
-                    if (t >= 0 && t <= currentMaxDist && t <= current.tMax + 0.001f) {
-                        currentMaxDist = t;
+                    if (t >= 0 && t <= currentMaxDist) {
                         hits.emplace_back(const_cast<RenderData_*>(&pt));
                         tv.emplace_back(t);
+                        if (pt.color.w() >= 0.99f) {
+                            currentMaxDist = std::min(currentMaxDist, t);
+                        }
                     }
                 }
             }
