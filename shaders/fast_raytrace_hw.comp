@@ -271,12 +271,17 @@ void main() {
         float alpha = albedo.a;
         GPUMaterial mat = materials[hitData.materialIdx];
 
+        bool isInternalVoxel = (hasPrev && hitData.objectId == prevOid);
+
         vec3 surfaceColor;
         if (mat.emittance > 0.0) {
             surfaceColor = albedo.rgb * mat.emittance;
         } else {
             vec3 lightDir = normalize(-cam.dir);
-            float diffuse = max(0.0, dot(hits[i].normal, lightDir));
+            float diffuse = 0.0;
+            if (!isInternalVoxel) {
+                diffuse = max(0.0, dot(hits[i].normal, lightDir));
+            }
             surfaceColor = albedo.rgb * min(1.0, 0.35 + diffuse * 0.65);
         }
         
@@ -286,9 +291,8 @@ void main() {
         surfaceColor = surfaceColor * fogFactor + skyColor * (1.0 - fogFactor);
 
         float coverage;
-        if (hasPrev && hitData.objectId == prevOid) {
-            float extent = max(hits[i].tExit - hits[i].t, 1e-6);
-            float thickness = max(0.0, hits[i].tExit - hits[i].t) / extent;
+        if (isInternalVoxel) {
+            float thickness = max(0.0, hits[i].tExit - hits[i].t);
             float trPerUnit = clamp(1.0 - alpha, 0.0, 1.0);
             coverage = 1.0 - pow(trPerUnit, thickness);
         } else {
