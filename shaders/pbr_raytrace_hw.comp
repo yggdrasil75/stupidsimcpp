@@ -347,13 +347,13 @@ vec3 traceRay(Ray initialRay, inout uint state, inout uint group_state, out floa
 
             vec3 sigma_a = medAbsorption * 5.0;
             vec4 tempvalue = medAlbedo * (medAlbedo.a) * 15.0;
-            sigma_s = vec3(tempvalue.r, tempvalue.g, tempvalue.b);
+            sigma_s = tempvalue.rgb;
             if (isMedGas) {
                 float densityProxy = max(0.001, 1.0 - medAlbedo.a);
                 vec3 compColor = vec3(1.0) - medAlbedo.rgb;
                 sigma_a = (medAbsorption + compColor * 2.0) * densityProxy * 5.0;
                 tempvalue = medAlbedo * densityProxy * 5.0;
-                sigma_s = vec3(tempvalue.r, tempvalue.g, tempvalue.b);
+                sigma_s = tempvalue.rgb;
             }
 
             vec3 sigma_t_vec = sigma_a + sigma_s;

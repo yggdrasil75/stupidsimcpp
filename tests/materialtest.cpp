@@ -172,9 +172,9 @@ int main() {
     createBox(octree, Eigen::Vector3f( sp,  0,  0.0f), size, cPurple, 0.0f, 0.05f, 0.0f, 0.0f, 2.4f, Eigen::Vector3f(0,0,0), 6, initType, mass, 0.5);
 
     // LAYER 3: Glass
-    createBox(octree, Eigen::Vector3f(-sp,  sp, 0.0f), size, cRed,    0.0f, 0.01f, 0.0f, 0.99f, 1.5f, Eigen::Vector3f(0.05f, 0.8f, 0.8f), 7, initType, mass, 0.5);
-    createBox(octree, Eigen::Vector3f(  0,  sp, 0.0f), size, cBlue,   0.0f, 0.01f, 0.0f, 0.99f, 1.5f, Eigen::Vector3f(0.8f, 0.8f, 0.05f), 8, initType, mass, 0.5);
-    createBox(octree, Eigen::Vector3f( sp,  sp, 0.0f), size, cPurple, 0.0f, 0.01f, 0.0f, 0.99f, 1.5f, Eigen::Vector3f(0.4f, 1.2f, 0.4f), 9, initType, mass, 0.5);
+    createBox(octree, Eigen::Vector3f(-sp,  sp, 0.0f), size, cRed,    0.0f, 0.01f, 0.0f, 0.59f, 1.5f, Eigen::Vector3f(0.05f, 0.8f, 0.8f), 7, initType, mass, 0.5);
+    createBox(octree, Eigen::Vector3f(  0,  sp, 0.0f), size, cBlue,   0.0f, 0.01f, 0.0f, 0.59f, 1.5f, Eigen::Vector3f(0.8f, 0.8f, 0.05f), 8, initType, mass, 0.5);
+    createBox(octree, Eigen::Vector3f( sp,  sp, 0.0f), size, cPurple, 0.0f, 0.01f, 0.0f, 0.59f, 1.5f, Eigen::Vector3f(0.4f, 1.2f, 0.4f), 9, initType, mass, 0.5);
 
     std::cout << "Optimizing and Generating LODs..." << std::endl;
     // octree.generateLODs();
