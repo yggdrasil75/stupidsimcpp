@@ -61,7 +61,7 @@ void createCheckerBox(Grid::Octree<int>& octree, const Eigen::Vector3f& center, 
                 bool isEven = ((cx + cy + cz) % 2 == 0);
                 Eigen::Vector3f albedo = isEven ? color1 : color2;
                 
-                octree.set(1, pos, true, albedo, step, true, 100, 0.0f, 0.8f, 0.2f, 0.0f, 1.635f);
+                octree.set(1, pos, true, albedo, step, true, 100, 0.0f, 0.01f, 0.0f, 0.0f, 1.486f);
             }
         }
     }
@@ -150,7 +150,7 @@ int main() {
 
     // 2b. Create the 3x3 material sampler grid inside the room
     Eigen::Vector3f cRed(1.0f, 0.1f, 0.1f);
-    Eigen::Vector3f cRuby(224, 17, 95);
+    Eigen::Vector3f cRuby(0.878, 0.066, 0.3725);
     Eigen::Vector3f cBlue(0.1f, 0.1f, 1.0f);
     Eigen::Vector3f cPurple(0.6f, 0.1f, 0.8f);
     Eigen::Vector3f cSapphire(0.03, 0.14, 0.403);
