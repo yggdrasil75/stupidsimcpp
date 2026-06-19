@@ -61,7 +61,7 @@ void createCheckerBox(Grid::Octree<int>& octree, const Eigen::Vector3f& center, 
                 bool isEven = ((cx + cy + cz) % 2 == 0);
                 Eigen::Vector3f albedo = isEven ? color1 : color2;
                 
-                octree.set(1, pos, true, albedo, step, true, 100, 0.0f, 0.8f, 0.2f, 0.2f, 1.45f);
+                octree.set(1, pos, true, albedo, step, true, 100, 0.0f, 0.8f, 0.2f, 0.0f, 1.635f);
             }
         }
     }
