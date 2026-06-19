@@ -186,17 +186,17 @@ int main() {
     octree.setMaxDistance(4096);
 
     // 3. Setup rendering loop
-    int width = 1080;
+    int width = 1920;
     int height = 1080;
     
-    const float fps = 30.0f;
+    const float fps = 60.0f;
     const float durationPerSegment = 10.0f;
     const int framesPerSegment = static_cast<int>(fps * durationPerSegment);
-    const int samples = 100;
-    const int blendedsamples = 100;
-    const float blendedfactor = 0.5;
-    const int videosamples = 100;
-    const int bounces = 4;
+    const int samples = 1000;
+    const int blendedsamples = 1000;
+    const float blendedfactor = 0.33;
+    const int videosamples = 1000;
+    const int bounces = 128;
     const int physicsSubsteps = 10;
     const float physicsDt = 1.0f / fps;
     const float subDt = physicsDt / physicsSubsteps;
@@ -281,40 +281,40 @@ int main() {
     std::cout << "\nStarting video render..." << std::endl;
     std::cout << "Total frames to render: " << totalFrames << std::endl;
 
-    // for (size_t i = 0; i < views.size(); ++i) {
-    //     ScopedFunctionTimer meh("Video");
-    //     const View& startView = views[i];
-    //     const View& endView = views[(i + 1) % views.size()]; // Loop back to the first view at the end
+    for (size_t i = 0; i < views.size(); ++i) {
+        ScopedFunctionTimer meh("Video");
+        const View& startView = views[i];
+        const View& endView = views[(i + 1) % views.size()]; // Loop back to the first view at the end
 
-    //     std::cout << "\nAnimating segment: " << startView.name << " -> " << endView.name << std::endl;
+        std::cout << "\nAnimating segment: " << startView.name << " -> " << endView.name << std::endl;
 
-    //     for (int j = 0; j < framesPerSegment; ++j) {
-    //         if (frameCounter < -1) {
-    //             frameCounter++;
-    //             continue;
-    //         }
-    //         frameCounter++;
-    //         float t = static_cast<float>(j) / static_cast<float>(framesPerSegment);
+        for (int j = 0; j < framesPerSegment; ++j) {
+            if (frameCounter < -1) {
+                frameCounter++;
+                continue;
+            }
+            frameCounter++;
+            float t = static_cast<float>(j) / static_cast<float>(framesPerSegment);
 
-    //         Eigen::Vector3f currentOrigin = startView.origin * (1.0f - t) + endView.origin * t;
+            Eigen::Vector3f currentOrigin = startView.origin * (1.0f - t) + endView.origin * t;
             
-    //         Eigen::Vector3f currentUp = (startView.up * (1.0f - t) + endView.up * t).normalized();
+            Eigen::Vector3f currentUp = (startView.up * (1.0f - t) + endView.up * t).normalized();
             
-    //         Camera cam;
-    //         cam.origin = currentOrigin;
-    //         cam.up = currentUp;
-    //         cam.direction = (target - cam.origin).normalized();
+            Camera cam;
+            cam.origin = currentOrigin;
+            cam.up = currentUp;
+            cam.direction = (target - cam.origin).normalized();
             
-    //         std::cout << "Rendering video frame " << frameCounter << "/" << totalFrames << "..." << std::endl;
-    //         // frame out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
-    //         frame out = octree.blendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, videosamples, bounces, false);
-    //         // frame out = octree.renderFrameVulkan(cam, height, width, frame::colormap::RGB, videosamples, bounces, false, true);
-    //         // videoFrames.push_back(std::move(out));
-    //         std::string debugFilename = "output/materialframes/debug_material_" + std::to_string(frameCounter) + ".bmp";
-    //         BMPWriter::saveBMP(debugFilename, out);
-    //     }
-    // }
-    // FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
+            std::cout << "Rendering video frame " << frameCounter << "/" << totalFrames << "..." << std::endl;
+            // frame out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
+            frame out = octree.blendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, videosamples, bounces, false);
+            // frame out = octree.renderFrameVulkan(cam, height, width, frame::colormap::RGB, videosamples, bounces, false, true);
+            // videoFrames.push_back(std::move(out));
+            std::string debugFilename = "output/materialframes/debug_material_" + std::to_string(frameCounter) + ".bmp";
+            BMPWriter::saveBMP(debugFilename, out);
+        }
+    }
+    FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
 
     // std::cout << "\nAll frames rendered. Saving video file..." << std::endl;
     // std::string videoFilename = "output/material_test_video.y4m";
