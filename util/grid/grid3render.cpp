@@ -383,7 +383,7 @@ static inline uint32_t packMaterialProps(float roughness, float metallic, float 
     uint32_t m8 = static_cast<uint32_t>(std::clamp(metallic, 0.0f, 1.0f) * 255.0f);
     float mappedIor = (std::clamp(ior, 1.0f, 2.5f) - 1.0f) / 1.5f;
     uint32_t i8 = static_cast<uint32_t>(std::clamp(mappedIor, 0.0f, 1.0f) * 255.0f);
-    return r8 | (m8 << 8) | (i8 << 24);
+    return r8 | (m8 << 8) | (i8 << 16);
 }
 
 struct PointSort {

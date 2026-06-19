@@ -75,7 +75,7 @@ vec3 unpackRGB8(uint c) {
     return vec3(float(c & 0xFF) / 255.0, float((c >> 8) & 0xFF) / 255.0, float((c >> 16) & 0xFF) / 255.0);
 }
 vec4 unpackRGBA8(uint c) {
-    return vec4(float(c & 0xFF) / 255.0, float((c >> 8) & 0xFF) / 255.0, float((c >> 16) & 0xFF) / 255.0, float((c >> 24) & 0xFF / 255));
+    return vec4(float(c & 0xFF) / 255.0, float((c >> 8) & 0xFF) / 255.0, float((c >> 16) & 0xFF) / 255.0, float((c >> 24) & 0xFF) / 255.0);
 }
 
 void unpackMaterial(uint m, out float roughness, out float metallic, out float ior) {
@@ -345,11 +345,13 @@ vec3 traceRay(Ray initialRay, inout uint state, inout uint group_state, out floa
             vec4 medAlbedo = unpackRGBA8(medData.color);
             bool isMedGas = medData.isGas != 0;
 
+            float medOpacity = medAlbedo.a;
+
             vec3 sigma_a = medAbsorption * 5.0;
-            vec4 tempvalue = medAlbedo * (medAlbedo.a) * 15.0;
+            vec4 tempvalue = medAlbedo * medOpacity * 15.0;
             sigma_s = tempvalue.rgb;
             if (isMedGas) {
-                float densityProxy = max(0.001, 1.0 - medAlbedo.a);
+                float densityProxy = max(0.001, medOpacity);
                 vec3 compColor = vec3(1.0) - medAlbedo.rgb;
                 sigma_a = (medAbsorption + compColor * 2.0) * densityProxy * 5.0;
                 tempvalue = medAlbedo * densityProxy * 5.0;
@@ -459,7 +461,9 @@ vec3 traceRay(Ray initialRay, inout uint state, inout uint group_state, out floa
 
         vec4 albedo = unpackRGBA8(hitData.color);
         float roughness, metallic, ior;
-        float transmission = 1.0 - albedo.a;
+
+        float opacity = albedo.a;
+        float transmission = 1.0 - opacity;  
         unpackMaterial(surfaceMat.materialProps, roughness, metallic, ior);
 
         roughness = max(roughness, pathRoughness);
@@ -488,7 +492,7 @@ vec3 traceRay(Ray initialRay, inout uint state, inout uint group_state, out floa
         float alpha2 = alpha * alpha;
 
         if (cam.emissiveCount > 0 && entering == 1 && surfaceMat.emittance == 0.0) {
-            if ((1.0 - metallic) * (1.0 - transmission) > 0.001) {
+            if ((1.0 - metallic) * opacity > 0.001) {
                 int lightIdx = int(nextFloat(group_state) * float(cam.emissiveCount));
                 lightIdx = clamp(lightIdx, 0, cam.emissiveCount - 1);
                 uint emissivePtIdx = emissiveIndices[lightIdx];
@@ -526,7 +530,7 @@ vec3 traceRay(Ray initialRay, inout uint state, inout uint group_state, out floa
                             vec3 F_nee = F0 + (vec3(1.0) - F0) * pow(1.0 - min(1.0, VdotH_nee), 5.0);
 
                             vec3 diffuseBRDF = albedo.rgb * (vec3(1.0) - F_nee) / PI;
-                            vec3 evalBRDF = diffuseBRDF * (1.0 - transmission) * (1.0 - metallic);
+                            vec3 evalBRDF = diffuseBRDF * opacity * (1.0 - metallic);
 
                             vec3 directLight = lightEmission * evalBRDF * NdotL * solidAngle * float(cam.emissiveCount) * shadowTransmittance;
 
@@ -562,7 +566,7 @@ vec3 traceRay(Ray initialRay, inout uint state, inout uint group_state, out floa
 
         float probSpec = (F.x + F.y + F.z) * 0.333333;
         float probT = (1.0 - metallic) * transmission;
-        float probDiffuse = (1.0 - metallic) * (1.0 - transmission);
+        float probDiffuse = (1.0 - metallic) * opacity;
 
         float pspec = probSpec;
         float pdiff = probDiffuse * (1.0 - pspec);
@@ -726,22 +730,24 @@ vec3 shadowTraverse(Ray ray, float maxDist, int lightPtIdx) {
                 float r, m, ior;
                 unpackMaterial(tMat.materialProps, r, m, ior);
                 bool isMedGas = pt.isGas != 0;
-
-                if (isMedGas || m < 1.0) {
+                vec4 albColor = unpackRGBA8(pt.color);
+                
+                float ptOpacity = albColor.a;
+                float ptTransmission = 1.0 - ptOpacity;
+                if (isMedGas || ptTransmission > 0.01) {
                     vec3 absColor = unpackRGB8(tMat.absorption);
                     float actualTEntry = max(0.0, tEntry);
                     float actualTExit = min(maxDist, tExit);
                     float thickness = max(0.0, actualTExit - actualTEntry);
 
                     if (isMedGas) {
-                        vec4 albColor = unpackRGBA8(pt.color);
-                        float densityProxy = max(0.001, 1.0 - albColor.a);
+                        float densityProxy = max(0.001, ptOpacity);
                         vec3 compColor = vec3(1.0) - albColor.rgb;
                         vec3 sigma_a = (absColor + compColor * 2.0) * densityProxy * 5.0;
                         vec3 sigma_s = albColor.rgb * densityProxy * 5.0;
                         transmittance *= exp(-(sigma_a + sigma_s) * thickness);
                     } else {
-                        transmittance *= exp(-absColor * 10.0 * thickness);
+                        transmittance *= ptTransmission * exp(-absColor * 10.0 * thickness);
                     }
                 } else {
                     float tHit = tEntry < 0.0 ? tExit : tEntry;
