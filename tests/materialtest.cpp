@@ -150,8 +150,10 @@ int main() {
 
     // 2b. Create the 3x3 material sampler grid inside the room
     Eigen::Vector3f cRed(1.0f, 0.1f, 0.1f);
+    Eigen::Vector3f cRuby(224, 17, 95);
     Eigen::Vector3f cBlue(0.1f, 0.1f, 1.0f);
     Eigen::Vector3f cPurple(0.6f, 0.1f, 0.8f);
+    Eigen::Vector3f cSapphire(0.03, 0.14, 0.403);
     Eigen::Vector3f size(1.0f, 1.0f, 1.0f);
     Eigen::Vector3f cGold(1.00f, 0.80f, 0.30f);
     Eigen::Vector3f cSilver(0.90f, 0.90f, 0.95f);
@@ -162,19 +164,19 @@ int main() {
     float mass = 1.0f;
 
     // LAYER 1: Metals
-    createBox(octree, Eigen::Vector3f(-sp, -sp, 0.0f), size, cGold,   0.0f, 0.08f, 0.99f, 0.0f, 1.45f, Eigen::Vector3f(0,0,0), 1, initType, mass);
-    createBox(octree, Eigen::Vector3f(  0, -sp, 0.0f), size, cSilver, 0.0f, 0.08f, 0.99f, 0.0f, 1.45f, Eigen::Vector3f(0,0,0), 2, initType, mass);
-    createBox(octree, Eigen::Vector3f( sp, -sp, 0.0f), size, cBrass,  0.0f, 0.08f, 0.99f, 0.0f, 1.45f, Eigen::Vector3f(0,0,0), 3, initType, mass);
+    createBox(octree, Eigen::Vector3f(-sp, -sp, 0.0f), size * 1.5, cGold,   0.0f, 0.08f, 0.99f, 0.0f, 0.47f, Eigen::Vector3f(0,0,0), 1, initType, mass);
+    createBox(octree, Eigen::Vector3f(  0, -sp, 0.0f), size * 1.5, cSilver, 0.0f, 0.08f, 0.99f, 0.0f, 0.13f, Eigen::Vector3f(0,0,0), 2, initType, mass);
+    createBox(octree, Eigen::Vector3f( sp, -sp, 0.0f), size * 1.5, cBrass,  0.0f, 0.08f, 0.99f, 0.0f, 1.18f, Eigen::Vector3f(0,0,0), 3, initType, mass);
 
     // LAYER 2: Opaque
-    createBox(octree, Eigen::Vector3f(-sp,  0,  0.0f), size, cRed,    0.0f, 0.05f, 0.0f, 0.0f, 2.4f, Eigen::Vector3f(0,0,0), 4, initType, mass, 0.5);
+    createBox(octree, Eigen::Vector3f(-sp,  0,  0.0f), size, cRed,    0.0f, 0.05f, 0.0f, 0.0f, 1.46f, Eigen::Vector3f(0,0,0), 4, initType, mass, 0.5);
     createBox(octree, Eigen::Vector3f(  0,  0,  0.0f), size, cBlue,   0.0f, 0.05f, 0.0f, 0.0f, 2.4f, Eigen::Vector3f(0,0,0), 5, initType, mass, 0.1);
     createBox(octree, Eigen::Vector3f( sp,  0,  0.0f), size, cPurple, 0.0f, 0.05f, 0.0f, 0.0f, 2.4f, Eigen::Vector3f(0,0,0), 6, initType, mass, 0.5);
 
     // LAYER 3: Glass
-    createBox(octree, Eigen::Vector3f(-sp,  sp, 0.0f), size, cRed,    0.0f, 0.01f, 0.0f, 0.59f, 1.5f, Eigen::Vector3f(0.05f, 0.8f, 0.8f), 7, initType, mass, 0.5);
-    createBox(octree, Eigen::Vector3f(  0,  sp, 0.0f), size, cBlue,   0.0f, 0.01f, 0.0f, 0.59f, 1.5f, Eigen::Vector3f(0.8f, 0.8f, 0.05f), 8, initType, mass, 0.5);
-    createBox(octree, Eigen::Vector3f( sp,  sp, 0.0f), size, cPurple, 0.0f, 0.01f, 0.0f, 0.59f, 1.5f, Eigen::Vector3f(0.4f, 1.2f, 0.4f), 9, initType, mass, 0.5);
+    createBox(octree, Eigen::Vector3f(-sp,  sp, 0.0f), size, cRuby,    0.0f, 0.01f, 0.0f, 0.95f, 1.757f, Eigen::Vector3f(0.05f, 0.8f, 0.8f), 7, initType, mass, 0.5); //ruby
+    createBox(octree, Eigen::Vector3f(  0,  sp, 0.0f), size, cBlue,   0.0f, 0.01f, 0.0f, 0.89f, 1.309f, Eigen::Vector3f(0.8f, 0.8f, 0.05f), 8, initType, mass, 0.5); //ice
+    createBox(octree, Eigen::Vector3f( sp,  sp, 0.0f), size, cSapphire, 0.0f, 0.01f, 0.0f, 0.97f, 1.757f, Eigen::Vector3f(0.4f, 1.2f, 0.4f), 9, initType, mass, 0.5); //sapphire
 
     std::cout << "Optimizing and Generating LODs..." << std::endl;
     // octree.generateLODs();
