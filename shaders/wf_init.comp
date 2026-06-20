@@ -1,0 +1,54 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : require
+#include "wf_common.glsl"
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+
+    int tileW = min(512, cam.width  - cam.tileOffsetX);
+    int tileH = min(512, cam.height - cam.tileOffsetY);
+    if (tileW <= 0 || tileH <= 0) return;
+    uint tilePixels = uint(tileW) * uint(tileH);
+    if (gid >= tilePixels) return;
+
+    ivec2 local = ivec2(int(gid) % tileW, int(gid) / tileW);
+    ivec2 coord = local + ivec2(cam.tileOffsetX, cam.tileOffsetY);
+    if (coord.x >= cam.width || coord.y >= cam.height) return;
+
+    uint pixelIndex = uint(coord.y * cam.width + coord.x);
+    uint idx   = pixelIndex * 5u;
+    uint adIdx = pixelIndex * 5u;
+    if (idx + 4u >= uint(pixels.length())) return;
+
+    int globalS = pc.sampleIndex;
+    bool firstEver = (cam.currentSampleOffset == 0) && (globalS == 0);
+    float reqSamples = firstEver ? float(cam.targetSamples) : adaptiveData[adIdx + 2u];
+    bool done = (!firstEver) && (reqSamples < 0.0);
+    reqSamples = abs(reqSamples);
+
+    if (done || globalS >= int(reqSamples)) return;
+
+    uint rng = pcg_hash(uint(coord.x) + uint(coord.y) * uint(cam.width) + pcg_hash(uint(globalS)));
+    uint grng = pcg_hash(pixelIndex * 9781u + pcg_hash(uint(globalS)) + 2654435761u);
+
+    float px = (2.0 * (float(coord.x) + nextFloat(rng)) / float(cam.width)  - 1.0) * cam.tanfovx;
+    float py = (1.0 - 2.0 * (float(coord.y) + nextFloat(rng)) / float(cam.height)) * cam.tanfovy;
+    vec3 rayDir = normalize(cam.dir + cam.right * px + cam.up * py);
+
+    Path p;
+    p.o_tmax    = vec4(cam.origin, cam.maxDist);
+    p.dir_rough = vec4(rayDir, 0.0);
+    p.thp       = vec4(1.0, 1.0, 1.0, 0.0);
+    p.rad       = vec4(0.0, 0.0, 0.0, LARGE);
+    p.hitN_t    = vec4(0.0);
+    p.hitP_idx  = vec4(0.0, 0.0, 0.0, intBitsToFloat(-1));
+    p.u0        = uvec4(pixelIndex, rng, grng, PC_PACK(0, 0, 0));
+    p.i1        = ivec4(-1, -1, -1, FLAG_SPECULAR | FLAG_ALIVE);
+
+    paths[gid] = p;
+
+    uint slot = atomicAdd(ctr.extendCount, 1u);
+    if (pc.parity == 0) extendA[slot] = gid;
+    else                extendB[slot] = gid;
+}

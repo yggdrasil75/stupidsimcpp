@@ -232,6 +232,23 @@ struct VulkanContext {
     VkDescriptorSetLayout pbrDescLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout smoothDescLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout blendDescLayout = VK_NULL_HANDLE;
+
+    VkDescriptorSetLayout wfDescLayout = VK_NULL_HANDLE;
+    VkDescriptorSet       wfDescSet    = VK_NULL_HANDLE;
+    VkPipelineLayout      wfPipelineLayout = VK_NULL_HANDLE;
+    VkShaderModule wfInitShader = VK_NULL_HANDLE, wfArgsShader = VK_NULL_HANDLE,
+                   wfExtendShader = VK_NULL_HANDLE, wfShadeShader = VK_NULL_HANDLE,
+                   wfShadowShader = VK_NULL_HANDLE, wfFinalizeShader = VK_NULL_HANDLE;
+    VkPipeline wfInitPipe = VK_NULL_HANDLE, wfArgsPipe = VK_NULL_HANDLE,
+               wfExtendPipe = VK_NULL_HANDLE, wfShadePipe = VK_NULL_HANDLE,
+               wfShadowPipe = VK_NULL_HANDLE, wfFinalizePipe = VK_NULL_HANDLE;
+    VkBuffer wfPathBuf = VK_NULL_HANDLE, wfExtendABuf = VK_NULL_HANDLE,
+             wfExtendBBuf = VK_NULL_HANDLE, wfShadeBuf = VK_NULL_HANDLE,
+             wfShadowBuf = VK_NULL_HANDLE, wfCounterBuf = VK_NULL_HANDLE;
+    VkDeviceMemory wfPathMem = VK_NULL_HANDLE, wfExtendAMem = VK_NULL_HANDLE,
+                   wfExtendBMem = VK_NULL_HANDLE, wfShadeMem = VK_NULL_HANDLE,
+                   wfShadowMem = VK_NULL_HANDLE, wfCounterMem = VK_NULL_HANDLE;
+    size_t wfPathCap = 0;
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
     VkDescriptorSet fastDescSet = VK_NULL_HANDLE;
     VkDescriptorSet pbrDescSet = VK_NULL_HANDLE;
@@ -479,14 +496,14 @@ struct VulkanContext {
         vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
 
         VkDescriptorPoolSize poolSizes[] = { 
-            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 40},
-            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4},
-            {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 4}
+            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 60},
+            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 6},
+            {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 6}
         };
         VkDescriptorPoolCreateInfo poolCreateInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         poolCreateInfo.poolSizeCount = 3;
         poolCreateInfo.pPoolSizes = poolSizes;
-        poolCreateInfo.maxSets = 6;
+        poolCreateInfo.maxSets = 8;
         vkCreateDescriptorPool(device, &poolCreateInfo, nullptr, &descriptorPool);
 
         VkDescriptorSetLayoutBinding bindings[9] = {};
@@ -667,6 +684,10 @@ struct VulkanContext {
         if (hasHardwareRT && sphIntegrateShader) {
             sphComputeInfo.stage.module = sphIntegrateShader;
             vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &sphComputeInfo, nullptr, &sphIntegratePipeline);
+        }
+
+        if (hasHardwareRT) {
+            initWavefront();
         }
 
         initialized = true;
@@ -1424,6 +1445,251 @@ struct VulkanContext {
         memcpy(particles.data(), data, size);
         vkUnmapMemory(device, particleMem);
     }
+
+struct WFPushConstants {
+    int parity;
+    int stage;
+    int sampleIndex;
+    int pad;
+};
+
+static constexpr size_t WF_PATH_STRIDE   = 9 * 4 * sizeof(float);
+static constexpr size_t WF_SHADOW_STRIDE = 4 * 4 * sizeof(float);
+static constexpr size_t WF_COUNTER_SIZE  = 16 * sizeof(uint32_t);
+static constexpr VkDeviceSize WF_OFF_EXTEND_ARGS = 16;
+static constexpr VkDeviceSize WF_OFF_SHADE_ARGS  = 32;
+static constexpr VkDeviceSize WF_OFF_SHADOW_ARGS = 48;
+
+void initWavefront() {
+    VkDescriptorSetLayoutBinding b[14] = {};
+    for (int i = 0; i < 14; ++i) {
+        b[i].binding = i;
+        b[i].descriptorCount = 1;
+        b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        b[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    }
+    b[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    b[5].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+
+    VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    li.bindingCount = 14;
+    li.pBindings = b;
+    vkCreateDescriptorSetLayout(device, &li, nullptr, &wfDescLayout);
+
+    VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    ai.descriptorPool = descriptorPool;
+    ai.descriptorSetCount = 1;
+    ai.pSetLayouts = &wfDescLayout;
+    vkAllocateDescriptorSets(device, &ai, &wfDescSet);
+
+    VkPushConstantRange pcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(WFPushConstants)};
+    VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    pli.setLayoutCount = 1;
+    pli.pSetLayouts = &wfDescLayout;
+    pli.pushConstantRangeCount = 1;
+    pli.pPushConstantRanges = &pcr;
+    vkCreatePipelineLayout(device, &pli, nullptr, &wfPipelineLayout);
+
+    wfInitShader     = createShaderModule("./bin/wf_init.spv");
+    wfArgsShader     = createShaderModule("./bin/wf_args.spv");
+    wfExtendShader   = createShaderModule("./bin/wf_extend.spv");
+    wfShadeShader    = createShaderModule("./bin/wf_shade.spv");
+    wfShadowShader   = createShaderModule("./bin/wf_shadow.spv");
+    wfFinalizeShader = createShaderModule("./bin/wf_finalize.spv");
+
+    auto makePipe = [&](VkShaderModule m, VkPipeline& out) {
+        VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        ci.stage.pName = "main";
+        ci.stage.module = m;
+        ci.layout = wfPipelineLayout;
+        vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &ci, nullptr, &out);
+    };
+    makePipe(wfInitShader,     wfInitPipe);
+    makePipe(wfArgsShader,     wfArgsPipe);
+    makePipe(wfExtendShader,   wfExtendPipe);
+    makePipe(wfShadeShader,    wfShadePipe);
+    makePipe(wfShadowShader,   wfShadowPipe);
+    makePipe(wfFinalizeShader, wfFinalizePipe);
+}
+
+void ensureWavefrontBuffers(size_t maxPaths) {
+    if (maxPaths <= wfPathCap && wfPathBuf) return;
+    auto destroy = [&](VkBuffer& bf, VkDeviceMemory& mm) {
+        if (bf) {
+            vkDestroyBuffer(device, bf, nullptr);
+            vkFreeMemory(device, mm, nullptr);
+            bf = VK_NULL_HANDLE;
+        }
+    };
+    destroy(wfPathBuf, wfPathMem);
+    destroy(wfExtendABuf, wfExtendAMem);
+    destroy(wfExtendBBuf, wfExtendBMem);
+    destroy(wfShadeBuf, wfShadeMem);
+    destroy(wfShadowBuf, wfShadowMem);
+    destroy(wfCounterBuf, wfCounterMem);
+
+    const VkBufferUsageFlags store = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    const VkMemoryPropertyFlags devLocal = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+
+    createBuffer(maxPaths * WF_PATH_STRIDE,   store, devLocal, wfPathBuf,    wfPathMem);
+    createBuffer(maxPaths * sizeof(uint32_t), store, devLocal, wfExtendABuf, wfExtendAMem);
+    createBuffer(maxPaths * sizeof(uint32_t), store, devLocal, wfExtendBBuf, wfExtendBMem);
+    createBuffer(maxPaths * sizeof(uint32_t), store, devLocal, wfShadeBuf,   wfShadeMem);
+    createBuffer(maxPaths * WF_SHADOW_STRIDE, store, devLocal, wfShadowBuf,  wfShadowMem);
+    createBuffer(WF_COUNTER_SIZE, store | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, devLocal, wfCounterBuf, wfCounterMem);
+    wfPathCap = maxPaths;
+}
+
+void writeWavefrontDescriptors() {
+    VkDescriptorBufferInfo bi[14] = {};
+    bi[0]  = {uboBuffer,      0, VK_WHOLE_SIZE};
+    bi[1]  = {pbrPointBuffer, 0, VK_WHOLE_SIZE};
+    bi[2]  = {materialBuffer, 0, VK_WHOLE_SIZE};
+    bi[3]  = {skyboxBuffer,   0, VK_WHOLE_SIZE};
+    bi[4]  = {lightBuffer,    0, VK_WHOLE_SIZE};
+    bi[6]  = {outBuffer,      0, VK_WHOLE_SIZE};
+    bi[7]  = {adaptiveBuffer, 0, VK_WHOLE_SIZE};
+    bi[8]  = {wfPathBuf,      0, VK_WHOLE_SIZE};
+    bi[9]  = {wfExtendABuf,   0, VK_WHOLE_SIZE};
+    bi[10] = {wfExtendBBuf,   0, VK_WHOLE_SIZE};
+    bi[11] = {wfShadeBuf,     0, VK_WHOLE_SIZE};
+    bi[12] = {wfShadowBuf,    0, VK_WHOLE_SIZE};
+    bi[13] = {wfCounterBuf,   0, VK_WHOLE_SIZE};
+
+    VkWriteDescriptorSet w[14] = {};
+    int n = 0;
+    for (int i = 0; i < 14; ++i) {
+        if (i == 5) continue;
+        w[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w[n].dstSet = wfDescSet;
+        w[n].dstBinding = i;
+        w[n].descriptorCount = 1;
+        w[n].descriptorType = (i == 0) ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+                                       : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w[n].pBufferInfo = &bi[i];
+        ++n;
+    }
+    VkWriteDescriptorSetAccelerationStructureKHR asInfo{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
+    asInfo.accelerationStructureCount = 1;
+    asInfo.pAccelerationStructures = &tlas;
+    w[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w[n].pNext = &asInfo;
+    w[n].dstSet = wfDescSet;
+    w[n].dstBinding = 5;
+    w[n].descriptorCount = 1;
+    w[n].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+    ++n;
+
+    vkUpdateDescriptorSets(device, n, w, 0, nullptr);
+}
+
+void wfBarrier(VkCommandBuffer cmd) {
+    VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+    mb.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT |
+                       VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+    vkCmdPipelineBarrier(cmd,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+        0, 1, &mb, 0, nullptr, 0, nullptr);
+}
+
+void wfBind(VkCommandBuffer cmd, VkPipeline pipe) {
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
+}
+void wfPush(VkCommandBuffer cmd, int parity, int stage, int sampleIndex) {
+    WFPushConstants pc{parity, stage, sampleIndex, 0};
+    vkCmdPushConstants(cmd, wfPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+}
+
+void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel) {
+    size_t maxPaths = size_t(tileW) * size_t(tileH);
+    if (maxPaths == 0) return;
+    ensureWavefrontBuffers(maxPaths);
+    writeWavefrontDescriptors();
+
+    const uint32_t WG = 64;
+    uint32_t pathGroups = uint32_t((maxPaths + WG - 1) / WG);
+    int maxIters = maxBounces + 24;
+
+    const int samplesPerSubmit = 1;
+
+    VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    VkFence fence;
+    vkCreateFence(device, &fi, nullptr, &fence);
+
+    for (int s0 = 0; s0 < samplesPerPixel; s0 += samplesPerSubmit) {
+        int s1 = std::min(s0 + samplesPerSubmit, samplesPerPixel);
+
+        VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        vkBeginCommandBuffer(commandBuffer, &bi);
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                wfPipelineLayout, 0, 1, &wfDescSet, 0, nullptr);
+
+        for (int s = s0; s < s1; ++s) {
+            wfBind(commandBuffer, wfArgsPipe);
+            wfPush(commandBuffer, 0, 4, s);
+            vkCmdDispatch(commandBuffer, 1, 1, 1);
+            wfBarrier(commandBuffer);
+            wfBind(commandBuffer, wfInitPipe);
+            wfPush(commandBuffer, 0, 0, s);
+            vkCmdDispatch(commandBuffer, pathGroups, 1, 1);
+            wfBarrier(commandBuffer);
+
+            int parity = 0;
+            for (int it = 0; it < maxIters; ++it) {
+                wfBind(commandBuffer, wfArgsPipe);
+                wfPush(commandBuffer, parity, 0, s);
+                vkCmdDispatch(commandBuffer, 1, 1, 1);
+                wfBarrier(commandBuffer);
+                wfBind(commandBuffer, wfExtendPipe);
+                wfPush(commandBuffer, parity, 0, s);
+                vkCmdDispatchIndirect(commandBuffer, wfCounterBuf, WF_OFF_EXTEND_ARGS);
+                wfBarrier(commandBuffer);
+                wfBind(commandBuffer, wfArgsPipe);
+                wfPush(commandBuffer, parity, 1, s);
+                vkCmdDispatch(commandBuffer, 1, 1, 1);
+                wfBarrier(commandBuffer);
+                wfBind(commandBuffer, wfShadePipe);
+                wfPush(commandBuffer, parity, 0, s);
+                vkCmdDispatchIndirect(commandBuffer, wfCounterBuf, WF_OFF_SHADE_ARGS);
+                wfBarrier(commandBuffer);
+                wfBind(commandBuffer, wfArgsPipe);
+                wfPush(commandBuffer, parity, 2, s);
+                vkCmdDispatch(commandBuffer, 1, 1, 1);
+                wfBarrier(commandBuffer);
+                wfBind(commandBuffer, wfShadowPipe);
+                wfPush(commandBuffer, parity, 0, s);
+                vkCmdDispatchIndirect(commandBuffer, wfCounterBuf, WF_OFF_SHADOW_ARGS);
+                wfBarrier(commandBuffer);
+                wfBind(commandBuffer, wfArgsPipe);
+                wfPush(commandBuffer, parity, 3, s);
+                vkCmdDispatch(commandBuffer, 1, 1, 1);
+                wfBarrier(commandBuffer);
+                parity ^= 1;
+            }
+
+            wfBind(commandBuffer, wfFinalizePipe);
+            wfPush(commandBuffer, parity, 0, s);
+            vkCmdDispatch(commandBuffer, pathGroups, 1, 1);
+            wfBarrier(commandBuffer);
+        }
+
+        vkEndCommandBuffer(commandBuffer);
+
+        VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        si.commandBufferCount = 1;
+        si.pCommandBuffers = &commandBuffer;
+        vkResetFences(device, 1, &fence);
+        vkQueueSubmit(queue, 1, &si, fence);
+        vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
+    }
+
+    vkDestroyFence(device, fence, nullptr);
+}
+
 };
 inline VulkanContext vkCtx;
 #endif

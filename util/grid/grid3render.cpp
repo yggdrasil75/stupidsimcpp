@@ -512,19 +512,7 @@ frame Octree<T, IndexType>::renderFrameVulkan(const Camera& cam, int height, int
     vkCtx.updateSkyboxBuffer(skyData);
     vkCtx.updateLightBuffer(gpuLights);
     vkCtx.updatePBRBuffers(gpuPoints);
-
-    int currentSampleOffset = 0;
-    
-    const long long maxWorkloadBudget = 4194304; 
-    const long long pixelsInFrame = (long long)width * height;
-
-    while (currentSampleOffset < samplesPerPixel) {
-        int samplesInBatch = std::max(1, (int)(maxWorkloadBudget / pixelsInFrame));
-        samplesInBatch = std::min(samplesInBatch, samplesPerPixel - currentSampleOffset);
-        
-        camData.currentSampleOffset = currentSampleOffset;
-        camData.dispatchSamples = samplesInBatch;
-
+    {
         int tileW = 512;
         int tileH = 512;
 
@@ -535,34 +523,13 @@ frame Octree<T, IndexType>::renderFrameVulkan(const Camera& cam, int height, int
 
                 camData.tileOffsetX = x;
                 camData.tileOffsetY = y;
-                
-                // Update camera for this specific tile/sample batch
+                camData.currentSampleOffset = 0;
+                camData.dispatchSamples = samplesPerPixel;
+
                 vkCtx.updateCameraData(camData);
-
-                VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-                vkBeginCommandBuffer(vkCtx.commandBuffer, &beginInfo);
-                vkCmdBindPipeline(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.pbrPipeline);
-                vkCmdBindDescriptorSets(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.pbrPipelineLayout, 0, 1, &vkCtx.pbrDescSet, 0, nullptr);
-                
-                // Dispatch only for the tile size
-                vkCmdDispatch(vkCtx.commandBuffer, (drawW + 7) / 8, (drawH + 7) / 8, 1);
-                vkEndCommandBuffer(vkCtx.commandBuffer);
-
-                VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-                submitInfo.commandBufferCount = 1;
-                submitInfo.pCommandBuffers = &vkCtx.commandBuffer;
-
-                VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-                VkFence fence;
-                vkCreateFence(vkCtx.device, &fenceInfo, nullptr, &fence);
-
-                vkQueueSubmit(vkCtx.queue, 1, &submitInfo, fence);
-                vkWaitForFences(vkCtx.device, 1, &fence, VK_TRUE, UINT64_MAX);
-                vkDestroyFence(vkCtx.device, fence, nullptr);
+                vkCtx.dispatchWavefront(drawW, drawH, maxBounces, samplesPerPixel);
             }
         }
-        
-        currentSampleOffset += samplesInBatch;
     }
 
     frameCounter_++;
@@ -833,16 +800,7 @@ frame Octree<T, IndexType>::blendedRenderFrameVulkan(const Camera& cam, int heig
     vkCtx.updateLightBuffer(gpuLights);
     vkCtx.updatePBRBuffers(gpuPBRPoints);
 
-    int currentSampleOffset = 0;
-    const long long maxWorkloadBudget = 4194304; 
-    const long long pixelsInFrame = (long long)lowW * lowH;
-
-    while (currentSampleOffset < samplesPerPixel) {
-        int samplesInBatch = std::max(1, (int)(maxWorkloadBudget / pixelsInFrame));
-        samplesInBatch = std::min(samplesInBatch, samplesPerPixel - currentSampleOffset);
-        pbrCamData.currentSampleOffset = currentSampleOffset;
-        pbrCamData.dispatchSamples = samplesInBatch;
-
+    {
         int tileW = 512;
         int tileH = 512;
         for (int y = 0; y < lowH; y += tileH) {
@@ -851,30 +809,12 @@ frame Octree<T, IndexType>::blendedRenderFrameVulkan(const Camera& cam, int heig
                 int drawH = std::min(tileH, lowH - y);
                 pbrCamData.tileOffsetX = x;
                 pbrCamData.tileOffsetY = y;
+                pbrCamData.currentSampleOffset = 0;
+                pbrCamData.dispatchSamples = samplesPerPixel;
                 vkCtx.updateCameraData(pbrCamData);
-
-                VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-                vkBeginCommandBuffer(vkCtx.commandBuffer, &beginInfo);
-                vkCmdBindPipeline(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.pbrPipeline);
-                vkCmdBindDescriptorSets(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.pbrPipelineLayout, 0, 1, &vkCtx.pbrDescSet, 0, nullptr);
-                
-                vkCmdDispatch(vkCtx.commandBuffer, (drawW + 7) / 8, (drawH + 7) / 8, 1);
-                vkEndCommandBuffer(vkCtx.commandBuffer);
-
-                VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-                submitInfo.commandBufferCount = 1;
-                submitInfo.pCommandBuffers = &vkCtx.commandBuffer;
-
-                VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-                VkFence fence;
-                vkCreateFence(vkCtx.device, &fenceInfo, nullptr, &fence);
-
-                vkQueueSubmit(vkCtx.queue, 1, &submitInfo, fence);
-                vkWaitForFences(vkCtx.device, 1, &fence, VK_TRUE, UINT64_MAX);
-                vkDestroyFence(vkCtx.device, fence, nullptr);
+                vkCtx.dispatchWavefront(drawW, drawH, maxBounces, samplesPerPixel);
             }
         }
-        currentSampleOffset += samplesInBatch;
     }
 
     vkCtx.ensureLowResBuffer(pbrOutSize);
