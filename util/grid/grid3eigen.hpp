@@ -1878,7 +1878,7 @@ public:
         if (nodes.empty()) return false;
 
         // BoundingBox oldBounds = getNodesBounds(nodes);
-        // int oldDepth = 0;
+        int oldDepth = 0;
         // OctreeNode* oldStart = getHighestCommonNode(root_.get(), oldBounds, 0, oldDepth);
 
         size_t removed = removeObjectBatchRecursive(oldStart, objectId);
