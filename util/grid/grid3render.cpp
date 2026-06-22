@@ -483,21 +483,8 @@ frame Octree<T, IndexType>::renderFrameVulkan(const Camera& cam, int height, int
     float tanHalfFov = tan(fovRad * 0.5f);
     float invFogRange = 1.0f / std::max(0.001f, maxDistance_ - lodMinDistance_);
 
-    size_t skyW = skybox_.skybox.getWidth();
-    size_t skyH = skybox_.skybox.getHeight();
-    if (skyW == 0 || skyH == 0) { skyW = 1; skyH = 1; }
-    std::vector<Eigen::Vector4f> skyData(skyW * skyH, Eigen::Vector4f(0,0,0,1));
-    if (skybox_.skybox.getWidth() > 0) {
-        for (size_t y = 0; y < skyH; ++y) {
-            float v = (static_cast<float>(y) + 0.5f) / skyH;
-            for (size_t x = 0; x < skyW; ++x) {
-                float u = (static_cast<float>(x) + 0.5f) / skyW;
-                PointType skyDir = skybox_.uvToDir(u, v);
-                Eigen::Vector3f color = skybox_.sampleVector(skyDir);
-                skyData[y * skyW + x] = Eigen::Vector4f(color.x(), color.y(), color.z(), 1.0f);
-            }
-        }
-    }
+    size_t skyW, skyH;
+    const std::vector<Eigen::Vector4f>& skyData = getCachedSkyData(skyW, skyH);
 
     GPUCameraData camData = {
         cam.origin, lodMinDistance_, cam.direction.normalized(), invLodf, cam.up.normalized(), 0.1f, cam.right(), maxDistance_,
@@ -593,21 +580,8 @@ frame Octree<T, IndexType>::fastRenderFrameVulkan(const Camera& cam, int height,
     if(gpuPoints.empty()) gpuPoints.push_back(GPUFastRenderData{});
     if(gpuLights.empty()) gpuLights.push_back(0);
 
-    size_t skyW = skybox_.skybox.getWidth();
-    size_t skyH = skybox_.skybox.getHeight();
-    if (skyW == 0 || skyH == 0) { skyW = 1; skyH = 1; }
-    std::vector<Eigen::Vector4f> skyData(skyW * skyH, Eigen::Vector4f(0,0,0,1));
-    if (skybox_.skybox.getWidth() > 0) {
-        for (size_t y = 0; y < skyH; ++y) {
-            float v = (static_cast<float>(y) + 0.5f) / skyH;
-            for (size_t x = 0; x < skyW; ++x) {
-                float u = (static_cast<float>(x) + 0.5f) / skyW;
-                PointType skyDir = skybox_.uvToDir(u, v);
-                Eigen::Vector3f color = skybox_.sampleVector(skyDir);
-                skyData[y * skyW + x] = Eigen::Vector4f(color.x(), color.y(), color.z(), 1.0f);
-            }
-        }
-    }
+    size_t skyW, skyH;
+    const std::vector<Eigen::Vector4f>& skyData = getCachedSkyData(skyW, skyH);
 
     float aspect = static_cast<float>(width) / height;
     float fovRad = cam.fovRad();
@@ -639,32 +613,40 @@ frame Octree<T, IndexType>::fastRenderFrameVulkan(const Camera& cam, int height,
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &vkCtx.commandBuffer;
 
-    VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-    VkFence fence;
-    vkCreateFence(vkCtx.device, &fenceInfo, nullptr, &fence);
+    if (vkCtx.renderFence == VK_NULL_HANDLE) {
+        VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        vkCreateFence(vkCtx.device, &fenceInfo, nullptr, &vkCtx.renderFence);
+    } else {
+        vkResetFences(vkCtx.device, 1, &vkCtx.renderFence);
+    }
 
-    vkQueueSubmit(vkCtx.queue, 1, &submitInfo, fence);
-    vkWaitForFences(vkCtx.device, 1, &fence, VK_TRUE, UINT64_MAX);
-    vkDestroyFence(vkCtx.device, fence, nullptr);
+    {
+        vkQueueSubmit(vkCtx.queue, 1, &submitInfo, vkCtx.renderFence);
+        vkWaitForFences(vkCtx.device, 1, &vkCtx.renderFence, VK_TRUE, UINT64_MAX);
+    }
 
     frame outFrame(width, height, colorformat);
     std::vector<float> colorBuffer(width * height * 3);
-    
-    std::vector<float> rawBuffer(width * height * 5);
+
     void* mappedData;
     vkMapMemory(vkCtx.device, vkCtx.outMem, 0, outSize, 0, &mappedData);
-    memcpy(rawBuffer.data(), mappedData, outSize);
-    vkUnmapMemory(vkCtx.device, vkCtx.outMem);
-
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            int outIdx = (y * width + x) * 3;
-            int inIdx = (y * width + x) * 5;
-            colorBuffer[outIdx]     = std::clamp(rawBuffer[inIdx], 0.0f, 1.0f);
-            colorBuffer[outIdx + 1] = std::clamp(rawBuffer[inIdx + 1], 0.0f, 1.0f);
-            colorBuffer[outIdx + 2] = std::clamp(rawBuffer[inIdx + 2], 0.0f, 1.0f);
-        }
+    if (!vkCtx.outMemCoherent) {
+        VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+        range.memory = vkCtx.outMem;
+        range.offset = 0;
+        range.size = VK_WHOLE_SIZE;
+        vkInvalidateMappedMemoryRanges(vkCtx.device, 1, &range);
     }
+    const float* raw = static_cast<const float*>(mappedData);
+    const int pixelCount = width * height;
+    for (int i = 0; i < pixelCount; ++i) {
+        int outIdx = i * 3;
+        int inIdx = i * 5;
+        colorBuffer[outIdx]     = std::clamp(raw[inIdx],     0.0f, 1.0f);
+        colorBuffer[outIdx + 1] = std::clamp(raw[inIdx + 1], 0.0f, 1.0f);
+        colorBuffer[outIdx + 2] = std::clamp(raw[inIdx + 2], 0.0f, 1.0f);
+    }
+    vkUnmapMemory(vkCtx.device, vkCtx.outMem);
 
     outFrame.setData(colorBuffer, frame::colormap::RGB);
     return outFrame;
@@ -767,21 +749,8 @@ frame Octree<T, IndexType>::blendedRenderFrameVulkan(const Camera& cam, int heig
     float tanHalfFov = tan(fovRad * 0.5f);
     float invFogRange = 1.0f / std::max(0.001f, maxDistance_ - lodMinDistance_);
 
-    size_t skyW = skybox_.skybox.getWidth();
-    size_t skyH = skybox_.skybox.getHeight();
-    if (skyW == 0 || skyH == 0) { skyW = 1; skyH = 1; }
-    std::vector<Eigen::Vector4f> skyData(skyW * skyH, Eigen::Vector4f(0,0,0,1));
-    if (skybox_.skybox.getWidth() > 0) {
-        for (size_t y = 0; y < skyH; ++y) {
-            float v = (static_cast<float>(y) + 0.5f) / skyH;
-            for (size_t x = 0; x < skyW; ++x) {
-                float u = (static_cast<float>(x) + 0.5f) / skyW;
-                PointType skyDir = skybox_.uvToDir(u, v);
-                Eigen::Vector3f color = skybox_.sampleVector(skyDir);
-                skyData[y * skyW + x] = Eigen::Vector4f(color.x(), color.y(), color.z(), 1.0f);
-            }
-        }
-    }
+    size_t skyW, skyH;
+    const std::vector<Eigen::Vector4f>& skyData = getCachedSkyData(skyW, skyH);
     vkCtx.updateSkyboxBuffer(skyData);
 
     int lowW = std::max(1, static_cast<int>(width * pbrScale));

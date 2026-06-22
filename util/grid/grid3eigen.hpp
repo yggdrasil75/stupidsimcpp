@@ -121,6 +121,11 @@ private:
     Skybox skybox_;
     Eigen::Vector3f skylight_ = {0.1f, 0.1f, 0.1f};
     Eigen::Vector3f backgroundColor_ = {0.53f, 0.81f, 0.92f};
+    mutable std::vector<Eigen::Vector4f> skyDataCache_;
+    mutable size_t skyDataCacheW_ = 0;
+    mutable size_t skyDataCacheH_ = 0;
+    mutable uint64_t skyDataCacheVersion_ = ~0ull;
+    std::atomic<uint64_t> skyboxVersion_{0};
 
     mutable std::queue<std::function<void()>> taskQueue_;
     mutable std::mutex taskMutex_;
@@ -382,21 +387,53 @@ public:
         if (it != objects_.end()) return it->second;
         return nullptr;
     }
+    
+    const std::vector<Eigen::Vector4f>& getCachedSkyData(size_t& outW, size_t& outH) {
+        size_t skyW = skybox_.skybox.getWidth();
+        size_t skyH = skybox_.skybox.getHeight();
+        if (skyW == 0 || skyH == 0) { skyW = 1; skyH = 1; }
 
+        uint64_t ver = skyboxVersion_.load(std::memory_order_relaxed);
+        if (ver != skyDataCacheVersion_ || skyW != skyDataCacheW_ || skyH != skyDataCacheH_) {
+            skyDataCache_.assign(skyW * skyH, Eigen::Vector4f(0, 0, 0, 1));
+            if (skybox_.skybox.getWidth() > 0) {
+                for (size_t y = 0; y < skyH; ++y) {
+                    float v = (static_cast<float>(y) + 0.5f) / skyH;
+                    for (size_t x = 0; x < skyW; ++x) {
+                        float u = (static_cast<float>(x) + 0.5f) / skyW;
+                        PointType skyDir = skybox_.uvToDir(u, v);
+                        Eigen::Vector3f color = skybox_.sampleVector(skyDir);
+                        skyDataCache_[y * skyW + x] = Eigen::Vector4f(color.x(), color.y(), color.z(), 1.0f);
+                    }
+                }
+            }
+            skyDataCacheW_ = skyW;
+            skyDataCacheH_ = skyH;
+            skyDataCacheVersion_ = ver;
+        }
+        outW = skyDataCacheW_;
+        outH = skyDataCacheH_;
+        return skyDataCache_;
+    }
+    
     void addSkyBody(int id, const PointType& dir, float angularRadius, uint8_t r, uint8_t g, uint8_t b, uint8_t emittance = 255) {
         skybox_.addBody(id, dir, angularRadius, r, g, b, emittance);
+        skyboxVersion_++;
     }
 
     void moveSkyBody(int id, const PointType& newDir) {
         skybox_.moveBody(id, newDir);
+        skyboxVersion_++;
     }
 
     void removeSkyBody(int id) {
         skybox_.removeBody(id);
+        skyboxVersion_++;
     }
 
     void bakeSkyBody(int id) {
         skybox_.bakeBody(id);
+        skyboxVersion_++;
     }
 
     void waitForIdle() {

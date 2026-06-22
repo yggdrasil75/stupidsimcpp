@@ -215,6 +215,7 @@ struct VulkanContext {
     uint32_t queueFamilyIndex = 0;
     VkCommandPool commandPool = VK_NULL_HANDLE;
     VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+    VkFence renderFence = VK_NULL_HANDLE;
     
     VkShaderModule fastShader = VK_NULL_HANDLE;
     VkShaderModule pbrShader = VK_NULL_HANDLE;
@@ -232,6 +233,9 @@ struct VulkanContext {
     VkDescriptorSetLayout pbrDescLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout smoothDescLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout blendDescLayout = VK_NULL_HANDLE;
+    VkBuffer fastGBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory fastGBufferMem = VK_NULL_HANDLE;
+    size_t currentFastGCap = 0;
 
     VkDescriptorSetLayout wfDescLayout = VK_NULL_HANDLE;
     VkDescriptorSet       wfDescSet    = VK_NULL_HANDLE;
@@ -332,6 +336,13 @@ struct VulkanContext {
     VkDeviceMemory tlasMem = VK_NULL_HANDLE;
 
     size_t currentAabbCap = 0;
+    VkBuffer asScratchBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory asScratchMem = VK_NULL_HANDLE;
+    size_t currentScratchCap = 0;
+    uint32_t lastBlasPrimCount = 0;       // primitive count of the live BLAS topology
+    uint32_t framesSinceFullBuild = 0;    // refit counter
+    uint32_t refitInterval = 16;          // force a clean rebuild every N frames
+    bool blasTopologyValid = false;       // is there a refit-able BLAS in place?
 
     uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
         VkPhysicalDeviceMemoryProperties memProperties;
@@ -342,6 +353,61 @@ struct VulkanContext {
         }
         return 0;
     }
+
+    uint32_t findMemoryTypePreferred(uint32_t typeFilter, VkMemoryPropertyFlags required,
+                                     VkMemoryPropertyFlags preferred, bool& gotPreferred) {
+        VkPhysicalDeviceMemoryProperties memProperties;
+        vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
+        // First pass: required + preferred.
+        for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+            VkMemoryPropertyFlags f = memProperties.memoryTypes[i].propertyFlags;
+            if ((typeFilter & (1 << i)) && ((f & (required | preferred)) == (required | preferred))) {
+                gotPreferred = true;
+                return i;
+            }
+        }
+        // Second pass: required only.
+        for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+            VkMemoryPropertyFlags f = memProperties.memoryTypes[i].propertyFlags;
+            if ((typeFilter & (1 << i)) && ((f & required) == required)) {
+                gotPreferred = false;
+                return i;
+            }
+        }
+        gotPreferred = false;
+        return 0;
+    }
+    bool outMemCoherent = true;
+
+    void createReadbackBuffer(VkDeviceSize size, VkBuffer& buffer, VkDeviceMemory& bufferMemory, bool& coherentOut) {
+        VkBufferCreateInfo bufferInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        bufferInfo.size = size;
+        bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        vkCreateBuffer(device, &bufferInfo, nullptr, &buffer);
+
+        VkMemoryRequirements memRequirements;
+        vkGetBufferMemoryRequirements(device, buffer, &memRequirements);
+
+        bool gotCached = false;
+        uint32_t typeIdx = findMemoryTypePreferred(
+            memRequirements.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+            VK_MEMORY_PROPERTY_HOST_CACHED_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            gotCached);
+
+        // Determine coherence of the chosen type so we know whether to invalidate.
+        VkPhysicalDeviceMemoryProperties memProps;
+        vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProps);
+        coherentOut = (memProps.memoryTypes[typeIdx].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
+
+        VkMemoryAllocateInfo allocInfo{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        allocInfo.allocationSize = memRequirements.size;
+        allocInfo.memoryTypeIndex = typeIdx;
+        vkAllocateMemory(device, &allocInfo, nullptr, &bufferMemory);
+        vkBindBufferMemory(device, buffer, bufferMemory, 0);
+    }
+
 
     void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties,
                         VkBuffer& buffer, VkDeviceMemory& bufferMemory) {
@@ -397,7 +463,7 @@ struct VulkanContext {
         vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
         std::vector<VkPhysicalDevice> devices(deviceCount);
         vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data());
-        physicalDevice = devices[0]; //need to set a flag for this at some point.
+        physicalDevice = devices[1]; //need to set a flag for this at some point.
 
         uint32_t queueFamilyCount = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
@@ -579,7 +645,6 @@ struct VulkanContext {
         }
         smoothShader = createShaderModule("./bin/smooth.spv");
         blendShader = createShaderModule("./bin/blend.spv");
-
         uint32_t sphBindingCount = hasHardwareRT ? 3 : 1;
         VkDescriptorSetLayoutBinding sphBindings[3] = {};
         sphBindings[0].binding = 0;
@@ -959,8 +1024,12 @@ struct VulkanContext {
     void buildHardwareAccelerationStructures(const std::vector<RenderDataType>& points) {
         if (!hasHardwareRT || points.empty()) return;
 
-        std::vector<VkAabbPositionsKHR> aabbs(points.size());
-        for (size_t i = 0; i < points.size(); ++i) {
+        const uint32_t numPrimitives = static_cast<uint32_t>(points.size());
+        bool doFullBuild = (!blasTopologyValid)
+                        || (numPrimitives != lastBlasPrimCount)
+                        || (framesSinceFullBuild >= refitInterval);
+        std::vector<VkAabbPositionsKHR> aabbs(numPrimitives);
+        for (uint32_t i = 0; i < numPrimitives; ++i) {
             float halfSize = points[i].size * 0.5f;
             aabbs[i].minX = points[i].position.x() - halfSize;
             aabbs[i].minY = points[i].position.y() - halfSize;
@@ -995,29 +1064,33 @@ struct VulkanContext {
 
         VkAccelerationStructureBuildGeometryInfoKHR blasBuildInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
         blasBuildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-        blasBuildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
-        blasBuildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+        blasBuildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
+                            | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+        blasBuildInfo.mode = doFullBuild ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR
+                                         : VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
         blasBuildInfo.geometryCount = 1;
         blasBuildInfo.pGeometries = &blasGeom;
 
-        uint32_t numPrimitives = static_cast<uint32_t>(points.size());
         VkAccelerationStructureBuildSizesInfoKHR blasSizeInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
         pfn_vkGetAccelerationStructureBuildSizesKHR(device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &blasBuildInfo, &numPrimitives, &blasSizeInfo);
 
-        if (blas) {
-            pfn_vkDestroyAccelerationStructureKHR(device, blas, nullptr);
-            vkDestroyBuffer(device, blasBuffer, nullptr);
-            vkFreeMemory(device, blasMem, nullptr);
-        }
-        createBufferWithAddress(blasSizeInfo.accelerationStructureSize, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, 
-                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, blasBuffer, blasMem);
-        
-        VkAccelerationStructureCreateInfoKHR blasCreateInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
-        blasCreateInfo.buffer = blasBuffer;
-        blasCreateInfo.size = blasSizeInfo.accelerationStructureSize;
-        blasCreateInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-        pfn_vkCreateAccelerationStructureKHR(device, &blasCreateInfo, nullptr, &blas);
 
+        if (doFullBuild) {
+            if (blas) {
+                pfn_vkDestroyAccelerationStructureKHR(device, blas, nullptr);
+                vkDestroyBuffer(device, blasBuffer, nullptr);
+                vkFreeMemory(device, blasMem, nullptr);
+            }
+            createBufferWithAddress(blasSizeInfo.accelerationStructureSize, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
+                                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, blasBuffer, blasMem);
+
+            VkAccelerationStructureCreateInfoKHR blasCreateInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
+            blasCreateInfo.buffer = blasBuffer;
+            blasCreateInfo.size = blasSizeInfo.accelerationStructureSize;
+            blasCreateInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+            pfn_vkCreateAccelerationStructureKHR(device, &blasCreateInfo, nullptr, &blas);
+        }
+        blasBuildInfo.srcAccelerationStructure = doFullBuild ? VK_NULL_HANDLE : blas;
         VkAccelerationStructureDeviceAddressInfoKHR blasAddrInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR};
         blasAddrInfo.accelerationStructure = blas;
         VkDeviceAddress blasAddress = pfn_vkGetAccelerationStructureDeviceAddressKHR(device, &blasAddrInfo);
@@ -1053,8 +1126,10 @@ struct VulkanContext {
 
         VkAccelerationStructureBuildGeometryInfoKHR tlasBuildInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
         tlasBuildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
-        tlasBuildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
-        tlasBuildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+        tlasBuildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
+                            | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+        tlasBuildInfo.mode = doFullBuild ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR
+                                         : VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
         tlasBuildInfo.geometryCount = 1;
         tlasBuildInfo.pGeometries = &tlasGeom;
 
@@ -1062,25 +1137,35 @@ struct VulkanContext {
         VkAccelerationStructureBuildSizesInfoKHR tlasSizeInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
         pfn_vkGetAccelerationStructureBuildSizesKHR(device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &tlasBuildInfo, &numInstances, &tlasSizeInfo);
 
-        if (tlas) {
-            pfn_vkDestroyAccelerationStructureKHR(device, tlas, nullptr);
-            vkDestroyBuffer(device, tlasBuffer, nullptr);
-            vkFreeMemory(device, tlasMem, nullptr);
+        if (doFullBuild) {
+            if (tlas) {
+                pfn_vkDestroyAccelerationStructureKHR(device, tlas, nullptr);
+                vkDestroyBuffer(device, tlasBuffer, nullptr);
+                vkFreeMemory(device, tlasMem, nullptr);
+            }
+            createBufferWithAddress(tlasSizeInfo.accelerationStructureSize, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
+                                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, tlasBuffer, tlasMem);
+
+            VkAccelerationStructureCreateInfoKHR tlasCreateInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
+            tlasCreateInfo.buffer = tlasBuffer;
+            tlasCreateInfo.size = tlasSizeInfo.accelerationStructureSize;
+            tlasCreateInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+            pfn_vkCreateAccelerationStructureKHR(device, &tlasCreateInfo, nullptr, &tlas);
         }
-        createBufferWithAddress(tlasSizeInfo.accelerationStructureSize, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, 
-                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, tlasBuffer, tlasMem);
+        tlasBuildInfo.srcAccelerationStructure = doFullBuild ? VK_NULL_HANDLE : tlas;
 
-        VkAccelerationStructureCreateInfoKHR tlasCreateInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
-        tlasCreateInfo.buffer = tlasBuffer;
-        tlasCreateInfo.size = tlasSizeInfo.accelerationStructureSize;
-        tlasCreateInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
-        pfn_vkCreateAccelerationStructureKHR(device, &tlasCreateInfo, nullptr, &tlas);
-
-        VkBuffer scratchBuffer;
-        VkDeviceMemory scratchMem;
         VkDeviceSize scratchSize = std::max(blasSizeInfo.buildScratchSize, tlasSizeInfo.buildScratchSize);
-        createBufferWithAddress(scratchSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, 
-                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, scratchBuffer, scratchMem);
+        scratchSize = std::max(scratchSize, std::max(blasSizeInfo.updateScratchSize, tlasSizeInfo.updateScratchSize));
+        if (scratchSize > currentScratchCap) {
+            if (asScratchBuffer) {
+                vkDestroyBuffer(device, asScratchBuffer, nullptr);
+                vkFreeMemory(device, asScratchMem, nullptr);
+            }
+            createBufferWithAddress(scratchSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, asScratchBuffer, asScratchMem);
+            currentScratchCap = scratchSize;
+        }
+        VkBuffer scratchBuffer = asScratchBuffer;
 
         executeSingleTimeCommands([&](VkCommandBuffer cmd) {
             blasBuildInfo.dstAccelerationStructure = blas;
@@ -1107,23 +1192,36 @@ struct VulkanContext {
             pfn_vkCmdBuildAccelerationStructuresKHR(cmd, 1, &tlasBuildInfo, &pTlasOffset);
         });
 
-        vkDestroyBuffer(device, scratchBuffer, nullptr);
-        vkFreeMemory(device, scratchMem, nullptr);
+        // Scratch buffer is persistent now — do not free it here.
 
-        VkWriteDescriptorSetAccelerationStructureKHR descASInfo{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
-        descASInfo.accelerationStructureCount = 1;
-        descASInfo.pAccelerationStructures = &tlas;
-
-        VkWriteDescriptorSet asWrites[2] = {};
-        for (int i = 0; i < 2; i++) {
-            asWrites[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            asWrites[i].pNext = &descASInfo;
-            asWrites[i].dstSet = (i == 0) ? fastDescSet : pbrDescSet;
-            asWrites[i].dstBinding = 6;
-            asWrites[i].descriptorCount = 1;
-            asWrites[i].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+        // Refit bookkeeping.
+        if (doFullBuild) {
+            lastBlasPrimCount = numPrimitives;
+            blasTopologyValid = true;
+            framesSinceFullBuild = 0;
+        } else {
+            framesSinceFullBuild++;
         }
-        vkUpdateDescriptorSets(device, 2, asWrites, 0, nullptr);
+
+        // The TLAS handle only changes on a full build (UPDATE refits in place),
+        // so the descriptor binding only needs rewriting then. On refit frames the
+        // shader already points at the same (now-updated) structure.
+        if (doFullBuild) {
+            VkWriteDescriptorSetAccelerationStructureKHR descASInfo{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
+            descASInfo.accelerationStructureCount = 1;
+            descASInfo.pAccelerationStructures = &tlas;
+
+            VkWriteDescriptorSet asWrites[2] = {};
+            for (int i = 0; i < 2; i++) {
+                asWrites[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                asWrites[i].pNext = &descASInfo;
+                asWrites[i].dstSet = (i == 0) ? fastDescSet : pbrDescSet;
+                asWrites[i].dstBinding = 6;
+                asWrites[i].descriptorCount = 1;
+                asWrites[i].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+            }
+            vkUpdateDescriptorSets(device, 2, asWrites, 0, nullptr);
+        }
     }
 
     void updateLightBuffer(const std::vector<uint32_t>& lights) {
@@ -1156,8 +1254,7 @@ struct VulkanContext {
                 vkDestroyBuffer(device, outBuffer, nullptr);
                 vkFreeMemory(device, outMem, nullptr);
             }
-            createBuffer(outSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, 
-                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, outBuffer, outMem);
+            createReadbackBuffer(outSize, outBuffer, outMem, outMemCoherent);
             currentOutCap = outSize;
         }
 
@@ -1277,6 +1374,20 @@ struct VulkanContext {
                          lowResOutBuffer, lowResOutMem);
             currentLowResOutCap = size;
         }
+    }
+
+    void retainFastGBuffer(size_t fastOutSize) {
+        if (fastOutSize > currentFastGCap) {
+            if (fastGBuffer) {
+                vkDestroyBuffer(device, fastGBuffer, nullptr);
+                vkFreeMemory(device, fastGBufferMem, nullptr);
+            }
+            createBuffer(fastOutSize,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, fastGBuffer, fastGBufferMem);
+            currentFastGCap = fastOutSize;
+        }
+        copyBuffer(outBuffer, fastGBuffer, fastOutSize);
     }
 
     void dispatchSmooth(int width, int height, int samples) {
@@ -1623,6 +1734,7 @@ void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel
     for (int s0 = 0; s0 < samplesPerPixel; s0 += samplesPerSubmit) {
         int s1 = std::min(s0 + samplesPerSubmit, samplesPerPixel);
 
+        ScopedFunctionTimer* _rec = new ScopedFunctionTimer("wf.recordCmd");
         VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         vkBeginCommandBuffer(commandBuffer, &bi);
         vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -1678,7 +1790,9 @@ void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel
         }
 
         vkEndCommandBuffer(commandBuffer);
+        delete _rec;
 
+        ScopedFunctionTimer _sw("wf.submitAndWait");
         VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
         si.commandBufferCount = 1;
         si.pCommandBuffers = &commandBuffer;

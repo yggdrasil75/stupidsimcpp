@@ -29,7 +29,7 @@ struct Skybox {
         v = 0.5f - (std::asin(d.y()) / M_PI);
     }
 
-    PointType uvToDir(float u, float v) const {
+    const PointType uvToDir(float u, float v) const {
         float theta = (u - 0.5f) * 2.0f * M_PI;
         float phi = (0.5f - v) * M_PI;
         float y = std::sin(phi);
