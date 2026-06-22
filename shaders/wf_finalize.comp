@@ -38,7 +38,7 @@ void main() {
         return;
     }
 
-    Path p = paths[gid];
+    PathHot p = pathsHot[gid];
     vec3 rad = p.rad.xyz;
     if (isInvalid(rad)) rad = vec3(0.0);
     float depth = p.rad.w;

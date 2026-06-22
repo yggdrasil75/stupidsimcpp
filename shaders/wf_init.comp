@@ -36,17 +36,16 @@ void main() {
     float py = (1.0 - 2.0 * (float(coord.y) + nextFloat(rng)) / float(cam.height)) * cam.tanfovy;
     vec3 rayDir = normalize(cam.dir + cam.right * px + cam.up * py);
 
-    Path p;
+    PathHot p;
     p.o_tmax    = vec4(cam.origin, cam.maxDist);
     p.dir_rough = vec4(rayDir, 0.0);
     p.thp       = vec4(1.0, 1.0, 1.0, 0.0);
     p.rad       = vec4(0.0, 0.0, 0.0, LARGE);
-    p.hitN_t    = vec4(0.0);
-    p.hitP_idx  = vec4(0.0, 0.0, 0.0, intBitsToFloat(-1));
     p.u0        = uvec4(pixelIndex, rng, grng, PC_PACK(0, 0, 0));
     p.i1        = ivec4(-1, -1, -1, FLAG_SPECULAR | FLAG_ALIVE);
+    pathsHot[gid] = p;
 
-    paths[gid] = p;
+    pathsHit[gid].hit = vec4(0.0, intBitsToFloat(-1), -1.0, 0.0);
 
     uint slot = atomicAdd(ctr.extendCount, 1u);
     if (pc.parity == 0) extendA[slot] = gid;

@@ -9,7 +9,7 @@ void main() {
     if (gid >= ctr.shadeCount) return;
 
     uint slot = shadeQueue[gid];
-    Path p = paths[slot];
+    PathHot p = pathsHot[slot];
     if ((p.i1.w & FLAG_ALIVE) == 0) return;
 
     vec3 origin = p.o_tmax.xyz;
@@ -28,8 +28,11 @@ void main() {
     int mediumVoxelIdx = p.i1.y;
     bool lastBounceSpecular = (p.i1.w & FLAG_SPECULAR) != 0;
 
-    int hitIndex = floatBitsToInt(p.hitP_idx.w);
-    float t = p.hitN_t.w;
+    vec4 hitRec = pathsHit[slot].hit;
+    float t = hitRec.x;
+    int hitIndex = floatBitsToInt(hitRec.y);
+    float prevPdf = hitRec.z;
+    float outMisc = -1.0;
 
     remainingMaxDist -= t;
     
@@ -44,7 +47,7 @@ void main() {
     int entering = (dot(dir, normal) < 0.0) ? 1 : 0;
     vec3 offsetNorm = (entering == 1) ? normal : -normal;
     bool isMedGas = hitData.isGas != 0;
-    bool isTransmissionInteraction;
+    bool isTransmissionInteraction = false;
 
     if (mediumObjId != -1) {
         vec3 segAbs = unpackRGB8(materials[hitData.materialIdx].absorption);
@@ -69,10 +72,8 @@ void main() {
     bool continuePath = true;
 
     if (skipSurface) {
-        // Nudge the ray forward just enough to clear the current boundary.
-        // The ray is now physically inside the next voxel.
         origin = hitPoint + dir * (DIST_EPSILON * 4.0);
-        p.misc.x = -1.0;
+        outMisc = -1.0;
     } else if (isMedGas) {
         if (entering == 1) {
             mediumObjId = hitData.objectId;
@@ -81,10 +82,9 @@ void main() {
             mediumObjId = -1;
             mediumVoxelIdx = -1;
         }
-        // Apply the same tighter nudge here
         origin = hitPoint + dir * (DIST_EPSILON * 4.0);
         transp++;
-        p.misc.x = -1.0;
+        outMisc = -1.0;
     } else {
         GPUMaterial surfaceMat = materials[hitData.materialIdx];
         vec4 albedo = unpackRGBA8(hitData.color);
@@ -100,7 +100,6 @@ void main() {
         vec3 emitted = albedo.rgb * surfaceMat.emittance;
         if (surfaceMat.emittance > 0.0) {
             float wB = 1.0;
-            float prevPdf = p.misc.x;
             if (prevPdf > 0.0 && cam.emissiveCount > 0) {
                 float area = hitData.size * hitData.size;
                 float distSq = t * t;
@@ -117,8 +116,11 @@ void main() {
             float continueProb = clamp(max(throughput.x, max(throughput.y, throughput.z)), 0.1, 0.95);
             if (nextFloat(grng) > continueProb) {
                 p.rad.xyz = radiance;
+                p.u0.y = rng;
+                p.u0.z = grng;
                 p.i1.w &= ~FLAG_ALIVE;
-                paths[slot] = p;
+                pathsHot[slot] = p;
+                pathsHit[slot].hit.z = -1.0;
                 return;
             }
             throughput /= continueProb;
@@ -273,9 +275,9 @@ void main() {
         }
 
         if (neeDone && !isTransmissionInteraction) {
-            p.misc.x = bsdfPdfW(offsetNorm, V, newDir, alpha2, pspec, pdiff);
+            outMisc = bsdfPdfW(offsetNorm, V, newDir, alpha2, pspec, pdiff);
         } else {
-            p.misc.x = -1.0;
+            outMisc = -1.0;
         }
 
         if (bounce > 0 || transp > 0) {
@@ -287,8 +289,11 @@ void main() {
         throughput *= weight;
         if (max(max(throughput.x, throughput.y), throughput.z) < 0.01) {
             p.rad.xyz = radiance;
+            p.u0.y = rng;
+            p.u0.z = grng;
             p.i1.w &= ~FLAG_ALIVE;
-            paths[slot] = p;
+            pathsHot[slot] = p;
+            pathsHit[slot].hit.z = -1.0;
             return;
         }
         origin = newOrigin;
@@ -316,7 +321,8 @@ void main() {
     p.i1.w &= ~FLAG_HITFOUND;
 
     if (!continuePath) p.i1.w &= ~FLAG_ALIVE;
-    paths[slot] = p;
+    pathsHot[slot] = p;
+    pathsHit[slot].hit.z = outMisc;
 
     if (continuePath) {
         if (!isTransmissionInteraction) {

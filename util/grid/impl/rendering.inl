@@ -246,10 +246,12 @@ struct VulkanContext {
     VkPipeline wfInitPipe = VK_NULL_HANDLE, wfArgsPipe = VK_NULL_HANDLE,
                wfExtendPipe = VK_NULL_HANDLE, wfShadePipe = VK_NULL_HANDLE,
                wfShadowPipe = VK_NULL_HANDLE, wfFinalizePipe = VK_NULL_HANDLE;
-    VkBuffer wfPathBuf = VK_NULL_HANDLE, wfExtendABuf = VK_NULL_HANDLE,
+    VkBuffer wfPathBuf = VK_NULL_HANDLE, wfPathHitBuf = VK_NULL_HANDLE,
+             wfExtendABuf = VK_NULL_HANDLE,
              wfExtendBBuf = VK_NULL_HANDLE, wfShadeBuf = VK_NULL_HANDLE,
              wfShadowBuf = VK_NULL_HANDLE, wfCounterBuf = VK_NULL_HANDLE;
-    VkDeviceMemory wfPathMem = VK_NULL_HANDLE, wfExtendAMem = VK_NULL_HANDLE,
+    VkDeviceMemory wfPathMem = VK_NULL_HANDLE, wfPathHitMem = VK_NULL_HANDLE,
+                   wfExtendAMem = VK_NULL_HANDLE,
                    wfExtendBMem = VK_NULL_HANDLE, wfShadeMem = VK_NULL_HANDLE,
                    wfShadowMem = VK_NULL_HANDLE, wfCounterMem = VK_NULL_HANDLE;
     size_t wfPathCap = 0;
@@ -463,7 +465,7 @@ struct VulkanContext {
         vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
         std::vector<VkPhysicalDevice> devices(deviceCount);
         vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data());
-        physicalDevice = devices[0]; //need to set a flag for this at some point.
+        physicalDevice = devices[1]; //need to set a flag for this at some point.
 
         uint32_t queueFamilyCount = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
@@ -1564,7 +1566,8 @@ struct WFPushConstants {
     int pad;
 };
 
-static constexpr size_t WF_PATH_STRIDE   = 9 * 4 * sizeof(float);
+static constexpr size_t WF_PATH_STRIDE   = 6 * 4 * sizeof(float); // hot record (was 9*vec4)
+static constexpr size_t WF_PATHHIT_STRIDE= 1 * 4 * sizeof(float); // transient extend->shade hand-off
 static constexpr size_t WF_SHADOW_STRIDE = 4 * 4 * sizeof(float);
 static constexpr size_t WF_COUNTER_SIZE  = 16 * sizeof(uint32_t);
 static constexpr VkDeviceSize WF_OFF_EXTEND_ARGS = 16;
@@ -1572,8 +1575,8 @@ static constexpr VkDeviceSize WF_OFF_SHADE_ARGS  = 32;
 static constexpr VkDeviceSize WF_OFF_SHADOW_ARGS = 48;
 
 void initWavefront() {
-    VkDescriptorSetLayoutBinding b[14] = {};
-    for (int i = 0; i < 14; ++i) {
+    VkDescriptorSetLayoutBinding b[15] = {};
+    for (int i = 0; i < 15; ++i) {
         b[i].binding = i;
         b[i].descriptorCount = 1;
         b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -1583,7 +1586,7 @@ void initWavefront() {
     b[5].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
 
     VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    li.bindingCount = 14;
+    li.bindingCount = 15;
     li.pBindings = b;
     vkCreateDescriptorSetLayout(device, &li, nullptr, &wfDescLayout);
 
@@ -1635,6 +1638,7 @@ void ensureWavefrontBuffers(size_t maxPaths) {
         }
     };
     destroy(wfPathBuf, wfPathMem);
+    destroy(wfPathHitBuf, wfPathHitMem);
     destroy(wfExtendABuf, wfExtendAMem);
     destroy(wfExtendBBuf, wfExtendBMem);
     destroy(wfShadeBuf, wfShadeMem);
@@ -1644,7 +1648,8 @@ void ensureWavefrontBuffers(size_t maxPaths) {
     const VkBufferUsageFlags store = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     const VkMemoryPropertyFlags devLocal = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
 
-    createBuffer(maxPaths * WF_PATH_STRIDE,   store, devLocal, wfPathBuf,    wfPathMem);
+    createBuffer(maxPaths * WF_PATH_STRIDE,    store, devLocal, wfPathBuf,    wfPathMem);
+    createBuffer(maxPaths * WF_PATHHIT_STRIDE, store, devLocal, wfPathHitBuf, wfPathHitMem);
     createBuffer(maxPaths * sizeof(uint32_t), store, devLocal, wfExtendABuf, wfExtendAMem);
     createBuffer(maxPaths * sizeof(uint32_t), store, devLocal, wfExtendBBuf, wfExtendBMem);
     createBuffer(maxPaths * sizeof(uint32_t), store, devLocal, wfShadeBuf,   wfShadeMem);
@@ -1654,7 +1659,7 @@ void ensureWavefrontBuffers(size_t maxPaths) {
 }
 
 void writeWavefrontDescriptors() {
-    VkDescriptorBufferInfo bi[14] = {};
+    VkDescriptorBufferInfo bi[15] = {};
     bi[0]  = {uboBuffer,      0, VK_WHOLE_SIZE};
     bi[1]  = {pbrPointBuffer, 0, VK_WHOLE_SIZE};
     bi[2]  = {materialBuffer, 0, VK_WHOLE_SIZE};
@@ -1668,10 +1673,11 @@ void writeWavefrontDescriptors() {
     bi[11] = {wfShadeBuf,     0, VK_WHOLE_SIZE};
     bi[12] = {wfShadowBuf,    0, VK_WHOLE_SIZE};
     bi[13] = {wfCounterBuf,   0, VK_WHOLE_SIZE};
+    bi[14] = {wfPathHitBuf,   0, VK_WHOLE_SIZE};
 
-    VkWriteDescriptorSet w[14] = {};
+    VkWriteDescriptorSet w[15] = {};
     int n = 0;
-    for (int i = 0; i < 14; ++i) {
+    for (int i = 0; i < 15; ++i) {
         if (i == 5) continue;
         w[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         w[n].dstSet = wfDescSet;

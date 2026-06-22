@@ -27,5 +27,5 @@ void main() {
     vec3 add = thp * directLight;
     if (isInvalid(add)) return;
 
-    paths[pathSlot].rad.xyz += add;
+    pathsHot[pathSlot].rad.xyz += add;
 }

@@ -26,16 +26,17 @@ struct GPUPBRRenderData {
     uint isGas;
 };
 
-struct Path {
+struct PathHot {
     vec4 o_tmax;
     vec4 dir_rough;
     vec4 thp;
     vec4 rad;
-    vec4 hitN_t;
-    vec4 hitP_idx;
     uvec4 u0;
     ivec4 i1;
-    vec4 misc;
+};
+
+struct PathHit {
+    vec4 hit;
 };
 
 #define PC_GET_BOUNCE(p)  (int((p) & 0xFFu))
@@ -106,12 +107,13 @@ layout(std430, binding = 4) readonly buffer LightBuffer    { uint emissiveIndice
 layout(binding = 5) uniform accelerationStructureEXT tlas;
 layout(std430, binding = 6) buffer OutputBuffer   { float pixels[]; };
 layout(std430, binding = 7) buffer AdaptiveBuffer { float adaptiveData[]; };
-layout(std430, binding = 8) buffer PathBuffer     { Path paths[]; };
+layout(std430, binding = 8) buffer PathHotBuffer  { PathHot pathsHot[]; };
 layout(std430, binding = 9)  buffer ExtendA   { uint extendA[]; };
 layout(std430, binding = 10) buffer ExtendB   { uint extendB[]; };
 layout(std430, binding = 11) buffer ShadeQ    { uint shadeQueue[]; };
 layout(std430, binding = 12) buffer ShadowQ   { ShadowRay shadowQueue[]; };
 layout(std430, binding = 13) buffer CounterBuf{ Counters ctr; };
+layout(std430, binding = 14) buffer PathHitBuffer { PathHit pathsHit[]; };
 
 layout(push_constant) uniform PC {
     int parity;
@@ -214,19 +216,20 @@ bool rayCubeIntersect(vec3 ro, vec3 rd, vec3 invD, GPUPBRRenderData pt,
         hitPoint = ro;
         return false;
     }
-    t = tMin < 0.0 ? tMax : tMin;
+    bool inside = tMin < 0.0;
+    t = inside ? tMax : tMin;
     hitPoint = ro + rd * t;
-    vec3 dMin = abs(hitPoint - bMin);
-    vec3 dMax = abs(hitPoint - bMax);
-    vec3 minmin = min(dMin, dMax);
-    float mind = min(min(minmin.x, minmin.y), minmin.z);
-    normal = vec3(0.0);
-    if      (mind == dMin.x) normal.x = -1.0;
-    else if (mind == dMax.x) normal.x =  1.0;
-    else if (mind == dMin.y) normal.y = -1.0;
-    else if (mind == dMax.y) normal.y =  1.0;
-    else if (mind == dMin.z) normal.z = -1.0;
-    else                     normal.z =  1.0;
+
+    vec3 sgn = vec3(rd.x < 0.0 ? 1.0 : -1.0,
+                    rd.y < 0.0 ? 1.0 : -1.0,
+                    rd.z < 0.0 ? 1.0 : -1.0);
+    vec3 slab = inside ? tmax3 : tmin3;
+    float key = inside ? tMax : tMin;
+    vec3 mask;
+    if (key == slab.x)      mask = vec3(1.0, 0.0, 0.0);
+    else if (key == slab.y) mask = vec3(0.0, 1.0, 0.0);
+    else                    mask = vec3(0.0, 0.0, 1.0);
+    normal = inside ? (sgn * mask) : (-sgn * mask);
     return true;
 }
 

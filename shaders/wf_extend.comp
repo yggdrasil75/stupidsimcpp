@@ -8,7 +8,7 @@ void main() {
     if (gid >= ctr.extendCount) return;
 
     uint slot = (pc.parity == 0) ? extendA[gid] : extendB[gid];
-    Path p = paths[slot];
+    PathHot p = pathsHot[slot];
 
     if ((p.i1.w & FLAG_ALIVE) == 0) return;
 
@@ -25,10 +25,11 @@ void main() {
     int volum  = PC_GET_VOLUM(p.u0.w);
     int mediumObjId   = p.i1.x;
     int mediumVoxelIdx= p.i1.y;
+    float carriedMisc = pathsHit[slot].hit.z;
 
     if (isInvalid(origin) || isInvalid(dir) || isInvalid(throughput) || remainingMaxDist <= 0.0) {
         p.i1.w &= ~FLAG_ALIVE;
-        paths[slot] = p;
+        pathsHot[slot] = p;
         return;
     }
 
@@ -110,7 +111,7 @@ void main() {
         if (max(max(throughput.x, throughput.y), throughput.z) < 0.01) {
             p.rad.xyz = radiance;
             p.i1.w &= ~FLAG_ALIVE;
-            paths[slot] = p;
+            pathsHot[slot] = p;
             return;
         }
     }
@@ -126,13 +127,13 @@ void main() {
     if (scattered) {
         if (volum >= MAX_VOLUMETRIC_BOUNCES) {
             p.i1.w &= ~FLAG_ALIVE;
-            paths[slot] = p;
+            pathsHot[slot] = p;
             return;
         }
         p.u0.w = PC_PACK(bounce, transp, volum);
         p.i1.x = mediumObjId;
         p.i1.y = mediumVoxelIdx;
-        paths[slot] = p;
+        pathsHot[slot] = p;
         uint q = atomicAdd(ctr.nextExtendCount, 1u);
         if (pc.parity == 0) extendB[q] = slot;
         else extendA[q] = slot;
@@ -149,23 +150,23 @@ void main() {
         else radiance += throughput * cam.skylight;
         p.rad.xyz = radiance;
         p.i1.w &= ~FLAG_ALIVE;
-        paths[slot] = p;
+        pathsHot[slot] = p;
         return;
     }
 
     if (hitIndex < 0 || hitIndex >= points.length()) {
         p.i1.w &= ~FLAG_ALIVE;
-        paths[slot] = p;
+        pathsHot[slot] = p;
         return;
     }
 
-    p.hitN_t   = vec4(normal, t);
-    p.hitP_idx = vec4(hitPoint, intBitsToFloat(hitIndex));
     p.u0.w = PC_PACK(bounce, transp, volum);
     p.i1.x = mediumObjId;
     p.i1.y = mediumVoxelIdx;
     p.i1.w |= FLAG_HITFOUND;
-    paths[slot] = p;
+    pathsHot[slot] = p;
+
+    pathsHit[slot].hit = vec4(t, intBitsToFloat(hitIndex), carriedMisc, 0.0);
 
     uint sq = atomicAdd(ctr.shadeCount, 1u);
     shadeQueue[sq] = slot;
