@@ -297,6 +297,16 @@ private:
         }
         return bounds;
     }
+    OctreeNode* getHighestCommonNodeRecursive(const PointType& Min, const PointType& Max, OctreeNode* current, int& depth) const {
+        depth++;
+        std::shared_lock<std::shared_mutex> lock(current->nodeMutex);
+        uint8_t mcell = getOctant(Min, current->center);
+        if (mcell == getOctant(Max, current->center) && current->children[mcell]) {
+            return getHighestCommonNodeRecursive(Min, Max, current->children[mcell].get(), depth);
+        }
+        depth--;
+        return current;
+    }
 
     OctreeNode* getHighestCommonNode(OctreeNode* current, const BoundingBox& bounds, int currentDepth, int& outDepth) const {
         if (!current || current->isLeaf()) {
@@ -313,6 +323,29 @@ private:
         }
         outDepth = currentDepth;
         return current;
+    }
+
+    OctreeNode* getHighestCommonNode(const std::vector<PointType>& positions, OctreeNode* current = nullptr, int& depth = 0) const {
+        if (!current) current = root_.get();
+        PointType min = positions[0];
+        PointType max = positions[0];
+        for (const auto& pos : positions) {
+            min = min.cwiseMin(pos);
+            max = max.cwiseMax(pos);
+        }
+
+        return getHighestCommonNodeRecursive(min, max, current, depth);
+    }
+
+    OctreeNode* getHighestCommonNode(const std::vector<std::shared_ptr<NodeData>>& nodes, OctreeNode* current = nullptr, int& depth = 0) const {
+        if (!current) current = root_.get();
+        PointType min = nodes[0]->position;
+        PointType max = nodes[0]->position;
+        for (const auto& node : nodes) {
+            min = min.cwiseMin(node->position);
+            max = max.cwiseMax(node->position);
+        }
+        return getHighestCommonNodeRecursive(min, max, current, depth);
     }
 
     size_t removeObjectBatchRecursive(OctreeNode* node, int objectId) {
@@ -893,12 +926,13 @@ private:
         }
     }
 
-    std::shared_ptr<NodeData> findRecursive(OctreeNode* node, const PointType& pos, float tolerance) {
+    std::shared_ptr<NodeData> findRecursive(OctreeNode* node, const PointType& pos, int objectId, float tolerance) {
         if (!node->contains(pos)) return nullptr;
         ensureLoaded(node, false);
         std::lock_guard<std::shared_mutex> lock(node->nodeMutex);
         
         for (const auto& pointData : node->points) {
+            if (pointData->objectId != objectId && objectId != -2) continue;
             float distSq = (pointData->position - pos).squaredNorm();
             if (distSq <= tolerance * tolerance) {
                 return pointData;
@@ -908,7 +942,7 @@ private:
         if (!node->isLeaf()) {
             int octant = getOctant(pos, node->center);
             if (node->children[octant]) {
-                return findRecursive(node->children[octant].get(), pos, tolerance);
+                return findRecursive(node->children[octant].get(), pos, objectId, tolerance);
             }
         }
         return nullptr;
@@ -1223,11 +1257,6 @@ private:
                 }
             }
         }
-    }
-
-    void collectNodesByObjectId(OctreeNode* node, int id, std::vector<std::shared_ptr<NodeData>>& results) {
-        std::unordered_set<std::shared_ptr<NodeData>> seen;
-        collectNodesByObjectIdRecursive(node, id, results, seen);
     }
 
     bool raycastRecursive(OctreeNode* node, const Ray& ray, float tMin, float tMax, float& maxDist, RayHit& hit, const std::shared_ptr<NodeData>& ignoreNode, bool hitOnlySolid, bool resolvePenetration, const std::unordered_map<int, std::shared_ptr<GridObject>>& localObjects) {
@@ -1557,6 +1586,42 @@ public:
         return false;
     }
 
+    bool bulkInsert(const T& data, std::vector<PointType> positions, Eigen::Vector3f color, bool visible = true, float size = 0.01f, bool active = true, int objectId = -1,
+                Eigen::Vector3f emittance = 0, float roughness = 1.0f, float reflective = 0.0f, float transmission = 0.0f, float ior = 1.45f, 
+                Eigen::Vector3f absorption = 0, BodyType bType = BodyType::STATIC, float mass = 1.0f, float restitution = 1.0f, float density = 1.0f, bool staticb = false) {
+        std::shared_ptr<GridObject> obj = getOrCreateObject(objectId);
+        Material rmat(packRGB9E5(emittance), roughness, reflective, ior, packRGB9E5(absorption));
+        IndexType rIdx = obj->getOrAddRenderMaterial(rmat);
+
+        PhysicsMaterial_ pmat{bType, mass};
+        IndexType pIdx = obj->getOrAddPhysicsMaterial(pmat);
+
+        Eigen::Vector4f albedo = Eigen::Vector4f(color.x(), color.y(), color.z(), transmission);
+
+        int depth = 0;
+        OctreeNode* commonNode = getHighestCommonNode(positions, root_.get(), depth);
+        commonNode->setKeepLoaded(true);
+        bool anyFailed = false;
+        
+        for (const auto& pos : positions) {
+            auto pointData = std::make_shared<NodeData>(data, pos, visible, albedo, size, active, objectId, rIdx, pIdx, bType == BodyType::STATIC);
+            
+            PointType relPos = pos - obj->centerPosition;
+            {
+                std::unique_lock<std::shared_mutex> lock(obj->objMutex);
+                obj->relativeVoxels.push_back(relPos);
+            }
+
+            if (insertRecursive(commonNode, pointData, depth)) {
+                this->size++;
+            } else anyFailed = true;
+        }
+        
+        commonNode->setKeepLoaded(false);
+        obj->setMeshClean(false);
+        return !anyFailed;
+    }
+
     bool insertVoxels(int objectId, const std::vector<PointType>& positions, const T& defaultData, 
                       float voxelSize = 0.1f, const Eigen::Vector3f& color = {1.0f, 1.0f, 1.0f},
                       BodyType bType = BodyType::STATIC, float mass = 1.0f,
@@ -1650,6 +1715,33 @@ public:
         if (!pt) return -1;
         return pt->physMatIdx;
     }
+    
+    void collectNodesByObjectId(int id, std::vector<std::shared_ptr<NodeData>>& results) {
+        auto obj = getObject(id);
+        if (!obj) return;
+        
+        std::vector<PointType> absolutePositions;
+        {
+            std::shared_lock<std::shared_mutex> lock(obj->objMutex);
+            if (obj->relativeVoxels.empty()) return;
+            
+            absolutePositions.reserve(obj->relativeVoxels.size());
+            for (const auto& relPos : obj->relativeVoxels) {
+                absolutePositions.push_back(obj->centerPosition + relPos.relPos);
+            }
+        }
+        int depth = 0;
+        OctreeNode* commonNode = getHighestCommonNode(absolutePositions, root_.get(), depth);
+        results.reserve(absolutePositions.size());
+        
+        for (const auto& absPos : absolutePositions) {
+            auto pt = find(absPos, id, EPSILON, commonNode);
+            
+            if (pt && pt->isActive()) {
+                results.push_back(pt);
+            }
+        }
+    }
 
     bool updateRenderMaterial(int objectId, uint16_t index, const Material& mat) {
         auto obj = getObject(objectId);
@@ -1662,7 +1754,7 @@ public:
             obj->renderMaterialIndex[mat] = index;
         }
         std::vector<std::shared_ptr<NodeData>> nodes;
-        if (root_) collectNodesByObjectId(root_.get(), objectId, nodes);
+        if (root_) collectNodesByObjectId(objectId, nodes);
         for (auto& n : nodes) invalidateLODForPoint(n);
         return true;
     }
@@ -1680,15 +1772,44 @@ public:
         markPhysicsCollidersDirty();
         return true;
     }
+    
+    OctreeNode* collectPointsByObjectId(int id, std::vector<std::shared_ptr<NodeData>>& results) {
+        auto obj = getObject(id);
+        if (!obj) return nullptr;
+        
+        std::vector<PointType> absolutePositions;
+        {
+            std::shared_lock<std::shared_mutex> lock(obj->objMutex);
+            if (obj->relativeVoxels.empty()) return nullptr;
+            
+            absolutePositions.reserve(obj->relativeVoxels.size());
+            for (const auto& relPos : obj->relativeVoxels) {
+                absolutePositions.push_back(obj->centerPosition + relPos);
+            }
+        }
+        int depth = 0;
+        OctreeNode* commonNode = getHighestCommonNode(absolutePositions, root_.get(), depth);
+        results.reserve(absolutePositions.size());
+        
+        for (const auto& absPos : absolutePositions) {
+            auto pt = find(absPos, id, EPSILON, commonNode);
+            
+            if (pt && pt->isActive()) {
+                results.push_back(pt);
+            }
+        }
+        return commonNode;
+    }
 
     bool removeObject(int objectId) {
         std::vector<std::shared_ptr<NodeData>> nodes;
-        if (root_) collectNodesByObjectId(root_.get(), objectId, nodes);
+        OctreeNode* startNode = collectPointsByObjectId(objectId, nodes);
         if (nodes.empty()) return false;
 
-        BoundingBox oldBounds = getNodesBounds(nodes);
-        int startDepth = 0;
-        OctreeNode* startNode = getHighestCommonNode(root_.get(), oldBounds, 0, startDepth);
+        // BoundingBox oldBounds = getNodesBounds(nodes);
+        // int startDepth = 0;
+        // OctreeNode* r = root_.get()
+        // OctreeNode* startNode = getHighestCommonNode(nodes, r, startDepth);
 
         size_t removed = removeObjectBatchRecursive(startNode, objectId);
         size -= removed;
@@ -1703,7 +1824,7 @@ public:
     bool rotateObject(int objectId, const Eigen::Matrix3f& rotation, const PointType& pivot) {
         if (!root_) return false;
         std::vector<std::shared_ptr<NodeData>> nodes;
-        collectNodesByObjectId(root_.get(), objectId, nodes);
+        collectNodesByObjectId(objectId, nodes);
         if (nodes.empty()) return false;
 
         BoundingBox oldBounds = getNodesBounds(nodes);
@@ -1753,12 +1874,12 @@ public:
     bool subdivideObject(int objectId) {
         if (!root_) return false;
         std::vector<std::shared_ptr<NodeData>> nodes;
-        collectNodesByObjectId(root_.get(), objectId, nodes);
+        OctreeNode* oldStart = collectPointsByObjectId(objectId, nodes);
         if (nodes.empty()) return false;
 
-        BoundingBox oldBounds = getNodesBounds(nodes);
-        int oldDepth = 0;
-        OctreeNode* oldStart = getHighestCommonNode(root_.get(), oldBounds, 0, oldDepth);
+        // BoundingBox oldBounds = getNodesBounds(nodes);
+        // int oldDepth = 0;
+        // OctreeNode* oldStart = getHighestCommonNode(root_.get(), oldBounds, 0, oldDepth);
 
         size_t removed = removeObjectBatchRecursive(oldStart, objectId);
         size -= removed;
@@ -1791,7 +1912,7 @@ public:
         if (!subdivideObject(objectId)) return false;
 
         std::vector<std::shared_ptr<NodeData>> nodes;
-        collectNodesByObjectId(root_.get(), objectId, nodes);
+        collectNodesByObjectId(objectId, nodes);
 
         std::unordered_set<std::shared_ptr<NodeData>> toRemove;
         std::vector<std::shared_ptr<NodeData>> toRemoveVec;
@@ -1982,13 +2103,14 @@ public:
         return true;
     }
 
-    std::shared_ptr<NodeData> find(const PointType& pos, float tolerance = EPSILON) {
-        return findRecursive(root_.get(), pos, tolerance);
+    std::shared_ptr<NodeData> find(const PointType& pos, int objectId = -2, float tolerance = EPSILON, OctreeNode* node = nullptr) {
+        if (!node) node = root_.get();
+        return findRecursive(node, pos, objectId, tolerance);
     }
 
-    std::shared_ptr<NodeData> findwNode(const PointType& pos, OctreeNode* node, float tolerance = EPSILON) {
+    std::shared_ptr<NodeData> findwNode(const PointType& pos, OctreeNode* node, int objectId = -2, float tolerance = EPSILON) {
         // node = root_.get();
-        return findRecursive(node, pos, tolerance);
+        return findRecursive(node, pos, objectId, tolerance);
     }
 
     bool inGrid(PointType pos) {
@@ -2017,7 +2139,7 @@ public:
     
     void makeObjectFluid(int objectId, float newMass, BodyType newType = BodyType::FLUID) {
         std::vector<std::shared_ptr<NodeData>> nodes;
-        collectNodesByObjectId(root_.get(), objectId, nodes);
+        collectNodesByObjectId(objectId, nodes);
         
         auto obj = getOrCreateObject(objectId);
         PhysicsMaterial_ pmat{newType, newMass};
@@ -2040,7 +2162,7 @@ public:
 
     std::vector<std::weak_ptr<NodeData>> getWeakNodesByObjectId(int objectId) {
         std::vector<std::shared_ptr<NodeData>> nodes;
-        if (root_) collectNodesByObjectId(root_.get(), objectId, nodes);
+        if (root_) collectNodesByObjectId(objectId, nodes);
         std::vector<std::weak_ptr<NodeData>> weakNodes;
         weakNodes.reserve(nodes.size());
         for (auto& n : nodes) weakNodes.push_back(n);
@@ -2058,7 +2180,7 @@ public:
     void queuedupdate(const PointType pos, const T newData) {
         enqueueTask([this, pos, newData]() {
             OctreeNode* node = root_.get();
-            auto pointData = findwNode(pos, node);
+            auto pointData = findwNode(pos, node, -2);
             if (!pointData) return;
             else {
                 std::lock_guard<std::shared_mutex> lock(node->nodeMutex);
@@ -2206,7 +2328,7 @@ public:
     void queuedsetColor(const PointType& pos, Eigen::Vector3f color, float tolerance = EPSILON) {
         enqueueTask([this, pos, color, tolerance]() {
             OctreeNode* node = root_.get();
-            auto pointData = findwNode(pos, node, tolerance);
+            auto pointData = findwNode(pos, node, -2, tolerance);
             if (!pointData) return;
             {
                 std::lock_guard<std::shared_mutex> lock(node->nodeMutex);
@@ -2269,7 +2391,7 @@ public:
             }
         }
         std::vector<std::shared_ptr<NodeData>> nodes;
-        collectNodesByObjectId(root_.get(), objectId, nodes);
+        collectNodesByObjectId(objectId, nodes);
         for (auto& n : nodes) {
             invalidateLODForPoint(n);
         }
@@ -2437,7 +2559,7 @@ public:
         std::vector<std::shared_ptr<NodeData>> candidates;
         std::vector<std::shared_ptr<NodeData>> surfaceNodes;
         
-        collectNodesByObjectId(root_.get(), targetObjectId, candidates);
+        collectNodesByObjectId(targetObjectId, candidates);
 
         if (candidates.empty()) return surfaceNodes;
 
@@ -2472,7 +2594,7 @@ public:
 
     void isolateInternalNodes(int objectId) {
         std::vector<std::shared_ptr<NodeData>> nodes;
-        collectNodesByObjectId(root_.get(), objectId, nodes); 
+        collectNodesByObjectId(objectId, nodes); 
 
         if(nodes.empty()) return;
         float checkRad = nodes[0]->size * 1.5f;
@@ -2495,7 +2617,7 @@ public:
         if (!root_) return false;
         
         std::vector<std::shared_ptr<NodeData>> nodes;
-        collectNodesByObjectId(root_.get(), objectId, nodes);
+        collectNodesByObjectId(objectId, nodes);
         if(nodes.empty()) return false;
 
         BoundingBox oldBounds = getNodesBounds(nodes);

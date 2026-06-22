@@ -463,7 +463,7 @@ struct VulkanContext {
         vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
         std::vector<VkPhysicalDevice> devices(deviceCount);
         vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data());
-        physicalDevice = devices[1]; //need to set a flag for this at some point.
+        physicalDevice = devices[0]; //need to set a flag for this at some point.
 
         uint32_t queueFamilyCount = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
