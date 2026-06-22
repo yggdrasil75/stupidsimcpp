@@ -322,7 +322,7 @@ vec3 shadowTransmit(vec3 ro, vec3 rd, vec3 invD, float maxDist, int lightPtIdx) 
                         vec3 sigma_s = albColor.rgb * densityProxy * 5.0;
                         transmittance *= exp(-(sigma_a + sigma_s) * thickness);
                     } else {
-                        transmittance *= ptTransmission * exp(-absColor * 10.0 * thickness);
+                        transmittance *= exp(-absColor * thickness);
                     }
                 } else {
                     float tHit = tEntry < 0.0 ? tExit : tEntry;

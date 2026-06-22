@@ -32,7 +32,7 @@ void main() {
     float t = p.hitN_t.w;
 
     remainingMaxDist -= t;
-
+    
     GPUPBRRenderData hitData = points[hitIndex];
     vec3 invD = safe_invDir(dir);
     float tExit;
@@ -44,6 +44,11 @@ void main() {
     int entering = (dot(dir, normal) < 0.0) ? 1 : 0;
     vec3 offsetNorm = (entering == 1) ? normal : -normal;
     bool isMedGas = hitData.isGas != 0;
+
+    if (mediumObjId != -1) {
+        vec3 segAbs = unpackRGB8(materials[hitData.materialIdx].absorption);
+        throughput *= exp(-segAbs * t);   // tune scale to match shadowTransmit
+    }
 
     bool skipSurface = false;
     if (mediumObjId != -1 && hitData.objectId == mediumObjId) {
