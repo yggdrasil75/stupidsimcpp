@@ -257,26 +257,20 @@ int voxelTraverse(vec3 ro, vec3 rd, vec3 invD, float maxDist,
     return 0;
 }
 
-int getMediumVoxelAt(vec3 pt, int targetObjectId, int ignoreIdx) {
+int getMediumVoxelAt(vec3 hitPoint, vec3 normal, int targetObjectId, int ignoreIdx) {
     if (targetObjectId == -1) return -1;
     rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, tlas, gl_RayFlagsNoneEXT, 0xFF, pt, 0.0, vec3(0,1,0), cam.maxDist);
+    vec3 ro = hitPoint - normal * DIST_EPSILON;
+    rayQueryInitializeEXT(rq, tlas, gl_RayFlagsNoneEXT, 0xFF, ro, 0.0, normal, GAP_EPSILON);
     int foundIdx = -1;
     float minDist = 1e30;
     while (rayQueryProceedEXT(rq)) {
         if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionAABBEXT) {
             int ptIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
+            
             if (ptIdx != ignoreIdx && points[ptIdx].objectId == targetObjectId) {
-                GPUPBRRenderData p = points[ptIdx];
-                vec3 bMin = p.position - p.size * 0.5 - vec3(GAP_EPSILON);
-                vec3 bMax = p.position + p.size * 0.5 + vec3(GAP_EPSILON);
-                if (all(greaterThanEqual(pt, bMin)) && all(lessThanEqual(pt, bMax))) {
-                    float d = distance(pt, p.position);
-                    if (d < minDist) {
-                        minDist = d;
-                        foundIdx = ptIdx;
-                    }
-                }
+                foundIdx = ptIdx;
+                break;
             }
         }
     }

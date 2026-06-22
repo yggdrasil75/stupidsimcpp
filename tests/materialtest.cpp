@@ -26,7 +26,7 @@ void createBox(Grid::Octree<int>& octree, const Eigen::Vector3f& center, const E
     Eigen::Vector3f minB = center - halfSize;
     Eigen::Vector3f maxB = center + halfSize;
     static std::mt19937 rng(1337);
-    std::uniform_real_distribution<float> jitter(-0.02f, 0.02f);
+    std::uniform_real_distribution<float> jitter(-0.002f, 0.002f);
     
     for (float x = minB.x(); x <= maxB.x(); x += step) {
         for (float y = minB.y(); y <= maxB.y(); y += step) {
@@ -174,9 +174,9 @@ int main() {
     createBox(octree, Eigen::Vector3f( sp,  0,  0.0f), size, cPurple, 0.0f, 0.05f, 0.0f, 0.0f, 2.4f, Eigen::Vector3f(0,0,0), 6, initType, mass, 0.5);
 
     // LAYER 3: Glass
-    createBox(octree, Eigen::Vector3f(-sp,  sp, 0.0f), size, cRuby,    0.0f, 0.01f, 0.0f, 0.95f, 1.757f, Eigen::Vector3f(0.05f, 0.8f, 0.8f), 7, initType, mass, 0.5); //ruby
-    createBox(octree, Eigen::Vector3f(  0,  sp, 0.0f), size, cBlue,   0.0f, 0.01f, 0.0f, 0.89f, 1.309f, Eigen::Vector3f(0.8f, 0.8f, 0.05f), 8, initType, mass, 0.5); //ice
-    createBox(octree, Eigen::Vector3f( sp,  sp, 0.0f), size, cSapphire, 0.0f, 0.01f, 0.0f, 0.97f, 1.757f, Eigen::Vector3f(0.4f, 1.2f, 0.4f), 9, initType, mass, 0.5); //sapphire
+    createBox(octree, Eigen::Vector3f(-sp,  sp, 0.0f), size * 0.5, cRuby,    0.0f, 0.01f, 0.0f, 0.95f, 1.757f, Eigen::Vector3f(0.05f, 0.8f, 0.8f), 7, initType, mass, 0.5); //ruby
+    createBox(octree, Eigen::Vector3f(  0,  sp, 0.0f), size * 0.5, cBlue,   0.0f, 0.01f, 0.0f, 0.89f, 1.309f, Eigen::Vector3f(0.08f, 0.02f, 0.01f), 8, initType, mass, 0.5); //ice
+    createBox(octree, Eigen::Vector3f( sp,  sp, 0.0f), size * 0.5, cSapphire, 0.0f, 0.01f, 0.0f, 0.97f, 1.757f, Eigen::Vector3f(0.8f, 0.6f, 0.05f), 9, initType, mass, 0.5); //sapphire
 
     std::cout << "Optimizing and Generating LODs..." << std::endl;
     // octree.generateLODs();
@@ -210,11 +210,11 @@ int main() {
     };
 
     std::vector<View> views = {
-        {"-Y", Eigen::Vector3f( 0.0f, -6.8f,  2.0f), Eigen::Vector3f(0.0f, 0.0f, 0.5f)},
         {"+X", Eigen::Vector3f( 6.8f,  0.0f,  2.0f), Eigen::Vector3f(0.0f, 0.0f, 0.5f)},
         {"+Y", Eigen::Vector3f( 0.0f,  6.8f,  2.0f), Eigen::Vector3f(0.0f, 0.0f, 0.5f)},
         {"-X", Eigen::Vector3f(-6.8f,  0.0f,  2.0f), Eigen::Vector3f(0.0f, 0.0f, 0.5f)},
-        {"+Z", Eigen::Vector3f( 0.0f,  0.0f,  7.3f), Eigen::Vector3f(0.0f, 1.0f, 0.0f)}
+        {"+Z", Eigen::Vector3f( 0.0f,  0.0f,  7.3f), Eigen::Vector3f(0.0f, 1.0f, 0.0f)},
+        {"-Y", Eigen::Vector3f( 0.0f, -6.8f,  2.0f), Eigen::Vector3f(0.0f, 0.0f, 0.5f)}
     };
 
     std::vector<StateEvent> timeline = {

@@ -44,6 +44,7 @@ void main() {
     int entering = (dot(dir, normal) < 0.0) ? 1 : 0;
     vec3 offsetNorm = (entering == 1) ? normal : -normal;
     bool isMedGas = hitData.isGas != 0;
+    bool isTransmissionInteraction;
 
     if (mediumObjId != -1) {
         vec3 segAbs = unpackRGB8(materials[hitData.materialIdx].absorption);
@@ -56,8 +57,8 @@ void main() {
             skipSurface = true;
             mediumVoxelIdx = hitIndex;
         } else {
-            vec3 testPt = hitPoint + dir * (GAP_EPSILON * 2.0);
-            int nextVoxelIdx = getMediumVoxelAt(testPt, mediumObjId, hitIndex);
+            // Pass the exact hit point and face normal
+            int nextVoxelIdx = getMediumVoxelAt(hitPoint, normal, mediumObjId, hitIndex);
             if (nextVoxelIdx != -1) {
                 skipSurface = true;
                 mediumVoxelIdx = nextVoxelIdx;
@@ -68,19 +69,20 @@ void main() {
     bool continuePath = true;
 
     if (skipSurface) {
-        origin = hitPoint + dir * (GAP_EPSILON * 2.0);
-        transp++;
+        // Nudge the ray forward just enough to clear the current boundary.
+        // The ray is now physically inside the next voxel.
+        origin = hitPoint + dir * (DIST_EPSILON * 4.0);
         p.misc.x = -1.0;
     } else if (isMedGas) {
         if (entering == 1) {
             mediumObjId = hitData.objectId;
             mediumVoxelIdx = hitIndex;
-            }
-        else {
+        } else {
             mediumObjId = -1;
             mediumVoxelIdx = -1;
         }
-        origin = hitPoint + dir * (GAP_EPSILON * 2.0);
+        // Apply the same tighter nudge here
+        origin = hitPoint + dir * (DIST_EPSILON * 4.0);
         transp++;
         p.misc.x = -1.0;
     } else {
@@ -93,7 +95,7 @@ void main() {
 
         roughness = max(roughness, pathRoughness);
         pathRoughness = max(pathRoughness, roughness);
-        pathRoughness = min(pathRoughness + 0.15, 1.0);
+        //pathRoughness = min(pathRoughness + 0.15, 1.0);
 
         vec3 emitted = albedo.rgb * surfaceMat.emittance;
         if (surfaceMat.emittance > 0.0) {
@@ -216,7 +218,7 @@ void main() {
 
         float r_type = nextFloat(grng);
         vec3 newDir, newOrigin, weight = vec3(0.0);
-        bool isTransmissionInteraction = false;
+        isTransmissionInteraction = false;
 
         if (r_type < pspec) {
             newDir = normalize(2.0 * VdotH * H - V);
@@ -317,6 +319,9 @@ void main() {
     paths[slot] = p;
 
     if (continuePath) {
+        if (!isTransmissionInteraction) {
+            pathRoughness = min(pathRoughness + 0.15, 1.0);
+        }
         uint q = atomicAdd(ctr.nextExtendCount, 1u);
         if (pc.parity == 0) extendB[q] = slot;
         else extendA[q] = slot;

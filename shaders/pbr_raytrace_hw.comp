@@ -468,7 +468,7 @@ vec3 traceRay(Ray initialRay, inout uint state, inout uint group_state, out floa
 
         roughness = max(roughness, pathRoughness);
         pathRoughness = max(pathRoughness, roughness);
-        pathRoughness = min(pathRoughness + 0.15, 1.0);
+        //pathRoughness = min(pathRoughness + 0.15, 1.0);
 
         vec3 emitted = albedo.rgb * surfaceMat.emittance;
         if (bounce == 0 || lastBounceSpecular) {
