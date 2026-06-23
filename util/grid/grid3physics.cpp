@@ -379,7 +379,7 @@ void Octree<T, IndexType>::stepPhysics(float dt) {
                     Material_ rMat = obj->getRenderMaterial(node->renderMatIdx);
                     
                     rMat.absorption *= ratio;
-                    rMat.emittance *= ratio;
+                    rMat.emittance = Grid::packRGB9E5(rMat.emittanceRGB() * ratio);
 
                     float lengthRatio = oldSize / currentSize;
                     float sqLengthRatio = lengthRatio * lengthRatio;
@@ -482,8 +482,10 @@ void Octree<T, IndexType>::stepPhysics(float dt) {
 
             for (auto& c : split.children) {
                 float parentTransmission = std::clamp(1.0f - split.parent->color.w(), 0.0f, 1.0f);
+                Eigen::Vector3f emRGB = rMat.emittanceRGB();
+                float emScalar = emRGB.maxCoeff();
                 this->set(split.parent->data, c.pos, split.parent->isVisible(), split.parent->color.template head<3>(), c.size, split.parent->isActive(), split.parent->objectId,
-                          rMat.emittance, rMat.roughness, rMat.metallic, parentTransmission, rMat.ior, rMat.absorption,
+                          emScalar, rMat.roughness, rMat.metallic, parentTransmission, rMat.iorGreen(), rMat.absorption,
                           BodyType::GAS, newMass);
                 
                 if (auto n = this->find(c.pos, EPSILON)) {

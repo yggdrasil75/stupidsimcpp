@@ -246,39 +246,70 @@ struct SPHForcePC {
     uint32_t numParticles;
     float airDensity;
 };
+using v3half = Eigen::Matrix<Eigen::half, 3, 1>;
+static constexpr float SELL_LAMBDA_R = 0.610f;
+static constexpr float SELL_LAMBDA_G = 0.550f;
+static constexpr float SELL_LAMBDA_B = 0.465f;
+
+static inline float sellmeierN(const v3half& B, const v3half& C, float lambdaUm) {
+    float l2 = lambdaUm * lambdaUm;
+    float n2 = 1.0f;
+    for (int j = 0; j < 3; ++j) {
+        float Bj = static_cast<float>(B[j]);
+        float Cj = static_cast<float>(C[j]);
+        float denom = l2 - Cj;
+        if (std::abs(denom) > 1e-8f) n2 += Bj * l2 / denom;
+    }
+    return std::sqrt(std::max(1.0f, n2));
+}
+static inline void sellmeierFromConstant(float n, v3half& B, v3half& C) {
+    float b0 = std::max(0.0f, n * n - 1.0f);
+    B = v3half(Eigen::half(b0), Eigen::half(0.0f), Eigen::half(0.0f));
+    C = v3half(Eigen::half(0.0f), Eigen::half(0.0f), Eigen::half(0.0f));
+}
+
 
 struct Material_ {
-    float emittance; //replace with eigen::vector3f<eigen::half> for chromaticity
-    //or use uint32_t r8g8b8i8.
-    // or a reasonable option: rgb9e5 GL_RGB9_E5
+    uint32_t emittance;
     float roughness;
-    float metallic; //rename to reflective or something
-    float ior;
+    float metallic;
+    v3half sellB;
+    v3half sellC;
     Eigen::Vector3f absorption;
     //bandwidth?
     //dispersion?
 
+    Material_(uint32_t e, float r, float m, const v3half& B, const v3half& C,
+              Eigen::Vector3f a = Eigen::Vector3f::Zero())
+        : emittance(e), roughness(r), metallic(m), sellB(B), sellC(C), absorption(a) {}
+
     Material_(float e = 0.0f, float r = 1.0f, float m = 0.0f, float i = 1.45f, Eigen::Vector3f a = Eigen::Vector3f::Zero())
-        : emittance(e), roughness(r), metallic(m), ior(i), absorption(a) {}
+        : emittance(packRGB9E5(Eigen::Vector3f(e, e, e))), roughness(r), metallic(m), absorption(a) {
+        sellmeierFromConstant(i, sellB, sellC);
+    }
+    float iorGreen() const { return sellmeierN(sellB, sellC, SELL_LAMBDA_G); }
+    Eigen::Vector3f emittanceRGB() const { return unpackRGB9E5(emittance); }
 
     bool operator==(const Material_& o) const {
         return emittance == o.emittance && roughness == o.roughness &&
                metallic == o.metallic &&
-               ior == o.ior && absorption == o.absorption;
+               sellB == o.sellB && sellC == o.sellC
+               && absorption == o.absorption;
     }
     
     bool operator<(const Material_& o) const {
         if (emittance != o.emittance) return emittance < o.emittance;
         if (roughness != o.roughness) return roughness < o.roughness;
         if (metallic != o.metallic) return metallic < o.metallic;
-        return ior < o.ior;
+        return iorGreen() < o.iorGreen();
     }
 
     float dist(const Material_& o) const {
         float dr = roughness - o.roughness;
         float dm = metallic - o.metallic;
-        float di = ior - o.ior;
-        float empenalty = emittance - o.emittance;
+        float di = iorGreen() - o.iorGreen();
+        Eigen::Vector3f de = emittanceRGB() - o.emittanceRGB();
+        float empenalty = de.norm();
         float absPenalty = (absorption != o.absorption) ? 0.5f : 0.0f;
         return dr*dr + dm*dm + di*di + empenalty + absPenalty;
     }
@@ -305,10 +336,13 @@ struct PhysicsMaterial_ {
 struct materialHash {
     size_t operator()(const Material_& m) const {
         std::hash<float> hf;
-        size_t h = hf(m.emittance);
+        size_t h = std::hash<uint32_t>()(m.emittance);
         h ^= hf(m.roughness) + 0x9e3779b9 + (h << 6) + (h >> 2);
         h ^= hf(m.metallic) + 0x9e3779b9 + (h << 6) + (h >> 2);
-        h ^= hf(m.ior) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        for (int j = 0; j < 3; ++j)
+            h ^= hf(static_cast<float>(m.sellB[j])) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        for (int j = 0; j < 3; ++j)
+            h ^= hf(static_cast<float>(m.sellC[j])) + 0x9e3779b9 + (h << 6) + (h >> 2);
         h ^= hf(m.absorption.x()) + 0x9e3779b9 + (h << 6) + (h >> 2);
         h ^= hf(m.absorption.y()) + 0x9e3779b9 + (h << 6) + (h >> 2);
         h ^= hf(m.absorption.z()) + 0x9e3779b9 + (h << 6) + (h >> 2);

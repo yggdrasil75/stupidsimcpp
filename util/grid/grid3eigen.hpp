@@ -763,11 +763,12 @@ private:
 
         Eigen::Vector3f avgPos = Eigen::Vector3f::Zero();
         Eigen::Vector4f avgColor = Eigen::Vector4f::Zero();
-        float avgEmittance = 0.0;
+        Eigen::Vector3f avgEmittance = Eigen::Vector3f::Zero();
         float avgRoughness = 0.0;
         float avgMetallic = 0.0;
         float avgTransmission = 0.0;
-        float avgIor = 0.0;
+        Eigen::Vector3f avgSellB = Eigen::Vector3f::Zero();
+        Eigen::Vector3f avgSellC = Eigen::Vector3f::Zero();
         float totalVolume = 0.0;
         int count = 0;
 
@@ -783,10 +784,13 @@ private:
             auto obj = getObject(item->objectId);
             Material mat = obj ? obj->getRenderMaterial(item->renderMatIdx) : Material();
             
-            avgEmittance += mat.emittance * v;
+            avgEmittance += mat.emittanceRGB() * v;
             avgRoughness += mat.roughness * v;
             avgMetallic += mat.metallic * v;
-            avgIor += mat.ior * v;
+            for (int j = 0; j < 3; ++j) {
+                avgSellB[j] += static_cast<float>(mat.sellB[j]) * v;
+                avgSellC[j] += static_cast<float>(mat.sellC[j]) * v;
+            }
             count++;
         };
 
@@ -809,8 +813,15 @@ private:
             lod->size = std::cbrt(totalVolume);
 
             lod->color = (avgColor * invVol);
-            Material avgMat(avgEmittance * invVol, avgRoughness * invVol, avgMetallic * invVol,
-                            avgIor * invVol);
+            Eigen::Vector3f e = avgEmittance * float(invVol);
+            Grid::v3half B(Eigen::half(float(avgSellB.x() * invVol)),
+                           Eigen::half(float(avgSellB.y() * invVol)),
+                           Eigen::half(float(avgSellB.z() * invVol)));
+            Grid::v3half C(Eigen::half(float(avgSellC.x() * invVol)),
+                           Eigen::half(float(avgSellC.y() * invVol)),
+                           Eigen::half(float(avgSellC.z() * invVol)));
+            Material avgMat(packRGB9E5(e), float(avgRoughness * invVol),
+                            float(avgMetallic * invVol), B, C);
             
             auto obj = getOrCreateObject(-1);
             lod->renderMatIdx = obj->getOrAddRenderMaterial(avgMat);
@@ -1590,7 +1601,9 @@ public:
                 Eigen::Vector3f emittance = 0, float roughness = 1.0f, float reflective = 0.0f, float transmission = 0.0f, float ior = 1.45f, 
                 Eigen::Vector3f absorption = 0, BodyType bType = BodyType::STATIC, float mass = 1.0f, float restitution = 1.0f, float density = 1.0f, bool staticb = false) {
         std::shared_ptr<GridObject> obj = getOrCreateObject(objectId);
-        Material rmat(packRGB9E5(emittance), roughness, reflective, ior, packRGB9E5(absorption));
+        v3half sB, sC;
+        sellmeierFromConstant(ior, sB, sC);
+        Material rmat(packRGB9E5(emittance), roughness, reflective, sB, sC, absorption);
         IndexType rIdx = obj->getOrAddRenderMaterial(rmat);
 
         PhysicsMaterial_ pmat{bType, mass};
@@ -2217,11 +2230,11 @@ public:
         auto obj = getOrCreateObject(targetObjId);
         Material mat = obj->getRenderMaterial(pointData->renderMatIdx);
         
-        if (newEmittance >= 0) mat.emittance = newEmittance;
+        if (newEmittance >= 0) mat.emittance = packRGB9E5(Eigen::Vector3f(newEmittance, newEmittance, newEmittance));
         if (newRoughness >= 0) mat.roughness = newRoughness;
         if (newMetallic >= 0) mat.metallic = newMetallic;
         if (newTransmission >= 0) pointData->color.w() = std::clamp(1.0f - newTransmission, 0.0f, 1.0f);
-        if (newIor >= 0) mat.ior = newIor;
+        if (newIor >= 0) sellmeierFromConstant(newIor, mat.sellB, mat.sellC);
         
         pointData->renderMatIdx = obj->getOrAddRenderMaterial(mat);
         
@@ -2340,11 +2353,38 @@ public:
     }
 
     bool setEmittance(const PointType& pos, float emittance, float tolerance = EPSILON) {
+        return setEmittance(pos, Eigen::Vector3f(emittance, emittance, emittance), tolerance);
+    }
+
+    bool setEmittance(const PointType& pos, const Eigen::Vector3f& emittance, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
         auto obj = getOrCreateObject(pointData->objectId);
         Material mat = obj->getRenderMaterial(pointData->renderMatIdx);
-        mat.emittance = emittance;
+        mat.emittance = packRGB9E5(emittance);
+        pointData->renderMatIdx = obj->getOrAddRenderMaterial(mat);
+        invalidateLODForPoint(pointData);
+        return true;
+    }
+
+    bool setIor(const PointType& pos, float ior, float tolerance = EPSILON) {
+        auto pointData = find(pos, tolerance);
+        if (!pointData) return false;
+        auto obj = getOrCreateObject(pointData->objectId);
+        Material mat = obj->getRenderMaterial(pointData->renderMatIdx);
+        sellmeierFromConstant(ior, mat.sellB, mat.sellC);
+        pointData->renderMatIdx = obj->getOrAddRenderMaterial(mat);
+        invalidateLODForPoint(pointData);
+        return true;
+    }
+
+    bool setSellmeier(const PointType& pos, const v3half& B, const v3half& C, float tolerance = EPSILON) {
+        auto pointData = find(pos, tolerance);
+        if (!pointData) return false;
+        auto obj = getOrCreateObject(pointData->objectId);
+        Material mat = obj->getRenderMaterial(pointData->renderMatIdx);
+        mat.sellB = B;
+        mat.sellC = C;
         pointData->renderMatIdx = obj->getOrAddRenderMaterial(mat);
         invalidateLODForPoint(pointData);
         return true;
@@ -2385,7 +2425,7 @@ public:
         {
             std::unique_lock<std::shared_mutex> lock(obj->objMutex);
             for (auto& mat : obj->renderMaterials) {
-                mat.emittance = emittance;
+                mat.emittance = packRGB9E5(Eigen::Vector3f(emittance, emittance, emittance));
                 mat.roughness = roughness;
                 mat.metallic = metallic;
             }

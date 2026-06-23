@@ -2,6 +2,16 @@
 #extension GL_EXT_ray_query : require
 layout(local_size_x = 8, local_size_y = 8) in;
 
+vec3 unpackRGB9E5(uint c) {
+    if (c == 0u) return vec3(0.0);
+    int e = int(c >> 27) - 15;
+    float scale = exp2(float(e - 9));
+    float r = float(c & 0x1FFu) * scale;
+    float g = float((c >> 9) & 0x1FFu) * scale;
+    float b = float((c >> 18) & 0x1FFu) * scale;
+    return vec3(r, g, b);
+}
+
 #define PI 3.14159265359
 const float EPS = 1e-8;
 const float LARGE = 1e30;
@@ -25,7 +35,7 @@ struct GPURenderNode {
 };
 
 struct GPUMaterial {
-    float emittance;
+    uint emittance;
     uint materialProps;
     uint absorption;
     uint padding;
@@ -274,8 +284,8 @@ void main() {
         bool isInternalVoxel = (hasPrev && hitData.objectId == prevOid);
 
         vec3 surfaceColor;
-        if (mat.emittance > 0.0) {
-            surfaceColor = albedo.rgb * mat.emittance;
+        if (mat.emittance != 0u) {
+            surfaceColor = albedo.rgb * unpackRGB9E5(mat.emittance);
         } else {
             vec3 lightDir = normalize(-cam.dir);
             float diffuse = 0.0;

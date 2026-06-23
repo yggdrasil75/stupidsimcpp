@@ -122,7 +122,7 @@ struct alignas(16) GPURenderNode {
 };
 
 struct alignas(16) GPUMaterial {
-    float emittance;
+    uint32_t emittance;
     uint32_t materialProps;
     uint32_t absorption;
     uint32_t padding;
@@ -176,6 +176,8 @@ struct alignas(16) GPUCameraData {
     int tileOffsetY;
     int emissiveCount;
     int targetSamples;
+    int sellWidth;
+    int sellSecondary;
 };
 
 struct alignas(16) GPUParticle {
@@ -297,8 +299,8 @@ struct VulkanContext {
     VkBuffer lowResOutBuffer = VK_NULL_HANDLE;
     VkBuffer adaptiveBuffer = VK_NULL_HANDLE;
     VkBuffer materialBuffer = VK_NULL_HANDLE;
-
     VkDeviceMemory nodeMem = VK_NULL_HANDLE;
+    VkBuffer sellmeierBuffer = VK_NULL_HANDLE;
     VkDeviceMemory outMem = VK_NULL_HANDLE;
     VkDeviceMemory uboMem = VK_NULL_HANDLE;
     VkDeviceMemory fastPointMem = VK_NULL_HANDLE;
@@ -309,7 +311,8 @@ struct VulkanContext {
     VkDeviceMemory lowResOutMem = VK_NULL_HANDLE;
     VkDeviceMemory adaptiveMem = VK_NULL_HANDLE;
     VkDeviceMemory materialMem = VK_NULL_HANDLE;
-
+    VkDeviceMemory sellmeierMem = VK_NULL_HANDLE;
+    
     size_t currentNodesCap = 0;
     size_t currentOutCap = 0;
     size_t currentFastPointsCap = 0;
@@ -320,6 +323,9 @@ struct VulkanContext {
     size_t currentLowResOutCap = 0;
     size_t currentAdaptiveCap = 0;
     size_t currentMaterialCap = 0;
+    size_t currentSellmeierCap = 0;
+    uint32_t sellmeierWidth = 0;   // wavelength samples per row
+    uint32_t sellmeierRows = 0;    // total rows (materials * secondary)
 
     bool initialized = false;
     bool hasHardwareRT = false;
@@ -465,7 +471,7 @@ struct VulkanContext {
         vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
         std::vector<VkPhysicalDevice> devices(deviceCount);
         vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data());
-        physicalDevice = devices[1]; //need to set a flag for this at some point.
+        physicalDevice = devices[0]; //need to set a flag for this at some point.
 
         uint32_t queueFamilyCount = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
@@ -1242,6 +1248,16 @@ struct VulkanContext {
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     }
 
+    void updateSellmeierBuffer(const std::vector<float>& lut, uint32_t width, uint32_t rows) {
+        sellmeierWidth = width;
+        sellmeierRows = rows;
+        size_t dataSize = lut.size() * sizeof(float);
+        size_t allocSize = std::max((size_t)256, dataSize);
+        updateDeviceLocalBuffer(sellmeierBuffer, sellmeierMem, currentSellmeierCap,
+                                lut.empty() ? nullptr : lut.data(), dataSize, allocSize,
+                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    }
+
     void updateCommonBuffers(size_t outSize, GPUCameraData& camData) {
         size_t allocSize = (size_t)256;
         
@@ -1575,8 +1591,8 @@ static constexpr VkDeviceSize WF_OFF_SHADE_ARGS  = 32;
 static constexpr VkDeviceSize WF_OFF_SHADOW_ARGS = 48;
 
 void initWavefront() {
-    VkDescriptorSetLayoutBinding b[15] = {};
-    for (int i = 0; i < 15; ++i) {
+    VkDescriptorSetLayoutBinding b[16] = {};
+    for (int i = 0; i < 16; ++i) {
         b[i].binding = i;
         b[i].descriptorCount = 1;
         b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -1586,7 +1602,7 @@ void initWavefront() {
     b[5].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
 
     VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    li.bindingCount = 15;
+    li.bindingCount = 16;
     li.pBindings = b;
     vkCreateDescriptorSetLayout(device, &li, nullptr, &wfDescLayout);
 
@@ -1659,7 +1675,7 @@ void ensureWavefrontBuffers(size_t maxPaths) {
 }
 
 void writeWavefrontDescriptors() {
-    VkDescriptorBufferInfo bi[15] = {};
+    VkDescriptorBufferInfo bi[16] = {};
     bi[0]  = {uboBuffer,      0, VK_WHOLE_SIZE};
     bi[1]  = {pbrPointBuffer, 0, VK_WHOLE_SIZE};
     bi[2]  = {materialBuffer, 0, VK_WHOLE_SIZE};
@@ -1674,10 +1690,11 @@ void writeWavefrontDescriptors() {
     bi[12] = {wfShadowBuf,    0, VK_WHOLE_SIZE};
     bi[13] = {wfCounterBuf,   0, VK_WHOLE_SIZE};
     bi[14] = {wfPathHitBuf,   0, VK_WHOLE_SIZE};
+    bi[15] = {sellmeierBuffer ? sellmeierBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
 
-    VkWriteDescriptorSet w[15] = {};
+    VkWriteDescriptorSet w[16] = {};
     int n = 0;
-    for (int i = 0; i < 15; ++i) {
+    for (int i = 0; i < 16; ++i) {
         if (i == 5) continue;
         w[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         w[n].dstSet = wfDescSet;

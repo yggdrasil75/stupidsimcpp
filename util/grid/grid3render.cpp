@@ -323,8 +323,8 @@ frame Octree<T, IndexType>::fastRenderFrame(const Camera& cam, int height, int w
                     coverage = alpha;
                 }
                 
-                if (objMat.emittance > 0.0f) {
-                    hitColor = hitColor * objMat.emittance;
+                if (objMat.emittance != 0u) {
+                    hitColor = hitColor.cwiseProduct(objMat.emittanceRGB());
                 } else {
                     float diffuse = 0.0f;
                     float ambient = 0.35f;
@@ -378,12 +378,34 @@ static inline uint32_t packRGBA8(const Eigen::Vector4f& c) {
     return r | (g << 8) | (b << 16) | (a << 24);
 }
 
-static inline uint32_t packMaterialProps(float roughness, float metallic, float ior) {
+static inline uint32_t packMaterialProps(float roughness, float metallic, uint32_t sellmeierRow) {
     uint32_t r8 = static_cast<uint32_t>(std::clamp(roughness, 0.0f, 1.0f) * 255.0f);
     uint32_t m8 = static_cast<uint32_t>(std::clamp(metallic, 0.0f, 1.0f) * 255.0f);
-    float mappedIor = (std::clamp(ior, 1.0f, 2.5f) - 1.0f) / 1.5f;
-    uint32_t i8 = static_cast<uint32_t>(std::clamp(mappedIor, 0.0f, 1.0f) * 255.0f);
-    return r8 | (m8 << 8) | (i8 << 16);
+    uint32_t row16 = sellmeierRow & 0xFFFFu;
+    return r8 | (m8 << 8) | (row16 << 16);
+}
+static constexpr int SELL_LUT_WAVELENGTHS = 32;
+static constexpr int SELL_LUT_SECONDARY   = 8;
+static constexpr float SELL_LMIN = 0.380f; // um
+static constexpr float SELL_LMAX = 0.720f; // um
+
+static inline std::vector<float> buildSellmeierLUT(const std::vector<Grid::Material_>& mats) {
+    int rows = std::max<size_t>(1, mats.size()) * SELL_LUT_SECONDARY;
+    std::vector<float> lut(static_cast<size_t>(rows) * SELL_LUT_WAVELENGTHS, 1.0f);
+    for (size_t mi = 0; mi < mats.size(); ++mi) {
+        const auto& m = mats[mi];
+        for (int s = 0; s < SELL_LUT_SECONDARY; ++s) {
+            int row = static_cast<int>(mi) * SELL_LUT_SECONDARY + s;
+            for (int w = 0; w < SELL_LUT_WAVELENGTHS; ++w) {
+                float f = (SELL_LUT_WAVELENGTHS == 1) ? 0.0f
+                          : float(w) / float(SELL_LUT_WAVELENGTHS - 1);
+                float lambda = SELL_LMIN + f * (SELL_LMAX - SELL_LMIN);
+                lut[static_cast<size_t>(row) * SELL_LUT_WAVELENGTHS + w] =
+                    Grid::sellmeierN(m.sellB, m.sellC, lambda);
+            }
+        }
+    }
+    return lut;
 }
 
 struct PointSort {
@@ -405,16 +427,21 @@ frame Octree<T, IndexType>::renderFrameVulkan(const Camera& cam, int height, int
 
     std::vector<GPUMaterial> gpuMaterials;
     gpuMaterials.reserve(tl_buffer.materials.size());
-    for (const auto& m : tl_buffer.materials) {
+    for (size_t mi = 0; mi < tl_buffer.materials.size(); ++mi) {
+        const auto& m = tl_buffer.materials[mi];
+        uint32_t sellRow = static_cast<uint32_t>(mi) * SELL_LUT_SECONDARY;
         gpuMaterials.push_back({
             m.emittance,
-            packMaterialProps(m.roughness, m.metallic, m.ior),
+            packMaterialProps(m.roughness, m.metallic, sellRow),
             packRGB8(m.absorption),
             0
         });
     }
     if (gpuMaterials.empty()) gpuMaterials.push_back(GPUMaterial{});
     vkCtx.updateMaterialBuffer(gpuMaterials);
+    vkCtx.updateSellmeierBuffer(buildSellmeierLUT(tl_buffer.materials),
+                                SELL_LUT_WAVELENGTHS,
+                                std::max<size_t>(1, tl_buffer.materials.size()) * SELL_LUT_SECONDARY);
 
     std::vector<bool> isLodPoint(tl_buffer.points.size(), false);
     for(const auto& n : tl_buffer.nodes) {
@@ -469,7 +496,7 @@ frame Octree<T, IndexType>::renderFrameVulkan(const Camera& cam, int height, int
             p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId, p.isGas
         });
 
-        if (tl_buffer.materials[p.materialIdx].emittance > 0.0f) {
+        if (tl_buffer.materials[p.materialIdx].emittance != 0u) {
             gpuLights.push_back(gpuPoints.size() - 1);
         }
     }
@@ -546,16 +573,20 @@ frame Octree<T, IndexType>::fastRenderFrameVulkan(const Camera& cam, int height,
     
     std::vector<GPUMaterial> gpuMaterials;
     gpuMaterials.reserve(tl_buffer.materials.size());
-    for (const auto& m : tl_buffer.materials) {
+    for (size_t mi = 0; mi < tl_buffer.materials.size(); ++mi) {
+        const auto& m = tl_buffer.materials[mi];
+        uint32_t sellRow = static_cast<uint32_t>(mi) * SELL_LUT_SECONDARY;
         gpuMaterials.push_back({
             m.emittance,
-            packMaterialProps(m.roughness, m.metallic, m.ior),
+            packMaterialProps(m.roughness, m.metallic, sellRow),
             packRGB8(m.absorption),
             0
         });
     }
     if (gpuMaterials.empty()) gpuMaterials.push_back(GPUMaterial{});
     vkCtx.updateMaterialBuffer(gpuMaterials);
+    vkCtx.updateSellmeierBuffer(buildSellmeierLUT(tl_buffer.materials), SELL_LUT_WAVELENGTHS,
+                                std::max<size_t>(1, tl_buffer.materials.size()) * SELL_LUT_SECONDARY);
 
     std::vector<bool> isLodPoint(tl_buffer.points.size(), false);
     for(const auto& n : tl_buffer.nodes) {
@@ -571,7 +602,7 @@ frame Octree<T, IndexType>::fastRenderFrameVulkan(const Camera& cam, int height,
         
         gpuPoints.push_back({p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId, p.isGas});
         
-        if (tl_buffer.materials[p.materialIdx].emittance > 0.0f) {
+        if (tl_buffer.materials[p.materialIdx].emittance != 0u) {
             gpuLights.push_back(gpuPoints.size() - 1);
         }
     }
@@ -665,16 +696,20 @@ frame Octree<T, IndexType>::blendedRenderFrameVulkan(const Camera& cam, int heig
     
     std::vector<GPUMaterial> gpuMaterials;
     gpuMaterials.reserve(tl_buffer.materials.size());
-    for (const auto& m : tl_buffer.materials) {
+    for (size_t mi = 0; mi < tl_buffer.materials.size(); ++mi) {
+        const auto& m = tl_buffer.materials[mi];
+        uint32_t sellRow = static_cast<uint32_t>(mi) * SELL_LUT_SECONDARY;
         gpuMaterials.push_back({
             m.emittance,
-            packMaterialProps(m.roughness, m.metallic, m.ior),
+            packMaterialProps(m.roughness, m.metallic, sellRow),
             packRGB8(m.absorption),
             0
         });
     }
     if (gpuMaterials.empty()) gpuMaterials.push_back(GPUMaterial{});
     vkCtx.updateMaterialBuffer(gpuMaterials);
+    vkCtx.updateSellmeierBuffer(buildSellmeierLUT(tl_buffer.materials), SELL_LUT_WAVELENGTHS,
+                                std::max<size_t>(1, tl_buffer.materials.size()) * SELL_LUT_SECONDARY);
 
     std::vector<bool> isLodPoint(tl_buffer.points.size(), false);
     for(const auto& n : tl_buffer.nodes) {
@@ -734,7 +769,7 @@ frame Octree<T, IndexType>::blendedRenderFrameVulkan(const Camera& cam, int heig
             p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId, p.isGas
         });
 
-        if (tl_buffer.materials[p.materialIdx].emittance > 0.0f) {
+        if (tl_buffer.materials[p.materialIdx].emittance != 0u) {
             gpuLights.push_back(gpuPBRPoints.size() - 1);
         }
     }
@@ -761,7 +796,8 @@ frame Octree<T, IndexType>::blendedRenderFrameVulkan(const Camera& cam, int heig
         skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
         lowW, lowH, maxBounces, useLod ? 1 : 0, invFogRange, frameCounter_,
         (int)skyW, (int)skyH, 0, 0, globalIllumination ? 1 : 0, 
-        0, (uint32_t)gpuPBRPoints.size(), 0, 0, emissiveCount, samplesPerPixel
+        0, (uint32_t)gpuPBRPoints.size(), 0, 0, emissiveCount, samplesPerPixel,
+        SELL_LUT_WAVELENGTHS, SELL_LUT_SECONDARY
     };
 
     size_t pbrOutSize = lowW * lowH * 5 * sizeof(float);
