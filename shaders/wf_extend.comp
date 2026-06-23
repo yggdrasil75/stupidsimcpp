@@ -117,6 +117,19 @@ void main() {
             return;
         }
     }
+    
+    if (!scattered && cam.gasFieldCount > 0u) {
+        float gasSeg = (hitResult == 1) ? t : remainingMaxDist;
+        if (gasSeg > 0.0 && gasSeg < LARGE) {
+            marchGasFields(origin, dir, gasSeg, throughput, radiance);
+            if (max(max(throughput.x, throughput.y), throughput.z) < 0.005) {
+                p.rad.xyz = radiance;
+                p.i1.w &= ~FLAG_ALIVE;
+                pathsHot[slot] = p;
+                return;
+            }
+        }
+    }
 
     // Persist mutated state common to all exits.
     p.o_tmax  = vec4(origin, remainingMaxDist);

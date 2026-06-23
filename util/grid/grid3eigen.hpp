@@ -143,6 +143,9 @@ private:
     std::vector<std::weak_ptr<NodeData>> activePhysicsNodes_;
     std::mutex physicsMutex_;
     std::string storagepath = ".";
+    std::vector<OctreeNode*> activeGasNodes_;
+    std::mutex gasMutex_;
+    GasRegistry_ gasRegistry_;
 
     float phys_smoothingRadius = 0.2f;
     float phys_restDensity = 1000.0f;
@@ -150,8 +153,6 @@ private:
     float phys_viscosity = 200.0f;
     float phys_velocityDamping = 0.5f;
     float phys_airDensity = 1.225f;
-    float phys_gasExpansionRate = 0.5f;
-    float phys_maxGasSize = 1.0f;
     Eigen::Vector3f phys_gravity{0.0f, -9.81f, 0.0f};
 
     SPHKernels kernels_{phys_smoothingRadius};
@@ -491,12 +492,21 @@ public:
     void setPhysicsViscosity(float v) { phys_viscosity = v; }
     void setPhysicsRestDensity(float d) { phys_restDensity = d; }
     void setPhysicsAirDensity(float d) { phys_airDensity = d; }
-    void setPhysicsGasExpansionRate(float rate) { phys_gasExpansionRate = rate; }
-    void setPhysicsMaxGasSize(float maxGas) { phys_maxGasSize = maxGas; }
     void setphys_gravityCenter(PointType n) {
         phys_gravityCenter = n;
     }
+
+    void setGasFieldResolution(uint16_t res) { gasFieldResolution_ = std::max<uint16_t>(1, res); }
+    uint16_t getGasFieldResolution() const { return gasFieldResolution_; }
+    void setGasBuoyancy(float b) { phys_gasBuoyancy = b; }
+    void setGasDiffusion(float d) { phys_gasDiffusion = std::clamp(d, 0.0f, 1.0f); }
+    void setGasDissipation(float d) { phys_gasDissipation = std::max(0.0f, d); }
 private:
+
+    uint16_t gasFieldResolution_ = 8;
+    float phys_gasBuoyancy = 1.0f;
+    float phys_gasDiffusion = 0.5f;
+    float phys_gasDissipation = 0.02f;
 
     float lodFalloffRate_ = 0.1f; // Lower = better, higher = worse. 0-1
     float invLodf = 1 / lodFalloffRate_;
@@ -639,6 +649,39 @@ private:
         }
     }
 
+    OctreeNode* findLeafForPoint(OctreeNode* node, const PointType& pos, int depth) {
+        if (!node) return nullptr;
+        ensureLoaded(node);
+        if (!node->contains(pos)) return nullptr;
+
+        if (node->isLeaf()) return node;
+
+        OctreeNode* targetChild = nullptr;
+        {
+            std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
+            for (int i = 0; i < 8; ++i) {
+                BoundingBox childBounds = createChildBounds(node, i);
+                if (pos.x() >= childBounds.first.x() && pos.x() <= childBounds.second.x() &&
+                    pos.y() >= childBounds.first.y() && pos.y() <= childBounds.second.y() &&
+                    pos.z() >= childBounds.first.z() && pos.z() <= childBounds.second.z()) {
+                    if (!node->children[i]) {
+                        node->children[i] = std::make_unique<OctreeNode>(childBounds.first, childBounds.second);
+                    }
+                    targetChild = node->children[i].get();
+                    break;
+                }
+            }
+        }
+        if (!targetChild) return node;
+        return findLeafForPoint(targetChild, pos, depth + 1);
+    }
+
+    void registerGasNode(OctreeNode* node) {
+        std::lock_guard<std::mutex> lock(gasMutex_);
+        for (OctreeNode* n : activeGasNodes_) if (n == node) return;
+        activeGasNodes_.push_back(node);
+    }
+
     bool invalidateNodeLODRecursive(OctreeNode* node, const BoundingBox& bounds) {
         if (!boxIntersectsBox(node->bounds, bounds)) return false;
         ensureLoaded(node);
@@ -730,7 +773,7 @@ private:
             newRoot->children[oldOctant] = std::move(root_);
             root_ = std::move(newRoot);
             
-            maxDepth++; 
+            maxDepth++;
         }
     }
 
@@ -1289,7 +1332,7 @@ private:
             if (hitOnlySolid) {
                 auto obj = getObj(pt->objectId);
                 BodyType bType = obj ? obj->getPhysicsMaterial(pt->physMatIdx).type : BodyType::STATIC;
-                if (bType == BodyType::FLUID || bType == BodyType::GAS) continue;
+                if (bType == BodyType::FLUID) continue;
             }
             
             BoundingBox bounds = pt->getCubeBounds();
@@ -1373,6 +1416,9 @@ private:
     }
 
     void buildRender(RenderBuffer_<T, IndexType>& buffer);
+#ifdef VULKAN_SUPPORT
+    void buildGPUMaterials(const RenderBuffer_<T, IndexType>& buf, std::vector<GPUMaterial>& out);
+#endif
     void buildRenderNodeAt(OctreeNode* node, RenderBuffer_<T, IndexType>& buffer, uint32_t nodeIdx, const std::unordered_map<int, std::shared_ptr<GridObject>>& localObjects);
     std::vector<RenderData*> fastVoxelTraverse(const RenderBuffer_<T, IndexType>& buffer, const Ray& ray, float maxDist);
 public:
@@ -1406,6 +1452,7 @@ public:
             streamingQueued_(false), skybox_(other.skybox_), regionTargetPoints_(other.regionTargetPoints_),
             minLodSize_(other.minLodSize_), minLodVolume_(other.minLodVolume_) {
         if (other.root_) root_ = other.root_->clone();
+        gasRegistry_.copyFrom(other.gasRegistry_);
         
         {
             std::shared_lock<std::shared_mutex> lockOther(other.objectsMutex_);
@@ -1424,6 +1471,7 @@ public:
             minLodSize_(other.minLodSize_), minLodVolume_(other.minLodVolume_) {
         other.stopWorkerThread();
         root_ = std::move(other.root_);
+        gasRegistry_.copyFrom(other.gasRegistry_);
         
         {
             std::unique_lock<std::shared_mutex> lockOther(other.objectsMutex_);
@@ -1459,6 +1507,7 @@ public:
         minLodVolume_ = other.minLodVolume_;
 
         if (other.root_) root_ = other.root_->clone();
+        gasRegistry_.copyFrom(other.gasRegistry_);
         
         {
             std::shared_lock<std::shared_mutex> lockOther(other.objectsMutex_);
@@ -1492,6 +1541,7 @@ public:
         minLodVolume_ = other.minLodVolume_;
         
         root_ = std::move(other.root_);
+        gasRegistry_.copyFrom(other.gasRegistry_);
         
         {
             std::unique_lock<std::shared_mutex> lockOther(other.objectsMutex_);
@@ -1595,6 +1645,64 @@ public:
             return true;
         }
         return false;
+    }
+    bool addGas(const PointType& pos, const GasSpecies_& species, float amount, const T& payload = T{}) {
+        uint16_t globalIdx = gasRegistry_.getOrAdd(species);
+        return addGas(pos, globalIdx, amount, payload);
+    }
+    uint16_t registerGasSpecies(const GasSpecies_& species) {
+        return gasRegistry_.getOrAdd(species);
+    }
+
+    GasSpecies_ getGasSpecies(uint16_t globalIdx) const {
+        return gasRegistry_.get(globalIdx);
+    }
+
+    size_t gasSpeciesCount() const { return gasRegistry_.size(); }
+
+    bool addGas(const PointType& pos, uint16_t globalSpeciesIdx, float amount, const T& payload = T{}) {
+        if (amount <= 0.0f || !root_) return false;
+        ensureBounds({pos, pos});
+
+        OctreeNode* leaf = findLeafForPoint(root_.get(), pos, 0);
+        if (!leaf) return false;
+
+        {
+            std::unique_lock<std::shared_mutex> lock(leaf->nodeMutex);
+            if (!leaf->gasField) {
+                leaf->gasField = std::make_unique<GasField_<T, IndexType>>(leaf->bounds, gasFieldResolution_);
+            }
+            GasField_<T, IndexType>* field = leaf->gasField.get();
+
+            int slot = field->getOrAddSlot(globalSpeciesIdx);
+            if (slot < 0) return false;
+            if (!field->deposit(pos, static_cast<uint8_t>(slot), amount, payload)) return false;
+            leaf->setDirty(true);
+        }
+
+        registerGasNode(leaf);
+        return true;
+    }
+
+    float sampleGas(const PointType& pos) {
+        if (!root_) return 0.0f;
+        OctreeNode* leaf = findLeafForPoint(root_.get(), pos, 0);
+        if (!leaf) return 0.0f;
+        std::shared_lock<std::shared_mutex> lock(leaf->nodeMutex);
+        if (!leaf->gasField) return 0.0f;
+        return leaf->gasField->sampleDensity(pos);
+    }
+
+    bool sampleGasData(const PointType& pos, T& out) {
+        if (!root_) return false;
+        OctreeNode* leaf = findLeafForPoint(root_.get(), pos, 0);
+        if (!leaf) return false;
+        std::shared_lock<std::shared_mutex> lock(leaf->nodeMutex);
+        if (!leaf->gasField) return false;
+        int x, y, z;
+        if (!leaf->gasField->worldToCell(pos, x, y, z)) return false;
+        out = leaf->gasField->at(x, y, z)->data;
+        return true;
     }
 
     bool bulkInsert(const T& data, std::vector<PointType> positions, Eigen::Vector3f color, bool visible = true, float size = 0.01f, bool active = true, int objectId = -1,
@@ -2032,7 +2140,6 @@ public:
                 std::shared_lock<std::shared_mutex> objLock(obj->objMutex);
                 OctreeNode::writeVal(out, obj->objectFlags);
                 OctreeNode::writeVec3(out, obj->centerPosition);
-                OctreeNode::writeVal(out, obj->maxGasVoxelSize);
                 
                 uint32_t numRMat = obj->renderMaterials.size();
                 OctreeNode::writeVal(out, numRMat);
@@ -2048,6 +2155,7 @@ public:
             }
         }
 
+        gasRegistry_.serialize(out);
         root_->serialize(out, regionTargetPoints_);
         
         out.close();
@@ -2089,7 +2197,6 @@ public:
                 auto obj = std::make_shared<GridObject>(id);
                 OctreeNode::readVal(in, obj->objectFlags);
                 OctreeNode::readVec3(in, obj->centerPosition);
-                OctreeNode::readVal(in, obj->maxGasVoxelSize);
                 
                 uint32_t numRMat;
                 OctreeNode::readVal(in, numRMat);
@@ -2108,6 +2215,7 @@ public:
             }
         }
 
+        gasRegistry_.deserialize(in);
         root_ = std::make_unique<OctreeNode>(minBound, maxBound);
         root_->deserialize(in, regionTargetPoints_);
 
@@ -2487,7 +2595,7 @@ public:
                 if (hitOnlySolid) {
                     auto obj = getObj(pt->objectId);
                     BodyType bType = obj ? obj->getPhysicsMaterial(pt->physMatIdx).type : BodyType::STATIC;
-                    if (bType == BodyType::FLUID || bType == BodyType::GAS) continue;
+                    if (bType == BodyType::FLUID) continue;
                 }
                 
                 BoundingBox bounds = pt->getCubeBounds();
@@ -2594,6 +2702,7 @@ public:
     frame renderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB,
         int samplesPerPixel = 2, int maxBounces = 4, bool globalIllumination = false, bool useLod = true);
     void stepPhysics(float dt);
+    void stepGasFields(float dt);
 
     std::vector<std::shared_ptr<NodeData>> getExternalNodes(int targetObjectId) {
         std::vector<std::shared_ptr<NodeData>> candidates;

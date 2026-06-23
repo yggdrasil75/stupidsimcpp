@@ -382,7 +382,9 @@ vec3 traceRay(Ray initialRay, inout uint state, out float primaryDepth, out int 
                 if (NdotL > 0.0) {
                     Ray shadowRay = makeRay(shadowOrigin, L);
                     int shadowHitIndex = -1;
-                    float shadowT; vec3 shadowN; vec3 shadowHP;
+                    float shadowT;
+                    vec3 shadowN;
+                    vec3 shadowHP;
                     float shadowMaxDist = distToLight - DIST_EPSILON;
                     
                     int shadowResult = voxelTraverse(shadowRay, shadowHitIndex, shadowT, shadowN, shadowHP, shadowMaxDist);
@@ -390,7 +392,7 @@ vec3 traceRay(Ray initialRay, inout uint state, out float primaryDepth, out int 
                     if (shadowResult == 0 || shadowHitIndex == emissivePtIdx) {
                         vec3 lightAlbedo = unpackRGB8(lightPt.color);
                         vec3 lightEmission = lightAlbedo * unpackRGB9E5(lightPt.emittance);
-                        float area = lightPt.size * lightPt.size; 
+                        float area = lightPt.size * lightPt.size;
                         float solidAngle = min(area / max(distSq, area * 0.25), 2.0 * PI);
                         
                         vec3 H_nee = normalize(V + L);

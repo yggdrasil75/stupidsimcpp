@@ -14,8 +14,22 @@ struct GPUMaterial {
     uint emittance;
     uint  materialProps;
     uint  absorption;
-    uint  padding;
+    uint  albedo;
 };
+
+struct GPUGasField {
+    vec4 boundsMin;
+    vec4 boundsMax;
+    vec4 cellSize;
+    uint res;
+    uint cellOffset;
+    uint slotCount;
+    uint pad0;
+    uint slotToGlobal[8];
+};
+
+const uint MAX_GAS_SPECIES = 8u;
+const uint GAS_INVALID_SLOT = 0xFFFFFFFFu;
 
 struct GPUPBRRenderData {
     vec3 position;
@@ -105,6 +119,10 @@ layout(binding = 0) uniform CameraData {
     int targetSamples;
     int sellWidth;
     int sellSecondary;
+    uint gasFieldCount;
+    uint gasPad0;
+    uint gasPad1;
+    uint gasPad2;
 } cam;
 
 layout(std430, binding = 1) readonly buffer PointBuffer    { GPUPBRRenderData points[]; };
@@ -122,6 +140,8 @@ layout(std430, binding = 12) buffer ShadowQ   { ShadowRay shadowQueue[]; };
 layout(std430, binding = 13) buffer CounterBuf{ Counters ctr; };
 layout(std430, binding = 14) buffer PathHitBuffer { PathHit pathsHit[]; };
 layout(std430, binding = 15) readonly buffer SellmeierBuffer { float sellmeierLUT[]; };
+layout(std430, binding = 16) readonly buffer GasFieldBuffer { GPUGasField gasFields[]; };
+layout(std430, binding = 17) readonly buffer GasCellBuffer  { float gasCells[]; };
 
 layout(push_constant) uniform PC {
     int parity;
@@ -148,20 +168,79 @@ vec3 unpackRGB9E5(uint c) {
     return vec3(r, g, b);
 }
 
-// Sellmeier hero wavelengths must match the CPU range [SELL_LMIN, SELL_LMAX].
+bool gasRayBox(vec3 ro, vec3 invD, vec3 bmin, vec3 bmax, float maxT, out float t0, out float t1) {
+    vec3 ta = (bmin - ro) * invD;
+    vec3 tb = (bmax - ro) * invD;
+    vec3 tmin = min(ta, tb);
+    vec3 tmax = max(ta, tb);
+    t0 = max(max(tmin.x, tmin.y), max(tmin.z, 0.0));
+    t1 = min(min(tmax.x, tmax.y), min(tmax.z, maxT));
+    return t1 > t0;
+}
+
+void marchGasFields(vec3 ro, vec3 rd, float segLen, inout vec3 throughput, inout vec3 radiance) {
+    if (cam.gasFieldCount == 0u) return;
+    vec3 invD = 1.0 / mix(rd, vec3(1e-8), equal(rd, vec3(0.0)));
+
+    for (uint fi = 0u; fi < cam.gasFieldCount; ++fi) {
+        GPUGasField gf = gasFields[fi];
+        float t0, t1;
+        if (!gasRayBox(ro, invD, gf.boundsMin.xyz, gf.boundsMax.xyz, segLen, t0, t1)) continue;
+
+        float cellMin = min(gf.cellSize.x, min(gf.cellSize.y, gf.cellSize.z));
+        cellMin = max(cellMin, 1e-4);
+        int steps = int(clamp((t1 - t0) / cellMin, 1.0, 128.0));
+        float dt = (t1 - t0) / float(steps);
+        float R = float(gf.res);
+
+        for (int s = 0; s < steps; ++s) {
+            float tc = t0 + (float(s) + 0.5) * dt;
+            vec3 wp = ro + rd * tc;
+            vec3 rel = (wp - gf.boundsMin.xyz) / gf.cellSize.xyz;
+            ivec3 ci = ivec3(floor(rel));
+            if (any(lessThan(ci, ivec3(0))) || any(greaterThanEqual(ci, ivec3(int(gf.res))))) continue;
+
+            uint cellIdx = gf.cellOffset + uint((ci.z * int(R) + ci.y) * int(R) + ci.x);
+            uint base = cellIdx * MAX_GAS_SPECIES;
+
+            vec3 sigma_t = vec3(0.0);
+            vec3 sigma_s = vec3(0.0);
+            vec3 emission = vec3(0.0);
+            for (uint sl = 0u; sl < gf.slotCount; ++sl) {
+                float dens = gasCells[base + sl];
+                if (dens <= 1e-5) continue;
+                uint mat = gf.slotToGlobal[sl];
+                if (mat == GAS_INVALID_SLOT) continue;
+                GPUMaterial gm = materials[mat];
+                vec3 absorp = unpackRGB8(gm.absorption);
+                vec3 alb    = unpackRGB8(gm.albedo);
+                sigma_t += (absorp + absorp * alb) * dens;
+                sigma_s += absorp * alb * dens;
+                if (gm.emittance != 0u) emission += unpackRGB9E5(gm.emittance) * alb * dens;
+            }
+
+            if (max(sigma_t.x, max(sigma_t.y, sigma_t.z)) <= 1e-6) continue;
+
+            vec3 stepTrans = exp(-sigma_t * dt);
+            vec3 inscatter = emission + sigma_s * cam.skylight;
+            radiance += throughput * inscatter * (vec3(1.0) - stepTrans) / max(sigma_t, vec3(1e-5));
+            throughput *= stepTrans;
+
+            if (max(throughput.x, max(throughput.y, throughput.z)) < 0.003) return;
+        }
+    }
+}
+
 const float SELL_LMIN = 0.380; // um
 const float SELL_LMAX = 0.720; // um
 const float HERO_LAMBDA_R = 0.610;
 const float HERO_LAMBDA_G = 0.550;
 const float HERO_LAMBDA_B = 0.465;
 
-// Map a wavelength in micrometers to a [0,1] sample coordinate along a LUT row.
 float lambdaToU(float lambdaUm) {
     return clamp((lambdaUm - SELL_LMIN) / (SELL_LMAX - SELL_LMIN), 0.0, 1.0);
 }
 
-// Sample the precomputed dispersion LUT. `row` already encodes material and the
-// (currently unused) secondary axis. Linear interpolation across wavelength.
 float sampleIor(uint row, float lambdaUm) {
     int w = cam.sellWidth;
     if (w <= 0) return 1.45;
@@ -181,13 +260,12 @@ void unpackMaterial(uint m, out float roughness, out float metallic, out uint se
     sellRow   = (m >> 16) & 0xFFFFu;
 }
 
-// Wavelength (um) for a hero index 1=R,2=G,3=B.
 float heroLambda(int hero) {
     if (hero == 1) return HERO_LAMBDA_R;
     if (hero == 3) return HERO_LAMBDA_B;
     return HERO_LAMBDA_G;
 }
-// RGB basis mask for a hero index (selects one channel).
+
 vec3 heroMask(int hero) {
     if (hero == 1) return vec3(1.0, 0.0, 0.0);
     if (hero == 3) return vec3(0.0, 0.0, 1.0);

@@ -15,6 +15,16 @@ struct RenderData_ {
     int objectId;
     uint32_t isGas;
 };
+struct GPUGasField {
+    Eigen::Vector4f boundsMin;
+    Eigen::Vector4f boundsMax;
+    Eigen::Vector4f cellSize;
+    uint32_t res;
+    uint32_t cellOffset;
+    uint32_t slotCount;
+    uint32_t pad0;
+    uint32_t slotToGlobal[8];
+};
 
 template<typename T, typename IndexType>
 struct RenderNode_ {
@@ -41,12 +51,19 @@ struct RenderBuffer_ {
     std::vector<Material_> materials;
     std::unordered_map<int, uint32_t> objMaterialOffsets;
     uint32_t defaultMatIdx;
+    uint32_t gasMaterialOffset = 0;
+
+    std::vector<GPUGasField> gasFields;
+    std::vector<float> gasCells;
     
     void clear() {
         nodes.clear();
         points.clear();
         materials.clear();
         objMaterialOffsets.clear();
+        gasMaterialOffset = 0;
+        gasFields.clear();
+        gasCells.clear();
     }
 };
 
@@ -125,7 +142,7 @@ struct alignas(16) GPUMaterial {
     uint32_t emittance;
     uint32_t materialProps;
     uint32_t absorption;
-    uint32_t padding;
+    uint32_t albedo;
 };
 
 struct alignas(16) GPUFastRenderData {
@@ -178,6 +195,10 @@ struct alignas(16) GPUCameraData {
     int targetSamples;
     int sellWidth;
     int sellSecondary;
+    uint32_t gasFieldCount;
+    uint32_t gasPad0;
+    uint32_t gasPad1;
+    uint32_t gasPad2;
 };
 
 struct alignas(16) GPUParticle {
@@ -301,6 +322,13 @@ struct VulkanContext {
     VkBuffer materialBuffer = VK_NULL_HANDLE;
     VkDeviceMemory nodeMem = VK_NULL_HANDLE;
     VkBuffer sellmeierBuffer = VK_NULL_HANDLE;
+    VkBuffer gasFieldBuffer = VK_NULL_HANDLE;     // GPUGasField headers
+    VkDeviceMemory gasFieldMem = VK_NULL_HANDLE;
+    size_t currentGasFieldCap = 0;
+    VkBuffer gasCellBuffer = VK_NULL_HANDLE;       // flattened cell densities
+    VkDeviceMemory gasCellMem = VK_NULL_HANDLE;
+    size_t currentGasCellCap = 0;
+    uint32_t gasFieldCount = 0;
     VkDeviceMemory outMem = VK_NULL_HANDLE;
     VkDeviceMemory uboMem = VK_NULL_HANDLE;
     VkDeviceMemory fastPointMem = VK_NULL_HANDLE;
@@ -1258,6 +1286,26 @@ struct VulkanContext {
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     }
 
+    // Upload Eulerian gas fields (headers) and their flattened cell densities
+    // for volumetric raymarching in the wavefront shaders.
+    void updateGasBuffers(const std::vector<GPUGasField>& fields, const std::vector<float>& cells) {
+        gasFieldCount = static_cast<uint32_t>(fields.size());
+
+        size_t fDataSize = fields.size() * sizeof(GPUGasField);
+        size_t fAllocSize = std::max((size_t)256, fDataSize);
+        updateDeviceLocalBuffer(gasFieldBuffer, gasFieldMem, currentGasFieldCap,
+                                fields.empty() ? nullptr : fields.data(), fDataSize, fAllocSize,
+                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+
+        size_t cDataSize = cells.size() * sizeof(float);
+        size_t cAllocSize = std::max((size_t)256, cDataSize);
+        updateDeviceLocalBuffer(gasCellBuffer, gasCellMem, currentGasCellCap,
+                                cells.empty() ? nullptr : cells.data(), cDataSize, cAllocSize,
+                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    }
+
+    uint32_t getGasFieldCount() const { return gasFieldCount; }
+
     void updateCommonBuffers(size_t outSize, GPUCameraData& camData) {
         size_t allocSize = (size_t)256;
         
@@ -1591,8 +1639,8 @@ static constexpr VkDeviceSize WF_OFF_SHADE_ARGS  = 32;
 static constexpr VkDeviceSize WF_OFF_SHADOW_ARGS = 48;
 
 void initWavefront() {
-    VkDescriptorSetLayoutBinding b[16] = {};
-    for (int i = 0; i < 16; ++i) {
+    VkDescriptorSetLayoutBinding b[18] = {};
+    for (int i = 0; i < 18; ++i) {
         b[i].binding = i;
         b[i].descriptorCount = 1;
         b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -1602,7 +1650,7 @@ void initWavefront() {
     b[5].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
 
     VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    li.bindingCount = 16;
+    li.bindingCount = 18;
     li.pBindings = b;
     vkCreateDescriptorSetLayout(device, &li, nullptr, &wfDescLayout);
 
@@ -1675,7 +1723,7 @@ void ensureWavefrontBuffers(size_t maxPaths) {
 }
 
 void writeWavefrontDescriptors() {
-    VkDescriptorBufferInfo bi[16] = {};
+    VkDescriptorBufferInfo bi[18] = {};
     bi[0]  = {uboBuffer,      0, VK_WHOLE_SIZE};
     bi[1]  = {pbrPointBuffer, 0, VK_WHOLE_SIZE};
     bi[2]  = {materialBuffer, 0, VK_WHOLE_SIZE};
@@ -1691,10 +1739,12 @@ void writeWavefrontDescriptors() {
     bi[13] = {wfCounterBuf,   0, VK_WHOLE_SIZE};
     bi[14] = {wfPathHitBuf,   0, VK_WHOLE_SIZE};
     bi[15] = {sellmeierBuffer ? sellmeierBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
+    bi[16] = {gasFieldBuffer ? gasFieldBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
+    bi[17] = {gasCellBuffer  ? gasCellBuffer  : materialBuffer, 0, VK_WHOLE_SIZE};
 
-    VkWriteDescriptorSet w[16] = {};
+    VkWriteDescriptorSet w[18] = {};
     int n = 0;
-    for (int i = 0; i < 16; ++i) {
+    for (int i = 0; i < 18; ++i) {
         if (i == 5) continue;
         w[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         w[n].dstSet = wfDescSet;

@@ -4,6 +4,8 @@
 #include <cmath>
 #include <algorithm>
 #include <vector>
+#include <array>
+#include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
@@ -24,6 +26,8 @@ static constexpr uint8_t SAVEDQUEUED = 1 << 4;
 static constexpr uint8_t KEEPLOADED_BIT = 1 << 5;
 
 static constexpr uint8_t OBJ_ALLOW_PARTIAL_UNLOAD_BIT = 1 << 0;
+
+static constexpr uint8_t MAX_GAS_SPECIES = 8;
 
 template<typename> struct is_shared_ptr : std::false_type {};
 template<typename T> struct is_shared_ptr<std::shared_ptr<T>> : std::true_type {};
@@ -246,6 +250,7 @@ struct SPHForcePC {
     uint32_t numParticles;
     float airDensity;
 };
+
 using v3half = Eigen::Matrix<Eigen::half, 3, 1>;
 static constexpr float SELL_LAMBDA_R = 0.610f;
 static constexpr float SELL_LAMBDA_G = 0.550f;
@@ -268,6 +273,301 @@ static inline void sellmeierFromConstant(float n, v3half& B, v3half& C) {
     C = v3half(Eigen::half(0.0f), Eigen::half(0.0f), Eigen::half(0.0f));
 }
 
+struct GasSpecies_ {
+    Eigen::Vector3f albedo{1.0f, 1.0f, 1.0f};
+    Eigen::Vector3f absorption{0.0f, 0.0f, 0.0f};
+    Eigen::Vector3f scattering{0.0f, 0.0f, 0.0f};
+    uint32_t emittance = 0;
+    Eigen::Vector3f dispersionDistance{0.0f, 0.0f, 0.0f};
+
+    GasSpecies_() = default;
+    GasSpecies_(const Eigen::Vector3f& alb, const Eigen::Vector3f& absorp,
+                const Eigen::Vector3f& scat = Eigen::Vector3f::Zero(), uint32_t em = 0,
+                const Eigen::Vector3f& disp = Eigen::Vector3f::Zero())
+        : albedo(alb), absorption(absorp), scattering(scat), emittance(em), dispersionDistance(disp) {}
+
+    Eigen::Vector3f effectiveAbsorption() const {
+        Eigen::Vector3f k = absorption;
+        for (int c = 0; c < 3; ++c) {
+            float d = dispersionDistance[c];
+            if (d > 1e-4f) k[c] += 0.69314718f / d;
+        }
+        return k;
+    }
+
+    Eigen::Vector3f emittanceRGB() const { return unpackRGB9E5(emittance); }
+
+    bool operator==(const GasSpecies_& o) const {
+        return albedo == o.albedo && absorption == o.absorption &&
+               scattering == o.scattering && emittance == o.emittance &&
+               dispersionDistance == o.dispersionDistance;
+    }
+
+    void serialize(std::ofstream& out) const {
+        auto w3 = [&](const Eigen::Vector3f& v){
+            out.write(reinterpret_cast<const char*>(v.data()), sizeof(float) * 3);
+        };
+        w3(albedo);
+        w3(absorption);
+        w3(scattering);
+        w3(dispersionDistance);
+        out.write(reinterpret_cast<const char*>(&emittance), sizeof(emittance));
+    }
+
+    static GasSpecies_ deserialize(std::ifstream& in) {
+        GasSpecies_ g;
+        auto r3 = [&](Eigen::Vector3f& v){
+            in.read(reinterpret_cast<char*>(v.data()), sizeof(float) * 3);
+        };
+        r3(g.albedo);
+        r3(g.absorption);
+        r3(g.scattering);
+        r3(g.dispersionDistance);
+        in.read(reinterpret_cast<char*>(&g.emittance), sizeof(g.emittance));
+        return g;
+    }
+};
+
+struct gasSpeciesHash {
+    size_t operator()(const GasSpecies_& s) const {
+        std::hash<float> hf;
+        size_t h = std::hash<uint32_t>()(s.emittance);
+        auto mix = [&](float v){ h ^= hf(v) + 0x9e3779b9 + (h << 6) + (h >> 2); };
+        for (int i = 0; i < 3; ++i) {
+            mix(s.albedo[i]);
+            mix(s.absorption[i]);
+            mix(s.scattering[i]);
+            mix(s.dispersionDistance[i]);
+        }
+        return h;
+    }
+};
+
+struct GasRegistry_ {
+    std::vector<GasSpecies_> species;
+    std::unordered_map<GasSpecies_, uint16_t, gasSpeciesHash> lookup;
+    mutable std::shared_mutex mutex;
+
+    uint16_t getOrAdd(const GasSpecies_& s) {
+        {
+            std::shared_lock<std::shared_mutex> r(mutex);
+            auto it = lookup.find(s);
+            if (it != lookup.end()) return it->second;
+        }
+        std::unique_lock<std::shared_mutex> w(mutex);
+        auto it = lookup.find(s);
+        if (it != lookup.end()) return it->second;
+        uint16_t idx = static_cast<uint16_t>(species.size());
+        species.push_back(s);
+        lookup[s] = idx;
+        return idx;
+    }
+
+    GasSpecies_ get(uint16_t idx) const {
+        std::shared_lock<std::shared_mutex> r(mutex);
+        if (idx < species.size()) return species[idx];
+        return GasSpecies_{};
+    }
+
+    size_t size() const {
+        std::shared_lock<std::shared_mutex> r(mutex);
+        return species.size();
+    }
+
+    void serialize(std::ofstream& out) const {
+        std::shared_lock<std::shared_mutex> r(mutex);
+        uint16_t n = static_cast<uint16_t>(species.size());
+        out.write(reinterpret_cast<const char*>(&n), sizeof(n));
+        for (const auto& s : species) s.serialize(out);
+    }
+
+    void deserialize(std::ifstream& in) {
+        std::unique_lock<std::shared_mutex> w(mutex);
+        species.clear();
+        lookup.clear();
+        uint16_t n = 0;
+        in.read(reinterpret_cast<char*>(&n), sizeof(n));
+        species.reserve(n);
+        for (uint16_t i = 0; i < n; ++i) {
+            GasSpecies_ s = GasSpecies_::deserialize(in);
+            lookup[s] = static_cast<uint16_t>(species.size());
+            species.push_back(s);
+        }
+    }
+
+    void copyFrom(const GasRegistry_& other) {
+        std::unique_lock<std::shared_mutex> w(mutex);
+        std::shared_lock<std::shared_mutex> r(other.mutex);
+        species = other.species;
+        lookup = other.lookup;
+    }
+};
+
+template<typename T>
+struct GasCell_ {
+    std::array<float, MAX_GAS_SPECIES> amount{};
+    Eigen::Vector3f velocity{0.0f, 0.0f, 0.0f};
+    T data{};
+
+    float totalDensity() const {
+        float s = 0.0f;
+        for (uint8_t i = 0; i < MAX_GAS_SPECIES; ++i) s += amount[i];
+        return s;
+    }
+    bool empty(float eps = 1e-5f) const { return totalDensity() <= eps; }
+};
+
+template<typename T, typename IndexType = uint16_t>
+struct GasField_ {
+    BoundingBox bounds;
+    uint16_t res = 0;
+    PointType cellSize{0,0,0};
+    std::vector<GasCell_<T>> cells;
+
+    static constexpr uint16_t INVALID_SLOT = 0xFFFF;
+    std::array<uint16_t, MAX_GAS_SPECIES> slotToGlobal;
+    uint8_t slotCount = 0;
+
+    mutable std::shared_mutex fieldMutex;
+
+    GasField_() { slotToGlobal.fill(INVALID_SLOT); }
+    GasField_(const BoundingBox& b, uint16_t resolution)
+        : bounds(b), res(resolution) {
+        slotToGlobal.fill(INVALID_SLOT);
+        cells.assign(static_cast<size_t>(res) * res * res, GasCell_<T>{});
+        PointType extent = bounds.second - bounds.first;
+        cellSize = PointType(extent.x() / res, extent.y() / res, extent.z() / res);
+    }
+
+    uint16_t globalForSlot(uint8_t slot) const {
+        return slot < MAX_GAS_SPECIES ? slotToGlobal[slot] : INVALID_SLOT;
+    }
+
+    size_t cellCount() const { return cells.size(); }
+
+    inline size_t index(int x, int y, int z) const {
+        return (static_cast<size_t>(z) * res + y) * res + x;
+    }
+
+    inline bool inRange(int x, int y, int z) const {
+        return x >= 0 && y >= 0 && z >= 0 && x < res && y < res && z < res;
+    }
+
+    bool worldToCell(const PointType& p, int& cx, int& cy, int& cz) const {
+        PointType rel = p - bounds.first;
+        cx = static_cast<int>(std::floor(rel.x() / cellSize.x()));
+        cy = static_cast<int>(std::floor(rel.y() / cellSize.y()));
+        cz = static_cast<int>(std::floor(rel.z() / cellSize.z()));
+        return inRange(cx, cy, cz);
+    }
+
+    PointType cellCenter(int x, int y, int z) const {
+        return bounds.first + PointType((x + 0.5f) * cellSize.x(),
+                                        (y + 0.5f) * cellSize.y(),
+                                        (z + 0.5f) * cellSize.z());
+    }
+
+    GasCell_<T>* at(int x, int y, int z) {
+        if (!inRange(x, y, z)) return nullptr;
+        return &cells[index(x, y, z)];
+    }
+    const GasCell_<T>* at(int x, int y, int z) const {
+        if (!inRange(x, y, z)) return nullptr;
+        return &cells[index(x, y, z)];
+    }
+
+    int getOrAddSlot(uint16_t globalIdx) {
+        for (uint8_t i = 0; i < MAX_GAS_SPECIES; ++i) {
+            if (slotToGlobal[i] == globalIdx) return i;
+        }
+        for (uint8_t i = 0; i < MAX_GAS_SPECIES; ++i) {
+            if (slotToGlobal[i] == INVALID_SLOT) {
+                slotToGlobal[i] = globalIdx;
+                if (i + 1 > slotCount) slotCount = i + 1;
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    bool deposit(const PointType& p, uint8_t slot, float amount, const T& payload) {
+        if (slot >= MAX_GAS_SPECIES) return false;
+        int x, y, z;
+        if (!worldToCell(p, x, y, z)) return false;
+        auto& c = cells[index(x, y, z)];
+        c.amount[slot] += amount;
+        c.data = payload;
+        return true;
+    }
+
+    float sampleDensity(const PointType& p) const {
+        int x, y, z;
+        if (!worldToCell(p, x, y, z)) return 0.0f;
+        return cells[index(x, y, z)].totalDensity();
+    }
+
+    bool isEmpty(float eps = 1e-5f) const {
+        for (const auto& c : cells) if (!c.empty(eps)) return false;
+        return true;
+    }
+
+    void serialize(std::ofstream& out) const {
+        out.write(reinterpret_cast<const char*>(&res), sizeof(res));
+        auto w3 = [&](const Eigen::Vector3f& v){
+            out.write(reinterpret_cast<const char*>(v.data()), sizeof(float) * 3);
+        };
+        w3(bounds.first);
+        w3(bounds.second);
+        w3(cellSize);
+
+        out.write(reinterpret_cast<const char*>(&slotCount), sizeof(slotCount));
+        out.write(reinterpret_cast<const char*>(slotToGlobal.data()), sizeof(uint16_t) * MAX_GAS_SPECIES);
+
+        uint32_t nonEmpty = 0;
+        for (const auto& c : cells) if (!c.empty()) ++nonEmpty;
+        out.write(reinterpret_cast<const char*>(&nonEmpty), sizeof(nonEmpty));
+        for (uint32_t i = 0; i < cells.size(); ++i) {
+            const auto& c = cells[i];
+            if (c.empty()) continue;
+            out.write(reinterpret_cast<const char*>(&i), sizeof(i));
+            out.write(reinterpret_cast<const char*>(c.amount.data()), sizeof(float) * MAX_GAS_SPECIES);
+            out.write(reinterpret_cast<const char*>(c.velocity.data()), sizeof(float) * 3);
+            if constexpr (std::is_trivially_copyable_v<T>) {
+                out.write(reinterpret_cast<const char*>(&c.data), sizeof(T));
+            }
+        }
+    }
+
+    static std::unique_ptr<GasField_> deserialize(std::ifstream& in) {
+        auto f = std::make_unique<GasField_>();
+        in.read(reinterpret_cast<char*>(&f->res), sizeof(f->res));
+        auto r3 = [&](Eigen::Vector3f& v){
+            in.read(reinterpret_cast<char*>(v.data()), sizeof(float) * 3);
+        };
+        r3(f->bounds.first);
+        r3(f->bounds.second);
+        r3(f->cellSize);
+
+        in.read(reinterpret_cast<char*>(&f->slotCount), sizeof(f->slotCount));
+        in.read(reinterpret_cast<char*>(f->slotToGlobal.data()), sizeof(uint16_t) * MAX_GAS_SPECIES);
+
+        f->cells.assign(static_cast<size_t>(f->res) * f->res * f->res, GasCell_<T>{});
+        uint32_t nonEmpty = 0;
+        in.read(reinterpret_cast<char*>(&nonEmpty), sizeof(nonEmpty));
+        for (uint32_t n = 0; n < nonEmpty; ++n) {
+            uint32_t idx = 0;
+            in.read(reinterpret_cast<char*>(&idx), sizeof(idx));
+            if (idx >= f->cells.size()) break;
+            auto& c = f->cells[idx];
+            in.read(reinterpret_cast<char*>(c.amount.data()), sizeof(float) * MAX_GAS_SPECIES);
+            in.read(reinterpret_cast<char*>(c.velocity.data()), sizeof(float) * 3);
+            if constexpr (std::is_trivially_copyable_v<T>) {
+                in.read(reinterpret_cast<char*>(&c.data), sizeof(T));
+            }
+        }
+        return f;
+    }
+};
 
 struct Material_ {
     uint32_t emittance;
@@ -364,7 +664,6 @@ struct GridObject_ {
     int id;
     uint8_t objectFlags;
     PointType centerPosition = PointType::Zero();
-    float maxGasVoxelSize = 0.0f;
 
     // std::vector<Material_> renderMaterials;
     std::vector<Material_> renderMaterials;
@@ -562,6 +861,7 @@ struct OctreeNode_ {
     
     mutable std::shared_ptr<NodeData_<T, IndexType>> lodData;
     mutable std::shared_mutex nodeMutex;
+    std::unique_ptr<GasField_<T, IndexType>> gasField;
 
     OctreeNode_(const PointType& min, const PointType& max) : bounds(min,max), flags(0), lodData(nullptr) {
         setLeaf(true);
@@ -585,6 +885,15 @@ struct OctreeNode_ {
         newNode->center = center;
         newNode->nodeSize = nodeSize;
         newNode->lodData = lodData;
+
+        if (gasField) {
+            auto gf = std::make_unique<GasField_<T, IndexType>>(gasField->bounds, gasField->res);
+            gf->cellSize = gasField->cellSize;
+            gf->cells = gasField->cells;
+            gf->slotToGlobal = gasField->slotToGlobal;
+            gf->slotCount = gasField->slotCount;
+            newNode->gasField = std::move(gf);
+        }
         
         if (!isLeaf()) {
             for (int i = 0; i < 8; ++i) {
@@ -648,6 +957,7 @@ struct OctreeNode_ {
 
     bool isEmpty() const {
         if (!points.empty()) return false;
+        if (gasField && !gasField->isEmpty()) return false;
         if (!isLeaf()) {
             for (int i = 0; i < 8; ++i) {
                 if (children[i] && !children[i]->isEmpty()) return false;
@@ -802,6 +1112,10 @@ struct OctreeNode_ {
             writeVal(out, pt->physMatIdx);
         }
 
+        bool hasGas = (gasField != nullptr);
+        writeVal(out, hasGas);
+        if (hasGas) gasField->serialize(out);
+
         if (!isLeaf()) {
             uint8_t childMask = 0;
             for (int i = 0; i < 8; ++i) if (children[i]) childMask |= (1 << i);
@@ -834,6 +1148,11 @@ struct OctreeNode_ {
             readVal(in, pt->physMatIdx);
             points.push_back(pt);
         }
+
+        bool hasGas;
+        readVal(in, hasGas);
+        if (hasGas) gasField = GasField_<T, IndexType>::deserialize(in);
+        else gasField.reset();
 
         if (!isLeaf()) {
             uint8_t childMask;
@@ -894,6 +1213,7 @@ struct OctreeNode_ {
         }
         points.clear();
         points.shrink_to_fit();
+        gasField.reset();
     }
 
     void serialize(std::ofstream& out, size_t regionTargetPoints, std::string storagepath) {
@@ -921,6 +1241,10 @@ struct OctreeNode_ {
             writeVal(out, pt->renderMatIdx);
             writeVal(out, pt->physMatIdx);
         }
+
+        bool hasGas = (gasField != nullptr);
+        writeVal(out, hasGas);
+        if (hasGas) gasField->serialize(out);
 
         if (!isLeaf()) {
             uint8_t childMask = 0;
@@ -964,6 +1288,11 @@ struct OctreeNode_ {
             readVal(in, pt->physMatIdx);
             points.push_back(pt);
         }
+
+        bool hasGas;
+        readVal(in, hasGas);
+        if (hasGas) gasField = GasField_<T, IndexType>::deserialize(in);
+        else gasField.reset();
 
         if (!isLeaf()) {
             uint8_t childMask;

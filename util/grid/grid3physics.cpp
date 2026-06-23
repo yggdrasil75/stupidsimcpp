@@ -9,28 +9,6 @@ struct FluidMoveAction {
     PointType newPos;
 };
 
-template<typename T, typename IndexType>
-struct GasMoveAction {
-    std::shared_ptr<NodeData_<T, IndexType>> node;
-    PointType oldPos;
-    PointType newPos;
-    float newSize;
-};
-
-template<typename T, typename IndexType>
-struct GasSplitChildDef {
-    PointType pos;
-    float size;
-    Eigen::Vector3f vel;
-};
-
-template<typename T, typename IndexType>
-struct GasSplitAction {
-    PointType oldPos;
-    std::shared_ptr<NodeData_<T, IndexType>> parent;
-    std::vector<GasSplitChildDef<T, IndexType>> children;
-};
-
 struct Vec3iHash {
     std::size_t operator()(const std::array<int64_t, 3>& v) const {
         return (v[0] * 73856093) ^ (v[1] * 19349663) ^ (v[2] * 83492791);
@@ -39,7 +17,6 @@ struct Vec3iHash {
 
 template<typename T, typename IndexType>
 void Octree<T, IndexType>::stepPhysics(float dt) {
-
     if (!root_ || dt <= 0.0f) return;
 
     int maxObjId = -1;
@@ -83,7 +60,7 @@ void Octree<T, IndexType>::stepPhysics(float dt) {
                         const auto& mats = fastMats[objIdx];
                         if (sp->physMatIdx < mats.size()) {
                             BodyType bType = mats[sp->physMatIdx].type;
-                            if (bType == BodyType::FLUID || bType == BodyType::GAS) {
+                            if (bType == BodyType::FLUID) {
                                 sphNodes.push_back(sp);
                             }
                         }
@@ -94,15 +71,13 @@ void Octree<T, IndexType>::stepPhysics(float dt) {
     }
 
     std::vector<FluidMoveAction<T, IndexType>> pendingFluidMoves;
-    std::vector<GasMoveAction<T, IndexType>> pendingGasMoves;
-    std::vector<GasSplitAction<T, IndexType>> pendingGasSplits;
 
     if (!sphNodes.empty()) {
         float h = phys_smoothingRadius;
         float h2 = h * h;
         float maxKernelVol = 4.18879f * h2 * h;
         
-        float C = std::max(phys_smoothingRadius, phys_maxGasSize);
+        float C = phys_smoothingRadius;
         std::unordered_map<std::array<int64_t, 3>, std::vector<std::shared_ptr<NodeData>>, Vec3iHash> grid;
         
         for (auto& node : sphNodes) {
@@ -156,13 +131,6 @@ void Octree<T, IndexType>::stepPhysics(float dt) {
                 if (myPmat.type == BodyType::FLUID) {
                     float over_density = std::max(0.0f, densityFraction - 1.0f);
                     node->physics.pressure = phys_gasConstant * std::min(over_density, 1.5f);
-                } else if (myPmat.type == BodyType::GAS) {
-                    float df = densityFraction;
-                    float p_ideal = phys_gasConstant * 0.5f * df;
-                    float p_cohesion = phys_gasConstant * 0.8f * df * df;
-                    float p_core = phys_gasConstant * 0.3f * df * df * df;
-                    
-                    node->physics.pressure = p_ideal - p_cohesion + p_core;
                 }
             }
         }
@@ -206,7 +174,7 @@ void Octree<T, IndexType>::stepPhysics(float dt) {
                     int objIdx = pt->objectId + 1;
                     if (objIdx >= 0 && objIdx < fastMatsSize) {
                         BodyType bType = fastMats[objIdx][pt->physMatIdx].type;
-                        if (bType == BodyType::FLUID || bType == BodyType::GAS) continue;
+                        if (bType == BodyType::FLUID) continue;
                     } else {
                         continue;
                     }
@@ -229,8 +197,7 @@ void Octree<T, IndexType>::stepPhysics(float dt) {
                 PhysicsMaterial_ myPmat = fastMats[objIdx][node->physMatIdx];
                 
                 float V_i = std::min(node->size * node->size * node->size, maxKernelVol);
-                float raw_mass = (myPmat.type == BodyType::FLUID) ? (V_i * phys_restDensity) : myPmat.mass;
-                float mass_i = std::max(raw_mass, 1e-6f);
+                float mass_i = std::max(V_i * phys_restDensity, 1e-6f);
 
                 Eigen::Vector3f gravityDir = phys_gravity;
                 if (phys_useGravityPoint) {
@@ -239,23 +206,14 @@ void Octree<T, IndexType>::stepPhysics(float dt) {
                     if (dist > 1e-4f) gravityDir = (toCenter / dist) * phys_gravityStrength;
                     else gravityDir = Eigen::Vector3f::Zero();
                 }
-                
-                if (myPmat.type == BodyType::FLUID) {
-                    node->physics.force = gravityDir * mass_i;
-                } else {
-                    float actualDensity = mass_i / std::max(V_i, 0.0001f);
-                    float effectiveDensity = std::max(actualDensity, phys_airDensity * 0.1f);
-                    node->physics.force = gravityDir * (effectiveDensity - phys_airDensity) * V_i;
-                }
+
+                node->physics.force = gravityDir * mass_i;
 
                 Eigen::Vector3f fPress = Eigen::Vector3f::Zero();
                 Eigen::Vector3f fVisc = Eigen::Vector3f::Zero();
 
                 for (auto& neighbor : dynamicNeighbors) {
                     if (neighbor == node) continue;
-                    
-                    int nObjIdx = neighbor->objectId + 1;
-                    PhysicsMaterial_ nPmat = fastMats[nObjIdx][neighbor->physMatIdx];
 
                     PointType diff = node->position - neighbor->position;
                     float r = diff.norm();
@@ -282,8 +240,7 @@ void Octree<T, IndexType>::stepPhysics(float dt) {
                         fPress += dir * F_p_mag;
 
                         float viscLap = kernels_.ViscLaplacian(r_scaled) * (S * S * S * S * S);
-                        float viscMulti = (myPmat.type == BodyType::GAS || nPmat.type == BodyType::GAS) ? 0.1f : 1.0f;
-                        float F_v_mag = V_i * V_j * phys_viscosity * viscMulti * viscLap;
+                        float F_v_mag = V_i * V_j * phys_viscosity * viscLap;
                         
                         fVisc += F_v_mag * (neighbor->physics.velocity - node->physics.velocity);
                     }
@@ -328,17 +285,14 @@ void Octree<T, IndexType>::stepPhysics(float dt) {
 
         for (size_t i = 0; i < sphNodes.size(); ++i) {
             auto& node = sphNodes[i];
-            int objIdx = node->objectId + 1;
-            PhysicsMaterial_ myPmat = fastMats[objIdx][node->physMatIdx];
             
             float V_i = std::min(node->size * node->size * node->size, maxKernelVol);
-            float raw_mass = (myPmat.type == BodyType::FLUID) ? (V_i * phys_restDensity) : myPmat.mass;
-            float mass_i = std::max(raw_mass, 1e-6f);
+            float mass_i = std::max(V_i * phys_restDensity, 1e-6f);
 
             Eigen::Vector3f accel = node->physics.force / mass_i;
             if (!accel.allFinite()) accel = Eigen::Vector3f::Zero();
             
-            float maxAccel = (myPmat.type == BodyType::GAS) ? 500.0f : 1000.0f; 
+            float maxAccel = 1000.0f; 
             if (accel.squaredNorm() > maxAccel * maxAccel) {
                 accel = accel.normalized() * maxAccel;
             }
@@ -346,88 +300,18 @@ void Octree<T, IndexType>::stepPhysics(float dt) {
             node->physics.velocity += accel * dt;
             if (!node->physics.velocity.allFinite()) node->physics.velocity = Eigen::Vector3f::Zero();
             
-            if (myPmat.type == BodyType::GAS) {
-                float drag = phys_velocityDamping + (node->size * 0.5f);
-                node->physics.velocity *= std::max(0.0f, 1.0f - drag * dt);
-            } else {
-                node->physics.velocity *= std::max(0.0f, 1.0f - phys_velocityDamping * dt);
-            }
+            node->physics.velocity *= std::max(0.0f, 1.0f - phys_velocityDamping * dt);
 
-            float maxVel = (myPmat.type == BodyType::GAS) ? 50.0f : std::max(h / dt, 25.0f);
+            float maxVel = std::max(h / dt, 25.0f);
             if (node->physics.velocity.squaredNorm() > maxVel * maxVel) {
                 node->physics.velocity = node->physics.velocity.normalized() * maxVel;
             }
 
-            if (myPmat.type == BodyType::FLUID) {
-                FluidMoveAction<T, IndexType> fm;
-                fm.node = node;
-                fm.oldPos = node->position;
-                fm.newPos = node->position + node->physics.velocity * dt;
-                pendingFluidMoves.push_back(fm);
-            } else {
-                auto obj = getObject(node->objectId);
-                float maxGasSize = (obj && obj->maxGasVoxelSize > 0.0f) ? obj->maxGasVoxelSize : phys_maxGasSize;
-                
-                float currentSize = node->size + phys_gasExpansionRate * dt;
-                
-                if (obj && currentSize > node->size) {
-                    float oldSize = node->size;
-                    float V_new = currentSize * currentSize * currentSize;
-                    float oldVol = oldSize * oldSize * oldSize;
-                    float ratio = oldVol / V_new; 
-                    
-                    Material_ rMat = obj->getRenderMaterial(node->renderMatIdx);
-                    
-                    rMat.absorption *= ratio;
-                    rMat.emittance = Grid::packRGB9E5(rMat.emittanceRGB() * ratio);
-
-                    float lengthRatio = oldSize / currentSize;
-                    float sqLengthRatio = lengthRatio * lengthRatio;
-                    float tr = std::max(1.0f - node->color.w(), 0.001f);
-                    float newTr = std::pow(tr, sqLengthRatio);
-
-                    newTr = std::round(newTr * 100.0f) / 100.0f;
-                    rMat.absorption.x() = std::round(rMat.absorption.x() * 100.0f) / 100.0f;
-                    rMat.absorption.y() = std::round(rMat.absorption.y() * 100.0f) / 100.0f;
-                    rMat.absorption.z() = std::round(rMat.absorption.z() * 100.0f) / 100.0f;
-                    
-                    node->color.w() = std::clamp(1.0f - newTr, 0.0f, 1.0f);
-                    node->renderMatIdx = obj->getOrAddRenderMaterial(rMat);
-                    
-                    if (newTr >= 0.99f && rMat.absorption.norm() < 0.05f) {
-                        node->setActive(false);
-                        node->setVisible(false);
-                    }
-                }
-
-                if (currentSize >= maxGasSize && node->isActive()) {
-                    GasSplitAction<T, IndexType> split;
-                    split.oldPos = node->position;
-                    split.parent = node;
-                    
-                    float newSize = currentSize * 0.5f;
-                    for (int dx : {-1, 1}) {
-                        for (int dy : {-1, 1}) {
-                            for (int dz : {-1, 1}) {
-                                PointType offset(dx * newSize * 0.5f, dy * newSize * 0.5f, dz * newSize * 0.5f);
-                                GasSplitChildDef<T, IndexType> c;
-                                c.pos = node->position + offset;
-                                c.size = newSize;
-                                c.vel = node->physics.velocity + offset.normalized() * (phys_gasExpansionRate * 0.5f);
-                                split.children.push_back(c);
-                            }
-                        }
-                    }
-                    pendingGasSplits.push_back(split);
-                } else {
-                    GasMoveAction<T, IndexType> gm;
-                    gm.node = node;
-                    gm.oldPos = node->position;
-                    gm.newPos = node->position + node->physics.velocity * dt;
-                    gm.newSize = currentSize;
-                    pendingGasMoves.push_back(gm);
-                }
-            }
+            FluidMoveAction<T, IndexType> fm;
+            fm.node = node;
+            fm.oldPos = node->position;
+            fm.newPos = node->position + node->physics.velocity * dt;
+            pendingFluidMoves.push_back(fm);
         }
     }
 
@@ -452,48 +336,140 @@ void Octree<T, IndexType>::stepPhysics(float dt) {
         
         this->move(move_act.oldPos, move_act.newPos);
     }
-
-    for (auto& gm : pendingGasMoves) {
-        RayHit_<T, IndexType> hit;
-        PointType diff = gm.newPos - gm.oldPos;
-        float dist = diff.norm();
-        if (dist > 1e-5f) {
-            PointType dir = diff / dist;
-            if (this->raycast(gm.oldPos, dir, dist + gm.node->size * 0.5f, hit, gm.node, true, true)) {
-                gm.newPos = hit.hitPoint + hit.normal * (gm.node->size * 0.51f);
-                float vn = gm.node->physics.velocity.dot(hit.normal);
-                if (vn < 0.0f) {
-                    gm.node->physics.velocity -= vn * hit.normal;
-                    gm.node->physics.velocity *= 0.5f; 
-                }
-            }
-        }
-
-        this->update(gm.oldPos, gm.newPos, gm.node->data, gm.node->isVisible(), gm.node->color.template head<3>(), 
-                     gm.newSize, gm.node->isActive(), gm.node->objectId, 
-                     -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, EPSILON);
-    }
-
-    for (auto& split : pendingGasSplits) {
-        if (this->remove(split.oldPos, EPSILON)) {
-            auto obj = this->getObject(split.parent->objectId);
-            Material_ rMat = obj ? obj->getRenderMaterial(split.parent->renderMatIdx) : Material_();
-            float newMass = fastMats[split.parent->objectId + 1][split.parent->physMatIdx].mass * 0.125f;
-
-            for (auto& c : split.children) {
-                float parentTransmission = std::clamp(1.0f - split.parent->color.w(), 0.0f, 1.0f);
-                Eigen::Vector3f emRGB = rMat.emittanceRGB();
-                float emScalar = emRGB.maxCoeff();
-                this->set(split.parent->data, c.pos, split.parent->isVisible(), split.parent->color.template head<3>(), c.size, split.parent->isActive(), split.parent->objectId,
-                          emScalar, rMat.roughness, rMat.metallic, parentTransmission, rMat.iorGreen(), rMat.absorption,
-                          BodyType::GAS, newMass);
-                
-                if (auto n = this->find(c.pos, EPSILON)) {
-                    n->physics.velocity = c.vel;
-                }
-            }
-        }
-    }
-
 }
+
+template<typename T, typename IndexType>
+void Octree<T, IndexType>::stepGasFields(float dt) {
+    if (!root_ || dt <= 0.0f) return;
+
+    std::vector<OctreeNode*> nodes;
+    {
+        std::lock_guard<std::mutex> lock(gasMutex_);
+        size_t w = 0;
+        for (size_t i = 0; i < activeGasNodes_.size(); ++i) {
+            OctreeNode* n = activeGasNodes_[i];
+            if (!n) continue;
+            std::shared_lock<std::shared_mutex> nl(n->nodeMutex);
+            if (n->gasField && !n->gasField->isEmpty()) {
+                activeGasNodes_[w++] = n;
+            }
+        }
+        activeGasNodes_.resize(w);
+        nodes = activeGasNodes_;
+    }
+    if (nodes.empty()) return;
+
+    Eigen::Vector3f gravityDir = phys_gravity;
+    if (phys_useGravityPoint) gravityDir = Eigen::Vector3f(0.0f, -1.0f, 0.0f) * phys_gravityStrength;
+    Eigen::Vector3f up = gravityDir.squaredNorm() > 1e-8f ? (-gravityDir.normalized()) : Eigen::Vector3f(0.0f, 1.0f, 0.0f);
+
+    float diffuse = phys_gasDiffusion;
+    float dissip = std::clamp(phys_gasDissipation * dt, 0.0f, 1.0f);
+
+    struct Outflow { PointType pos; uint16_t globalSpecies; float amount; T data; };
+    std::vector<Outflow> outflows;
+    std::mutex outflowMutex;
+
+    for (OctreeNode* node : nodes) {
+        std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
+        auto* field = node->gasField.get();
+        if (!field) continue;
+
+        const int R = field->res;
+        if (R <= 0) continue;
+        const size_t N = field->cells.size();
+
+        for (auto& c : field->cells) {
+            float dens = c.totalDensity();
+            if (dens <= 1e-6f) continue;
+            c.velocity += up * (phys_gasBuoyancy * dens * dt);
+            c.velocity *= std::max(0.0f, 1.0f - phys_velocityDamping * dt);
+        }
+
+        std::vector<GasCell_<T>> next(N);
+        for (int z = 0; z < R; ++z)
+        for (int y = 0; y < R; ++y)
+        for (int x = 0; x < R; ++x) {
+            size_t idx = field->index(x, y, z);
+            GasCell_<T>& dst = next[idx];
+            const GasCell_<T>& cur = field->cells[idx];
+
+            PointType centre = field->cellCenter(x, y, z);
+            PointType src = centre - cur.velocity * dt;
+
+            int sx, sy, sz;
+            if (field->worldToCell(src, sx, sy, sz)) {
+                const GasCell_<T>& s = field->cells[field->index(sx, sy, sz)];
+                dst.amount = s.amount;
+                dst.velocity = s.velocity;
+                dst.data = s.data;
+            } else {
+                dst.amount = cur.amount;
+                dst.velocity = cur.velocity;
+                dst.data = cur.data;
+                if (cur.totalDensity() > 1e-5f) {
+                    PointType outPos = centre + cur.velocity * dt;
+                    if (!field->worldToCell(outPos, sx, sy, sz)) {
+                        for (uint8_t sp = 0; sp < field->slotCount; ++sp) {
+                            float a = cur.amount[sp];
+                            if (a <= 1e-6f) continue;
+                            uint16_t g = field->slotToGlobal[sp];
+                            if (g == GasField_<T, IndexType>::INVALID_SLOT) continue;
+                            std::lock_guard<std::mutex> ol(outflowMutex);
+                            outflows.push_back({outPos, g, a * 0.5f, cur.data});
+                        }
+                        for (uint8_t sp = 0; sp < MAX_GAS_SPECIES; ++sp) dst.amount[sp] *= 0.5f;
+                    }
+                }
+            }
+        }
+
+        if (diffuse > 0.0f) {
+            const float keep = 1.0f - diffuse;
+            const float share = diffuse / 6.0f;
+            const int off[6][3] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+
+            std::vector<GasCell_<T>> diff(N);
+            for (int z = 0; z < R; ++z)
+            for (int y = 0; y < R; ++y)
+            for (int x = 0; x < R; ++x) {
+                size_t idx = field->index(x, y, z);
+                diff[idx].velocity = next[idx].velocity;
+                diff[idx].data = next[idx].data;
+                for (uint8_t sp = 0; sp < MAX_GAS_SPECIES; ++sp)
+                    diff[idx].amount[sp] = next[idx].amount[sp] * keep;
+            }
+            for (int z = 0; z < R; ++z)
+            for (int y = 0; y < R; ++y)
+            for (int x = 0; x < R; ++x) {
+                size_t idx = field->index(x, y, z);
+                const auto& c = next[idx];
+                if (c.totalDensity() <= 1e-6f) continue;
+                for (auto& o : off) {
+                    int nx = x+o[0], ny = y+o[1], nz = z+o[2];
+                    if (!field->inRange(nx, ny, nz)) continue;
+                    auto& nd = diff[field->index(nx, ny, nz)];
+                    for (uint8_t sp = 0; sp < MAX_GAS_SPECIES; ++sp)
+                        nd.amount[sp] += c.amount[sp] * share;
+                }
+            }
+            next.swap(diff);
+        }
+
+        if (dissip > 0.0f) {
+            float scale = 1.0f - dissip;
+            for (auto& c : next) {
+                for (uint8_t sp = 0; sp < MAX_GAS_SPECIES; ++sp) c.amount[sp] *= scale;
+            }
+        }
+
+        field->cells.swap(next);
+        node->setDirty(true);
+    }
+
+    for (auto& o : outflows) {
+        addGas(o.pos, o.globalSpecies, o.amount, o.data);
+    }
+}
+
 }

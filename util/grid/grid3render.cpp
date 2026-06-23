@@ -22,6 +22,20 @@ void Octree<T, IndexType>::buildRender(RenderBuffer_<T, IndexType>& buffer) {
     }
     buffer.defaultMatIdx = buffer.materials.size();
     buffer.materials.push_back(Material_());
+    
+    buffer.gasMaterialOffset = static_cast<uint32_t>(buffer.materials.size());
+    {
+        size_t gasCount = gasRegistry_.size();
+        for (size_t i = 0; i < gasCount; ++i) {
+            GasSpecies_ s = gasRegistry_.get(static_cast<uint16_t>(i));
+            Material_ gm{};
+            gm.absorption = s.effectiveAbsorption();
+            gm.roughness = 1.0f;
+            gm.metallic = 0.0f;
+            gm.emittance = s.emittance;
+            buffer.materials.push_back(gm);
+        }
+    }
 
     buildRenderNodeAt(root_.get(), buffer, 0, localObjects);
 }
@@ -70,6 +84,38 @@ void Octree<T, IndexType>::buildRenderNodeAt(OctreeNode_<T, IndexType>* node, Re
             rd.objectId = pt->objectId;
             buffer.points.push_back(rd);
         }
+    }
+    
+    if (isLoaded && node->gasField && !node->gasField->isEmpty()) {
+        auto* field = node->gasField.get();
+        const uint32_t R = field->res;
+        const size_t cellCount = static_cast<size_t>(R) * R * R;
+
+        GPUGasField gf{};
+        gf.boundsMin = Eigen::Vector4f(field->bounds.first.x(), field->bounds.first.y(), field->bounds.first.z(), 0.0f);
+        gf.boundsMax = Eigen::Vector4f(field->bounds.second.x(), field->bounds.second.y(), field->bounds.second.z(), 0.0f);
+        gf.cellSize = Eigen::Vector4f(field->cellSize.x(), field->cellSize.y(), field->cellSize.z(), 0.0f);
+        gf.res = R;
+        gf.slotCount = field->slotCount;
+        gf.cellOffset = static_cast<uint32_t>(buffer.gasCells.size() / MAX_GAS_SPECIES);
+        for (int s = 0; s < MAX_GAS_SPECIES; ++s) {
+            uint16_t g = field->slotToGlobal[s];
+            // Store the global *material* index (offset folded in) or 0xFFFFFFFF.
+            gf.slotToGlobal[s] = (g == GasField_<T, IndexType>::INVALID_SLOT)
+                                     ? 0xFFFFFFFFu
+                                     : (buffer.gasMaterialOffset + g);
+        }
+
+        // Flatten cell densities (MAX_GAS_SPECIES floats per cell, row-major).
+        size_t base = buffer.gasCells.size();
+        buffer.gasCells.resize(base + cellCount * MAX_GAS_SPECIES);
+        for (size_t i = 0; i < cellCount; ++i) {
+            const auto& c = field->cells[i];
+            float* dst = &buffer.gasCells[base + i * MAX_GAS_SPECIES];
+            for (int s = 0; s < MAX_GAS_SPECIES; ++s) dst[s] = c.amount[s];
+        }
+
+        buffer.gasFields.push_back(gf);
     }
     rnode.pointCount = static_cast<uint32_t>(buffer.points.size() - rnode.firstPoint);
     
@@ -415,6 +461,29 @@ struct PointSort {
 };
 
 template<typename T, typename IndexType>
+void Octree<T, IndexType>::buildGPUMaterials(const RenderBuffer_<T, IndexType>& buf, std::vector<GPUMaterial>& out) {
+    out.clear();
+    out.reserve(buf.materials.size());
+    size_t gasCount = gasRegistry_.size();
+    for (size_t mi = 0; mi < buf.materials.size(); ++mi) {
+        const auto& m = buf.materials[mi];
+        uint32_t sellRow = static_cast<uint32_t>(mi) * SELL_LUT_SECONDARY;
+        uint32_t albedoPacked = 0;
+        if (gasCount > 0 && mi >= buf.gasMaterialOffset && mi < buf.gasMaterialOffset + gasCount) {
+            GasSpecies_ sp = gasRegistry_.get(static_cast<uint16_t>(mi - buf.gasMaterialOffset));
+            albedoPacked = packRGB8(sp.albedo);
+        }
+        out.push_back({
+            m.emittance,
+            packMaterialProps(m.roughness, m.metallic, sellRow),
+            packRGB8(m.absorption),
+            albedoPacked
+        });
+    }
+    if (out.empty()) out.push_back(GPUMaterial{});
+}
+
+template<typename T, typename IndexType>
 frame Octree<T, IndexType>::renderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat, int samplesPerPixel,
                 int maxBounces, bool globalIllumination, bool useLod) {
     TIME_FUNCTION;
@@ -426,18 +495,7 @@ frame Octree<T, IndexType>::renderFrameVulkan(const Camera& cam, int height, int
     vkCtx.init();
 
     std::vector<GPUMaterial> gpuMaterials;
-    gpuMaterials.reserve(tl_buffer.materials.size());
-    for (size_t mi = 0; mi < tl_buffer.materials.size(); ++mi) {
-        const auto& m = tl_buffer.materials[mi];
-        uint32_t sellRow = static_cast<uint32_t>(mi) * SELL_LUT_SECONDARY;
-        gpuMaterials.push_back({
-            m.emittance,
-            packMaterialProps(m.roughness, m.metallic, sellRow),
-            packRGB8(m.absorption),
-            0
-        });
-    }
-    if (gpuMaterials.empty()) gpuMaterials.push_back(GPUMaterial{});
+    buildGPUMaterials(tl_buffer, gpuMaterials);
     vkCtx.updateMaterialBuffer(gpuMaterials);
     vkCtx.updateSellmeierBuffer(buildSellmeierLUT(tl_buffer.materials),
                                 SELL_LUT_WAVELENGTHS,
@@ -526,6 +584,8 @@ frame Octree<T, IndexType>::renderFrameVulkan(const Camera& cam, int height, int
     vkCtx.updateSkyboxBuffer(skyData);
     vkCtx.updateLightBuffer(gpuLights);
     vkCtx.updatePBRBuffers(gpuPoints);
+    vkCtx.updateGasBuffers(tl_buffer.gasFields, tl_buffer.gasCells);
+    camData.gasFieldCount = vkCtx.getGasFieldCount();
     {
         int tileW = 512;
         int tileH = 512;
@@ -572,18 +632,7 @@ frame Octree<T, IndexType>::fastRenderFrameVulkan(const Camera& cam, int height,
     vkCtx.init();
     
     std::vector<GPUMaterial> gpuMaterials;
-    gpuMaterials.reserve(tl_buffer.materials.size());
-    for (size_t mi = 0; mi < tl_buffer.materials.size(); ++mi) {
-        const auto& m = tl_buffer.materials[mi];
-        uint32_t sellRow = static_cast<uint32_t>(mi) * SELL_LUT_SECONDARY;
-        gpuMaterials.push_back({
-            m.emittance,
-            packMaterialProps(m.roughness, m.metallic, sellRow),
-            packRGB8(m.absorption),
-            0
-        });
-    }
-    if (gpuMaterials.empty()) gpuMaterials.push_back(GPUMaterial{});
+    buildGPUMaterials(tl_buffer, gpuMaterials);
     vkCtx.updateMaterialBuffer(gpuMaterials);
     vkCtx.updateSellmeierBuffer(buildSellmeierLUT(tl_buffer.materials), SELL_LUT_WAVELENGTHS,
                                 std::max<size_t>(1, tl_buffer.materials.size()) * SELL_LUT_SECONDARY);
@@ -695,18 +744,7 @@ frame Octree<T, IndexType>::blendedRenderFrameVulkan(const Camera& cam, int heig
     vkCtx.init();
     
     std::vector<GPUMaterial> gpuMaterials;
-    gpuMaterials.reserve(tl_buffer.materials.size());
-    for (size_t mi = 0; mi < tl_buffer.materials.size(); ++mi) {
-        const auto& m = tl_buffer.materials[mi];
-        uint32_t sellRow = static_cast<uint32_t>(mi) * SELL_LUT_SECONDARY;
-        gpuMaterials.push_back({
-            m.emittance,
-            packMaterialProps(m.roughness, m.metallic, sellRow),
-            packRGB8(m.absorption),
-            0
-        });
-    }
-    if (gpuMaterials.empty()) gpuMaterials.push_back(GPUMaterial{});
+    buildGPUMaterials(tl_buffer, gpuMaterials);
     vkCtx.updateMaterialBuffer(gpuMaterials);
     vkCtx.updateSellmeierBuffer(buildSellmeierLUT(tl_buffer.materials), SELL_LUT_WAVELENGTHS,
                                 std::max<size_t>(1, tl_buffer.materials.size()) * SELL_LUT_SECONDARY);
@@ -804,6 +842,8 @@ frame Octree<T, IndexType>::blendedRenderFrameVulkan(const Camera& cam, int heig
     vkCtx.updateCommonBuffers(pbrOutSize, pbrCamData);
     vkCtx.updateLightBuffer(gpuLights);
     vkCtx.updatePBRBuffers(gpuPBRPoints);
+    vkCtx.updateGasBuffers(tl_buffer.gasFields, tl_buffer.gasCells);
+    pbrCamData.gasFieldCount = vkCtx.getGasFieldCount();
 
     {
         int tileW = 512;

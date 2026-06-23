@@ -116,9 +116,15 @@ struct Camera {
         
         Eigen::Matrix4f view = Eigen::Matrix4f::Identity();
         
-        view(0, 0) = r.x(); view(0, 1) = r.y(); view(0, 2) = r.z();
-        view(1, 0) = u.x(); view(1, 1) = u.y(); view(1, 2) = u.z();
-        view(2, 0) = -f.x(); view(2, 1) = -f.y(); view(2, 2) = -f.z();
+        view(0, 0) = r.x();
+        view(0, 1) = r.y();
+        view(0, 2) = r.z();
+        view(1, 0) = u.x();
+        view(1, 1) = u.y();
+        view(1, 2) = u.z();
+        view(2, 0) = -f.x();
+        view(2, 1) = -f.y();
+        view(2, 2) = -f.z();
         
         view(0, 3) = -r.dot(origin);
         view(1, 3) = -u.dot(origin);
@@ -219,8 +225,10 @@ struct Camera2D {
         
         Eigen::Matrix3f view = Eigen::Matrix3f::Identity();
         
-        view(0, 0) = r.x();  view(0, 1) = r.y();
-        view(1, 0) = -f.x(); view(1, 1) = -f.y();
+        view(0, 0) = r.x();
+        view(0, 1) = r.y();
+        view(1, 0) = -f.x();
+        view(1, 1) = -f.y();
         
         view(0, 2) = -r.dot(origin);
         view(1, 2) = f.dot(origin);
