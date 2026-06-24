@@ -79,6 +79,9 @@ struct StateEvent {
     float mass;
     bool isMoltenMetal;
     TargetState targetState;
+    Eigen::Vector3f gasColor      = Eigen::Vector3f(1.0f, 1.0f, 1.0f);
+    Eigen::Vector3f gasAbsorption = Eigen::Vector3f::Zero();
+    float gasMassScale            = 1.0f;
 };
 
 int main() {
@@ -195,8 +198,8 @@ int main() {
     const int samples = 10;
     const int blendedsamples = 10;
     const float blendedfactor = 0.5;
-    const int videosamples = 10;
-    const int bounces = 3;
+    const int videosamples = 100;
+    const int bounces = 4;
     const int physicsSubsteps = 10;
     const float physicsDt = 1.0f / fps;
     const float subDt = physicsDt / physicsSubsteps;
@@ -219,13 +222,15 @@ int main() {
 
     std::vector<StateEvent> timeline = {
         { 20,   5,  1.0f, false, TargetState::FLUID   }, // Center -> Water
-        { 100,  8,  0.00005f, false, TargetState::GAS }, // Second Blue -> Lighter than air Gas
+        
+        { 100,  8,  0.00005f, false, TargetState::GAS, Eigen::Vector3f::Constant(1.0f), Eigen::Vector3f::Constant(0.1), 40.0f }, // Second Blue -> steam
         { 180,  6,  1.2f, false, TargetState::FLUID   }, // Purple 1 -> Heavy Water
         { 260,  9,  0.4f, false, TargetState::RIGID   }, // Purple 2 -> RIGID (Floats lightly in fluid)
         { 340,  3,  8.5f, true,  TargetState::FLUID   }, // Brass -> Molten Brass
         { 420,  2, 10.5f, true,  TargetState::FLUID   }, // Silver -> Molten Silver
         { 500,  1, 19.3f, true,  TargetState::FLUID   }, // Gold -> Molten Gold
-        { 580,  4,  0.001f, false, TargetState::GAS   }, // Red 1 -> heavier GAS
+        
+        { 580,  4,  0.001f, false, TargetState::GAS, Eigen::Vector3f(1.0f, 0.3f, 0.25f), Eigen::Vector3f(0.05f, 0.2f, 0.2f), 20.0f }, // Red 1 -> heavier GAS
         { 660,  7,  0.1f, false, TargetState::FLUID   }  // Red 2 -> fluid
     };
 
@@ -352,17 +357,26 @@ int main() {
             for (const auto& event : timeline) {
                 if (fluidframeCounter == event.frameTrigger) {
                     std::cout << ">>> TRIGGERING STATE CHANGE for Object ID: " << event.objectId << std::endl;
-                    Grid::BodyType targetType;
-                    switch(event.targetState) {
-                        case TargetState::FLUID: targetType = Grid::BodyType::FLUID; break;
-                        case TargetState::GAS:   targetType = Grid::BodyType::GAS; break;
-                        case TargetState::RIGID: targetType = Grid::BodyType::RIGID; break;
-                    }
-                    octree.makeObjectFluid(event.objectId, event.mass, targetType);
-                    
-                    if (event.isMoltenMetal) {
-                        // Make metals glow slightly when molten and adjust PBR values
-                        octree.setMaterialByObjectId(event.objectId, 1.5f, 0.2f, 1.0f);
+
+                    if (event.targetState == TargetState::GAS) {
+                        // Gases are Eulerian, not voxels: convert the solid into a gas
+                        // field of its own species rather than re-typing voxels.
+                        size_t cells = octree.vaporize(event.objectId, event.gasColor,
+                                                       event.gasAbsorption, event.gasMassScale);
+                        std::cout << "    vaporized " << cells << " voxels into gas" << std::endl;
+                    } else {
+                        Grid::BodyType targetType;
+                        switch(event.targetState) {
+                            case TargetState::FLUID: targetType = Grid::BodyType::FLUID; break;
+                            case TargetState::RIGID: targetType = Grid::BodyType::RIGID; break;
+                            default:                 targetType = Grid::BodyType::FLUID; break;
+                        }
+                        octree.makeObjectFluid(event.objectId, event.mass, targetType);
+
+                        if (event.isMoltenMetal) {
+                            // Make metals glow slightly when molten and adjust PBR values
+                            octree.setMaterialByObjectId(event.objectId, 1.5f, 0.2f, 1.0f);
+                        }
                     }
                     // octree.markPhysicsCollidersDirty();
                 }

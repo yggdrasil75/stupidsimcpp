@@ -2277,6 +2277,55 @@ public:
         physicsCollidersDirty_.store(true);
     }
 
+    size_t vaporize(int objectId, const GasSpecies_& species, float massScale = 1.0f) {
+        if (!root_) return 0;
+
+        std::vector<std::shared_ptr<NodeData>> nodes;
+        collectNodesByObjectId(objectId, nodes);
+        if (nodes.empty()) return 0;
+
+        auto obj = getOrCreateObject(objectId);
+
+        struct GasDrop { PointType pos; float amount; T payload; };
+        std::vector<GasDrop> drops;
+        drops.reserve(nodes.size());
+        for (auto& n : nodes) {
+            float voxelMass = obj->getPhysicsMaterial(n->physMatIdx).mass;
+            if (voxelMass <= 0.0f) voxelMass = 1.0f;
+            float amount = voxelMass * massScale;
+            if (amount > 0.0f) drops.push_back({ n->position, amount, n->data });
+        }
+
+        uint16_t speciesIdx = registerGasSpecies(species);
+
+        {
+            BoundingBox bounds = getNodesBounds(nodes);
+            int depth = 0;
+            OctreeNode* start = getHighestCommonNode(root_.get(), bounds, 0, depth);
+            size_t removed = removeObjectBatchRecursive(start, objectId);
+            size -= removed;
+            std::unique_lock<std::shared_mutex> lock(objectsMutex_);
+            objects_.erase(objectId);
+        }
+
+        size_t converted = 0;
+        for (const auto& d : drops) {
+            if (addGas(d.pos, speciesIdx, d.amount, d.payload)) ++converted;
+        }
+
+        physicsCollidersDirty_.store(true);
+        return converted;
+    }
+
+    size_t vaporize(int objectId,
+                    const Eigen::Vector3f& albedo,
+                    const Eigen::Vector3f& absorption = Eigen::Vector3f::Zero(),
+                    float massScale = 1.0f,
+                    uint32_t emittance = 0u) {
+        GasSpecies_ species(albedo, absorption, albedo /*scattering*/, emittance);
+        return vaporize(objectId, species, massScale);
+    }
+
     void markPhysicsCollidersDirty() {
         physicsCollidersDirty_.store(true);
     }
