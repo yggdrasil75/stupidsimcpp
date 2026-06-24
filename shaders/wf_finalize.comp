@@ -71,8 +71,8 @@ void main() {
             float mean = lumSum / n;
             float sampleVar = max(0.0, (lumSqSum / n) - mean * mean);
             float stdErr = sqrt(sampleVar / n);
-            float relErr = stdErr / (mean + 1e-3);
-            if (relErr < 0.02) {
+            float relErr = stdErr / (mean + 1e-4);
+            if (relErr < 0.01) {
                 adaptiveData[ad + 2u] = n;
             }
         }

@@ -19,7 +19,7 @@ constexpr int TILE       = 512;
 constexpr int TILE_AREA  = TILE * TILE;
 constexpr int GRID       = TILE / SUB;
 constexpr int SUBS_PER_T = GRID * GRID;
-constexpr int NTILES     = 32;
+constexpr int NTILES     = 512;
 
 class VoidAndCluster {
 public:
