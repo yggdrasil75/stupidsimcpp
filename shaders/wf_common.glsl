@@ -367,7 +367,7 @@ bool rayCubeIntersect(vec3 ro, vec3 rd, vec3 invD, GPUPBRRenderData pt,
     if (key == slab.x)      mask = vec3(1.0, 0.0, 0.0);
     else if (key == slab.y) mask = vec3(0.0, 1.0, 0.0);
     else                    mask = vec3(0.0, 0.0, 1.0);
-    normal = inside ? (sgn * mask) : (-sgn * mask);
+    normal = -sgn * mask;
     return true;
 }
 
