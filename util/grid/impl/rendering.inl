@@ -273,11 +273,13 @@ struct VulkanContext {
     VkBuffer wfPathBuf = VK_NULL_HANDLE, wfPathHitBuf = VK_NULL_HANDLE,
              wfExtendABuf = VK_NULL_HANDLE,
              wfExtendBBuf = VK_NULL_HANDLE, wfShadeBuf = VK_NULL_HANDLE,
-             wfShadowBuf = VK_NULL_HANDLE, wfCounterBuf = VK_NULL_HANDLE;
+             wfShadowBuf = VK_NULL_HANDLE, wfCounterBuf = VK_NULL_HANDLE,
+             wfArgsBuf = VK_NULL_HANDLE;
     VkDeviceMemory wfPathMem = VK_NULL_HANDLE, wfPathHitMem = VK_NULL_HANDLE,
                    wfExtendAMem = VK_NULL_HANDLE,
                    wfExtendBMem = VK_NULL_HANDLE, wfShadeMem = VK_NULL_HANDLE,
-                   wfShadowMem = VK_NULL_HANDLE, wfCounterMem = VK_NULL_HANDLE;
+                   wfShadowMem = VK_NULL_HANDLE, wfCounterMem = VK_NULL_HANDLE,
+                   wfArgsMem = VK_NULL_HANDLE;
     size_t wfPathCap = 0;
     VkBuffer       blueTileBuf = VK_NULL_HANDLE;
     VkDeviceMemory blueTileMem = VK_NULL_HANDLE;
@@ -1653,14 +1655,15 @@ struct WFPushConstants {
 static constexpr size_t WF_PATH_STRIDE   = 6 * 4 * sizeof(float); // hot record (was 9*vec4)
 static constexpr size_t WF_PATHHIT_STRIDE= 1 * 4 * sizeof(float); // transient extend->shade hand-off
 static constexpr size_t WF_SHADOW_STRIDE = 4 * 4 * sizeof(float);
-static constexpr size_t WF_COUNTER_SIZE  = 16 * sizeof(uint32_t);
-static constexpr VkDeviceSize WF_OFF_EXTEND_ARGS = 16;
-static constexpr VkDeviceSize WF_OFF_SHADE_ARGS  = 32;
-static constexpr VkDeviceSize WF_OFF_SHADOW_ARGS = 48;
+static constexpr size_t WF_COUNTER_SIZE  = 4 * sizeof(uint32_t);   // hot atomic counts only
+static constexpr size_t WF_ARGS_SIZE     = 12 * sizeof(uint32_t);  // 3x uvec4 dispatch args
+static constexpr VkDeviceSize WF_OFF_EXTEND_ARGS = 0;
+static constexpr VkDeviceSize WF_OFF_SHADE_ARGS  = 16;
+static constexpr VkDeviceSize WF_OFF_SHADOW_ARGS = 32;
 
 void initWavefront() {
-    VkDescriptorSetLayoutBinding b[19] = {};
-    for (int i = 0; i < 19; ++i) {
+    VkDescriptorSetLayoutBinding b[20] = {};
+    for (int i = 0; i < 20; ++i) {
         b[i].binding = i;
         b[i].descriptorCount = 1;
         b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -1670,7 +1673,7 @@ void initWavefront() {
     b[5].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
 
     VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    li.bindingCount = 19;
+    li.bindingCount = 20;
     li.pBindings = b;
     vkCreateDescriptorSetLayout(device, &li, nullptr, &wfDescLayout);
 
@@ -1728,6 +1731,7 @@ void ensureWavefrontBuffers(size_t maxPaths) {
     destroy(wfShadeBuf, wfShadeMem);
     destroy(wfShadowBuf, wfShadowMem);
     destroy(wfCounterBuf, wfCounterMem);
+    destroy(wfArgsBuf, wfArgsMem);
 
     const VkBufferUsageFlags store = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     const VkMemoryPropertyFlags devLocal = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
@@ -1738,12 +1742,13 @@ void ensureWavefrontBuffers(size_t maxPaths) {
     createBuffer(maxPaths * sizeof(uint32_t), store, devLocal, wfExtendBBuf, wfExtendBMem);
     createBuffer(maxPaths * sizeof(uint32_t), store, devLocal, wfShadeBuf,   wfShadeMem);
     createBuffer(maxPaths * WF_SHADOW_STRIDE, store, devLocal, wfShadowBuf,  wfShadowMem);
-    createBuffer(WF_COUNTER_SIZE, store | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, devLocal, wfCounterBuf, wfCounterMem);
+    createBuffer(WF_COUNTER_SIZE, store, devLocal, wfCounterBuf, wfCounterMem);
+    createBuffer(WF_ARGS_SIZE, store | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, devLocal, wfArgsBuf, wfArgsMem);
     wfPathCap = maxPaths;
 }
 
 void writeWavefrontDescriptors() {
-    VkDescriptorBufferInfo bi[19] = {};
+    VkDescriptorBufferInfo bi[20] = {};
     bi[0]  = {uboBuffer,      0, VK_WHOLE_SIZE};
     bi[1]  = {pbrPointBuffer, 0, VK_WHOLE_SIZE};
     bi[2]  = {materialBuffer, 0, VK_WHOLE_SIZE};
@@ -1762,10 +1767,11 @@ void writeWavefrontDescriptors() {
     bi[16] = {gasFieldBuffer ? gasFieldBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
     bi[17] = {gasCellBuffer  ? gasCellBuffer  : materialBuffer, 0, VK_WHOLE_SIZE};
     bi[18] = {blueTileBuf    ? blueTileBuf    : materialBuffer, 0, VK_WHOLE_SIZE};
+    bi[19] = {wfArgsBuf,      0, VK_WHOLE_SIZE};
 
-    VkWriteDescriptorSet w[19] = {};
+    VkWriteDescriptorSet w[20] = {};
     int n = 0;
-    for (int i = 0; i < 19; ++i) {
+    for (int i = 0; i < 20; ++i) {
         if (i == 5) continue;
         w[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         w[n].dstSet = wfDescSet;
@@ -1817,9 +1823,9 @@ void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel
 
     const uint32_t WG = 64;
     uint32_t pathGroups = uint32_t((maxPaths + WG - 1) / WG);
-    int maxIters = maxBounces + 24;
+    int maxIters = maxBounces + 12;
 
-    const int samplesPerSubmit = 1;
+    const int samplesPerSubmit = 4;
 
     VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     VkFence fence;
@@ -1852,7 +1858,7 @@ void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel
                 wfBarrier(commandBuffer);
                 wfBind(commandBuffer, wfExtendPipe);
                 wfPush(commandBuffer, parity, 0, s);
-                vkCmdDispatchIndirect(commandBuffer, wfCounterBuf, WF_OFF_EXTEND_ARGS);
+                vkCmdDispatchIndirect(commandBuffer, wfArgsBuf, WF_OFF_EXTEND_ARGS);
                 wfBarrier(commandBuffer);
                 wfBind(commandBuffer, wfArgsPipe);
                 wfPush(commandBuffer, parity, 1, s);
@@ -1860,7 +1866,7 @@ void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel
                 wfBarrier(commandBuffer);
                 wfBind(commandBuffer, wfShadePipe);
                 wfPush(commandBuffer, parity, 0, s);
-                vkCmdDispatchIndirect(commandBuffer, wfCounterBuf, WF_OFF_SHADE_ARGS);
+                vkCmdDispatchIndirect(commandBuffer, wfArgsBuf, WF_OFF_SHADE_ARGS);
                 wfBarrier(commandBuffer);
                 wfBind(commandBuffer, wfArgsPipe);
                 wfPush(commandBuffer, parity, 2, s);
@@ -1868,7 +1874,7 @@ void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel
                 wfBarrier(commandBuffer);
                 wfBind(commandBuffer, wfShadowPipe);
                 wfPush(commandBuffer, parity, 0, s);
-                vkCmdDispatchIndirect(commandBuffer, wfCounterBuf, WF_OFF_SHADOW_ARGS);
+                vkCmdDispatchIndirect(commandBuffer, wfArgsBuf, WF_OFF_SHADOW_ARGS);
                 wfBarrier(commandBuffer);
                 wfBind(commandBuffer, wfArgsPipe);
                 wfPush(commandBuffer, parity, 3, s);

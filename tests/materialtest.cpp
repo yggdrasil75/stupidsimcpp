@@ -218,6 +218,7 @@ int main() {
         {"-X", Eigen::Vector3f(-6.8f,  0.0f,  2.0f), Eigen::Vector3f(0.0f, 0.0f, 0.5f)},
         {"+Z", Eigen::Vector3f( 0.0f,  0.0f,  7.3f), Eigen::Vector3f(0.0f, 1.0f, 0.0f)},
         {"-Y", Eigen::Vector3f( 0.0f, -6.8f,  2.0f), Eigen::Vector3f(0.0f, 0.0f, 0.5f)}
+        // {"-Z", Eigen::Vector3f( 0.0f,  0.0f,  -1.3f), Eigen::Vector3f(0.0f, -1.0f, 0.0f)}
     };
 
     std::vector<StateEvent> timeline = {
