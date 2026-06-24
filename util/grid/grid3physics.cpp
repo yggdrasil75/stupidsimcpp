@@ -378,6 +378,42 @@ void Octree<T, IndexType>::stepGasFields(float dt) {
         const int R = field->res;
         if (R <= 0) continue;
         const size_t N = field->cells.size();
+        if (phys_gasPressure > 0.0f) {
+            std::vector<float> pressure(N, 0.0f);
+            for (size_t i = 0; i < N; ++i) {
+                float over = field->cells[i].totalDensity() - phys_gasRestDensity;
+                pressure[i] = phys_gasPressure * std::max(0.0f, over);
+            }
+
+            const float invDx = (field->cellSize.x() > 1e-8f) ? 1.0f / field->cellSize.x() : 0.0f;
+            const float invDy = (field->cellSize.y() > 1e-8f) ? 1.0f / field->cellSize.y() : 0.0f;
+            const float invDz = (field->cellSize.z() > 1e-8f) ? 1.0f / field->cellSize.z() : 0.0f;
+
+            for (int z = 0; z < R; ++z)
+            for (int y = 0; y < R; ++y)
+            for (int x = 0; x < R; ++x) {
+                size_t idx = field->index(x, y, z);
+                float dens = field->cells[idx].totalDensity();
+                if (dens <= 1e-6f) continue;
+
+                int xm = x > 0     ? x - 1 : x;
+                int xp = x < R - 1 ? x + 1 : x;
+                int ym = y > 0     ? y - 1 : y;
+                int yp = y < R - 1 ? y + 1 : y;
+                int zm = z > 0     ? z - 1 : z;
+                int zp = z < R - 1 ? z + 1 : z;
+
+                float gx = (xp != xm) ? (pressure[field->index(xp, y, z)] - pressure[field->index(xm, y, z)])
+                                        / float(xp - xm) * invDx : 0.0f;
+                float gy = (yp != ym) ? (pressure[field->index(x, yp, z)] - pressure[field->index(x, ym, z)])
+                                        / float(yp - ym) * invDy : 0.0f;
+                float gz = (zp != zm) ? (pressure[field->index(x, y, zp)] - pressure[field->index(x, y, zm)])
+                                        / float(zp - zm) * invDz : 0.0f;
+
+                Eigen::Vector3f gradP(gx, gy, gz);
+                field->cells[idx].velocity += -gradP * (dt / dens);
+            }
+        }
 
         for (auto& c : field->cells) {
             float dens = c.totalDensity();
@@ -398,28 +434,32 @@ void Octree<T, IndexType>::stepGasFields(float dt) {
             PointType src = centre - cur.velocity * dt;
 
             int sx, sy, sz;
-            if (field->worldToCell(src, sx, sy, sz)) {
+            bool inside = field->worldToCell(src, sx, sy, sz);
+            if (!inside) {
+                sx = std::clamp(sx, 0, R - 1);
+                sy = std::clamp(sy, 0, R - 1);
+                sz = std::clamp(sz, 0, R - 1);
+            }
+            {
                 const GasCell_<T>& s = field->cells[field->index(sx, sy, sz)];
                 dst.amount = s.amount;
                 dst.velocity = s.velocity;
                 dst.data = s.data;
-            } else {
-                dst.amount = cur.amount;
-                dst.velocity = cur.velocity;
-                dst.data = cur.data;
-                if (cur.totalDensity() > 1e-5f) {
-                    PointType outPos = centre + cur.velocity * dt;
-                    if (!field->worldToCell(outPos, sx, sy, sz)) {
-                        for (uint8_t sp = 0; sp < field->slotCount; ++sp) {
-                            float a = cur.amount[sp];
-                            if (a <= 1e-6f) continue;
-                            uint16_t g = field->slotToGlobal[sp];
-                            if (g == GasField_<T, IndexType>::INVALID_SLOT) continue;
-                            std::lock_guard<std::mutex> ol(outflowMutex);
-                            outflows.push_back({outPos, g, a * 0.5f, cur.data});
-                        }
-                        for (uint8_t sp = 0; sp < MAX_GAS_SPECIES; ++sp) dst.amount[sp] *= 0.5f;
+            }
+
+            if (cur.totalDensity() > 1e-5f) {
+                PointType outPos = centre + cur.velocity * dt;
+                int ox, oy, oz;
+                if (!field->worldToCell(outPos, ox, oy, oz)) {
+                    for (uint8_t sp = 0; sp < field->slotCount; ++sp) {
+                        float a = cur.amount[sp];
+                        if (a <= 1e-6f) continue;
+                        uint16_t g = field->slotToGlobal[sp];
+                        if (g == GasField_<T, IndexType>::INVALID_SLOT) continue;
+                        std::lock_guard<std::mutex> ol(outflowMutex);
+                        outflows.push_back({outPos, g, a * 0.5f, cur.data});
                     }
+                    for (uint8_t sp = 0; sp < MAX_GAS_SPECIES; ++sp) dst.amount[sp] *= 0.5f;
                 }
             }
         }
@@ -447,7 +487,11 @@ void Octree<T, IndexType>::stepGasFields(float dt) {
                 if (c.totalDensity() <= 1e-6f) continue;
                 for (auto& o : off) {
                     int nx = x+o[0], ny = y+o[1], nz = z+o[2];
-                    if (!field->inRange(nx, ny, nz)) continue;
+                    if (!field->inRange(nx, ny, nz)) {
+                        for (uint8_t sp = 0; sp < MAX_GAS_SPECIES; ++sp)
+                            diff[idx].amount[sp] += c.amount[sp] * share;
+                        continue;
+                    }
                     auto& nd = diff[field->index(nx, ny, nz)];
                     for (uint8_t sp = 0; sp < MAX_GAS_SPECIES; ++sp)
                         nd.amount[sp] += c.amount[sp] * share;

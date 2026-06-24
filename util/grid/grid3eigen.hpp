@@ -501,12 +501,16 @@ public:
     void setGasBuoyancy(float b) { phys_gasBuoyancy = b; }
     void setGasDiffusion(float d) { phys_gasDiffusion = std::clamp(d, 0.0f, 1.0f); }
     void setGasDissipation(float d) { phys_gasDissipation = std::max(0.0f, d); }
+    void setGasPressure(float k) { phys_gasPressure = std::max(0.0f, k); }
+    void setGasRestDensity(float d) { phys_gasRestDensity = std::max(0.0f, d); }
 private:
 
     uint16_t gasFieldResolution_ = 8;
     float phys_gasBuoyancy = 1.0f;
     float phys_gasDiffusion = 0.5f;
     float phys_gasDissipation = 0.02f;
+    float phys_gasPressure = 4.0f;
+    float phys_gasRestDensity = 0.0f;
 
     float lodFalloffRate_ = 0.1f; // Lower = better, higher = worse. 0-1
     float invLodf = 1 / lodFalloffRate_;
