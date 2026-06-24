@@ -586,6 +586,8 @@ frame Octree<T, IndexType>::renderFrameVulkan(const Camera& cam, int height, int
     vkCtx.updatePBRBuffers(gpuPoints);
     vkCtx.updateGasBuffers(tl_buffer.gasFields, tl_buffer.gasCells);
     camData.gasFieldCount = vkCtx.getGasFieldCount();
+    camData.blueFrameSeed = (uint32_t)frameCounter_ * 2654435761u + 0x9E3779B9u;
+    vkCtx.updateBlueNoise(camData.blueFrameSeed);
     {
         int tileW = 512;
         int tileH = 512;
@@ -844,6 +846,8 @@ frame Octree<T, IndexType>::blendedRenderFrameVulkan(const Camera& cam, int heig
     vkCtx.updatePBRBuffers(gpuPBRPoints);
     vkCtx.updateGasBuffers(tl_buffer.gasFields, tl_buffer.gasCells);
     pbrCamData.gasFieldCount = vkCtx.getGasFieldCount();
+    pbrCamData.blueFrameSeed = (uint32_t)frameCounter_ * 2654435761u + 0x9E3779B9u;
+    vkCtx.updateBlueNoise(pbrCamData.blueFrameSeed);
 
     {
         int tileW = 512;

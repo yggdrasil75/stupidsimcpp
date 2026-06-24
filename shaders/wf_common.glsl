@@ -120,7 +120,7 @@ layout(binding = 0) uniform CameraData {
     int sellWidth;
     int sellSecondary;
     uint gasFieldCount;
-    uint gasPad0;
+    uint blueFrameSeed;
     uint gasPad1;
     uint gasPad2;
 } cam;

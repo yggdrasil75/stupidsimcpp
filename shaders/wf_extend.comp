@@ -2,6 +2,7 @@
 #extension GL_EXT_ray_query : require
 #extension GL_GOOGLE_include_directive : require
 #include "wf_common.glsl"
+#include "blue_sample.glsl"
 
 void main() {
     uint gid = gl_GlobalInvocationID.x;
@@ -18,8 +19,7 @@ void main() {
     vec3 throughput = p.thp.xyz;
     vec3 radiance   = p.rad.xyz;
 
-    uint rng  = p.u0.y;
-    uint grng = p.u0.z;
+    BlueState bs = blueResume(p.u0.x, pc.sampleIndex, uint(cam.width), p.u0.y, p.u0.z);
     int bounce = PC_GET_BOUNCE(p.u0.w);
     int transp = PC_GET_TRANS(p.u0.w);
     int volum  = PC_GET_VOLUM(p.u0.w);
@@ -90,15 +90,15 @@ void main() {
         vec3 emission = (mData.emittance != 0u) ? medAlbedo.rgb * unpackRGB9E5(mData.emittance) : vec3(0.0);
 
         if (max_sigma_t > 1e-5) {
-            float t_scatter = -log(max(1e-7, 1.0 - nextFloat(rng))) / max_sigma_t;
+            float t_scatter = -log(max(1e-7, 1.0 - blueNext(bs))) / max_sigma_t;
             if (t_scatter < t) {
                 scattered = true;
                 vec3 scatterPos = origin + dir * t_scatter;
                 if (any(greaterThan(emission, vec3(0.0))))
                     radiance += throughput * emission * (vec3(1.0) - exp(-sigma_t_vec * t_scatter)) / max(sigma_t_vec, vec3(1e-5));
-                float z = 1.0 - 2.0 * nextFloat(rng);
+                float z = 1.0 - 2.0 * blueNext(bs);
                 float radius = sqrt(max(0.0, 1.0 - z * z));
-                float phi = 2.0 * PI * nextFloat(rng);
+                float phi = 2.0 * PI * blueNext(bs);
                 dir = vec3(radius * cos(phi), radius * sin(phi), z);
                 origin = scatterPos;
                 throughput *= (sigma_s / max_sigma_t) * exp((vec3(max_sigma_t) - sigma_t_vec) * t_scatter);
@@ -136,8 +136,8 @@ void main() {
     p.dir_rough.xyz = dir;
     p.thp.xyz = throughput;
     p.rad.xyz = radiance;
-    p.u0.y = rng;
-    p.u0.z = grng;
+    p.u0.y = bs.seqIndex;
+    p.u0.z = bs.dim;
 
     if (scattered) {
         if (volum >= MAX_VOLUMETRIC_BOUNCES) {

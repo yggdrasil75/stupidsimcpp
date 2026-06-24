@@ -21,7 +21,7 @@
 // Helper function to create a solid volume of voxels with material properties
 void createBox(Grid::Octree<int>& octree, const Eigen::Vector3f& center, const Eigen::Vector3f& size, const Eigen::Vector3f& albedo, float emission = 0.0f,
                float roughness = 0.8f, float metallic = 0.0f, float transmission = 0.0f, float ior = 1.45f,const Eigen::Vector3f& absorp = Eigen::Vector3f::Zero(), 
-               int oid = 0, Grid::BodyType bType = Grid::BodyType::STATIC, float mass = 1.0f, float step = 0.01) {
+               int oid = 0, Grid::BodyType bType = Grid::BodyType::STATIC, float mass = 1.0f, float step = 0.1) {
     Eigen::Vector3f halfSize = size / 2.0f;
     Eigen::Vector3f minB = center - halfSize;
     Eigen::Vector3f maxB = center + halfSize;

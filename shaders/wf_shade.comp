@@ -2,6 +2,7 @@
 #extension GL_EXT_ray_query : require
 #extension GL_GOOGLE_include_directive : require
 #include "wf_common.glsl"
+#include "blue_sample.glsl"
 
 
 void main() {
@@ -19,8 +20,7 @@ void main() {
     vec3 throughput = p.thp.xyz;
     vec3 radiance   = p.rad.xyz;
 
-    uint rng  = p.u0.y;
-    uint grng = p.u0.z;
+    BlueState bs = blueResume(p.u0.x, pc.sampleIndex, uint(cam.width), p.u0.y, p.u0.z);
     int bounce = PC_GET_BOUNCE(p.u0.w);
     int transp = PC_GET_TRANS(p.u0.w);
     int volum  = PC_GET_VOLUM(p.u0.w);
@@ -121,10 +121,10 @@ void main() {
 
         if (bounce > 2) {
             float continueProb = clamp(max(throughput.x, max(throughput.y, throughput.z)), 0.1, 0.95);
-            if (nextFloat(grng) > continueProb) {
+            if (blueNext(bs) > continueProb) {
                 p.rad.xyz = radiance;
-                p.u0.y = rng;
-                p.u0.z = grng;
+                p.u0.y = bs.seqIndex;
+                p.u0.z = bs.dim;
                 p.i1.w &= ~FLAG_ALIVE;
                 pathsHot[slot] = p;
                 pathsHit[slot].hit.z = -1.0;
@@ -161,12 +161,12 @@ void main() {
         bool neeDone = (cam.emissiveCount > 0 && entering == 1 && !isEmissive && opacity > 0.001);
 
         if (neeDone) {
-            int lightIdx = clamp(int(nextFloat(grng) * float(cam.emissiveCount)), 0, cam.emissiveCount - 1);
+            int lightIdx = clamp(int(blueNext(bs) * float(cam.emissiveCount)), 0, cam.emissiveCount - 1);
             uint emissivePtIdx = emissiveIndices[lightIdx];
             if (emissivePtIdx != uint(hitIndex)) {
                 GPUPBRRenderData lightPt = points[emissivePtIdx];
                 GPUMaterial lightMat = materials[lightPt.materialIdx];
-                vec3 jitter = vec3(nextFloat(rng), nextFloat(rng), nextFloat(rng)) - 0.5;
+                vec3 jitter = vec3(blueNext(bs), blueNext(bs), blueNext(bs)) - 0.5;
                 vec3 lightPos = lightPt.position + jitter * (lightPt.size * 0.8);
                 vec3 shadowOrigin = hitPoint + offsetNorm * DIST_EPSILON;
                 vec3 toLight = lightPos - shadowOrigin;
@@ -208,8 +208,8 @@ void main() {
             }
         }
 
-        float r1 = nextFloat(rng);
-        float r2 = nextFloat(rng);
+        float r1 = blueNext(bs);
+        float r2 = blueNext(bs);
         float phi = 2.0 * PI * r1;
         float cosThetaM = sqrt(max(0.0, (1.0 - r2) / (1.0 + (alpha2 - 1.0) * r2)));
         float sinThetaM = sqrt(max(0.0, 1.0 - cosThetaM * cosThetaM));
@@ -224,7 +224,7 @@ void main() {
         }
         vec3 F = F0 + (vec3(1.0) - F0) * pow(1.0 - min(1.0, VdotH), 5.0);
 
-        float r_type = nextFloat(grng);
+        float r_type = blueNext(bs);
         vec3 newDir, newOrigin, weight = vec3(0.0);
         isTransmissionInteraction = false;
 
@@ -239,7 +239,7 @@ void main() {
             }
             lastBounceSpecular = true;
         } else if (r_type < pspec + pdiff) {
-            float r3 = nextFloat(rng), r4 = nextFloat(rng);
+            float r3 = blueNext(bs), r4 = blueNext(bs);
             float Phid = 2.0 * PI * r3, rD = sqrt(r4);
             vec3 L_local = vec3(rD * cos(Phid), rD * sin(Phid), sqrt(max(0.0, 1.0 - r4)));
             newDir = normalize(tangent * L_local.x + bitangent * L_local.y + offsetNorm * L_local.z);
@@ -252,7 +252,7 @@ void main() {
             int curHero = hero;
             vec3 dispersionMask = vec3(1.0);
             if (curHero == 0) {
-                curHero = clamp(int(nextFloat(grng) * 3.0) + 1, 1, 3);
+                curHero = clamp(int(blueNext(bs) * 3.0) + 1, 1, 3);
                 dispersionMask = heroMask(curHero) * 3.0;
                 p.i1.w = SET_HERO(p.i1.w, curHero);
             }
@@ -310,8 +310,8 @@ void main() {
         throughput *= weight;
         if (max(max(throughput.x, throughput.y), throughput.z) < 0.01) {
             p.rad.xyz = radiance;
-            p.u0.y = rng;
-            p.u0.z = grng;
+            p.u0.y = bs.seqIndex;
+            p.u0.z = bs.dim;
             p.i1.w &= ~FLAG_ALIVE;
             pathsHot[slot] = p;
             pathsHit[slot].hit.z = -1.0;
@@ -333,8 +333,8 @@ void main() {
     p.dir_rough = vec4(dir, pathRoughness);
     p.thp.xyz = throughput;
     p.rad.xyz = radiance;
-    p.u0.y = rng;
-    p.u0.z = grng;
+    p.u0.y = bs.seqIndex;
+    p.u0.z = bs.dim;
     p.u0.w = PC_PACK(bounce, transp, volum);
     p.i1.x = mediumObjId;
     p.i1.y = mediumVoxelIdx;

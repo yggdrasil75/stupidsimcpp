@@ -1,6 +1,7 @@
 #pragma once
 #ifdef VULKAN_SUPPORT
 #include <vulkan/vulkan.h>
+#include "../../noise/bluetilepool.hpp"
 #endif
 
 namespace Grid {
@@ -196,7 +197,7 @@ struct alignas(16) GPUCameraData {
     int sellWidth;
     int sellSecondary;
     uint32_t gasFieldCount;
-    uint32_t gasPad0;
+    uint32_t blueFrameSeed;
     uint32_t gasPad1;
     uint32_t gasPad2;
 };
@@ -278,6 +279,13 @@ struct VulkanContext {
                    wfExtendBMem = VK_NULL_HANDLE, wfShadeMem = VK_NULL_HANDLE,
                    wfShadowMem = VK_NULL_HANDLE, wfCounterMem = VK_NULL_HANDLE;
     size_t wfPathCap = 0;
+    VkBuffer       blueTileBuf = VK_NULL_HANDLE;
+    VkDeviceMemory blueTileMem = VK_NULL_HANDLE;
+    size_t         blueTileCap = 0;
+    bool           bluePoolBuilt = false;
+    bluetile::Pool      bluePool;
+    bluetile::Assembler blueAsm{bluePool};
+    std::vector<float>  blueFrameTiles;
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
     VkDescriptorSet fastDescSet = VK_NULL_HANDLE;
     VkDescriptorSet pbrDescSet = VK_NULL_HANDLE;
@@ -1306,6 +1314,18 @@ struct VulkanContext {
 
     uint32_t getGasFieldCount() const { return gasFieldCount; }
 
+    void updateBlueNoise(uint32_t frameSeed) {
+        if (!bluePoolBuilt) {
+            bluePool.build();
+            bluePoolBuilt = true;
+        }
+        blueAsm.assemble(frameSeed, blueFrameTiles);
+        size_t bytes = blueFrameTiles.size() * sizeof(float);
+        updateDeviceLocalBuffer(blueTileBuf, blueTileMem, blueTileCap,
+                                blueFrameTiles.data(), bytes, bytes,
+                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    }
+
     void updateCommonBuffers(size_t outSize, GPUCameraData& camData) {
         size_t allocSize = (size_t)256;
         
@@ -1639,8 +1659,8 @@ static constexpr VkDeviceSize WF_OFF_SHADE_ARGS  = 32;
 static constexpr VkDeviceSize WF_OFF_SHADOW_ARGS = 48;
 
 void initWavefront() {
-    VkDescriptorSetLayoutBinding b[18] = {};
-    for (int i = 0; i < 18; ++i) {
+    VkDescriptorSetLayoutBinding b[19] = {};
+    for (int i = 0; i < 19; ++i) {
         b[i].binding = i;
         b[i].descriptorCount = 1;
         b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -1650,7 +1670,7 @@ void initWavefront() {
     b[5].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
 
     VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    li.bindingCount = 18;
+    li.bindingCount = 19;
     li.pBindings = b;
     vkCreateDescriptorSetLayout(device, &li, nullptr, &wfDescLayout);
 
@@ -1723,7 +1743,7 @@ void ensureWavefrontBuffers(size_t maxPaths) {
 }
 
 void writeWavefrontDescriptors() {
-    VkDescriptorBufferInfo bi[18] = {};
+    VkDescriptorBufferInfo bi[19] = {};
     bi[0]  = {uboBuffer,      0, VK_WHOLE_SIZE};
     bi[1]  = {pbrPointBuffer, 0, VK_WHOLE_SIZE};
     bi[2]  = {materialBuffer, 0, VK_WHOLE_SIZE};
@@ -1741,10 +1761,11 @@ void writeWavefrontDescriptors() {
     bi[15] = {sellmeierBuffer ? sellmeierBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
     bi[16] = {gasFieldBuffer ? gasFieldBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
     bi[17] = {gasCellBuffer  ? gasCellBuffer  : materialBuffer, 0, VK_WHOLE_SIZE};
+    bi[18] = {blueTileBuf    ? blueTileBuf    : materialBuffer, 0, VK_WHOLE_SIZE};
 
-    VkWriteDescriptorSet w[18] = {};
+    VkWriteDescriptorSet w[19] = {};
     int n = 0;
-    for (int i = 0; i < 18; ++i) {
+    for (int i = 0; i < 19; ++i) {
         if (i == 5) continue;
         w[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         w[n].dstSet = wfDescSet;
