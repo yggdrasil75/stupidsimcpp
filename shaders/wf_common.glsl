@@ -337,6 +337,18 @@ vec3 sampleSkybox(vec3 d) {
     return skyPixels[idx].rgb;
 }
 
+vec3 sampleCosHemisphere(vec3 N, float r1, float r2, out float pdfW) {
+    float phi = 2.0 * PI * r1;
+    float cosT = sqrt(max(0.0, 1.0 - r2));
+    float sinT = sqrt(r2);
+    vec3 up = abs(N.z) < 0.999 ? vec3(0, 0, 1) : vec3(1, 0, 0);
+    vec3 tang = normalize(cross(up, N));
+    vec3 bitang = cross(N, tang);
+    vec3 d = tang * (sinT * cos(phi)) + bitang * (sinT * sin(phi)) + N * cosT;
+    pdfW = cosT / PI;
+    return normalize(d);
+}
+
 bool rayCubeIntersect(vec3 ro, vec3 rd, vec3 invD, GPUPBRRenderData pt,
                       out float t, out vec3 normal, out vec3 hitPoint, out float tExit) {
     vec3 bMin = pt.position - pt.size * 0.5;

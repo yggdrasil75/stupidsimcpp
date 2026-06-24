@@ -26,6 +26,7 @@ void main() {
     int mediumObjId   = p.i1.x;
     int mediumVoxelIdx= p.i1.y;
     float carriedMisc = pathsHit[slot].hit.z;
+    float carriedSkyPdf = pathsHit[slot].hit.w;
 
     if (isInvalid(origin) || isInvalid(dir) || isInvalid(throughput) || remainingMaxDist <= 0.0) {
         p.i1.w &= ~FLAG_ALIVE;
@@ -161,7 +162,11 @@ void main() {
             float skyLum = dot(skyCol, vec3(0.2126, 0.7152, 0.0722));
             if (skyLum > 5.0) skyCol *= 5.0 / skyLum;
         }
-        if (bounce == 0 || cam.globalIllumination == 1) radiance += throughput * skyCol;
+        float skyMis = 1.0;
+        if (carriedSkyPdf >= 0.0 && carriedMisc > 0.0) {
+            skyMis = misWeight(carriedMisc, carriedSkyPdf);
+        }
+        if (bounce == 0 || cam.globalIllumination == 1) radiance += throughput * skyCol * skyMis;
         else radiance += throughput * cam.skylight;
         p.rad.xyz = radiance;
         p.i1.w &= ~FLAG_ALIVE;
@@ -181,7 +186,7 @@ void main() {
     p.i1.w |= FLAG_HITFOUND;
     pathsHot[slot] = p;
 
-    pathsHit[slot].hit = vec4(t, intBitsToFloat(hitIndex), carriedMisc, 0.0);
+    pathsHit[slot].hit = vec4(t, intBitsToFloat(hitIndex), carriedMisc, -1.0);
 
     uint sq = atomicAdd(ctr.shadeCount, 1u);
     shadeQueue[sq] = slot;

@@ -33,6 +33,7 @@ void main() {
     int hitIndex = floatBitsToInt(hitRec.y);
     float prevPdf = hitRec.z;
     float outMisc = -1.0;
+    float skyPdfFwd = -1.0;
 
     remainingMaxDist -= t;
     
@@ -119,8 +120,9 @@ void main() {
 
         vec3 F0 = mix(vec3(0.04), albedo.rgb, metallic);
 
-        if (bounce > 2) {
-            float continueProb = clamp(max(throughput.x, max(throughput.y, throughput.z)), 0.1, 0.95);
+        if (bounce > 3) {
+            float thpLum = dot(throughput, vec3(0.2126, 0.7152, 0.0722));
+            float continueProb = clamp(thpLum, 0.05, 0.95);
             if (blueNext(bs) > continueProb) {
                 p.rad.xyz = radiance;
                 p.u0.y = bs.seqIndex;
@@ -201,6 +203,43 @@ void main() {
                     sr.o_tmax   = vec4(shadowOrigin, shadowMaxDist);
                     sr.dir_slot = vec4(L, intBitsToFloat(int(slot)));
                     sr.contrib  = vec4(contrib, intBitsToFloat(int(emissivePtIdx)));
+                    sr.thp      = vec4(throughput, 0.0);
+                    uint si = atomicAdd(ctr.shadowCount, 1u);
+                    shadowQueue[si] = sr;
+                }
+            }
+        }
+
+        bool skyNeeDone = (cam.globalIllumination == 1 && entering == 1 && !isEmissive && (pspec + pdiff) > 0.001);
+        if (skyNeeDone) {
+            float sr1 = blueNext(bs);
+            float sr2 = blueNext(bs);
+            float skyPdfW;
+            vec3 Ls = sampleCosHemisphere(offsetNorm, sr1, sr2, skyPdfW);
+            float NdotLs = dot(offsetNorm, Ls);
+            if (NdotLs > 0.0 && skyPdfW > 1e-6) {
+                vec3 skyRad = sampleSkybox(Ls);
+                if (dot(skyRad, vec3(1.0)) > 1e-5) {
+                    vec3 Hs = normalize(V + Ls);
+                    float NdotHs = max(0.0, dot(offsetNorm, Hs));
+                    float VdotHs = max(0.0, dot(V, Hs));
+                    vec3 Fs = F0 + (vec3(1.0) - F0) * pow(1.0 - min(1.0, VdotHs), 5.0);
+                    vec3 diffuseBRDF = albedo.rgb * (vec3(1.0) - Fs) / PI;
+                    float Ds = ggxD(NdotHs, alpha2);
+                    float Gs = smith(NdotV, alpha2) * smith(NdotLs, alpha2);
+                    vec3 specBRDF = Fs * (Ds * Gs / max(1e-5, 4.0 * NdotV * NdotLs));
+                    vec3 evalBRDF = diffuseBRDF * opacity * (1.0 - metallic) + specBRDF;
+
+                    float bPdf = bsdfPdfW(offsetNorm, V, Ls, alpha2, pspec, pdiff);
+                    float wS = misWeight(skyPdfW, bPdf);
+
+                    vec3 contrib = skyRad * evalBRDF * NdotLs / skyPdfW * wS;
+
+                    vec3 shadowOrigin = hitPoint + offsetNorm * DIST_EPSILON;
+                    ShadowRay sr;
+                    sr.o_tmax   = vec4(shadowOrigin, cam.maxDist);
+                    sr.dir_slot = vec4(Ls, intBitsToFloat(int(slot)));
+                    sr.contrib  = vec4(contrib, intBitsToFloat(-1));
                     sr.thp      = vec4(throughput, 0.0);
                     uint si = atomicAdd(ctr.shadowCount, 1u);
                     shadowQueue[si] = sr;
@@ -302,8 +341,9 @@ void main() {
             lastBounceSpecular = true;
         }
 
-        if (neeDone && !isTransmissionInteraction) {
+        if ((neeDone || skyNeeDone) && !isTransmissionInteraction) {
             outMisc = bsdfPdfW(offsetNorm, V, newDir, alpha2, pspec, pdiff);
+            if (skyNeeDone) skyPdfFwd = max(0.0, dot(offsetNorm, newDir)) / PI;
         } else {
             outMisc = -1.0;
         }
@@ -351,6 +391,7 @@ void main() {
     if (!continuePath) p.i1.w &= ~FLAG_ALIVE;
     pathsHot[slot] = p;
     pathsHit[slot].hit.z = outMisc;
+    pathsHit[slot].hit.w = skyPdfFwd;
 
     if (continuePath) {
         if (!isTransmissionInteraction) {

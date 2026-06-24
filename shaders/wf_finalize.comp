@@ -66,13 +66,14 @@ void main() {
         adaptiveData[ad]      = lumSum;
         adaptiveData[ad + 1u] = lumSqSum;
 
-        int checkInterval = max(1, cam.targetSamples / 10);
-        if (s > 0 && (s % checkInterval == 0)) {
+        if (s >= 9 && (s % 10 == 9)) {
             float n = float(s + 1);
             float mean = lumSum / n;
-            float variance = (lumSqSum / n) - (mean * mean);
-            if (variance < 0.005 * (mean + 1e-4)) {
-                adaptiveData[ad + 2u] = float(s + 1);
+            float sampleVar = max(0.0, (lumSqSum / n) - mean * mean);
+            float stdErr = sqrt(sampleVar / n);
+            float relErr = stdErr / (mean + 1e-3);
+            if (relErr < 0.02) {
+                adaptiveData[ad + 2u] = n;
             }
         }
     }
