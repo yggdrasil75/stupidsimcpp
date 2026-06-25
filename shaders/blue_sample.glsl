@@ -2,7 +2,7 @@
 #define BLUE_SAMPLE_GLSL
 
 const int  BT_TILE   = 512;
-const int  BT_NTILES = 32;
+const int  BT_NTILES = 512;
 const int  BT_TILE_AREA = BT_TILE * BT_TILE;
 
 layout(std430, binding = 18) readonly buffer BlueTileBuffer { float blueTiles[]; };
@@ -59,14 +59,18 @@ float bt_key(ivec2 coord, uint tile) {
     return blueTiles[idx];
 }
 
+float bt_keyD(ivec2 coord, uint sampleIndex, uint dim) {
+    uint tile = bt_hash(sampleIndex * 0x9E3779B9u ^ dim * 0x85EBCA6Bu)
+              % uint(BT_NTILES);
+    return bt_key(coord, tile);
+}
+
 BlueState blueInit(ivec2 coord, int sampleIndex) {
     BlueState s;
-    uint tile = uint(sampleIndex) % uint(BT_NTILES);
-    s.keyA     = bt_key(coord, tile);
-    s.keyB     = bt_key(coord + ivec2(1, 1), tile);
-    s.seqIndex = uint(sampleIndex)
-               + bt_hash(uint(coord.x) ^ (uint(coord.y) << 16u));
-    s.dim      = 0u;
+    s.seqIndex = uint(sampleIndex);
+    s.dim      = bt_hash(uint(coord.x) ^ (uint(coord.y) << 16u)) & 0xFFFFu;
+    s.keyA     = uintBitsToFloat(uint(coord.x) | (uint(coord.y) << 16u));
+    s.keyB     = uintBitsToFloat(uint(sampleIndex));
     return s;
 }
 
@@ -80,15 +84,14 @@ BlueState blueResume(uint pixelIndex, int sampleIndex, uint width,
 }
 
 float blueNext(inout BlueState s) {
-    float u, key;
-    if ((s.dim & 1u) == 0u) {
-        u = bt_vdc2(s.seqIndex + (s.dim >> 1u) * 0x68E31DA4u);
-        key = s.keyA;
-        }
-    else {
-        u = bt_vdc3(s.seqIndex + (s.dim >> 1u) * 0x68E31DA4u);
-        key = s.keyB;
-        }
+    uint packedCoord = floatBitsToUint(s.keyA);
+    ivec2 coord = ivec2(int(packedCoord & 0xFFFFu), int(packedCoord >> 16u));
+    uint sampleIndex = floatBitsToUint(s.keyB);
+
+    uint pairIdx = s.seqIndex + (s.dim >> 1u) * 0x68E31DA4u;
+    float u   = ((s.dim & 1u) == 0u) ? bt_vdc2(pairIdx) : bt_vdc3(pairIdx);
+    float key = bt_keyD(coord + ((s.dim & 1u) == 0u ? ivec2(0) : ivec2(1)),
+                        sampleIndex, s.dim);
     s.dim += 1u;
     float r = u + key;
     return r - floor(r);

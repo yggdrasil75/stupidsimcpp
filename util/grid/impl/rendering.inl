@@ -1318,7 +1318,8 @@ struct VulkanContext {
 
     void updateBlueNoise(uint32_t frameSeed) {
         if (!bluePoolBuilt) {
-            bluePool.build();
+            bluePool.build(0x9E3779B97F4A7C15ull, bluetile::POOL,
+                           bluetile::SUB_AREA / 16);
             bluePoolBuilt = true;
         }
         blueAsm.assemble(frameSeed, blueFrameTiles);
