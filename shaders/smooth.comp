@@ -7,25 +7,11 @@ layout(push_constant) uniform Push {
     int samples;
 } pc;
 
-layout(std430, binding = 0) readonly buffer InBuf  { float inData[]; };
+layout(std430, binding = 0) readonly buffer InBuf { float inData[]; };
 layout(std430, binding = 1) writeonly buffer OutBuf { float outData[]; };
 
-const int ITER = 5;
-const float KERNEL[3] = float[](6.0/16.0, 4.0/16.0, 1.0/16.0);
-
-float luminance(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
-
-vec3 fetchColor(int x, int y, float invS) {
-    int i = (y * pc.width + x) * 5;
-    return vec3(inData[i], inData[i + 1], inData[i + 2]) * invS;
-}
-float fetchDepth(int x, int y, float invS) {
-    int i = (y * pc.width + x) * 5;
-    return inData[i + 3] * invS;
-}
-int fetchObj(int x, int y) {
-    int i = (y * pc.width + x) * 5;
-    return int(inData[i + 4]);
+float getLuminance(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
 }
 
 void main() {
@@ -33,83 +19,77 @@ void main() {
     int y = int(gl_GlobalInvocationID.y);
     if (x >= pc.width || y >= pc.height) return;
 
-    float invS = 1.0 / max(1.0, float(pc.samples));
-
-    vec3  centerColor = fetchColor(x, y, invS);
-    float centerDepth = fetchDepth(x, y, invS);
-    int   centerObj   = fetchObj(x, y);
-    float centerLum   = luminance(centerColor);
+    int centerIdx = (y * pc.width + x) * 5;
+    float invSamples = 1.0 / max(1.0, float(pc.samples));
+    
+    vec3 centerColor = vec3(inData[centerIdx], inData[centerIdx + 1], inData[centerIdx + 2]) * invSamples;
+    float centerDepth = inData[centerIdx + 3] * invSamples;
+    int centerObj = int(inData[centerIdx + 4]);
 
     vec3 localAvg = vec3(0.0);
-    float localLumSq = 0.0;
     float localW = 0.0;
     for (int dy = -1; dy <= 1; ++dy) {
         for (int dx = -1; dx <= 1; ++dx) {
             int nx = clamp(x + dx, 0, pc.width - 1);
             int ny = clamp(y + dy, 0, pc.height - 1);
-            if (fetchObj(nx, ny) != centerObj) continue;
-            vec3 c = fetchColor(nx, ny, invS);
-            localAvg += c;
-            localLumSq += luminance(c) * luminance(c);
-            localW += 1.0;
-        }
-    }
-    localAvg /= max(1.0, localW);
-    float localLumMean = luminance(localAvg);
-    float localVar = max(0.0, localLumSq / max(1.0, localW) - localLumMean * localLumMean);
-
-    float fireflyLimit = localLumMean * 3.0 + 0.1;
-    if (centerLum > fireflyLimit) {
-        centerColor = localAvg;
-        centerLum   = localLumMean;
-    }
-
-    float sigmaL = 4.0 * sqrt(localVar) + 0.05;
-
-    float depthScale = max(0.05 * abs(centerDepth), 0.05);
-
-    vec3  accumColor   = centerColor;
-    float accumWeight  = 1.0;
-
-    // Run the cascade. Each level re-reads the source at spacing 2^level taps.
-    for (int level = 0; level < ITER; ++level) {
-        int step = 1 << level;              // 1,2,4,8,16
-        for (int ky = -2; ky <= 2; ++ky) {
-            for (int kx = -2; kx <= 2; ++kx) {
-                if (kx == 0 && ky == 0) continue;
-                int nx = clamp(x + kx * step, 0, pc.width - 1);
-                int ny = clamp(y + ky * step, 0, pc.height - 1);
-
-                vec3  nColor = fetchColor(nx, ny, invS);
-                float nDepth = fetchDepth(nx, ny, invS);
-                int   nObj   = fetchObj(nx, ny);
-                float nLum   = luminance(nColor);
-
-                float hw = KERNEL[abs(kx)] * KERNEL[abs(ky)];
-
-                float dl = nLum - centerLum;
-                float wL = exp(-(dl * dl) / (2.0 * sigmaL * sigmaL));
-
-                float dd = (nDepth - centerDepth) / depthScale;
-                float wD = exp(-(dd * dd) * 0.5);
-
-                float wObj = (nObj == centerObj) ? 1.0 : 0.02;
-                
-                if (nObj == centerObj && nLum > fireflyLimit) {
-                    nColor *= fireflyLimit / max(nLum, 1e-3);
-                }
-
-                float w = hw * wL * wD * wObj;
-                accumColor  += nColor * w;
-                accumWeight += w;
+            int nIdx = (ny * pc.width + nx) * 5;
+            
+            // Only aggregate same-object pixels for accurate background color
+            if (int(inData[nIdx + 4]) == centerObj) {
+                localAvg += vec3(inData[nIdx], inData[nIdx + 1], inData[nIdx + 2]) * invSamples;
+                localW += 1.0;
             }
         }
     }
+    localAvg /= max(1.0, localW);
+    
+    float lLum = getLuminance(localAvg);
+    float cLum = getLuminance(centerColor);
+    
+    float maxAllowedLum = lLum * 3.0 + 0.1;
+    if (cLum > maxAllowedLum) {
+        centerColor = localAvg; // Override the center firefly entirely
+    }
+    float sumWeights = 0.0;
+    vec3 sumColor = vec3(0.0);
 
-    vec3 result = accumColor / max(accumWeight, 1e-5);
+    int radius = 2;
+    float spatialSigma = 2.0;
+    float depthSigma = 1.0;
 
+    for (int dy = -radius; dy <= radius; ++dy) {
+        for (int dx = -radius; dx <= radius; ++dx) {
+            int nx = clamp(x + dx, 0, pc.width - 1);
+            int ny = clamp(y + dy, 0, pc.height - 1);
+            int nIdx = (ny * pc.width + nx) * 5;
+            
+            vec3 nColor = vec3(inData[nIdx], inData[nIdx + 1], inData[nIdx + 2]) * invSamples;
+            float nDepth = inData[nIdx + 3] * invSamples;
+            int nObj = int(inData[nIdx + 4]);
+            
+            float spatialDistSq = float(dx*dx + dy*dy);
+            float spatialWeight = exp(-spatialDistSq / (2.0 * spatialSigma * spatialSigma));
+            
+            float depthDiff = nDepth - centerDepth;
+            float depthWeight = exp(-(depthDiff * depthDiff) / (2.0 * depthSigma * depthSigma));
+            
+            float objWeight = (centerObj == nObj) ? 1.0 : 0.05;
+            float nLum = getLuminance(nColor);
+            if (dx == 0 && dy == 0) {
+                nColor = centerColor; // Use clamped center
+            } else if (nLum > maxAllowedLum && nObj == centerObj) {
+                // If the neighbor is a firefly, forcibly dim it down to local tolerance bounds
+                nColor *= maxAllowedLum / max(nLum, 0.001);
+            }
+
+            float weight = spatialWeight * depthWeight * objWeight;
+            sumWeights += weight;
+            sumColor += nColor * weight;
+        }
+    }
+    
     int outIdx = (y * pc.width + x) * 3;
-    outData[outIdx]     = max(0.0, result.r);
-    outData[outIdx + 1] = max(0.0, result.g);
-    outData[outIdx + 2] = max(0.0, result.b);
+    outData[outIdx]     = clamp(sumColor.r / sumWeights, 0.0, 1.0);
+    outData[outIdx + 1] = clamp(sumColor.g / sumWeights, 0.0, 1.0);
+    outData[outIdx + 2] = clamp(sumColor.b / sumWeights, 0.0, 1.0);
 }

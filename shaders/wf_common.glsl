@@ -79,8 +79,6 @@ struct Counters {
     uint shadeCount;
     uint shadowCount;
     uint nextExtendCount;
-};
-struct DispatchArgs {
     uvec4 extendArgs;
     uvec4 shadeArgs;
     uvec4 shadowArgs;
@@ -121,7 +119,7 @@ layout(binding = 0) uniform CameraData {
     int sellWidth;
     int sellSecondary;
     uint gasFieldCount;
-    uint blueFrameSeed;
+    uint gasPad0;
     uint gasPad1;
     uint gasPad2;
 } cam;
@@ -143,7 +141,6 @@ layout(std430, binding = 14) buffer PathHitBuffer { PathHit pathsHit[]; };
 layout(std430, binding = 15) readonly buffer SellmeierBuffer { float sellmeierLUT[]; };
 layout(std430, binding = 16) readonly buffer GasFieldBuffer { GPUGasField gasFields[]; };
 layout(std430, binding = 17) readonly buffer GasCellBuffer  { float gasCells[]; };
-layout(std430, binding = 19) buffer DispatchArgsBuf { DispatchArgs args; };
 
 layout(push_constant) uniform PC {
     int parity;

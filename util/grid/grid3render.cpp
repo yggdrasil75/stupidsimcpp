@@ -586,8 +586,6 @@ frame Octree<T, IndexType>::renderFrameVulkan(const Camera& cam, int height, int
     vkCtx.updatePBRBuffers(gpuPoints);
     vkCtx.updateGasBuffers(tl_buffer.gasFields, tl_buffer.gasCells);
     camData.gasFieldCount = vkCtx.getGasFieldCount();
-    camData.blueFrameSeed = (uint32_t)frameCounter_ * 2654435761u + 0x9E3779B9u;
-    vkCtx.updateBlueNoise(camData.blueFrameSeed);
     {
         int tileW = 512;
         int tileH = 512;
@@ -647,6 +645,8 @@ frame Octree<T, IndexType>::fastRenderFrameVulkan(const Camera& cam, int height,
     std::vector<GPUFastRenderData> gpuPoints;
     std::vector<uint32_t> gpuLights;
     gpuPoints.reserve(tl_buffer.points.size());
+    Eigen::Vector3f vctMin = Eigen::Vector3f::Constant(std::numeric_limits<float>::max());
+    Eigen::Vector3f vctMax = Eigen::Vector3f::Constant(std::numeric_limits<float>::lowest());
     for(size_t i = 0; i < tl_buffer.points.size(); ++i) {
         if(isLodPoint[i]) continue;
         const auto& p = tl_buffer.points[i];
@@ -656,7 +656,12 @@ frame Octree<T, IndexType>::fastRenderFrameVulkan(const Camera& cam, int height,
         if (tl_buffer.materials[p.materialIdx].emittance != 0u) {
             gpuLights.push_back(gpuPoints.size() - 1);
         }
+
+        float h = p.size * 0.5f;
+        vctMin = vctMin.cwiseMin(p.position - Eigen::Vector3f::Constant(h));
+        vctMax = vctMax.cwiseMax(p.position + Eigen::Vector3f::Constant(h));
     }
+    if (vctMin.x() > vctMax.x()) { vctMin.setZero(); vctMax.setOnes(); } // empty scene guard
 
     int emissiveCount = gpuLights.size();
     if(gpuPoints.empty()) gpuPoints.push_back(GPUFastRenderData{});
@@ -682,6 +687,12 @@ frame Octree<T, IndexType>::fastRenderFrameVulkan(const Camera& cam, int height,
     vkCtx.updateSkyboxBuffer(skyData);
     vkCtx.updateLightBuffer(gpuLights);
     vkCtx.updateFastBuffers(gpuPoints);
+
+    {
+        Eigen::Vector3f keyLight = (-cam.direction.normalized());
+        vkCtx.vctBuildVolume(vkCtx.fastPointBuffer, (uint32_t)gpuPoints.size(),
+                             vctMin, vctMax, keyLight, /*enabled=*/true);
+    }
 
     VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     vkBeginCommandBuffer(vkCtx.commandBuffer, &beginInfo);
@@ -846,8 +857,6 @@ frame Octree<T, IndexType>::blendedRenderFrameVulkan(const Camera& cam, int heig
     vkCtx.updatePBRBuffers(gpuPBRPoints);
     vkCtx.updateGasBuffers(tl_buffer.gasFields, tl_buffer.gasCells);
     pbrCamData.gasFieldCount = vkCtx.getGasFieldCount();
-    pbrCamData.blueFrameSeed = (uint32_t)frameCounter_ * 2654435761u + 0x9E3779B9u;
-    vkCtx.updateBlueNoise(pbrCamData.blueFrameSeed);
 
     {
         int tileW = 512;
@@ -879,6 +888,13 @@ frame Octree<T, IndexType>::blendedRenderFrameVulkan(const Camera& cam, int heig
     size_t fastOutSize = width * height * 5 * sizeof(float);
     vkCtx.updateCommonBuffers(fastOutSize, fastCamData);
     vkCtx.updateFastBuffers(gpuFastPoints);
+
+    // VCT: build the radiance volume once for the whole frame (shared across tiles).
+    {
+        Eigen::Vector3f keyLight = (-cam.direction.normalized());
+        vkCtx.vctBuildVolume(vkCtx.fastPointBuffer, (uint32_t)gpuFastPoints.size(),
+                             globalMin, globalMax, keyLight, /*enabled=*/true);
+    }
 
     int tileW = 512;
     int tileH = 512;

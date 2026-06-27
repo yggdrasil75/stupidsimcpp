@@ -66,7 +66,8 @@ void main() {
         adaptiveData[ad]      = lumSum;
         adaptiveData[ad + 1u] = lumSqSum;
 
-        if (s >= 9 && (s % 10 == 9)) {
+        int checkInterval = max(1, cam.targetSamples / 10);
+        if (s > 0 && (s % checkInterval == 0)) {
             float n = float(s + 1);
             float mean = lumSum / n;
             float sampleVar = max(0.0, (lumSqSum / n) - mean * mean);

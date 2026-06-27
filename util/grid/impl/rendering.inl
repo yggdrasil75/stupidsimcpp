@@ -1,7 +1,6 @@
 #pragma once
 #ifdef VULKAN_SUPPORT
 #include <vulkan/vulkan.h>
-#include "../../noise/bluetilepool.hpp"
 #endif
 
 namespace Grid {
@@ -197,7 +196,7 @@ struct alignas(16) GPUCameraData {
     int sellWidth;
     int sellSecondary;
     uint32_t gasFieldCount;
-    uint32_t blueFrameSeed;
+    uint32_t gasPad0;
     uint32_t gasPad1;
     uint32_t gasPad2;
 };
@@ -273,21 +272,12 @@ struct VulkanContext {
     VkBuffer wfPathBuf = VK_NULL_HANDLE, wfPathHitBuf = VK_NULL_HANDLE,
              wfExtendABuf = VK_NULL_HANDLE,
              wfExtendBBuf = VK_NULL_HANDLE, wfShadeBuf = VK_NULL_HANDLE,
-             wfShadowBuf = VK_NULL_HANDLE, wfCounterBuf = VK_NULL_HANDLE,
-             wfArgsBuf = VK_NULL_HANDLE;
+             wfShadowBuf = VK_NULL_HANDLE, wfCounterBuf = VK_NULL_HANDLE;
     VkDeviceMemory wfPathMem = VK_NULL_HANDLE, wfPathHitMem = VK_NULL_HANDLE,
                    wfExtendAMem = VK_NULL_HANDLE,
                    wfExtendBMem = VK_NULL_HANDLE, wfShadeMem = VK_NULL_HANDLE,
-                   wfShadowMem = VK_NULL_HANDLE, wfCounterMem = VK_NULL_HANDLE,
-                   wfArgsMem = VK_NULL_HANDLE;
+                   wfShadowMem = VK_NULL_HANDLE, wfCounterMem = VK_NULL_HANDLE;
     size_t wfPathCap = 0;
-    VkBuffer       blueTileBuf = VK_NULL_HANDLE;
-    VkDeviceMemory blueTileMem = VK_NULL_HANDLE;
-    size_t         blueTileCap = 0;
-    bool           bluePoolBuilt = false;
-    bluetile::Pool      bluePool;
-    bluetile::Assembler blueAsm{bluePool};
-    std::vector<float>  blueFrameTiles;
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
     VkDescriptorSet fastDescSet = VK_NULL_HANDLE;
     VkDescriptorSet pbrDescSet = VK_NULL_HANDLE;
@@ -509,7 +499,7 @@ struct VulkanContext {
         vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
         std::vector<VkPhysicalDevice> devices(deviceCount);
         vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data());
-        physicalDevice = devices[0]; //need to set a flag for this at some point.
+        physicalDevice = devices[1]; //need to set a flag for this at some point.
 
         uint32_t queueFamilyCount = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
@@ -609,16 +599,18 @@ struct VulkanContext {
 
         VkDescriptorPoolSize poolSizes[] = { 
             {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 60},
-            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 6},
-            {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 6}
+            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 12},
+            {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 6},
+            {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 64},          // VCT mip + voxelize views
+            {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4}   // VCT volume sampler in fast/pbr sets
         };
         VkDescriptorPoolCreateInfo poolCreateInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-        poolCreateInfo.poolSizeCount = 3;
+        poolCreateInfo.poolSizeCount = 5;
         poolCreateInfo.pPoolSizes = poolSizes;
-        poolCreateInfo.maxSets = 8;
+        poolCreateInfo.maxSets = 40;
         vkCreateDescriptorPool(device, &poolCreateInfo, nullptr, &descriptorPool);
 
-        VkDescriptorSetLayoutBinding bindings[9] = {};
+        VkDescriptorSetLayoutBinding bindings[11] = {};
         for(int i=0; i<6; i++) {
             bindings[i].binding = i;
             bindings[i].descriptorType = i==3 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -641,8 +633,19 @@ struct VulkanContext {
         bindings[8].descriptorCount = 1;
         bindings[8].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
+        // VCT: mipmapped radiance volume sampler + params UBO
+        bindings[9].binding = 9;
+        bindings[9].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bindings[9].descriptorCount = 1;
+        bindings[9].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        bindings[10].binding = 10;
+        bindings[10].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        bindings[10].descriptorCount = 1;
+        bindings[10].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
         VkDescriptorSetLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        layoutInfo.bindingCount = 9;
+        layoutInfo.bindingCount = 11;
         layoutInfo.pBindings = bindings;
 
         vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &fastDescLayout);
@@ -800,6 +803,8 @@ struct VulkanContext {
         if (hasHardwareRT) {
             initWavefront();
         }
+
+        vctInit();
 
         initialized = true;
     }
@@ -1316,19 +1321,6 @@ struct VulkanContext {
 
     uint32_t getGasFieldCount() const { return gasFieldCount; }
 
-    void updateBlueNoise(uint32_t frameSeed) {
-        if (!bluePoolBuilt) {
-            bluePool.build(0x9E3779B97F4A7C15ull, bluetile::POOL,
-                           bluetile::SUB_AREA / 16);
-            bluePoolBuilt = true;
-        }
-        blueAsm.assemble(frameSeed, blueFrameTiles);
-        size_t bytes = blueFrameTiles.size() * sizeof(float);
-        updateDeviceLocalBuffer(blueTileBuf, blueTileMem, blueTileCap,
-                                blueFrameTiles.data(), bytes, bytes,
-                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    }
-
     void updateCommonBuffers(size_t outSize, GPUCameraData& camData) {
         size_t allocSize = (size_t)256;
         
@@ -1416,6 +1408,8 @@ struct VulkanContext {
             writes[i].pBufferInfo = &bInfos[i];
         }
         vkUpdateDescriptorSets(device, updateCount, writes, 0, nullptr);
+
+        vctWriteFastDescriptors();
     }
 
     void updatePBRBuffers(const std::vector<GPUPBRRenderData>& points) {
@@ -1449,6 +1443,19 @@ struct VulkanContext {
             writes[i].pBufferInfo = &bInfos[i];
         }
         vkUpdateDescriptorSets(device, updateCount, writes, 0, nullptr);
+
+        if (vctReady) {
+            VkDescriptorImageInfo si{vctSampler, vctSampleView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+            VkDescriptorBufferInfo bi{vctParamBuf, 0, VK_WHOLE_SIZE};
+            VkWriteDescriptorSet vw[2]{};
+            vw[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}; vw[0].dstSet = pbrDescSet;
+            vw[0].dstBinding = 9; vw[0].descriptorCount = 1;
+            vw[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; vw[0].pImageInfo = &si;
+            vw[1] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}; vw[1].dstSet = pbrDescSet;
+            vw[1].dstBinding = 10; vw[1].descriptorCount = 1;
+            vw[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; vw[1].pBufferInfo = &bi;
+            vkUpdateDescriptorSets(device, 2, vw, 0, nullptr);
+        }
     }
 
     void ensureLowResBuffer(size_t size) {
@@ -1656,15 +1663,14 @@ struct WFPushConstants {
 static constexpr size_t WF_PATH_STRIDE   = 6 * 4 * sizeof(float); // hot record (was 9*vec4)
 static constexpr size_t WF_PATHHIT_STRIDE= 1 * 4 * sizeof(float); // transient extend->shade hand-off
 static constexpr size_t WF_SHADOW_STRIDE = 4 * 4 * sizeof(float);
-static constexpr size_t WF_COUNTER_SIZE  = 4 * sizeof(uint32_t);   // hot atomic counts only
-static constexpr size_t WF_ARGS_SIZE     = 12 * sizeof(uint32_t);  // 3x uvec4 dispatch args
-static constexpr VkDeviceSize WF_OFF_EXTEND_ARGS = 0;
-static constexpr VkDeviceSize WF_OFF_SHADE_ARGS  = 16;
-static constexpr VkDeviceSize WF_OFF_SHADOW_ARGS = 32;
+static constexpr size_t WF_COUNTER_SIZE  = 16 * sizeof(uint32_t);
+static constexpr VkDeviceSize WF_OFF_EXTEND_ARGS = 16;
+static constexpr VkDeviceSize WF_OFF_SHADE_ARGS  = 32;
+static constexpr VkDeviceSize WF_OFF_SHADOW_ARGS = 48;
 
 void initWavefront() {
-    VkDescriptorSetLayoutBinding b[20] = {};
-    for (int i = 0; i < 20; ++i) {
+    VkDescriptorSetLayoutBinding b[18] = {};
+    for (int i = 0; i < 18; ++i) {
         b[i].binding = i;
         b[i].descriptorCount = 1;
         b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -1674,7 +1680,7 @@ void initWavefront() {
     b[5].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
 
     VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    li.bindingCount = 20;
+    li.bindingCount = 18;
     li.pBindings = b;
     vkCreateDescriptorSetLayout(device, &li, nullptr, &wfDescLayout);
 
@@ -1732,7 +1738,6 @@ void ensureWavefrontBuffers(size_t maxPaths) {
     destroy(wfShadeBuf, wfShadeMem);
     destroy(wfShadowBuf, wfShadowMem);
     destroy(wfCounterBuf, wfCounterMem);
-    destroy(wfArgsBuf, wfArgsMem);
 
     const VkBufferUsageFlags store = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     const VkMemoryPropertyFlags devLocal = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
@@ -1743,13 +1748,12 @@ void ensureWavefrontBuffers(size_t maxPaths) {
     createBuffer(maxPaths * sizeof(uint32_t), store, devLocal, wfExtendBBuf, wfExtendBMem);
     createBuffer(maxPaths * sizeof(uint32_t), store, devLocal, wfShadeBuf,   wfShadeMem);
     createBuffer(maxPaths * WF_SHADOW_STRIDE, store, devLocal, wfShadowBuf,  wfShadowMem);
-    createBuffer(WF_COUNTER_SIZE, store, devLocal, wfCounterBuf, wfCounterMem);
-    createBuffer(WF_ARGS_SIZE, store | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, devLocal, wfArgsBuf, wfArgsMem);
+    createBuffer(WF_COUNTER_SIZE, store | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, devLocal, wfCounterBuf, wfCounterMem);
     wfPathCap = maxPaths;
 }
 
 void writeWavefrontDescriptors() {
-    VkDescriptorBufferInfo bi[20] = {};
+    VkDescriptorBufferInfo bi[18] = {};
     bi[0]  = {uboBuffer,      0, VK_WHOLE_SIZE};
     bi[1]  = {pbrPointBuffer, 0, VK_WHOLE_SIZE};
     bi[2]  = {materialBuffer, 0, VK_WHOLE_SIZE};
@@ -1767,12 +1771,10 @@ void writeWavefrontDescriptors() {
     bi[15] = {sellmeierBuffer ? sellmeierBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
     bi[16] = {gasFieldBuffer ? gasFieldBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
     bi[17] = {gasCellBuffer  ? gasCellBuffer  : materialBuffer, 0, VK_WHOLE_SIZE};
-    bi[18] = {blueTileBuf    ? blueTileBuf    : materialBuffer, 0, VK_WHOLE_SIZE};
-    bi[19] = {wfArgsBuf,      0, VK_WHOLE_SIZE};
 
-    VkWriteDescriptorSet w[20] = {};
+    VkWriteDescriptorSet w[18] = {};
     int n = 0;
-    for (int i = 0; i < 20; ++i) {
+    for (int i = 0; i < 18; ++i) {
         if (i == 5) continue;
         w[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         w[n].dstSet = wfDescSet;
@@ -1824,9 +1826,9 @@ void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel
 
     const uint32_t WG = 64;
     uint32_t pathGroups = uint32_t((maxPaths + WG - 1) / WG);
-    int maxIters = maxBounces + 12;
+    int maxIters = maxBounces + 24;
 
-    const int samplesPerSubmit = 4;
+    const int samplesPerSubmit = 1;
 
     VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     VkFence fence;
@@ -1859,7 +1861,7 @@ void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel
                 wfBarrier(commandBuffer);
                 wfBind(commandBuffer, wfExtendPipe);
                 wfPush(commandBuffer, parity, 0, s);
-                vkCmdDispatchIndirect(commandBuffer, wfArgsBuf, WF_OFF_EXTEND_ARGS);
+                vkCmdDispatchIndirect(commandBuffer, wfCounterBuf, WF_OFF_EXTEND_ARGS);
                 wfBarrier(commandBuffer);
                 wfBind(commandBuffer, wfArgsPipe);
                 wfPush(commandBuffer, parity, 1, s);
@@ -1867,7 +1869,7 @@ void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel
                 wfBarrier(commandBuffer);
                 wfBind(commandBuffer, wfShadePipe);
                 wfPush(commandBuffer, parity, 0, s);
-                vkCmdDispatchIndirect(commandBuffer, wfArgsBuf, WF_OFF_SHADE_ARGS);
+                vkCmdDispatchIndirect(commandBuffer, wfCounterBuf, WF_OFF_SHADE_ARGS);
                 wfBarrier(commandBuffer);
                 wfBind(commandBuffer, wfArgsPipe);
                 wfPush(commandBuffer, parity, 2, s);
@@ -1875,7 +1877,7 @@ void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel
                 wfBarrier(commandBuffer);
                 wfBind(commandBuffer, wfShadowPipe);
                 wfPush(commandBuffer, parity, 0, s);
-                vkCmdDispatchIndirect(commandBuffer, wfArgsBuf, WF_OFF_SHADOW_ARGS);
+                vkCmdDispatchIndirect(commandBuffer, wfCounterBuf, WF_OFF_SHADOW_ARGS);
                 wfBarrier(commandBuffer);
                 wfBind(commandBuffer, wfArgsPipe);
                 wfPush(commandBuffer, parity, 3, s);
@@ -1904,6 +1906,8 @@ void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel
 
     vkDestroyFence(device, fence, nullptr);
 }
+
+#include "vct_host.inl"
 
 };
 inline VulkanContext vkCtx;

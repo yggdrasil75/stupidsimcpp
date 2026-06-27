@@ -88,6 +88,63 @@ layout(binding = 3) uniform CameraData {
 layout(std430, binding = 4) readonly buffer SkyboxBuffer { vec4 skyPixels[]; };
 layout(binding = 6) uniform accelerationStructureEXT tlas;
 layout(std430, binding = 8) readonly buffer MaterialBuffer { GPUMaterial materials[]; };
+layout(binding = 9)  uniform sampler3D voxelTex;
+layout(binding = 10) uniform VoxelParams {
+    vec3 volMin;     float voxelSize;
+    vec3 volExtent;  float invVoxelSize;
+    ivec3 gridRes;   int   maxMip;
+    vec3 lightDir;   float vctEnabled;
+} vp;
+
+vec3 worldToVoxelUV(vec3 p) { return (p - vp.volMin) / vp.volExtent; }
+
+vec4 sampleVoxelCone(vec3 worldPos, float diameter) {
+    vec3 uv = worldToVoxelUV(worldPos);
+    if (any(lessThan(uv, vec3(0.0))) || any(greaterThan(uv, vec3(1.0)))) return vec4(0.0);
+    float lod = clamp(log2(max(diameter * vp.invVoxelSize, 1.0)), 0.0, float(vp.maxMip));
+    return textureLod(voxelTex, uv, lod);
+}
+
+vec4 traceCone(vec3 origin, vec3 dir, float aperture, float maxConeDist) {
+    vec4 acc = vec4(0.0);
+    float dist = vp.voxelSize;
+    while (dist < maxConeDist && acc.a < 0.99) {
+        float diameter = max(vp.voxelSize, aperture * dist);
+        vec4 s = sampleVoxelCone(origin + dir * dist, diameter);
+        float w = (1.0 - acc.a);
+        acc.rgb += w * s.rgb;
+        acc.a   += w * s.a;
+        dist += diameter * 0.5;
+    }
+    return acc;
+}
+
+vec3 coneTraceDiffuse(vec3 worldPos, vec3 normal, float maxConeDist, out float ao) {
+    vec3 up = abs(normal.y) > 0.95 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
+    vec3 tg = normalize(cross(up, normal));
+    vec3 bt = cross(normal, tg);
+    const float aperture = 0.577;
+    vec3 diffuse = vec3(0.0);
+    float occlusion = 0.0;
+    const float wCenter = 0.25;
+    const float wSide   = 0.15;
+    vec3 o = worldPos + normal * vp.voxelSize * 1.5;
+
+    vec4 c = traceCone(o, normal, aperture, maxConeDist);
+    diffuse += wCenter * c.rgb; occlusion += wCenter * c.a;
+
+    const float SIN60 = 0.866025;
+    const float COS60 = 0.5;
+    for (int i = 0; i < 5; ++i) {
+        float ang = float(i) * (6.2831853 / 5.0);
+        vec3 dirT = cos(ang) * tg + sin(ang) * bt;
+        vec3 d = normalize(COS60 * normal + SIN60 * dirT);
+        vec4 sc = traceCone(o, d, aperture, maxConeDist);
+        diffuse += wSide * sc.rgb; occlusion += wSide * sc.a;
+    }
+    ao = 1.0 - clamp(occlusion, 0.0, 1.0);
+    return diffuse;
+}
 
 vec3 safe_invDir(vec3 d) {
     return vec3(
@@ -292,7 +349,19 @@ void main() {
             if (!isInternalVoxel) {
                 diffuse = max(0.0, dot(hits[i].normal, lightDir));
             }
-            surfaceColor = albedo.rgb * min(1.0, 0.35 + diffuse * 0.65);
+
+            if (vp.vctEnabled > 0.5 && !isInternalVoxel) {
+                // Cone-traced indirect diffuse + AO from the radiance volume.
+                vec3 hitPos = ray.origin + ray.dir * hits[i].t;
+                float ao;
+                float coneMax = length(vp.volExtent) * 0.5;
+                vec3 indirect = coneTraceDiffuse(hitPos, hits[i].normal, coneMax, ao);
+                vec3 directTerm  = albedo.rgb * diffuse * ao;
+                vec3 ambientTerm = albedo.rgb * 0.15 * ao;
+                surfaceColor = directTerm + ambientTerm + albedo.rgb * indirect;
+            } else {
+                surfaceColor = albedo.rgb * min(1.0, 0.35 + diffuse * 0.65);
+            }
         }
         
         float fogFactor = clamp((cam.maxDist - hits[i].t) * cam.invFogRange, cam.minVisibility, 1.0);

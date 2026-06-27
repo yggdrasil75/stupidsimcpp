@@ -14,131 +14,89 @@ layout(std430, binding = 0) readonly buffer FastBuf { float fastData[]; };
 layout(std430, binding = 1) readonly buffer PBRBuf { float pbrData[]; };
 layout(std430, binding = 2) writeonly buffer OutBuf { float outData[]; };
 
-float luminance(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
-
-vec3 fastColor(int x, int y) {
-    int i = (y * pc.width + x) * 5;
-    return vec3(fastData[i], fastData[i + 1], fastData[i + 2]);
-}
-int fastObjAt(int x, int y) {
-    return int(fastData[(y * pc.width + x) * 5 + 4]);
-}
-
-vec3 pbrColor(int lx, int ly, float invS) {
-    int i = (ly * pc.lowW + lx) * 5;
-    return vec3(pbrData[i], pbrData[i + 1], pbrData[i + 2]) * invS;
-}
-float pbrDepth(int lx, int ly, float invS) {
-    return pbrData[(ly * pc.lowW + lx) * 5 + 3] * invS;
-}
-int pbrObjAt(int lx, int ly) {
-    return int(pbrData[(ly * pc.lowW + lx) * 5 + 4]);
-}
-
 void main() {
     int x = int(gl_GlobalInvocationID.x);
     int y = int(gl_GlobalInvocationID.y);
     if (x >= pc.width || y >= pc.height) return;
 
-    float invS = 1.0 / max(1.0, float(pc.samples));
-    int outIdx = (y * pc.width + x) * 3;
+    int fastIdx = (y * pc.width + x) * 5;
+    // Fast render is exactly 1 sample, no accumulation division needed
+    float fastR = fastData[fastIdx];
+    float fastG = fastData[fastIdx + 1];
+    float fastB = fastData[fastIdx + 2];
+    float fastDepth = fastData[fastIdx + 3];
+    int fastObj = int(fastData[fastIdx + 4]);
 
-    vec3  fc       = fastColor(x, y);
-    int   fastObj  = fastObjAt(x, y);
-    float fastDepth = fastData[(y * pc.width + x) * 5 + 3];
+    int center_lx = int(round(float(x) * pc.pbrScale));
+    int center_ly = int(round(float(y) * pc.pbrScale));
 
-    float flx = float(x) * pc.pbrScale;
-    float fly = float(y) * pc.pbrScale;
-    int   center_lx = int(floor(flx));
-    int   center_ly = int(floor(fly));
+    float sumWeights = 0.0;
+    float sumR = 0.0, sumG = 0.0, sumB = 0.0;
 
-    int radius = 2;
-    float spatialSigma = 1.2;
-    float relativeDepthSigma = 0.06;
-
-    float sumW = 0.0;
-    vec3  sumLight = vec3(0.0);
+    int radius = 3;
+    float spatialSigma = 1.5;
+    float relativeDepthSigma = 0.05;
+    float invSamples = 1.0 / max(1.0, float(pc.samples));
 
     for (int dy = -radius; dy <= radius; ++dy) {
         for (int dx = -radius; dx <= radius; ++dx) {
             int nx = clamp(center_lx + dx, 0, pc.lowW - 1);
             int ny = clamp(center_ly + dy, 0, pc.lowH - 1);
+            int pbrIdx = (ny * pc.lowW + nx) * 5;
 
-            if (pbrObjAt(nx, ny) != fastObj) continue;
+            int pbrObj = int(pbrData[pbrIdx + 4]);
+            if (fastObj != pbrObj) continue;
 
-            float ddx = float(nx) - flx;
-            float ddy = float(ny) - fly;
-            float sDistSq = ddx * ddx + ddy * ddy;
-            float wS = exp(-sDistSq / (2.0 * spatialSigma * spatialSigma));
+            float pbrDepth = pbrData[pbrIdx + 3] * invSamples;
 
-            float pd = pbrDepth(nx, ny, invS);
-            float depthDiff = abs(fastDepth - pd) / max(fastDepth, 0.1);
-            if (fastDepth > 999000.0 && pd > 999000.0) depthDiff = 0.0;
-            float wD = exp(-(depthDiff * depthDiff) /
-                           (2.0 * relativeDepthSigma * relativeDepthSigma));
+            float sDistSq = float(dx*dx + dy*dy);
+            float spatialWeight = exp(-sDistSq / (2.0 * spatialSigma * spatialSigma));
 
-            float w = wS * wD;
-            sumW += w;
-            sumLight += pbrColor(nx, ny, invS) * w;
+            float depthDiff = abs(fastDepth - pbrDepth) / max(fastDepth, 0.1);
+            if (fastDepth > 999000.0 && pbrDepth > 999000.0) depthDiff = 0.0;
+            
+            float depthWeight = exp(-(depthDiff * depthDiff) / (2.0 * relativeDepthSigma * relativeDepthSigma));
+
+            float weight = spatialWeight * depthWeight;
+            sumWeights += weight;
+            sumR += pbrData[pbrIdx] * invSamples * weight;
+            sumG += pbrData[pbrIdx + 1] * invSamples * weight;
+            sumB += pbrData[pbrIdx + 2] * invSamples * weight;
         }
     }
-
-    if (sumW == 0.0 && fastObj != -1) {
-        int sr = radius * 4;
-        float nearest = 1e9;
-        for (int dy = -sr; dy <= sr; ++dy) {
-            for (int dx = -sr; dx <= sr; ++dx) {
+    
+    if (sumWeights == 0.0 && fastObj != -1) {
+        int searchRadius = radius * 3;
+        float nearestDist = 99999.0;
+        
+        for (int dy = -searchRadius; dy <= searchRadius; ++dy) {
+            for (int dx = -searchRadius; dx <= searchRadius; ++dx) {
                 int nx = clamp(center_lx + dx, 0, pc.lowW - 1);
                 int ny = clamp(center_ly + dy, 0, pc.lowH - 1);
-                if (pbrObjAt(nx, ny) == fastObj) {
-                    float d = float(dx*dx + dy*dy);
-                    if (d < nearest) {
-                        nearest = d;
-                        sumLight = pbrColor(nx, ny, invS);
-                        sumW = 1.0;
+                int pbrIdx = (ny * pc.lowW + nx) * 5;
+
+                if (int(pbrData[pbrIdx + 4]) == fastObj) {
+                    float dist = float(dx*dx + dy*dy);
+                    if (dist < nearestDist) {
+                        nearestDist = dist;
+                        sumR = pbrData[pbrIdx] * invSamples;
+                        sumG = pbrData[pbrIdx + 1] * invSamples;
+                        sumB = pbrData[pbrIdx + 2] * invSamples;
+                        sumWeights = 1.0;
                     }
                 }
             }
         }
     }
-
-    if (sumW <= 0.0) {
-        outData[outIdx]     = max(0.0, fc.r);
-        outData[outIdx + 1] = max(0.0, fc.g);
-        outData[outIdx + 2] = max(0.0, fc.b);
-        return;
+    
+    int outIdx = (y * pc.width + x) * 3;
+    if (sumWeights > 0.0) { 
+        outData[outIdx]     = clamp(sumR / sumWeights, 0.0, 1.0);
+        outData[outIdx + 1] = clamp(sumG / sumWeights, 0.0, 1.0);
+        outData[outIdx + 2] = clamp(sumB / sumWeights, 0.0, 1.0);
+    } else { 
+        outData[outIdx]     = clamp(fastR, 0.0, 1.0);
+        outData[outIdx + 1] = clamp(fastG, 0.0, 1.0);
+        outData[outIdx + 2] = clamp(fastB, 0.0, 1.0);
     }
-
-    vec3 pbrLight = sumLight / sumW;
-
-    vec3 fastBlur = vec3(0.0);
-    float fbW = 0.0;
-    for (int dy = -1; dy <= 1; ++dy) {
-        for (int dx = -1; dx <= 1; ++dx) {
-            int nx = clamp(x + dx, 0, pc.width - 1);
-            int ny = clamp(y + dy, 0, pc.height - 1);
-            if (fastObjAt(nx, ny) != fastObj) continue;
-            fastBlur += fastColor(nx, ny);
-            fbW += 1.0;
-        }
-    }
-    fastBlur /= max(1.0, fbW);
-
-    const float eps = 1e-3;
-    vec3 ratio = (fc + eps) / (fastBlur + eps);
-    ratio = clamp(ratio, vec3(0.5), vec3(2.0));
-
-    float localContrast = abs(luminance(fc) - luminance(fastBlur));
-    float detailAmount = clamp(localContrast * 4.0, 0.0, 1.0);
-
-    float convergence = clamp(float(pc.samples) / 256.0, 0.0, 1.0);
-    detailAmount *= (1.0 - convergence);
-
-    ratio = mix(vec3(1.0), ratio, detailAmount);
-
-    vec3 result = pbrLight * ratio;
-
-    outData[outIdx]     = max(0.0, result.r);
-    outData[outIdx + 1] = max(0.0, result.g);
-    outData[outIdx + 2] = max(0.0, result.b);
 }

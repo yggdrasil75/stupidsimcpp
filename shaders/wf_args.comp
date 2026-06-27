@@ -19,20 +19,16 @@ void main() {
             ctr.nextExtendCount = 0u;
             break;
         case 0:
-            args.extendArgs     = divUp(ctr.extendCount);
+            ctr.extendArgs      = divUp(ctr.extendCount);
             ctr.shadeCount      = 0u;
             ctr.nextExtendCount = 0u;
-            if (ctr.extendCount == 0u) {
-                args.shadeArgs  = uvec4(0u);
-                args.shadowArgs = uvec4(0u);
-            }
             break;
         case 1:
-            args.shadeArgs      = divUp(ctr.shadeCount);
+            ctr.shadeArgs       = divUp(ctr.shadeCount);
             ctr.shadowCount     = 0u;
             break;
         case 2:
-            args.shadowArgs     = divUp(ctr.shadowCount);
+            ctr.shadowArgs      = divUp(ctr.shadowCount);
             break;
         case 3:
             ctr.extendCount     = ctr.nextExtendCount;

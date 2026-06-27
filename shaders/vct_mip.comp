@@ -1,0 +1,32 @@
+#version 450
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+layout(binding = 0, rgba16f) uniform readonly  image3D srcMip;
+layout(binding = 1, rgba16f) uniform writeonly image3D dstMip;
+
+layout(push_constant) uniform Push {
+    ivec3 dstRes;
+    int pad;
+} pc;
+
+void main() {
+    ivec3 d = ivec3(gl_GlobalInvocationID.xyz);
+    if (any(greaterThanEqual(d, pc.dstRes))) return;
+
+    ivec3 s = d * 2;
+
+    vec3 radSum = vec3(0.0);
+    float aSum = 0.0;
+    for (int dz = 0; dz < 2; ++dz)
+        for (int dy = 0; dy < 2; ++dy)
+            for (int dx = 0; dx < 2; ++dx) {
+                vec4 c = imageLoad(srcMip, s + ivec3(dx, dy, dz));
+                radSum += c.rgb;
+                aSum   += c.a;
+            }
+
+    vec3 rad = radSum * 0.125;
+    float a = aSum * 0.125;
+
+    imageStore(dstMip, d, vec4(rad, a));
+}
