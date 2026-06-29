@@ -1,0 +1,37 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : require
+#include "wf_common.glsl"
+
+uvec4 divUp(uint count) {
+    if (count == 0u) return uvec4(0u, 0u, 0u, 0u);
+    return uvec4((count + 63u) / 64u, 1u, 1u, 0u);
+}
+
+void main() {
+    if (gl_GlobalInvocationID.x != 0u) return;
+
+    switch (pc.stage) {
+        case 4:
+            ctr.extendCount     = 0u;
+            ctr.shadeCount      = 0u;
+            ctr.shadowCount     = 0u;
+            ctr.nextExtendCount = 0u;
+            break;
+        case 0:
+            ctr.extendArgs      = divUp(ctr.extendCount);
+            ctr.shadeCount      = 0u;
+            ctr.nextExtendCount = 0u;
+            break;
+        case 1:
+            ctr.shadeArgs       = divUp(ctr.shadeCount);
+            ctr.shadowCount     = 0u;
+            break;
+        case 2:
+            ctr.shadowArgs      = divUp(ctr.shadowCount);
+            break;
+        case 3:
+            ctr.extendCount     = ctr.nextExtendCount;
+            break;
+    }
+}

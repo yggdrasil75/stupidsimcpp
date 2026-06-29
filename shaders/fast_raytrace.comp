@@ -1,0 +1,313 @@
+#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+
+struct GPURenderNode {
+    vec3 boundsMin;
+    float padding1;
+    vec3 boundsMax;
+    float padding2;
+    vec3 center;
+    float nodeSize;
+    uint isLeaf;
+    uint isLoaded;
+    uint childMask;
+    uint firstPoint;
+    uint pointCount;
+    int  lodPoint;
+    uint firstChild;
+    uint padding3;
+};
+
+struct GPUFastRenderData {
+    vec3 position;
+    float size;
+    vec3 color;
+    float emittance;
+    vec3 boundsMin;
+    float objectId;
+    vec3 boundsMax;
+    float padding2;
+};
+
+layout(std430, binding = 0) readonly buffer NodeBuffer { GPURenderNode nodes[]; };
+layout(std430, binding = 1) readonly buffer PointBuffer { GPUFastRenderData points[]; };
+layout(std430, binding = 2) writeonly buffer OutputBuffer { float pixels[]; };
+
+layout(binding = 3) uniform CameraData {
+    vec3 origin;
+    float lodMinDist;
+    vec3 dir;
+    float invLodf;
+    vec3 up;
+    float minVisibility;
+    vec3 right;
+    float maxDist;
+    vec3 skylight;
+    float tanfovx;
+    vec3 bgColor;
+    float tanfovy;
+    int width;
+    int height;
+    int maxBounces;
+    int useLod;
+    float invFogRange;
+    uint frameCount;
+    int skyWidth;
+    int skyHeight;
+    int currentSampleOffset;
+    int dispatchSamples;
+    int globalIllumination;
+    uint nodeCount;
+    uint pointCount;
+    int tileOffsetX;
+    int tileOffsetY;
+    int padding;
+} cam;
+
+struct Ray {
+    vec3 origin;
+    vec3 dir;
+    vec3 invDir;
+    ivec3 signMask;
+};
+
+Ray makeRay(vec3 o, vec3 d) {
+    Ray r;
+    r.origin = o;
+    r.dir = d;
+    r.invDir = 1.0 / d;
+    r.signMask = ivec3(r.invDir.x < 0 ? 1 : 0, r.invDir.y < 0 ? 1 : 0, r.invDir.z < 0 ? 1 : 0);
+    return r;
+}
+
+bool rayBoxIntersect(Ray ray, vec3 bMin, vec3 bMax, out float tMin, out float tMax) {
+    vec3 t0 = (bMin - ray.origin) * ray.invDir;
+    vec3 t1 = (bMax - ray.origin) * ray.invDir;
+    vec3 tsmall = min(t0, t1);
+    vec3 tbig = max(t0, t1);
+    tMin = max(max(tsmall.x, tsmall.y), tsmall.z);
+    tMax = min(min(tbig.x, tbig.y), tbig.z);
+    return tMax >= max(0.0, tMin);
+}
+
+bool rayCubeIntersect(Ray ray, GPUFastRenderData pt, out float t, out vec3 normal) {
+    float tMin, tMax;
+    if (!rayBoxIntersect(ray, pt.boundsMin, pt.boundsMax, tMin, tMax) || tMax < 0.0) return false;
+    
+    t = tMin < 0.0 ? tMax : tMin;
+    vec3 hitPoint = ray.origin + ray.dir * t;
+    
+    vec3 dMin = abs(hitPoint - pt.boundsMin);
+    vec3 dMax = abs(hitPoint - pt.boundsMax);
+    
+    float minDist = 999999.0;
+    int minAxis = 0;
+    float sgn = 1.0;
+    
+    if(dMin.x < minDist) {
+        minDist = dMin.x;
+        minAxis = 0;
+        sgn = -1.0;
+    }
+    if(dMin.y < minDist) {
+        minDist = dMin.y;
+        minAxis = 1;
+        sgn = -1.0;
+    }
+    if(dMin.z < minDist) {
+        minDist = dMin.z;
+        minAxis = 2;
+        sgn = -1.0;
+    }
+    if(dMax.x < minDist) {
+        minDist = dMax.x;
+        minAxis = 0;
+        sgn = 1.0;
+    }
+    if(dMax.y < minDist) {
+        minDist = dMax.y;
+        minAxis = 1;
+        sgn = 1.0;
+    }
+    if(dMax.z < minDist) {
+        minDist = dMax.z;
+        minAxis = 2;
+        sgn = 1.0;
+    }
+    
+    normal = vec3(0);
+    normal[minAxis] = sgn;
+    return true;
+}
+
+struct ChildHit {
+    uint nodeIdx;
+    float tMin;
+};
+
+int voxelTraverse(Ray ray, out int hitIndex, out float outT, out vec3 outNormal) {
+    float tMin, tMax;
+    if (nodes.length() == 0 || !rayBoxIntersect(ray, nodes[0].boundsMin, nodes[0].boundsMax, tMin, tMax)) {
+        return 0;
+    }
+    
+    float currentMaxDist = cam.maxDist;
+    tMax = min(tMax, currentMaxDist);
+    
+    uint stackNodes[256];
+    float stackTMin[256];
+    float stackTMax[256];
+    int stackPtr = 0;
+    
+    // Initial push of the root node if it's in front of the ray
+    if (tMax > 0.0) {
+        stackNodes[stackPtr] = 0;
+        stackTMin[stackPtr] = max(0.0, tMin);
+        stackTMax[stackPtr] = tMax;
+        stackPtr++;
+    }
+    
+    int hitFound = 0;
+
+    while(stackPtr > 0) {
+        stackPtr--;
+        uint nodeIdx = stackNodes[stackPtr];
+        float t0 = stackTMin[stackPtr];
+        float t1 = stackTMax[stackPtr];
+        
+        if (t0 > currentMaxDist) continue;
+        
+        GPURenderNode node = nodes[nodeIdx];
+
+        if (cam.useLod == 1 && node.lodPoint != -1) {
+            float dist = distance(node.center, ray.origin);
+            if (node.isLoaded == 0 || (dist > cam.lodMinDist && (dist / node.nodeSize) > cam.invLodf)) {
+                float t;
+                vec3 n;
+                if (rayCubeIntersect(ray, points[node.lodPoint], t, n) && t >= 0.0 && t <= currentMaxDist) {
+                    currentMaxDist = t;
+                    outT = t;
+                    outNormal = n;
+                    hitIndex = node.lodPoint;
+                    hitFound = 1;
+                }
+                if (node.isLoaded == 0 || node.isLeaf == 1) continue;
+            }
+        }
+
+        for (uint i = 0; i < node.pointCount; ++i) {
+            float t;
+            vec3 n;
+            uint pointIdx = node.firstPoint + i;
+            if (rayCubeIntersect(ray, points[pointIdx], t, n) && t >= 0.0 && t <= currentMaxDist && t <= t1 + 0.001) {
+                currentMaxDist = t;
+                outT = t;
+                outNormal = n;
+                hitIndex = int(pointIdx);
+                hitFound = 1;
+            }
+        }
+
+        if (node.isLeaf == 1 || node.isLoaded == 0) continue;
+
+        vec3 ttt = (node.center - ray.origin) * ray.invDir;
+        int raySignMask = ray.signMask.x | (ray.signMask.y << 1) | (ray.signMask.z << 2);
+        
+        ChildHit childHits[8];
+        int childCount = 0;
+
+        float current_tMin = t0;
+        int currIdx = ((current_tMin >= ttt.x) ? 1 : 0) | ((current_tMin >= ttt.y) ? 2 : 0) | ((current_tMin >= ttt.z) ? 4 : 0);
+
+        while(current_tMin < t1 && current_tMin <= currentMaxDist) {
+            vec3 next_t = vec3( (currIdx & 1) != 0 ? t1 : ttt.x, (currIdx & 2) != 0 ? t1 : ttt.y, (currIdx & 4) != 0 ? t1 : ttt.z );
+            float tNext = min(min(next_t.x, next_t.y), next_t.z);
+            int physIdx = currIdx ^ raySignMask;
+
+            if ((node.childMask & (1 << physIdx)) != 0) {
+                uint mask = node.childMask & ((1 << physIdx) - 1);
+                uint childOffset = bitCount(mask);
+                childHits[childCount].nodeIdx = node.firstChild + childOffset;
+                childHits[childCount].tMin = current_tMin;
+                childCount++;
+            }
+            
+            current_tMin = tNext;
+            currIdx |= ((next_t.x <= tNext + 0.0001) ? 1 : 0) | ((next_t.y <= tNext + 0.0001) ? 2 : 0) | ((next_t.z <= tNext + 0.0001) ? 4 : 0);
+        }
+
+        for (int i = 1; i < childCount; ++i) {
+            ChildHit key = childHits[i];
+            int j = i - 1;
+            while (j >= 0 && childHits[j].tMin > key.tMin) {
+                childHits[j + 1] = childHits[j];
+                j = j - 1;
+            }
+            childHits[j + 1] = key;
+        }
+
+        for(int i = childCount - 1; i >= 0; --i) {
+            if (stackPtr < 256) {
+                GPURenderNode childNode = nodes[childHits[i].nodeIdx];
+                float child_tMin, child_tMax;
+                rayBoxIntersect(ray, childNode.boundsMin, childNode.boundsMax, child_tMin, child_tMax);
+                
+                stackNodes[stackPtr] = childHits[i].nodeIdx;
+                stackTMin[stackPtr] = max(t0, child_tMin);
+                stackTMax[stackPtr] = min(t1, child_tMax);
+                stackPtr++;
+            }
+        }
+    }
+    return hitFound;
+}
+
+void main() {
+    ivec2 localCoord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 coord = localCoord + ivec2(cam.tileOffsetX, cam.tileOffsetY);
+    if (coord.x >= cam.width || coord.y >= cam.height) return;
+
+    float px = (2.0 * (float(coord.x) + 0.5) / float(cam.width) - 1.0) * cam.tanfovx;
+    float py = (1.0 - 2.0 * (float(coord.y) + 0.5) / float(cam.height)) * cam.tanfovy;
+    vec3 rayDir = normalize(cam.dir + cam.right * px + cam.up * py);
+    Ray ray = makeRay(cam.origin, rayDir);
+
+    vec3 finalColor = cam.bgColor;
+
+    int hitIndex;
+    float t;
+    vec3 normal;
+    int hitResult = voxelTraverse(ray, hitIndex, t, normal);
+
+    float depthOut = 1e30;
+    float objIdOut = -1.0;
+
+    if (hitResult == 1) {
+        GPUFastRenderData hitData = points[hitIndex];
+        vec3 surfaceColor;
+        if (hitData.emittance > 0.0) {
+            surfaceColor = hitData.color * hitData.emittance;
+        } else {
+            vec3 lightDir = normalize(-cam.dir);
+            float diffuse = max(0.0, dot(normal, lightDir));
+            float ambient = 0.35;
+            float intensity = min(1.0, ambient + diffuse * 0.65);
+            surfaceColor = hitData.color * intensity;
+        }
+
+        float fogT = clamp((t - cam.lodMinDist) * cam.invFogRange, 0.0, 1.0);
+        float fogFactor = mix(1.0, cam.minVisibility, fogT);
+        finalColor = mix(cam.bgColor, surfaceColor, fogFactor);
+        
+        depthOut = t;
+        objIdOut = float(hitData.objectId);
+    }
+    
+    finalColor = clamp(finalColor, 0.0, 1.0);
+    uint idx = (coord.y * cam.width + coord.x) * 5;
+    pixels[idx]     = finalColor.r;
+    pixels[idx + 1] = finalColor.g;
+    pixels[idx + 2] = finalColor.b;
+    pixels[idx + 3] = depthOut;
+    pixels[idx + 4] = objIdOut;
+}

@@ -1,0 +1,188 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : require
+#include "wf_common.glsl"
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= ctr.extendCount) return;
+
+    uint slot = (pc.parity == 0) ? extendA[gid] : extendB[gid];
+    PathHot p = pathsHot[slot];
+
+    if ((p.i1.w & FLAG_ALIVE) == 0) return;
+
+    vec3 origin = p.o_tmax.xyz;
+    vec3 dir    = p.dir_rough.xyz;
+    float remainingMaxDist = p.o_tmax.w;
+    vec3 throughput = p.thp.xyz;
+    vec3 radiance   = p.rad.xyz;
+
+    uint rng  = p.u0.y;
+    uint grng = p.u0.z;
+    int bounce = PC_GET_BOUNCE(p.u0.w);
+    int transp = PC_GET_TRANS(p.u0.w);
+    int volum  = PC_GET_VOLUM(p.u0.w);
+    int mediumObjId   = p.i1.x;
+    int mediumVoxelIdx= p.i1.y;
+    float carriedMisc = pathsHit[slot].hit.z;
+
+    if (isInvalid(origin) || isInvalid(dir) || isInvalid(throughput) || remainingMaxDist <= 0.0) {
+        p.i1.w &= ~FLAG_ALIVE;
+        pathsHot[slot] = p;
+        return;
+    }
+
+    vec3 invD = safe_invDir(dir);
+
+    int hitIndex;
+    float t;
+    vec3 normal;
+    vec3 hitPoint;
+    int hitResult = voxelTraverse(origin, dir, invD, remainingMaxDist, hitIndex, t, normal, hitPoint);
+    if (hitResult == 0) t = remainingMaxDist;
+
+    bool isPrimary = (bounce == 0 && transp == 0 && volum == 0);
+    if (isPrimary) {
+        if (hitResult == 1 && hitIndex >= 0 && hitIndex < points.length()) {
+            GPUPBRRenderData hd = points[hitIndex];
+            GPUMaterial mData = materials[hd.materialIdx];
+            float r, m;
+            uint sellRow;
+            unpackMaterial(mData.materialProps, r, m, sellRow);
+            float comp = 0.3;
+            if (m > 0.0) comp += 0.2;
+            if (r > 0.0 && r < 0.9) comp += 0.3;
+            if (mData.emittance != 0u) comp += 0.2;
+            p.rad.w = t;
+            p.i1.z  = hd.objectId;
+            p.thp.w = clamp(comp, 0.2, 1.0);
+        } else {
+            p.rad.w = LARGE;
+            p.i1.z  = -1;
+            p.thp.w = 0.1;
+        }
+    }
+
+    // ---- participating medium (scatter / absorption) ----
+    bool scattered = false;
+    if (mediumVoxelIdx != -1) {
+        GPUPBRRenderData medData = points[mediumVoxelIdx];
+        GPUMaterial mData = materials[medData.materialIdx];
+        float r, m;
+        uint sellRow;
+        unpackMaterial(mData.materialProps, r, m, sellRow);
+        vec3 medAbsorption = unpackRGB8(mData.absorption);
+        vec4 medAlbedo = unpackRGBA8(medData.color);
+        bool isMedGas = medData.isGas != 0;
+        float medOpacity = medAlbedo.a;
+
+        vec3 sigma_a = medAbsorption * 5.0;
+        vec3 sigma_s = (medAlbedo * medOpacity * 15.0).rgb;
+        if (isMedGas) {
+            float densityProxy = max(0.001, medOpacity);
+            vec3 compColor = vec3(1.0) - medAlbedo.rgb;
+            sigma_a = (medAbsorption + compColor * 2.0) * densityProxy * 5.0;
+            sigma_s = (medAlbedo * densityProxy * 5.0).rgb;
+        }
+        vec3 sigma_t_vec = sigma_a + sigma_s;
+        float max_sigma_t = max(sigma_t_vec.x, max(sigma_t_vec.y, sigma_t_vec.z));
+        vec3 emission = (mData.emittance != 0u) ? medAlbedo.rgb * unpackRGB9E5(mData.emittance) : vec3(0.0);
+
+        if (max_sigma_t > 1e-5) {
+            float t_scatter = -log(max(1e-7, 1.0 - nextFloat(rng))) / max_sigma_t;
+            if (t_scatter < t) {
+                scattered = true;
+                vec3 scatterPos = origin + dir * t_scatter;
+                if (any(greaterThan(emission, vec3(0.0))))
+                    radiance += throughput * emission * (vec3(1.0) - exp(-sigma_t_vec * t_scatter)) / max(sigma_t_vec, vec3(1e-5));
+                float z = 1.0 - 2.0 * nextFloat(rng);
+                float radius = sqrt(max(0.0, 1.0 - z * z));
+                float phi = 2.0 * PI * nextFloat(rng);
+                dir = vec3(radius * cos(phi), radius * sin(phi), z);
+                origin = scatterPos;
+                throughput *= (sigma_s / max_sigma_t) * exp((vec3(max_sigma_t) - sigma_t_vec) * t_scatter);
+                volum++;
+            }
+        }
+        if (!scattered) {
+            if (any(greaterThan(emission, vec3(0.0))))
+                radiance += throughput * emission * (vec3(1.0) - exp(-sigma_t_vec * t)) / max(sigma_t_vec, vec3(1e-5));
+            throughput *= exp((vec3(max_sigma_t) - sigma_t_vec) * t);
+        }
+        if (max(max(throughput.x, throughput.y), throughput.z) < 0.01) {
+            p.rad.xyz = radiance;
+            p.i1.w &= ~FLAG_ALIVE;
+            pathsHot[slot] = p;
+            return;
+        }
+    }
+    
+    if (!scattered && cam.gasFieldCount > 0u) {
+        float gasSeg = (hitResult == 1) ? t : remainingMaxDist;
+        if (gasSeg > 0.0 && gasSeg < LARGE) {
+            marchGasFields(origin, dir, gasSeg, throughput, radiance);
+            if (max(max(throughput.x, throughput.y), throughput.z) < 0.005) {
+                p.rad.xyz = radiance;
+                p.i1.w &= ~FLAG_ALIVE;
+                pathsHot[slot] = p;
+                return;
+            }
+        }
+    }
+
+    // Persist mutated state common to all exits.
+    p.o_tmax  = vec4(origin, remainingMaxDist);
+    p.dir_rough.xyz = dir;
+    p.thp.xyz = throughput;
+    p.rad.xyz = radiance;
+    p.u0.y = rng;
+    p.u0.z = grng;
+
+    if (scattered) {
+        if (volum >= MAX_VOLUMETRIC_BOUNCES) {
+            p.i1.w &= ~FLAG_ALIVE;
+            pathsHot[slot] = p;
+            return;
+        }
+        p.u0.w = PC_PACK(bounce, transp, volum);
+        p.i1.x = mediumObjId;
+        p.i1.y = mediumVoxelIdx;
+        pathsHot[slot] = p;
+        uint q = atomicAdd(ctr.nextExtendCount, 1u);
+        if (pc.parity == 0) extendB[q] = slot;
+        else extendA[q] = slot;
+        return;
+    }
+
+    if (hitResult == 0) {
+        vec3 skyCol = sampleSkybox(dir);
+        if (bounce > 0) {
+            float skyLum = dot(skyCol, vec3(0.2126, 0.7152, 0.0722));
+            if (skyLum > 5.0) skyCol *= 5.0 / skyLum;
+        }
+        if (bounce == 0 || cam.globalIllumination == 1) radiance += throughput * skyCol;
+        else radiance += throughput * cam.skylight;
+        p.rad.xyz = radiance;
+        p.i1.w &= ~FLAG_ALIVE;
+        pathsHot[slot] = p;
+        return;
+    }
+
+    if (hitIndex < 0 || hitIndex >= points.length()) {
+        p.i1.w &= ~FLAG_ALIVE;
+        pathsHot[slot] = p;
+        return;
+    }
+
+    p.u0.w = PC_PACK(bounce, transp, volum);
+    p.i1.x = mediumObjId;
+    p.i1.y = mediumVoxelIdx;
+    p.i1.w |= FLAG_HITFOUND;
+    pathsHot[slot] = p;
+
+    pathsHit[slot].hit = vec4(t, intBitsToFloat(hitIndex), carriedMisc, -1.0);
+
+    uint sq = atomicAdd(ctr.shadeCount, 1u);
+    shadeQueue[sq] = slot;
+}

@@ -1,0 +1,406 @@
+#version 460
+#extension GL_EXT_ray_query : require
+layout(local_size_x = 8, local_size_y = 8) in;
+
+vec3 unpackRGB9E5(uint c) {
+    if (c == 0u) return vec3(0.0);
+    int e = int(c >> 27) - 15;
+    float scale = exp2(float(e - 9));
+    float r = float(c & 0x1FFu) * scale;
+    float g = float((c >> 9) & 0x1FFu) * scale;
+    float b = float((c >> 18) & 0x1FFu) * scale;
+    return vec3(r, g, b);
+}
+
+#define PI 3.14159265359
+const float EPS = 1e-8;
+const float LARGE = 1e30;
+#define MAX_HITS 16 
+
+struct GPURenderNode {
+    vec3 boundsMin;
+    float p1;
+    vec3 boundsMax;
+    float p2;
+    vec3 center;
+    float nodeSize;
+    uint isLeaf;
+    uint isLoaded;
+    uint childMask;
+    uint firstPoint;
+    uint pointCount;
+    int lodPoint;
+    uint firstChild;
+    uint p3;
+};
+
+struct GPUMaterial {
+    uint emittance;
+    uint materialProps;
+    uint absorption;
+    uint padding;
+};
+
+struct GPUFastRenderData {
+    vec3 position;
+    float size;
+    uint color;
+    uint materialIdx;
+    int objectId;
+    uint padding2;
+};
+
+layout(std430, binding = 0) readonly buffer NodeBuffer { GPURenderNode nodes[]; };
+layout(std430, binding = 1) readonly buffer PointBuffer { GPUFastRenderData points[]; };
+layout(std430, binding = 2) writeonly buffer OutputBuffer { float pixels[]; };
+
+layout(binding = 3) uniform CameraData {
+    vec3 origin;
+    float lodMinDist;
+    vec3 dir;
+    float invLodf;
+    vec3 up;
+    float minVisibility;
+    vec3 right;
+    float maxDist;
+    vec3 skylight;
+    float tanfovx;
+    vec3 bgColor;
+    float tanfovy;
+    int width;
+    int height;
+    int maxBounces;
+    int useLod;
+    float invFogRange;
+    uint frameCount;
+    int skyWidth;
+    int skyHeight;
+    int currentSampleOffset;
+    int dispatchSamples;
+    int globalIllumination;
+    uint nodeCount;
+    uint pointCount;
+    int tileOffsetX;
+    int tileOffsetY;
+    int padding;
+} cam;
+
+layout(std430, binding = 4) readonly buffer SkyboxBuffer { vec4 skyPixels[]; };
+layout(binding = 6) uniform accelerationStructureEXT tlas;
+layout(std430, binding = 8) readonly buffer MaterialBuffer { GPUMaterial materials[]; };
+layout(binding = 9)  uniform sampler3D voxelTex;
+layout(binding = 10) uniform VoxelParams {
+    vec3 volMin;     float voxelSize;
+    vec3 volExtent;  float invVoxelSize;
+    ivec3 gridRes;   int   maxMip;
+    vec3 lightDir;   float vctEnabled;
+} vp;
+
+vec3 worldToVoxelUV(vec3 p) { return (p - vp.volMin) / vp.volExtent; }
+
+vec4 sampleVoxelCone(vec3 worldPos, float diameter) {
+    vec3 uv = worldToVoxelUV(worldPos);
+    if (any(lessThan(uv, vec3(0.0))) || any(greaterThan(uv, vec3(1.0)))) return vec4(0.0);
+    float lod = clamp(log2(max(diameter * vp.invVoxelSize, 1.0)), 0.0, float(vp.maxMip));
+    return textureLod(voxelTex, uv, lod);
+}
+
+vec4 traceCone(vec3 origin, vec3 dir, float aperture, float maxConeDist) {
+    vec4 acc = vec4(0.0);
+    float dist = vp.voxelSize;
+    while (dist < maxConeDist && acc.a < 0.99) {
+        float diameter = max(vp.voxelSize, aperture * dist);
+        vec4 s = sampleVoxelCone(origin + dir * dist, diameter);
+        float w = (1.0 - acc.a);
+        acc.rgb += w * s.rgb;
+        acc.a   += w * s.a;
+        dist += diameter * 0.5;
+    }
+    return acc;
+}
+
+vec3 coneTraceDiffuse(vec3 worldPos, vec3 normal, float maxConeDist, out float ao) {
+    vec3 up = abs(normal.y) > 0.95 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
+    vec3 tg = normalize(cross(up, normal));
+    vec3 bt = cross(normal, tg);
+    const float aperture = 0.577;
+    vec3 diffuse = vec3(0.0);
+    float occlusion = 0.0;
+    const float wCenter = 0.25;
+    const float wSide   = 0.15;
+    vec3 o = worldPos + normal * vp.voxelSize * 1.5;
+
+    vec4 c = traceCone(o, normal, aperture, maxConeDist);
+    diffuse += wCenter * c.rgb; occlusion += wCenter * c.a;
+
+    const float SIN60 = 0.866025;
+    const float COS60 = 0.5;
+    for (int i = 0; i < 5; ++i) {
+        float ang = float(i) * (6.2831853 / 5.0);
+        vec3 dirT = cos(ang) * tg + sin(ang) * bt;
+        vec3 d = normalize(COS60 * normal + SIN60 * dirT);
+        vec4 sc = traceCone(o, d, aperture, maxConeDist);
+        diffuse += wSide * sc.rgb; occlusion += wSide * sc.a;
+    }
+    ao = 1.0 - clamp(occlusion, 0.0, 1.0);
+    return diffuse;
+}
+
+vec3 safe_invDir(vec3 d) {
+    return vec3(
+        abs(d.x) < EPS ? (d.x < 0.0 ? -LARGE : LARGE) : 1.0 / d.x,
+        abs(d.y) < EPS ? (d.y < 0.0 ? -LARGE : LARGE) : 1.0 / d.y,
+        abs(d.z) < EPS ? (d.z < 0.0 ? -LARGE : LARGE) : 1.0 / d.z
+    );
+}
+
+struct Ray {
+    vec3 origin;
+    vec3 dir;
+    vec3 invDir;
+    ivec3 signMask;
+};
+Ray makeRay(vec3 o, vec3 d) {
+    Ray r;
+    r.origin = o;
+    r.dir = d;
+    r.invDir = safe_invDir(d);
+    r.signMask = ivec3(r.invDir.x < 0.0 ? 1 : 0, r.invDir.y < 0.0 ? 1 : 0, r.invDir.z < 0.0 ? 1 : 0);
+    return r;
+}
+
+vec4 unpackRGBA8(uint c) {
+    return vec4(float(c & 0xFF) / 255.0, 
+                float((c >> 8) & 0xFF) / 255.0, 
+                float((c >> 16) & 0xFF) / 255.0, 
+                float((c >> 24) & 0xFF) / 255.0);
+}
+
+bool rayBoxIntersect(Ray ray, vec3 bMin, vec3 bMax, out float tMin, out float tMax) {
+    vec3 t0 = (bMin - ray.origin) * ray.invDir;
+    vec3 t1 = (bMax - ray.origin) * ray.invDir;
+    vec3 tsmall = min(t0, t1);
+    vec3 tbig = max(t0, t1);
+    tMin = max(max(tsmall.x, tsmall.y), tsmall.z);
+    tMax = min(min(tbig.x, tbig.y), tbig.z);
+    return tMax >= max(0.0, tMin);
+}
+
+bool rayCubeIntersect(Ray ray, GPUFastRenderData pt, out float t, out float tExitOut, out vec3 normal) {
+    vec3 bMin = pt.position - pt.size * 0.5;
+    vec3 bMax = pt.position + pt.size * 0.5;
+
+    float tMin, tMax;
+    if (!rayBoxIntersect(ray, bMin, bMax, tMin, tMax) || tMax < 0.0) return false;
+    t = tMin < 0.0 ? tMax : tMin;
+    tExitOut = tMax;
+    vec3 hitPoint = ray.origin + ray.dir * t;
+    vec3 dMin = abs(hitPoint - bMin);
+    vec3 dMax = abs(hitPoint - bMax);
+    
+    float minDist = 999999.0;
+    int minAxis = 0;
+    float sgn = 1.0;
+    if(dMin.x < minDist) {
+        minDist = dMin.x;
+        minAxis = 0;
+        sgn = -1.0;
+    }
+    if(dMin.y < minDist) {
+        minDist = dMin.y;
+        minAxis = 1;
+        sgn = -1.0;
+    }
+    if(dMin.z < minDist) {
+        minDist = dMin.z;
+        minAxis = 2;
+        sgn = -1.0;
+    }
+    if(dMax.x < minDist) {
+        minDist = dMax.x;
+        minAxis = 0;
+        sgn = 1.0;
+    }
+    if(dMax.y < minDist) {
+        minDist = dMax.y;
+        minAxis = 1;
+        sgn = 1.0;
+    }
+    if(dMax.z < minDist) {
+        minDist = dMax.z;
+        minAxis = 2;
+        sgn = 1.0;
+    }
+    
+    normal = vec3(0);
+    normal[minAxis] = sgn;
+    return true;
+}
+
+vec3 sampleSkybox(vec3 d) {
+    float u = 0.5 + (atan(d.z, d.x) / (2.0 * PI));
+    float v = 0.5 - (asin(clamp(d.y, -1.0, 1.0)) / PI);
+    u = clamp(u, 0.0, 0.9999);
+    v = clamp(v, 0.0, 0.9999);
+    
+    int x = int(u * float(cam.skyWidth));
+    int y = int(v * float(cam.skyHeight));
+    int idx = y * cam.skyWidth + x;
+    
+    if (idx < 0 || idx >= cam.skyWidth * cam.skyHeight) return cam.bgColor;
+    return skyPixels[idx].rgb;
+}
+
+struct HitData {
+    int id;
+    float t;
+    float tExit;
+    vec3 normal;
+};
+
+int voxelTraverse(Ray ray, out HitData hits[MAX_HITS]) {
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, tlas, gl_RayFlagsNoneEXT, 0xFF, ray.origin, 0.0, ray.dir, cam.maxDist);
+
+    int hitCount = 0;
+    while(rayQueryProceedEXT(rq)) {
+        if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionAABBEXT) {
+            int ptIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
+            float t, tExit;
+            vec3 n;
+            if (rayCubeIntersect(ray, points[ptIdx], t, tExit, n) && t >= 0.0 && t <= cam.maxDist) {
+                if (hitCount < MAX_HITS) {
+                    hits[hitCount].id = ptIdx;
+                    hits[hitCount].t = t;
+                    hits[hitCount].tExit = tExit;
+                    hits[hitCount].normal = n;
+                    hitCount++;
+                } else {
+                    int maxIdx = 0;
+                    float maxT = hits[0].t;
+                    for (int i = 1; i < MAX_HITS; i++) {
+                        if (hits[i].t > maxT) {
+                            maxT = hits[i].t;
+                            maxIdx = i;
+                        }
+                    }
+                    if (t < maxT) {
+                        hits[maxIdx].id = ptIdx;
+                        hits[maxIdx].t = t;
+                        hits[maxIdx].tExit = tExit;
+                        hits[maxIdx].normal = n;
+                    }
+                }
+            }
+        }
+    }
+    
+    for (int i = 0; i < hitCount - 1; i++) {
+        for (int j = 0; j < hitCount - i - 1; j++) {
+            if (hits[j].t > hits[j + 1].t) {
+                HitData temp = hits[j];
+                hits[j] = hits[j + 1];
+                hits[j + 1] = temp;
+            }
+        }
+    }
+    
+    return hitCount;
+}
+
+void main() {
+    ivec2 localCoord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 coord = localCoord + ivec2(cam.tileOffsetX, cam.tileOffsetY);
+    if (coord.x >= cam.width || coord.y >= cam.height) return;
+
+    float px = (2.0 * (float(coord.x) + 0.5) / float(cam.width) - 1.0) * cam.tanfovx;
+    float py = (1.0 - 2.0 * (float(coord.y) + 0.5) / float(cam.height)) * cam.tanfovy;
+    vec3 rayDir = normalize(cam.dir + cam.right * px + cam.up * py);
+    Ray ray = makeRay(cam.origin, rayDir);
+
+    HitData hits[MAX_HITS];
+    int hitCount = voxelTraverse(ray, hits);
+
+    float depthOut = 1e30;
+    float objIdOut = -1.0;
+    
+    vec3 accum = vec3(0.0);
+    float accumAlpha = 0.0;
+    int prevOid = 0;
+    bool hasPrev = false;
+
+    for (int i = 0; i < hitCount; i++) {
+        if (accumAlpha >= 0.99) break;
+        
+        GPUFastRenderData hitData = points[hits[i].id];
+        
+        vec4 albedo = unpackRGBA8(hitData.color);
+        float alpha = albedo.a;
+        GPUMaterial mat = materials[hitData.materialIdx];
+
+        bool isInternalVoxel = (hasPrev && hitData.objectId == prevOid);
+
+        vec3 surfaceColor;
+        if (mat.emittance != 0u) {
+            surfaceColor = albedo.rgb * unpackRGB9E5(mat.emittance);
+        } else {
+            vec3 lightDir = normalize(-cam.dir);
+            float diffuse = 0.0;
+            if (!isInternalVoxel) {
+                diffuse = max(0.0, dot(hits[i].normal, lightDir));
+            }
+
+            if (vp.vctEnabled > 0.5 && !isInternalVoxel) {
+                // Cone-traced indirect diffuse + AO from the radiance volume.
+                vec3 hitPos = ray.origin + ray.dir * hits[i].t;
+                float ao;
+                float coneMax = length(vp.volExtent) * 0.5;
+                vec3 indirect = coneTraceDiffuse(hitPos, hits[i].normal, coneMax, ao);
+                vec3 directTerm  = albedo.rgb * diffuse * ao;
+                vec3 ambientTerm = albedo.rgb * 0.15 * ao;
+                surfaceColor = directTerm + ambientTerm + albedo.rgb * indirect;
+            } else {
+                surfaceColor = albedo.rgb * min(1.0, 0.35 + diffuse * 0.65);
+            }
+        }
+        
+        float fogFactor = clamp((cam.maxDist - hits[i].t) * cam.invFogRange, cam.minVisibility, 1.0);
+        vec3 skyColor = sampleSkybox(rayDir);
+        
+        surfaceColor = surfaceColor * fogFactor + skyColor * (1.0 - fogFactor);
+
+        float coverage;
+        if (isInternalVoxel) {
+            float thickness = max(0.0, hits[i].tExit - hits[i].t);
+            float trPerUnit = clamp(1.0 - alpha, 0.0, 1.0);
+            coverage = 1.0 - pow(trPerUnit, thickness);
+        } else {
+            coverage = alpha;
+        }
+        
+        accum += surfaceColor * coverage * (1.0 - accumAlpha);
+        accumAlpha += coverage * (1.0 - accumAlpha);
+        prevOid = hitData.objectId;
+        hasPrev = true;
+
+        if (i == 0) {
+            depthOut = hits[i].t;
+            objIdOut = float(hitData.objectId);
+        }
+    }
+    
+    vec3 finalRGB = accum;
+    if (accumAlpha < 1.0) {
+        vec3 skyColor = sampleSkybox(rayDir);
+        finalRGB += skyColor * (1.0 - accumAlpha);
+    }
+    
+    finalRGB = clamp(finalRGB, 0.0, 1.0);
+
+    uint idx = (coord.y * cam.width + coord.x) * 5;
+    pixels[idx] = finalRGB.r;
+    pixels[idx + 1] = finalRGB.g;
+    pixels[idx + 2] = finalRGB.b;
+    pixels[idx + 3] = depthOut;
+    pixels[idx + 4] = objIdOut;
+}

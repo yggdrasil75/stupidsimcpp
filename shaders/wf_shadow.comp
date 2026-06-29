@@ -1,0 +1,31 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : require
+#include "wf_common.glsl"
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= ctr.shadowCount) return;
+
+    ShadowRay sr = shadowQueue[gid];
+    vec3 ro = sr.o_tmax.xyz;
+    float maxDist = sr.o_tmax.w;
+    vec3 rd = sr.dir_slot.xyz;
+    int pathSlot = floatBitsToInt(sr.dir_slot.w);
+    vec3 contrib = sr.contrib.rgb;
+    int lightPtIdx = floatBitsToInt(sr.contrib.w);
+    vec3 thp = sr.thp.rgb;
+
+    vec3 invD = safe_invDir(rd);
+    vec3 transmittance = shadowTransmit(ro, rd, invD, maxDist, lightPtIdx);
+    if (all(lessThanEqual(transmittance, vec3(0.0)))) return;
+
+    vec3 directLight = contrib * transmittance;
+    float lum = dot(directLight, vec3(0.2126, 0.7152, 0.0722));
+    if (lum > 20.0) directLight *= 20.0 / lum;
+
+    vec3 add = thp * directLight;
+    if (isInvalid(add)) return;
+
+    pathsHot[pathSlot].rad.xyz += add;
+}

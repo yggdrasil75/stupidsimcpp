@@ -1,20 +1,11 @@
 #include <iostream>
 #include <vector>
 #include <string>
-
 #include <GLFW/glfw3.h>
-
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
-
-#include "../util/noise/pnoise.cpp"
-#include "planet.cpp"
-#include "plant.cpp"
-// #include "terrain.cpp"
 #include "../util/basicdefines.hpp"
-#include "../util/grid/grid3render.cpp"
-#include "../util/grid/grid3physics.cpp"
 
 void framebuffer_size_callback(GLFWwindow* window, int width, int height) {
     glViewport(0, 0, width, height);
@@ -81,28 +72,8 @@ int main() {
     ImGui_ImplOpenGL3_Init(glsl_version);
 
     ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
-
-    planetSimUI planetApp;
-    NoisePreviewState noiseState;
-    PlantSimUI plantApp;
-    // TerrainSimUI terrainApp;
-    bool doShowPlanet = false;
-    bool doShowPlants = true;
-    bool doShowNoiseLab = false;
-    // bool doShowTerrain = true;
-
-    if (noiseState.layers.empty()) {
-        NoiseLayer defaultLayer;
-        strcpy(defaultLayer.name, "Base Terrain");
-        defaultLayer.type = NoiseType::Fractal;
-        noiseState.layers.push_back(defaultLayer);
-    }
-    updateNoiseTexture(noiseState);
+    PlantSimUI plantsim;
     
-    Eigen::Vector3f selectedPlanetPos(1024.0f, 0.0f, 0.0f);
-    float regionSize = 1000.0f;
-    float regionResolution = 10.0f;
-
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
         glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
@@ -111,44 +82,20 @@ int main() {
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
-
-        ImGui::GetMainViewport();
-        if (doShowNoiseLab) drawNoiseLab(noiseState);
-        if (doShowPlanet) planetApp.renderUI(window);
-        if (doShowPlants) plantApp.renderUI(window);
-        // if (doShowTerrain) terrainApp.renderUI();
-
-        ImGui::Begin("Main Controls");
-        ImGui::Checkbox("Show Planet", &doShowPlanet);
-        ImGui::Checkbox("Show Plants", &doShowPlants);
-        // ImGui::Checkbox("Show 2D Terrain", &doShowTerrain);
-        ImGui::Checkbox("Show Noise lab", &doShowNoiseLab);
-
-        ImGui::Text("Bridge: Noise Lab -> Planet Sim");
-        ImGui::Separator();
-        
-        ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "Current Noise Layers: %zu", noiseState.layers.size());
-        
-        if (ImGui::Button("APPLY CURRENT NOISE TO PLANET", ImVec2(-1, 50))) {
-            planetApp.applyNoise(noiseState);
-        }
-        
-        // if (ImGui::Button("APPLY CURRENT NOISE TO 2D TERRAIN", ImVec2(-1, 30))) {
-        //     terrainApp.applyNoise(noiseState);
-        // }
-        
-        // ImGui::Separator();
-        // ImGui::TextColored(ImVec4(0.6f, 0.9f, 0.6f, 1.0f), "Detailed Terrain Region Selection");
-        // ImGui::DragFloat3("Center Coord (3D)", selectedPlanetPos.data(), 1.0f);
-        // ImGui::DragFloat("Region Size (m)", &regionSize, 10.0f, 100.0f, 10000.0f);
-        // ImGui::DragFloat("Resolution (m/vx)", &regionResolution, 0.1f, 0.5f, 100.0f);
-
-        // if (ImGui::Button("Extract Region to Terrain Module", ImVec2(-1, 40))) {
-        //     terrainApp.applyRegion(selectedPlanetPos, regionSize, regionResolution, noiseState);
-        //     doShowTerrain = true;
-        // }
+        #ifdef IMGUI_HAS_VIEWPORT
+        ImGuiViewport* viewport = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(viewport->GetWorkPos());
+        ImGui::SetNextWindowSize(viewport->GetWorkSize());
+        ImGui::SetNextWindowViewport(viewport->ID);
+        #else 
+        ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+        ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
+        #endif
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+        plantsim.renderUI(window);
         
         ImGui::End();
+        ImGui::PopStyleVar(2);
 
         ImGui::Render();
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());

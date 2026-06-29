@@ -142,9 +142,8 @@ private:
         }
         
         uint32_t srcRowSize = width * srcChannels;
-        uint32_t dstRowSize = width * 3; // RGB
+        uint32_t dstRowSize = width * 3; // BGR requirement for AVI Uncompressed (BI_RGB)
         
-        // Convert and flip vertically for BMP format
         for (uint32_t y = 0; y < height; ++y) {
             uint32_t srcY = height - 1 - y; // Flip vertically
             const uint8_t* srcRow = frameData.data() + (srcY * srcRowSize);
@@ -153,35 +152,36 @@ private:
             // Convert to RGB format
             switch (frm.colorFormat) {
                 case frame::colormap::RGB:
-                    memcpy(dstRow, srcRow, dstRowSize);
+                    for (uint32_t x = 0; x < width; ++x) {
+                        dstRow[x * 3 + 0] = srcRow[x * 3 + 2]; // B
+                        dstRow[x * 3 + 1] = srcRow[x * 3 + 1]; // G
+                        dstRow[x * 3 + 2] = srcRow[x * 3 + 0]; // R
+                    }
                     break;
                 case frame::colormap::RGBA:
                     for (uint32_t x = 0; x < width; ++x) {
-                        dstRow[x * 3 + 2] = srcRow[x * 4 + 0];     // R
-                        dstRow[x * 3 + 1] = srcRow[x * 4 + 1]; // G
                         dstRow[x * 3 + 0] = srcRow[x * 4 + 2]; // B
+                        dstRow[x * 3 + 1] = srcRow[x * 4 + 1]; // G
+                        dstRow[x * 3 + 2] = srcRow[x * 4 + 0]; // R
                     }
                     break;
                 case frame::colormap::BGR:
-                    for (uint32_t x = 0; x < width; ++x) {
-                        dstRow[x * 3 + 2] = srcRow[x * 3 + 2];     // R
-                        dstRow[x * 3 + 1] = srcRow[x * 3 + 1]; // G
-                        dstRow[x * 3 + 0] = srcRow[x * 3 + 0];     // B
-                    }
+                    // Already BGR -> standard memcpy
+                    memcpy(dstRow, srcRow, dstRowSize);
                     break;
                 case frame::colormap::BGRA:
                     for (uint32_t x = 0; x < width; ++x) {
-                        dstRow[x * 3 + 2] = srcRow[x * 4 + 2];     // R
+                        dstRow[x * 3 + 0] = srcRow[x * 4 + 0]; // B
                         dstRow[x * 3 + 1] = srcRow[x * 4 + 1]; // G
-                        dstRow[x * 3 + 0] = srcRow[x * 4 + 0];     // B
+                        dstRow[x * 3 + 2] = srcRow[x * 4 + 2]; // R
                     }
                     break;
                 case frame::colormap::B:
                     for (uint32_t x = 0; x < width; ++x) {
                         uint8_t gray = srcRow[x];
-                        dstRow[x * 3 + 0] = gray; // R
+                        dstRow[x * 3 + 0] = gray; // B
                         dstRow[x * 3 + 1] = gray; // G
-                        dstRow[x * 3 + 2] = gray; // B
+                        dstRow[x * 3 + 2] = gray; // R
                     }
                     break;
             }
@@ -357,8 +357,11 @@ public:
                 int srcY = height - 1 - y; // Flip vertically for BMP format
                 const uint8_t* srcRow = frame.data() + (srcY * srcRowSize);
                 uint8_t* dstRow = paddedFrame.data() + (y * rowSize);
-                memcpy(dstRow, srcRow, srcRowSize);
-                // Padding bytes remain zeros
+                for (int x = 0; x < width; ++x) {
+                    dstRow[x * 3 + 0] = srcRow[x * 3 + 2]; // B
+                    dstRow[x * 3 + 1] = srcRow[x * 3 + 1]; // G
+                    dstRow[x * 3 + 2] = srcRow[x * 3 + 0]; // R
+                }
             }
             
             // Write frame as '00db' chunk
@@ -379,10 +382,7 @@ public:
     }
 
     // New method for streaming decompression of frame objects
-    static bool saveAVIFromCompressedFrames(const std::string& filename,
-                                          std::vector<frame> frames,
-                                          int width, int height, 
-                                          float fps = 30.0f) {
+    static bool saveAVIFromCompressedFrames(const std::string& filename, std::vector<frame> frames, int width, int height, float fps = 30.0f) {
         TIME_FUNCTION;
         if (frames.empty() || width <= 0 || height <= 0 || fps <= 0) {
             return false;

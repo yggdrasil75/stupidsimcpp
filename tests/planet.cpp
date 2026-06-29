@@ -25,7 +25,7 @@ private:
     int reflectCount = 4;
     bool slowRender = false;
     float lodDist = 1024.0f;
-    float lodDropoff = 0.001f;
+    float lodDropoff = 0.05f;
     float maxViewDistance = 4096;
     bool globalIllumination = false;
     bool useLod = true;
@@ -42,12 +42,23 @@ private:
     std::string cachedStats;
     bool statsNeedUpdate = true;
     float framerate = 60.0;
+    bool autoAdjustDistance = true;
+    int targetMemoryMB = 1024;
+    float minAutoDistance = 1024.0f;
+    float maxAutoDistance = 16384.0f;
+    size_t currentMemoryMB = 0;
+    size_t currentLoadedPoints = 0;
+    std::chrono::steady_clock::time_point lastAutoAdjustTime = std::chrono::steady_clock::now();
 
     enum class DebugColorMode {
         BASE,
         PLATES,
         NOISE,
-        RESERVED
+        IMPACTS,
+        WATER,
+        TEMPERATURE,
+        MOISTURE,
+        MATERIALS
     };
     DebugColorMode currentColorMode = DebugColorMode::BASE;
 
@@ -108,6 +119,7 @@ public:
             v3 target(sim.config.center);
             cam.direction = (target - cam.origin).normalized();
         }
+
         glfwPollEvents();
         for (int i = GLFW_KEY_SPACE; i <= GLFW_KEY_LAST; i++) {
             keyStates[i] = (glfwGetKey(window, i) == GLFW_PRESS);
@@ -160,16 +172,53 @@ public:
             ImGui::Checkbox("Fix Boundaries", &doFixPlates);
             ImGui::Checkbox("use Cellular", &platesUseCellular);
 
-            if (ImGui::Button("2. Simulate Tectonics", ImVec2(-1, 40))) {
+            if (ImGui::Button("2. Simulate Tectonics", ImVec2(-1, 20))) {
                 simulateTectonics();
             }
         }
 
         if (ImGui::CollapsingHeader("Celestial Bodies")) {
-            ///TODO: add controls for moon, star.
-            if (ImGui::Button("Add Star", ImVec2(-1, 40))) {
+            if (ImGui::Button("Add Star", ImVec2(-1, 20))) {
                 sim.addStar();
             }
+            if (ImGui::Button("Add Moon", ImVec2(-1, 20))) {
+                sim.addMoon();
+            }
+            ImGui::Separator();
+
+            if (!sim.coreFilled) ImGui::BeginDisabled();
+
+            static int numAsteroids = 5;
+            ImGui::InputInt("Asteroids Count", &numAsteroids);
+            if (numAsteroids < 1) numAsteroids = 1;
+
+            if (ImGui::Button("Generate Asteroid Impacts", ImVec2(-1, 30))) {
+                sim.generateAsteroidImpacts(numAsteroids);
+                applyDebugColorMode(); 
+            }
+            if (ImGui::Button("Quick Smooth Surface", ImVec2(-1, 20))) {
+                sim.quickSmoothSurface();
+                applyDebugColorMode(); 
+            }
+            ImGui::Separator();
+            
+            ImGui::DragInt("Erosion Drops", &sim.config.erosionDrops, 1000, 1000, 1000000);
+            if (ImGui::Button("Simulate Erosion", ImVec2(-1, 30))) {
+                sim.erosion();
+                applyDebugColorMode();
+            }
+            
+            ImGui::DragInt("Weather Iterations", &sim.config.weatherIterations, 10, 10, 1000);
+            if (ImGui::Button("Simulate Weather", ImVec2(-1, 30))) {
+                sim.storms();
+                applyDebugColorMode();
+            }
+
+            if (!sim.coreFilled) {
+                ImGui::EndDisabled();
+                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Requires 'Fill Planet' to be executed first.");
+            }
+            
         }
 
         if (ImGui::CollapsingHeader("Fillings")) {
@@ -199,8 +248,27 @@ public:
                 colorChanged = true;
             }
             ImGui::SameLine();
-            if (ImGui::RadioButton("Reserved", currentColorMode == DebugColorMode::RESERVED)) { 
-                currentColorMode = DebugColorMode::RESERVED; 
+            if (ImGui::RadioButton("Impacts", currentColorMode == DebugColorMode::IMPACTS)) { 
+                currentColorMode = DebugColorMode::IMPACTS; 
+                colorChanged = true; 
+            }
+
+            if (ImGui::RadioButton("Materials", currentColorMode == DebugColorMode::MATERIALS)) { 
+                currentColorMode = DebugColorMode::MATERIALS; 
+                colorChanged = true; 
+            }
+            ImGui::SameLine();
+            if (ImGui::RadioButton("Water", currentColorMode == DebugColorMode::WATER)) { 
+                currentColorMode = DebugColorMode::WATER; 
+                colorChanged = true; 
+            }
+            if (ImGui::RadioButton("Temp", currentColorMode == DebugColorMode::TEMPERATURE)) { 
+                currentColorMode = DebugColorMode::TEMPERATURE; 
+                colorChanged = true; 
+            }
+            ImGui::SameLine();
+            if (ImGui::RadioButton("Moisture", currentColorMode == DebugColorMode::MOISTURE)) { 
+                currentColorMode = DebugColorMode::MOISTURE; 
                 colorChanged = true; 
             }
 
@@ -280,6 +348,30 @@ public:
 
             if (ImGui::Button(orbitEquator ? "Stop Equator" : "Orbit Equator")) orbitEquator = !orbitEquator;
         }
+        
+        if (ImGui::CollapsingHeader("Streaming & LOD Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Checkbox("Use LOD", &useLod);
+            ImGui::Checkbox("Auto-Adjust View Distance", &autoAdjustDistance);
+            
+            if (autoAdjustDistance) {
+                ImGui::InputInt("Target Memory Budget (MB)", &targetMemoryMB);
+                ImGui::DragFloat("Min Auto Distance", &minAutoDistance, 10.0f, 10.0f, maxAutoDistance);
+                ImGui::DragFloat("Max Auto Distance", &maxAutoDistance, 10.0f, minAutoDistance, 65536.0f);
+                
+                ImGui::BeginDisabled();
+                ImGui::DragFloat("Max View Distance", &maxViewDistance, 10.0f, 100.0f, 65536.0f);
+                ImGui::DragFloat("LOD Distance", &lodDist, 10.0f, 10.0f, 5000.0f);
+                ImGui::EndDisabled();
+            } else {
+                ImGui::DragFloat("Max View Distance", &maxViewDistance, 10.0f, 100.0f, 65536.0f);
+                ImGui::DragFloat("LOD Distance", &lodDist, 10.0f, 10.0f, 5000.0f);
+            }
+            ImGui::DragFloat("LOD Dropoff", &lodDropoff, 0.01f, 0.01f, 1.0f);
+            
+            ImGui::Separator();
+            ImGui::Text("Est. Memory Usage: %zu MB", currentMemoryMB);
+            ImGui::Text("Currently Loaded Points: %zu", currentLoadedPoints);
+        }
 
         updateStatsCache();
         ImGui::TextUnformatted(cachedStats.c_str());
@@ -305,23 +397,27 @@ public:
 
         float minNoise = std::numeric_limits<float>::max();
         float maxNoise = std::numeric_limits<float>::lowest();
-        int minSub = std::numeric_limits<int>::max();
-        int maxSub = std::numeric_limits<int>::lowest();
 
-        for (const auto& p : sim.config.surfaceNodes) {
-            if (p.noiseDisplacement < minNoise) minNoise = p.noiseDisplacement;
-            if (p.noiseDisplacement > maxNoise) maxNoise = p.noiseDisplacement;
+        if (currentColorMode == DebugColorMode::NOISE) {
+            for (const auto& pos : sim.config.surfaceNodes) {
+                auto pt = sim.grid.find(pos, sim.config.voxelSize * 0.5f);
+                if (!pt) continue;
+                if (pt->data.noiseDisplacement < minNoise) minNoise = pt->data.noiseDisplacement;
+                if (pt->data.noiseDisplacement > maxNoise) maxNoise = pt->data.noiseDisplacement;
+            }
         }
-        int snf = 0;
-        int inf = 0;
 
-        for (auto& p : sim.config.surfaceNodes) {
-            v3 color = p.originColor.cast<float>();
+        for (auto& pos : sim.config.surfaceNodes) {
+            auto pt = sim.grid.find(pos, sim.config.voxelSize * 0.5f);
+            if (!pt) continue;
+            auto& p = pt->data;
+            v3 originColor = sim.getOriginColor(pt);
+            v3 color = originColor;
             
             switch (currentColorMode) {
                 case DebugColorMode::PLATES:
-                    if (p.plateID != -1 && p.plateID < sim.plates.size()) {
-                        color = sim.plates[p.plateID].debugColor;
+                    if (pt->objectId != -1 && pt->objectId < sim.plates.size()) {
+                        color = sim.plates[pt->objectId].debugColor;
                     } else {
                         color = v3(0.5f, 0.5f, 0.5f);
                     }
@@ -332,24 +428,65 @@ public:
                     color = v3(t, t, t);
                     break;
                 }
+                case DebugColorMode::IMPACTS: {
+                    color = v3(p.impactHeat, p.impactShock, p.impactDebris);
+                    color = v3(0.2f, 0.2f, 0.2f) + color * 0.8f;
+                    
+                    color = color.cwiseMin(1.0f).cwiseMax(0.0f);
+                    break;
+                }
+                case DebugColorMode::WATER: {
+                    float w = std::min(1.0f, p.water * 0.1f);
+                    if (w > 0.0f) color = v3(0.1f, 0.2f, 0.4f + w * 0.6f);
+                    else color = v3(0.4f, 0.4f, 0.4f); 
+                    break;
+                }
+                case DebugColorMode::TEMPERATURE: {
+                    float t = (p.temperature + 20.0f) / 50.0f;
+                    t = std::clamp(t, 0.0f, 1.0f);
+                    color = v3(t, 0.2f, 1.0f - t); 
+                    break;
+                }
+                case DebugColorMode::MOISTURE: {
+                    float m = std::min(1.0f, p.moisture * 0.05f);
+                    color = v3(1.0f - m, 1.0f, 1.0f - m); 
+                    break;
+                }
+                case DebugColorMode::MATERIALS: {
+                    float sand = static_cast<float>(p.materials(0,0));
+                    float rock = static_cast<float>(p.materials(3,0));
+                    float silt = static_cast<float>(p.materials(1,0));
+                    float sum = sand + rock + silt + 0.001f;
+                    color = v3(
+                        (sand + rock * 0.5f) / sum, 
+                        (silt + rock * 0.5f) / sum, 
+                        (rock * 0.5f) / sum
+                    );
+                    break;
+                }
                 case DebugColorMode::BASE:
                 default:
-                    color = p.originColor.cast<float>();
+                    color = originColor;
                     break;
             }
 
-            if (!sim.grid.setColor(p.currentPos, color)) {
-                snf++;
-            }
+            sim.grid.waitForIdle();
+            // sim.grid.queuedsetColor(p.currentPos, color);
+            sim.grid.setColor(p.currentPos, color);
+                // snf++;
             // sim.grid.update(p.currentPos, p.currentPos, p, true, color, sim.config.voxelSize, true, -2, false, 0.0f, 0.0f, 0.0f);
         }
-        for (auto& p : sim.config.interpolatedNodes) {
-            v3 color = p.originColor.cast<float>();
+        for (auto& pos : sim.config.interpolatedNodes) {
+            auto pt = sim.grid.find(pos, sim.config.voxelSize * 0.5f);
+            if (!pt) continue;
+            auto& p = pt->data;
+            v3 originColor = sim.getOriginColor(pt);
+            v3 color = originColor;
             
             switch (currentColorMode) {
                 case DebugColorMode::PLATES:
-                    if (p.plateID != -1 && p.plateID < sim.plates.size()) {
-                        color = sim.plates[p.plateID].debugColor;
+                    if (pt->objectId != -1 && pt->objectId < sim.plates.size()) {
+                        color = sim.plates[pt->objectId].debugColor;
                     } else {
                         color = v3(0.5f, 0.5f, 0.5f);
                     }
@@ -360,21 +497,57 @@ public:
                     color = v3(t, t, t);
                     break;
                 }
+                case DebugColorMode::IMPACTS: {
+                    color = v3(p.impactHeat, p.impactShock, p.impactDebris);
+                    color = v3(0.2f, 0.2f, 0.2f) + color * 0.8f;
+                    
+                    color = color.cwiseMin(1.0f).cwiseMax(0.0f);
+                    break;
+                }
+                case DebugColorMode::WATER: {
+                    float w = std::min(1.0f, p.water * 0.1f);
+                    if (w > 0.0f) color = v3(0.1f, 0.2f, 0.4f + w * 0.6f);
+                    else color = v3(0.4f, 0.4f, 0.4f); 
+                    break;
+                }
+                case DebugColorMode::TEMPERATURE: {
+                    float t = (p.temperature + 20.0f) / 50.0f;
+                    t = std::clamp(t, 0.0f, 1.0f);
+                    color = v3(t, 0.2f, 1.0f - t); 
+                    break;
+                }
+                case DebugColorMode::MOISTURE: {
+                    float m = std::min(1.0f, p.moisture * 0.05f);
+                    color = v3(1.0f - m, 1.0f, 1.0f - m); 
+                    break;
+                }
+                case DebugColorMode::MATERIALS: {
+                    float sand = static_cast<float>(p.materials(0,0));
+                    float rock = static_cast<float>(p.materials(3,0));
+                    float silt = static_cast<float>(p.materials(1,0));
+                    float sum = sand + rock + silt + 0.001f;
+                    color = v3(
+                        (sand + rock * 0.5f) / sum, 
+                        (silt + rock * 0.5f) / sum, 
+                        (rock * 0.5f) / sum
+                    );
+                    break;
+                }
                 case DebugColorMode::BASE:
                 default:
-                    color = p.originColor.cast<float>();
+                    color = originColor;
                     break;
             }
 
-            if (!sim.grid.setColor(p.currentPos, color)) {
-                inf++;
-            }
+            sim.grid.waitForIdle();
+            // sim.grid.queuedsetColor(p.currentPos, color);
+            sim.grid.setColor(p.currentPos, color);
             // sim.grid.update(p.currentPos, p.currentPos, p, true, color, sim.config.voxelSize, true, -2, false, 0.0f, 0.0f, 0.0f);
         }
-        if (snf > 0 || inf > 0) {
-            std::cout << snf << " original nodes failed to set" << std::endl;
-            std::cout << inf << " interpolated nodes failed to set" << std::endl;
-        }
+        // if (snf > 0 || inf > 0) {
+        //     std::cout << snf << " original nodes failed to set" << std::endl;
+        //     std::cout << inf << " interpolated nodes failed to set" << std::endl;
+        // }
     }
 
     void generateDebugMap(DebugMapMode mode) {
@@ -386,51 +559,63 @@ public:
         float minD = std::numeric_limits<float>::max();
         float maxD = std::numeric_limits<float>::lowest();
 
-        for (const auto& p : sim.config.surfaceNodes) {
-            v3 pos;
+        for (const auto& pos : sim.config.surfaceNodes) {
+            auto pt = sim.grid.find(pos, sim.config.voxelSize * 0.5f);
+            if (!pt || !pt->isActive()) continue;
+            auto& p = pt->data;
+
+            v3 p_pos;
             switch(mode) {
                 case DebugMapMode::BASE: 
-                    pos = p.altPos->originalPos.cast<float>();
+                    p_pos = p.altPos->originalPos;
                     break;
                 case DebugMapMode::NOISE: 
-                    pos = p.altPos->noisePos.cast<float>();
+                    p_pos = p.altPos->noisePos;
                     break;
                 case DebugMapMode::TECTONIC: 
-                    pos = p.altPos->tectonicPos.cast<float>();
+                    p_pos = p.altPos->tectonicPos;
                     break;
                 case DebugMapMode::CURRENT:
                 default: 
-                    pos = p.currentPos;
+                    p_pos = p.currentPos;
                     break;
             }
-            float d = pos.norm();
+            float d = p_pos.norm();
             if (d < minD) minD = d;
             if (d > maxD) maxD = d;
         }
 
-        for (const auto& p : sim.config.surfaceNodes) {
-            v3 pos;
+        for (const auto& pos : sim.config.surfaceNodes) {
+            auto pt = sim.grid.find(pos, sim.config.voxelSize * 0.5f);
+            if (!pt || !pt->isActive()) continue;
+            auto& p = pt->data;
+
+            v3 p_pos;
             switch(mode) {
                 case DebugMapMode::BASE: 
-                    pos = p.altPos->originalPos.cast<float>();
+                    p_pos = p.altPos->originalPos;
                     break;
                 case DebugMapMode::NOISE: 
-                    pos = p.altPos->noisePos.cast<float>();
+                    p_pos = p.altPos->noisePos;
                     break;
                 case DebugMapMode::TECTONIC: 
-                    pos = p.altPos->tectonicPos.cast<float>();
+                    p_pos = p.altPos->tectonicPos;
                     break;
                 case DebugMapMode::TECTONICCOLOR: 
-                    pos = sim.plates[p.plateID].debugColor;
+                    if (pt->objectId != -1 && pt->objectId < sim.plates.size()) {
+                        p_pos = sim.plates[pt->objectId].debugColor;
+                    } else {
+                        p_pos = v3(0.5f, 0.5f, 0.5f);
+                    }
                     break;
                 case DebugMapMode::CURRENT:
                 default:
-                    pos = p.currentPos;
+                    p_pos = p.currentPos;
                     break;
             }
 
-            float d = pos.norm();
-            v3 n = p.altPos->originalPos.cast<float>().normalized();
+            float d = p_pos.norm();
+            v3 n = p.altPos->originalPos.normalized();
             
             float u = 0.5f + std::atan2(n.z(), n.x()) / (2.0f * static_cast<float>(M_PI));
             float v = 0.5f - std::asin(n.y()) / static_cast<float>(M_PI);
@@ -510,15 +695,45 @@ public:
         std::lock_guard<std::mutex> lock(PreviewMutex);
         updatePreview = true;
         
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastAutoAdjustTime).count() > 1500) {
+            lastAutoAdjustTime = now;
+            
+            currentMemoryMB = sim.grid.getEstimatedMemoryUsageMB();
+            currentLoadedPoints = sim.grid.getLoadedPointCount();
+            
+            if (autoAdjustDistance) {
+                if (currentMemoryMB > (size_t)targetMemoryMB) {
+                    maxViewDistance *= 0.85f;
+                    lodDist *= 0.85f;
+                } else if (currentMemoryMB < (size_t)targetMemoryMB * 0.8f) {
+                    maxViewDistance *= 1.05f;
+                    lodDist *= 1.05f;
+                }
+                
+                maxViewDistance = std::clamp(maxViewDistance, minAutoDistance, maxAutoDistance);
+                lodDist = std::clamp(lodDist, 10.0f, maxViewDistance * 0.5f);
+            }
+        }
+
         sim.grid.setLODMinDistance(lodDist);
         sim.grid.setLODFalloff(lodDropoff);
         sim.grid.setMaxDistance(maxViewDistance);
+        
         float invFrameRate = 1 / framerate;
         
         if (slowRender) {
-            currentPreviewFrame = sim.grid.renderFrameTimed(cam, outHeight, outWidth, frame::colormap::RGB, invFrameRate, reflectCount, globalIllumination, useLod);
+            #ifdef VULKAN_SUPPORT
+            currentPreviewFrame = sim.grid.renderFrameVulkan(cam, outHeight, outWidth, frame::colormap::RGB, 3, reflectCount, useLod);
+            #else
+            currentPreviewFrame = sim.grid.renderFrame(cam, outHeight, outWidth, frame::colormap::RGB, 3, reflectCount, globalIllumination, useLod);
+            #endif
         } else {
+            #ifdef VULKAN_SUPPORT
+            currentPreviewFrame = sim.grid.fastRenderFrameVulkan(cam, outHeight, outWidth, frame::colormap::RGB);
+            #else
             currentPreviewFrame = sim.grid.fastRenderFrame(cam, outHeight, outWidth, frame::colormap::RGB);
+            #endif
         }
         
         if (textu == 0) {
@@ -543,9 +758,11 @@ public:
     }
 
     void simulateTectonics() {
+        sim.grid.waitForIdle();
         
         currentColorMode = DebugColorMode::PLATES;
         
+        sim.grid.waitForIdle();
         sim.assignSeeds();
         sim.buildAdjacencyList();
         if (platesUseCellular) {
