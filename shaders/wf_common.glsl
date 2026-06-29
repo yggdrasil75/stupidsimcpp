@@ -122,10 +122,6 @@ layout(binding = 0) uniform CameraData {
     uint gasPad0;
     uint gasPad1;
     uint gasPad2;
-    float lightTracing;
-    float ltSplatScale;
-    float ltPad0;
-    float ltPad1;
 } cam;
 
 layout(std430, binding = 1) readonly buffer PointBuffer    { GPUPBRRenderData points[]; };
@@ -484,42 +480,5 @@ vec3 shadowTransmit(vec3 ro, vec3 rd, vec3 invD, float maxDist, int lightPtIdx) 
         return vec3(0.0);
     return transmittance;
 }
-
-layout(std430, binding = 7) buffer SplatBufferU { uint splatU[]; };
-bool projectToCamera(vec3 worldPos, out ivec2 pix, out float camDist, out vec3 toCamDir) {
-    vec3 toCam = cam.origin - worldPos;
-    camDist = length(toCam);
-    if (camDist < 1e-4) return false;
-    toCamDir = toCam / camDist;
-
-    vec3 fwd = normalize(cam.dir);
-    vec3 v = worldPos - cam.origin;
-    float z = dot(v, fwd);
-    if (z <= 1e-4) return false; // behind the camera
-
-    float xCam = dot(v, normalize(cam.right));
-    float yCam = dot(v, normalize(cam.up));
-
-    float ndcX = (xCam / z) / max(1e-6, cam.tanfovx);
-    float ndcY = (yCam / z) / max(1e-6, cam.tanfovy);
-    if (abs(ndcX) > 1.0 || abs(ndcY) > 1.0) return false;
-
-    float fx = (ndcX * 0.5 + 0.5) * float(cam.width);
-    float fy = (0.5 - ndcY * 0.5) * float(cam.height);
-    pix = ivec2(int(fx), int(fy));
-    if (pix.x < 0 || pix.x >= cam.width || pix.y < 0 || pix.y >= cam.height) return false;
-    return true;
-}
-
-void splatAdd(ivec2 pix, vec3 color) {
-    if (isInvalid(color)) return;
-    color = max(color, vec3(0.0));
-    uint base = (uint(pix.y) * uint(cam.width) + uint(pix.x)) * 4u;
-    atomicAdd(splatU[base + 0u], uint(min(color.r * cam.ltSplatScale, 4.0e9)));
-    atomicAdd(splatU[base + 1u], uint(min(color.g * cam.ltSplatScale, 4.0e9)));
-    atomicAdd(splatU[base + 2u], uint(min(color.b * cam.ltSplatScale, 4.0e9)));
-}
-uint dbgBase() { return uint(cam.width) * uint(cam.height) * 4u; }
-void dbgInc(uint k) { atomicAdd(splatU[dbgBase() + k], 1u); }
 
 #endif

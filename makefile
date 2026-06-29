@@ -39,8 +39,8 @@ endif
 CXXFLAGS = $(BASE_CXXFLAGS) $(SIMD_CXXFLAGS) 
 
 # Source files
-# SRC := $(SRC_DIR)/ptest.cpp
-SRC := $(SRC_DIR)/materialtest.cpp
+SRC := $(SRC_DIR)/ptest.cpp
+# SRC := $(SRC_DIR)/materialtest.cpp
 #SRC := $(SRC_DIR)/g2chromatic2.cpp
 SRC += $(IMGUI_DIR)/imgui.cpp $(IMGUI_DIR)/imgui_demo.cpp $(IMGUI_DIR)/imgui_draw.cpp $(IMGUI_DIR)/imgui_tables.cpp $(IMGUI_DIR)/imgui_widgets.cpp
 SRC += $(IMGUI_DIR)/backends/imgui_impl_glfw.cpp $(IMGUI_DIR)/backends/imgui_impl_opengl3.cpp
@@ -53,7 +53,7 @@ EXE := $(BIN_DIR)/g2gradc
 
 GLSLC := glslc --target-env=vulkan1.3
 
-SHADER_SRCS := $(SHADER_DIR)/fast_raytrace.comp $(SHADER_DIR)/pbr_raytrace.comp $(SHADER_DIR)/fast_raytrace_hw.comp $(SHADER_DIR)/pbr_raytrace_hw.comp $(SHADER_DIR)/smooth.comp $(SHADER_DIR)/blend.comp
+SHADER_SRCS := $(SHADER_DIR)/fast_raytrace.comp $(SHADER_DIR)/fast_raytrace_hw.comp $(SHADER_DIR)/smooth.comp $(SHADER_DIR)/blend.comp
 SHADER_SRCS += $(SHADER_DIR)/sph_density.comp $(SHADER_DIR)/sph_force.comp $(SHADER_DIR)/sph_integrate.comp
 SHADER_SRCS += $(SHADER_DIR)/wf_init.comp $(SHADER_DIR)/wf_args.comp $(SHADER_DIR)/wf_extend.comp $(SHADER_DIR)/wf_shade.comp $(SHADER_DIR)/wf_shadow.comp $(SHADER_DIR)/wf_finalize.comp
 SHADER_SRCS += $(SHADER_DIR)/wf_lt_init.comp $(SHADER_DIR)/wf_lt_shade.comp $(SHADER_DIR)/wf_lt_shadow.comp $(SHADER_DIR)/wf_lt_resolve.comp

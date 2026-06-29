@@ -140,8 +140,9 @@ int main() {
                     
                     bool isLightArea = (x >= minLight.x() && x <= maxLight.x() &&
                                         y >= minLight.y() && y <= maxLight.y());
+                    bool isExposedLightLayer = isLightArea && (z < minCeiling.z() + step);
 
-                    if (isLightArea) {
+                    if (isExposedLightLayer) {
                         octree.set(1, pos, true, cWhite, step, true, 10, 15.0f, 0.8f, 0.0f, 1.0f, 1.45f, Eigen::Vector3f::Zero(), Grid::BodyType::STATIC, 1.0f);
                     } else {
                         octree.set(1, pos, true, cBlack, step, true, 100, 0.0f, 0.8f, 0.2f, 1.0f, 1.45f, Eigen::Vector3f::Zero(), Grid::BodyType::STATIC, 1.0f);
@@ -199,7 +200,7 @@ int main() {
     const int blendedsamples = 400;
     const float blendedfactor = 0.5;
     const int videosamples = 500;
-    const int bounces = 128;
+    const int bounces = 4;
     const int physicsSubsteps = 10;
     const float physicsDt = 1.0f / fps;
     const float subDt = physicsDt / physicsSubsteps;
@@ -213,11 +214,11 @@ int main() {
     };
 
     std::vector<View> views = {
-        {"+X", Eigen::Vector3f( 6.5f,  0.0f,  2.0f), Eigen::Vector3f(0.0f, 0.0f, 0.5f)},
-        {"+Y", Eigen::Vector3f( 0.0f,  6.5f,  2.0f), Eigen::Vector3f(0.0f, 0.0f, 0.5f)},
-        {"-X", Eigen::Vector3f(-6.5f,  0.0f,  2.0f), Eigen::Vector3f(0.0f, 0.0f, 0.5f)},
+        {"+X", Eigen::Vector3f( 6.8f,  0.0f,  2.0f), Eigen::Vector3f(0.0f, 0.0f, 0.5f)},
+        {"+Y", Eigen::Vector3f( 0.0f,  6.8f,  2.0f), Eigen::Vector3f(0.0f, 0.0f, 0.5f)},
+        {"-X", Eigen::Vector3f(-6.8f,  0.0f,  2.0f), Eigen::Vector3f(0.0f, 0.0f, 0.5f)},
         {"+Z", Eigen::Vector3f( 0.0f,  0.0f,  7.3f), Eigen::Vector3f(0.0f, 1.0f, 0.0f)},
-        {"-Y", Eigen::Vector3f( 0.0f, -6.5f,  2.0f), Eigen::Vector3f(0.0f, 0.0f, 0.5f)},
+        {"-Y", Eigen::Vector3f( 0.0f, -6.8f,  2.0f), Eigen::Vector3f(0.0f, 0.0f, 0.5f)},
         {"-Z", Eigen::Vector3f( 0.0f,  0.0f,  -1.3f), Eigen::Vector3f(0.0f, -1.0f, 0.0f)}
     };
 
@@ -258,35 +259,6 @@ int main() {
     }
     FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
 
-    {
-        const int ltSamples = 4000;   // a lot; we save progressively so it can be cut short
-
-        for (const auto& view : views) {
-            std::cout << "\nLight-traced render from " << view.name << " (saving every sample)..." << std::endl;
-            Camera ltcam;
-            ltcam.origin = view.origin;
-            ltcam.direction = (target - view.origin).normalized();
-            ltcam.up = view.up;
-
-            std::string viewName = view.name;
-            auto onSample = [&, viewName](int s, const frame& f) {
-                // Save every sample (overwrite a "latest" plus periodic snapshots).
-                std::string latest = "output/lighttrace/lt_" + viewName + "_latest.bmp";
-                BMPWriter::saveBMP(latest, f);
-                if (s % 25 == 0 || s < 5) {
-                    std::string snap = "output/lighttrace/lt_" + viewName + "_s" + std::to_string(s) + ".bmp";
-                    BMPWriter::saveBMP(snap, f);
-                    std::cout << "  saved sample " << s << std::endl;
-                }
-            };
-
-            octree.renderFrameLightTracedVulkan(ltcam, height, width, frame::colormap::RGB,
-                                                ltSamples, bounces, true, onSample);
-        }
-        std::cout << "Light-traced pass done." << std::endl;
-    }
-    FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
-
     for (const auto& view : views) {
         ScopedFunctionTimer meh("Slow Section");
         std::cout << "\nRendering view from " << view.name << " direction (Slow "<< samples <<" Samples Pass)..." << std::endl;
@@ -307,7 +279,6 @@ int main() {
         std::cout << "blended done" << std::endl;
     }
     FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
-
 
     std::vector<frame> videoFrames;
     const int totalFrames = framesPerSegment * views.size();
