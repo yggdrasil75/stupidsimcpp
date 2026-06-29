@@ -495,6 +495,12 @@ public:
     void setphys_gravityCenter(PointType n) {
         phys_gravityCenter = n;
     }
+    void setPhysicsUseGravityPoint(bool use) { phys_useGravityPoint = use; }
+    void setPhysicsGravity(const Eigen::Vector3f& g) {
+        phys_gravity = g;
+        phys_gravityStrength = g.norm();
+    }
+    void setPhysicsGravityStrength(float s) { phys_gravityStrength = s; }
 
     void setGasFieldResolution(uint16_t res) { gasFieldResolution_ = std::max<uint16_t>(1, res); }
     uint16_t getGasFieldResolution() const { return gasFieldResolution_; }

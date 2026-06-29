@@ -114,21 +114,6 @@ private:
         permutation.insert(permutation.end(), permutationt.begin(), permutationt.end());
     }
 
-    /// @brief Normalize noise value from [-1,1] to [0,1]
-    /// @param point Input coordinate
-    /// @return Normalized noise value in [0,1] range
-    /// @note Useful for texture generation; changes affect output range
-    float normalizedNoise(const Vector2f& point) {
-        return (permute(point) + 1.0f) * 0.5f;
-    }
-
-    /// @brief Normalize 3D noise value from [-1,1] to [0,1]
-    /// @param point Input coordinate
-    /// @return Normalized noise value in [0,1] range
-    float normalizedNoise(const Vector3f& point) {
-        return (permute(point) + 1.0f) * 0.5f;
-    }
-
     /// @brief Map value from one range to another
     /// @param value Input value
     /// @param inMin Original range minimum
@@ -224,6 +209,21 @@ public:
     /// @note Same seed produces identical noise patterns across runs
     PNoise2(unsigned int seed) : rng(seed) {
         initializePermutation();
+    }
+
+    /// @brief Normalize noise value from [-1,1] to [0,1]
+    /// @param point Input coordinate
+    /// @return Normalized noise value in [0,1] range
+    /// @note Useful for texture generation; changes affect output range
+    float normalizedNoise(const Vector2f& point) {
+        return (permute(point) + 1.0f) * 0.5f;
+    }
+
+    /// @brief Normalize 3D noise value from [-1,1] to [0,1]
+    /// @param point Input coordinate
+    /// @return Normalized noise value in [0,1] range
+    float normalizedNoise(const Vector3f& point) {
+        return (permute(point) + 1.0f) * 0.5f;
     }
     
     /// @brief Generate 2D Perlin noise at given point

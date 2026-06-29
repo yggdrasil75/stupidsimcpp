@@ -158,7 +158,7 @@ private:
             if (sim.weatherTimer > 0.0f) {
                 ImGui::TextColored(weatherColor, "(Time Remaining: %.1fs)", sim.weatherTimer);
             }
-            ImGui::BulletText("Active Raindrops: %zu", sim.activeRainDrops.size());
+            ImGui::BulletText("Active Water Voxels: %zu", sim.getActiveWaterVoxelCount());
             
             ImGui::Separator();
             ImGui::Text("Atmospheric Moisture: %.1f", sim.atmosphericMoisture);
@@ -499,9 +499,9 @@ private:
     }
 
     void spawnSeed(v3 pos, std::shared_ptr<PlantDNA> dna) {
-        float startSize = sim.config.voxelSize;
+        float startSize = sim.config.plantVoxelSize;
         if (dna->stem.maxGirth < 1.0f) {
-            startSize *= std::max(0.01f, dna->stem.maxGirth);
+            startSize *= std::max(0.3f, dna->stem.maxGirth);
         }
 
         int pId = sim.nextPlantId++;
