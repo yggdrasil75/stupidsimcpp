@@ -861,12 +861,8 @@ private:
 
             lod->color = (avgColor * invVol);
             Eigen::Vector3f e = avgEmittance * float(invVol);
-            Grid::v3half B(Eigen::half(float(avgSellB.x() * invVol)),
-                           Eigen::half(float(avgSellB.y() * invVol)),
-                           Eigen::half(float(avgSellB.z() * invVol)));
-            Grid::v3half C(Eigen::half(float(avgSellC.x() * invVol)),
-                           Eigen::half(float(avgSellC.y() * invVol)),
-                           Eigen::half(float(avgSellC.z() * invVol)));
+            Grid::v3half B = (avgSellB * invVol).cast<Eigen::half>();
+            Grid::v3half C = (avgSellC * invVol).cast<Eigen::half>();
             Material avgMat(packRGB9E5(e), float(avgRoughness * invVol),
                             float(avgMetallic * invVol), B, C);
             
@@ -1624,10 +1620,10 @@ public:
         
         auto obj = getOrCreateObject(objectId);
         Material mat(emittance, roughness, metallic, ior, absorp);
-        uint16_t rIdx = obj->getOrAddRenderMaterial(mat);
+        IndexType rIdx = obj->getOrAddRenderMaterial(mat);
         
         PhysicsMaterial_ pmat{bType, mass};
-        uint16_t pIdx = obj->getOrAddPhysicsMaterial(pmat);
+        IndexType pIdx = obj->getOrAddPhysicsMaterial(pmat);
         Eigen::Vector4f color4(color.x(), color.y(), color.z(), std::clamp(1.0f - transmission, 0.0f, 1.0f));
 
         auto pointData = std::make_shared<NodeData>(data, pos, visible, color4, size, active, objectId, rIdx, pIdx, bType == BodyType::STATIC);
@@ -1651,20 +1647,20 @@ public:
         return false;
     }
     bool addGas(const PointType& pos, const GasSpecies_& species, float amount, const T& payload = T{}) {
-        uint16_t globalIdx = gasRegistry_.getOrAdd(species);
+        IndexType globalIdx = gasRegistry_.getOrAdd(species);
         return addGas(pos, globalIdx, amount, payload);
     }
-    uint16_t registerGasSpecies(const GasSpecies_& species) {
+    IndexType registerGasSpecies(const GasSpecies_& species) {
         return gasRegistry_.getOrAdd(species);
     }
 
-    GasSpecies_ getGasSpecies(uint16_t globalIdx) const {
+    GasSpecies_ getGasSpecies(IndexType globalIdx) const {
         return gasRegistry_.get(globalIdx);
     }
 
     size_t gasSpeciesCount() const { return gasRegistry_.size(); }
 
-    bool addGas(const PointType& pos, uint16_t globalSpeciesIdx, float amount, const T& payload = T{}) {
+    bool addGas(const PointType& pos, IndexType globalSpeciesIdx, float amount, const T& payload = T{}) {
         if (amount <= 0.0f || !root_) return false;
         ensureBounds({pos, pos});
 
@@ -1756,9 +1752,9 @@ public:
         if (!root_) return false;
         auto obj = getOrCreateObject(objectId);
         Material mat(emittance, roughness, metallic, ior, absorp);
-        uint16_t rIdx = obj->getOrAddRenderMaterial(mat);
+        IndexType rIdx = obj->getOrAddRenderMaterial(mat);
         PhysicsMaterial_ pmat{bType, mass};
-        uint16_t pIdx = obj->getOrAddPhysicsMaterial(pmat);
+        IndexType pIdx = obj->getOrAddPhysicsMaterial(pmat);
 
         Eigen::Vector4f color4(color.x(), color.y(), color.z(), std::clamp(1.0f - transmission, 0.0f, 1.0f));
         std::vector<std::shared_ptr<NodeData>> newPhysNodes;
@@ -2082,10 +2078,10 @@ public:
         enqueueTask([this, data, pos, visible, color, size, active, objectId, emittance, roughness, metallic, transmission, ior, absorp, bType, mass]() {
             auto obj = getOrCreateObject(objectId);
             Material mat(emittance, roughness, metallic, ior, absorp);
-            uint16_t rIdx = obj->getOrAddRenderMaterial(mat);
+            IndexType rIdx = obj->getOrAddRenderMaterial(mat);
             
             PhysicsMaterial_ pmat{bType, mass};
-            uint16_t pIdx = obj->getOrAddPhysicsMaterial(pmat);
+            IndexType pIdx = obj->getOrAddPhysicsMaterial(pmat);
 
             Eigen::Vector4f color4(color.x(), color.y(), color.z(), std::clamp(1.0f - transmission, 0.0f, 1.0f));
             auto pointData = std::make_shared<NodeData>(data, pos, visible, color4, size, active, objectId, rIdx, pIdx, bType == BodyType::STATIC);
@@ -2160,7 +2156,7 @@ public:
         }
 
         gasRegistry_.serialize(out);
-        root_->serialize(out, regionTargetPoints_);
+        root_->serialize(out, regionTargetPoints_, storagepath);
         
         out.close();
         std::cout << "successfully saved grid to " << filename << std::endl;
@@ -2268,7 +2264,7 @@ public:
         
         auto obj = getOrCreateObject(objectId);
         PhysicsMaterial_ pmat{newType, newMass};
-        uint16_t newIdx = obj->getOrAddPhysicsMaterial(pmat);
+        IndexType newIdx = obj->getOrAddPhysicsMaterial(pmat);
 
         std::lock_guard<std::mutex> lock(physicsMutex_);
         for (auto& n : nodes) {
@@ -2300,7 +2296,7 @@ public:
             if (amount > 0.0f) drops.push_back({ n->position, amount, n->data });
         }
 
-        uint16_t speciesIdx = registerGasSpecies(species);
+        IndexType speciesIdx = registerGasSpecies(species);
 
         {
             BoundingBox bounds = getNodesBounds(nodes);

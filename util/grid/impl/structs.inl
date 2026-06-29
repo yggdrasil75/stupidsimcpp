@@ -1251,7 +1251,7 @@ struct OctreeNode_ {
             for (int i = 0; i < 8; ++i) if (children[i]) childMask |= (1 << i);
             writeVal(out, childMask);
             for (int i = 0; i < 8; ++i) {
-                if (children[i]) children[i]->serialize(out, regionTargetPoints);
+                if (children[i]) children[i]->serialize(out, regionTargetPoints, storagepath);
             }
         }
     }

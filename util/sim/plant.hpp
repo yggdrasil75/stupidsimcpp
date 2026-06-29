@@ -642,7 +642,7 @@ class PlantSim {
 public:
     enum class WeatherState { CLEAR, RAIN, SNOW };
 
-    Grid::Octree<std::shared_ptr<PlantsimParticle>, uint8_t, "output/plants"> grid;
+    Grid::Octree<std::shared_ptr<PlantsimParticle>, uint8_t> grid = Grid::Octree<std::shared_ptr<PlantsimParticle>, uint8_t>(Vector3f::Constant(-16384), Vector3f::Constant(16384), "output/plant", 16, 16);
     PlantConfig config;
     std::mt19937 rng;
 
@@ -958,7 +958,7 @@ private:
                                 sdrop->splashCount = drop->splashCount + 1;
                                 sdrop->size = drop->size * 0.7f;
                                 sdrop->velocity = splashVel;
-                                if(grid.set(sdrop, splashPos, true, node->color, sdrop->size, true, 3, 0.0f, 0.1f, 0.0f, 0.8f, 1.33f)) {
+                                if(grid.set(sdrop, splashPos, true, node->color.head<3>(), sdrop->size, true, 3, 0.0f, 0.1f, 0.0f, 0.8f, 1.33f)) {
                                     nextDrops.push_back(splashPos);
                                 }
                             }

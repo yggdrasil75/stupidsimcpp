@@ -332,7 +332,7 @@ struct ImpactEvent {
 class planetsim {
 public:
     planetConfig config;
-    Grid::Octree<Particle, int16_t, "output/fibSphere"> grid;
+    Grid::Octree<Particle, int16_t> grid;
     std::vector<PlateConfig> plates;
     std::mt19937 rng = std::mt19937(42);
     bool starAdded = false;
@@ -345,7 +345,7 @@ public:
 
     planetsim() {
         config = planetConfig();
-        grid = Grid::Octree<Particle, int16_t, "output/fibSphere">(v3(-config.gridSizeCubeMin,-config.gridSizeCubeMin,-config.gridSizeCubeMin),v3(config.gridSizeCubeMin,config.gridSizeCubeMin,config.gridSizeCubeMin), 4, 64);
+        grid = Grid::Octree<Particle, int16_t>(v3(-config.gridSizeCubeMin,-config.gridSizeCubeMin,-config.gridSizeCubeMin),v3(config.gridSizeCubeMin,config.gridSizeCubeMin,config.gridSizeCubeMin), "output/Planet", 4, 64);
     }
 
     v3 getOriginColor(const NodeType& pt) {
@@ -1644,7 +1644,7 @@ public:
         TIME_FUNCTION;
         auto allNodes = grid.findInRadius(config.center, config.radius * 1.5f);
         
-        std::vector<std::pair<std::shared_ptr<Grid::Octree<Particle, int16_t, "output/fibSphere">::NodeData>, v3>> smoothMoves;
+        std::vector<std::pair<std::shared_ptr<Grid::Octree<Particle, int16_t>::NodeData>, v3>> smoothMoves;
         
         for (auto& n : allNodes) {
             if (!n->isActive() || n->objectId == config.numPlates) continue;
