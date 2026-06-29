@@ -2750,6 +2750,10 @@ public:
     frame fastRenderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB);
     frame renderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB,
         int samplesPerPixel = 2, int maxBounces = 4, bool globalIllumination = false, bool useLod = true);
+    frame renderFrameLightTracedVulkan(const Camera& cam, int height, int width,
+        frame::colormap colorformat = frame::colormap::RGB,
+        int samplesPerPixel = 64, int maxBounces = 4, bool useLod = true,
+        const std::function<void(int, const frame&)>& onSample = {});
     void stepPhysics(float dt);
     void stepGasFields(float dt);
 

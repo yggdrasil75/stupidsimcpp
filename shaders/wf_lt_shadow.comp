@@ -1,0 +1,45 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : require
+#define WF_LIGHT_TRACE
+#include "wf_common.glsl"
+
+// Resolve camera-connection shadow rays for light tracing.
+//
+// Each ShadowRay carries: origin/maxDist toward the camera, the connection
+// direction, the target pixel index (packed in dir_slot.w), and the
+// pre-weighted contribution. We test occlusion (with transmission through
+// transparent media, reusing shadowTransmit) and atomically splat the surviving
+// energy onto the target pixel in the uint splat buffer.
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= ctr.shadowCount) return;
+
+    ShadowRay sr = shadowQueue[gid];
+    vec3 ro = sr.o_tmax.xyz;
+    float maxDist = sr.o_tmax.w;
+    vec3 rd = sr.dir_slot.xyz;
+    int pixelIndex = floatBitsToInt(sr.dir_slot.w);
+    vec3 contrib = sr.contrib.rgb;
+    int tag = floatBitsToInt(sr.contrib.w); // -1 => camera connection
+
+    if (tag != -1) return; // not a camera connection; ignore
+    if (maxDist <= 0.0) return;
+
+    vec3 invD = safe_invDir(rd);
+    // lightPtIdx = -1: nothing to skip; the camera is not a scene primitive.
+    vec3 transmittance = shadowTransmit(ro, rd, invD, maxDist, -1);
+    if (all(lessThanEqual(transmittance, vec3(0.0)))) return;
+
+    vec3 energy = contrib * transmittance;
+    if (isInvalid(energy)) return;
+
+    int px = pixelIndex % cam.width;
+    int py = pixelIndex / cam.width;
+    if (px < 0 || px >= cam.width || py < 0 || py >= cam.height) return;
+
+    splatAdd(ivec2(px, py), energy);
+    // DEBUG: count surviving (unoccluded) splats.
+    dbgInc(4u);
+}

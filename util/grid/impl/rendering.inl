@@ -199,6 +199,10 @@ struct alignas(16) GPUCameraData {
     uint32_t gasPad0;
     uint32_t gasPad1;
     uint32_t gasPad2;
+    float lightTracing;
+    float ltSplatScale;
+    float ltPad0;
+    float ltPad1;
 };
 
 struct alignas(16) GPUParticle {
@@ -266,9 +270,13 @@ struct VulkanContext {
     VkShaderModule wfInitShader = VK_NULL_HANDLE, wfArgsShader = VK_NULL_HANDLE,
                    wfExtendShader = VK_NULL_HANDLE, wfShadeShader = VK_NULL_HANDLE,
                    wfShadowShader = VK_NULL_HANDLE, wfFinalizeShader = VK_NULL_HANDLE;
+    VkShaderModule wfLtInitShader = VK_NULL_HANDLE, wfLtShadeShader = VK_NULL_HANDLE,
+                   wfLtShadowShader = VK_NULL_HANDLE, wfLtResolveShader = VK_NULL_HANDLE;
     VkPipeline wfInitPipe = VK_NULL_HANDLE, wfArgsPipe = VK_NULL_HANDLE,
                wfExtendPipe = VK_NULL_HANDLE, wfShadePipe = VK_NULL_HANDLE,
                wfShadowPipe = VK_NULL_HANDLE, wfFinalizePipe = VK_NULL_HANDLE;
+    VkPipeline wfLtInitPipe = VK_NULL_HANDLE, wfLtShadePipe = VK_NULL_HANDLE,
+               wfLtShadowPipe = VK_NULL_HANDLE, wfLtResolvePipe = VK_NULL_HANDLE;
     VkBuffer wfPathBuf = VK_NULL_HANDLE, wfPathHitBuf = VK_NULL_HANDLE,
              wfExtendABuf = VK_NULL_HANDLE,
              wfExtendBBuf = VK_NULL_HANDLE, wfShadeBuf = VK_NULL_HANDLE,
@@ -493,6 +501,23 @@ struct VulkanContext {
         vkEnumerateInstanceExtensionProperties(nullptr, &extCount, nullptr);
         VkInstanceCreateInfo createInfo{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
         createInfo.pApplicationInfo = &appInfo;
+
+        const char* validationLayers[] = { "VK_LAYER_KHRONOS_validation" };
+        if (const char* v = getenv("SSCPP_VK_VALIDATE"); v && v[0] == '1') {
+            uint32_t lc = 0;
+            vkEnumerateInstanceLayerProperties(&lc, nullptr);
+            std::vector<VkLayerProperties> avail(lc);
+            vkEnumerateInstanceLayerProperties(&lc, avail.data());
+            bool found = false;
+            for (auto& l : avail) if (std::string(l.layerName) == validationLayers[0]) found = true;
+            if (found) {
+                createInfo.enabledLayerCount = 1;
+                createInfo.ppEnabledLayerNames = validationLayers;
+                std::cout << "[vk] validation layer enabled" << std::endl;
+            } else {
+                std::cout << "[vk] validation layer requested but not installed" << std::endl;
+            }
+        }
         vkCreateInstance(&createInfo, nullptr, &instance);
 
         uint32_t deviceCount = 0;
@@ -1704,6 +1729,10 @@ void initWavefront() {
     wfShadeShader    = createShaderModule("./bin/wf_shade.spv");
     wfShadowShader   = createShaderModule("./bin/wf_shadow.spv");
     wfFinalizeShader = createShaderModule("./bin/wf_finalize.spv");
+    wfLtInitShader = createShaderModule("./bin/wf_lt_init.spv");
+    wfLtShadeShader = createShaderModule("./bin/wf_lt_shade.spv");
+    wfLtShadowShader = createShaderModule("./bin/wf_lt_shadow.spv");
+    wfLtResolveShader = createShaderModule("./bin/wf_lt_resolve.spv");
 
     auto makePipe = [&](VkShaderModule m, VkPipeline& out) {
         VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
@@ -1720,6 +1749,10 @@ void initWavefront() {
     makePipe(wfShadeShader,    wfShadePipe);
     makePipe(wfShadowShader,   wfShadowPipe);
     makePipe(wfFinalizeShader, wfFinalizePipe);
+    makePipe(wfLtInitShader, wfLtInitPipe);
+    makePipe(wfLtShadeShader, wfLtShadePipe);
+    makePipe(wfLtShadowShader, wfLtShadowPipe);
+    makePipe(wfLtResolveShader, wfLtResolvePipe);
 }
 
 void ensureWavefrontBuffers(size_t maxPaths) {
@@ -1904,6 +1937,102 @@ void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel
         vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
     }
 
+    vkDestroyFence(device, fence, nullptr);
+}
+
+void dispatchLightTraceSample(int width, int height, int maxBounces, int sampleIndex) {
+    size_t maxPaths = size_t(width) * size_t(height);
+    if (maxPaths == 0) return;
+    ensureWavefrontBuffers(maxPaths);
+    writeWavefrontDescriptors();
+
+    const uint32_t WG = 64;
+    uint32_t pathGroups = uint32_t((maxPaths + WG - 1) / WG);
+    uint32_t pixelGroups = pathGroups; // same count: one slot per pixel
+    int maxIters = maxBounces + 24;
+
+    VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    VkFence fence;
+    vkCreateFence(device, &fi, nullptr, &fence);
+
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    vkBeginCommandBuffer(commandBuffer, &bi);
+    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            wfPipelineLayout, 0, 1, &wfDescSet, 0, nullptr);
+
+    int s = sampleIndex;
+
+    // CLEAR splat buffer (stage 0 of resolve).
+    wfBind(commandBuffer, wfLtResolvePipe);
+    wfPush(commandBuffer, 0, 0, s);
+    vkCmdDispatch(commandBuffer, pixelGroups, 1, 1);
+    wfBarrier(commandBuffer);
+
+    // Reset counters (args stage 4).
+    wfBind(commandBuffer, wfArgsPipe);
+    wfPush(commandBuffer, 0, 4, s);
+    vkCmdDispatch(commandBuffer, 1, 1, 1);
+    wfBarrier(commandBuffer);
+
+    // Seed light rays.
+    wfBind(commandBuffer, wfLtInitPipe);
+    wfPush(commandBuffer, 0, 0, s);
+    vkCmdDispatch(commandBuffer, pathGroups, 1, 1);
+    wfBarrier(commandBuffer);
+
+    int parity = 0;
+    for (int it = 0; it < maxIters; ++it) {
+        wfBind(commandBuffer, wfArgsPipe);
+        wfPush(commandBuffer, parity, 0, s);
+        vkCmdDispatch(commandBuffer, 1, 1, 1);
+        wfBarrier(commandBuffer);
+
+        wfBind(commandBuffer, wfExtendPipe);   // traversal is identical
+        wfPush(commandBuffer, parity, 0, s);
+        vkCmdDispatchIndirect(commandBuffer, wfCounterBuf, WF_OFF_EXTEND_ARGS);
+        wfBarrier(commandBuffer);
+
+        wfBind(commandBuffer, wfArgsPipe);
+        wfPush(commandBuffer, parity, 1, s);
+        vkCmdDispatch(commandBuffer, 1, 1, 1);
+        wfBarrier(commandBuffer);
+
+        wfBind(commandBuffer, wfLtShadePipe);  // camera connection instead of NEE
+        wfPush(commandBuffer, parity, 0, s);
+        vkCmdDispatchIndirect(commandBuffer, wfCounterBuf, WF_OFF_SHADE_ARGS);
+        wfBarrier(commandBuffer);
+
+        wfBind(commandBuffer, wfArgsPipe);
+        wfPush(commandBuffer, parity, 2, s);
+        vkCmdDispatch(commandBuffer, 1, 1, 1);
+        wfBarrier(commandBuffer);
+
+        wfBind(commandBuffer, wfLtShadowPipe); // occlusion + atomic splat
+        wfPush(commandBuffer, parity, 0, s);
+        vkCmdDispatchIndirect(commandBuffer, wfCounterBuf, WF_OFF_SHADOW_ARGS);
+        wfBarrier(commandBuffer);
+
+        wfBind(commandBuffer, wfArgsPipe);
+        wfPush(commandBuffer, parity, 3, s);
+        vkCmdDispatch(commandBuffer, 1, 1, 1);
+        wfBarrier(commandBuffer);
+        parity ^= 1;
+    }
+
+    // RESOLVE splat -> pixels[] (accumulate).
+    wfBind(commandBuffer, wfLtResolvePipe);
+    wfPush(commandBuffer, parity, 1, s);
+    vkCmdDispatch(commandBuffer, pixelGroups, 1, 1);
+    wfBarrier(commandBuffer);
+
+    vkEndCommandBuffer(commandBuffer);
+
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &commandBuffer;
+    vkResetFences(device, 1, &fence);
+    vkQueueSubmit(queue, 1, &si, fence);
+    vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
     vkDestroyFence(device, fence, nullptr);
 }
 
