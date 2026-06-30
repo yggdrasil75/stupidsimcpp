@@ -7,7 +7,6 @@ struct GPUFastRenderData {
     uint color;
     uint materialIdx;
     int  objectId;
-    uint isGas;
 };
 
 layout(std430, binding = 0) readonly buffer PointBuffer { GPUFastRenderData points[]; };
@@ -52,7 +51,6 @@ void main() {
     if (int(i) >= vp.pointCount) return;
 
     GPUFastRenderData pt = points[i];
-    if (pt.isGas != 0u) return;
 
     vec4 albedo = unpackRGBA8(pt.color);
     if (albedo.a <= 0.001) return;

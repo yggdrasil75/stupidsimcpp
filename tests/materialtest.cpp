@@ -361,11 +361,9 @@ int main() {
                     std::cout << ">>> TRIGGERING STATE CHANGE for Object ID: " << event.objectId << std::endl;
 
                     if (event.targetState == TargetState::GAS) {
-                        // Gases are Eulerian, not voxels: convert the solid into a gas
-                        // field of its own species rather than re-typing voxels.
-                        size_t cells = octree.vaporize(event.objectId, event.gasColor,
-                                                       event.gasAbsorption, event.gasMassScale);
-                        std::cout << "    vaporized " << cells << " voxels into gas" << std::endl;
+                        // size_t cells = octree.vaporize(event.objectId, event.gasColor,
+                        //                                event.gasAbsorption, event.gasMassScale);
+                        // std::cout << "    vaporized " << cells << " voxels into gas" << std::endl;
                     } else {
                         Grid::BodyType targetType;
                         switch(event.targetState) {
