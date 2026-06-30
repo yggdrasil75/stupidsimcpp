@@ -337,7 +337,6 @@ void Octree<T>::stepPhysics(float dt) {
         if (!removeRecursive(start, pd->getCubeBounds(), pd))
             removeRecursive(root_.get(), pd->getCubeBounds(), pd);
         pd->position = mv.newPos;
-        ensureBounds(pd->getCubeBounds());
         if (!insertRecursive(start, pd, depth))
             if (!insertRecursive(root_.get(), pd, 0)) size--;
     }
@@ -448,7 +447,6 @@ void Octree<T>::stepRigidLattice(
         if (!removeRecursive(start, pd->getCubeBounds(), pd))
             removeRecursive(root_.get(), pd->getCubeBounds(), pd);
         pd->position = mv.newPos;
-        ensureBounds(pd->getCubeBounds());
         if (!insertRecursive(start, pd, depth))
             if (!insertRecursive(root_.get(), pd, 0)) size--;
     }

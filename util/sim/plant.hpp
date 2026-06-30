@@ -723,7 +723,7 @@ class PlantSim {
 public:
     enum class WeatherState { CLEAR, RAIN, SNOW };
 
-    Grid::Octree<std::shared_ptr<PlantsimParticle>> grid = Grid::Octree<std::shared_ptr<PlantsimParticle>>(Vector3f::Constant(-128), Vector3f::Constant(128), "output/plant", 16);
+    Grid::Octree<std::shared_ptr<PlantsimParticle>> grid = Grid::Octree<std::shared_ptr<PlantsimParticle>>(Vector3f::Constant(-16), Vector3f::Constant(16), "output/plant", 16);
     PlantConfig config;
     std::mt19937 rng;
     std::uniform_real_distribution<float> chanceDist{0.0f, 1.0f};

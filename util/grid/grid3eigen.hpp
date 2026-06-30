@@ -182,6 +182,7 @@ private:
     }
 
     void ensureLoaded(OctreeNode* node, bool asyncLoad = false) {
+        if (!node) return;
         {
             if (node->isLoaded() || node->isQueued()) return; 
             else {
@@ -574,7 +575,7 @@ private:
             bool insertedInChild = false;
             uint8_t targetIndex = getOctant(pointData->position, node->center);
             OctreeNode* targetChild = node->children[targetIndex].get();
-
+            std::unique_lock<std::shared_mutex> clock(targetChild->nodeMutex);
             if (targetChild) {
                 insertedInChild = insertRecursive(targetChild, pointData, depth);
             }
@@ -613,72 +614,6 @@ private:
     void invalidateLODForPoint(const std::shared_ptr<NodeData>& pointData) {
         if (root_ && pointData) {
             invalidateNodeLODRecursive(root_.get(), pointData->getCubeBounds());
-        }
-    }
-    
-    void ensureBounds(const BoundingBox& targetBounds) {
-        if (!targetBounds.first.allFinite() || !targetBounds.second.allFinite()) return;
-
-        if (!root_) {
-            PointType center = (targetBounds.first + targetBounds.second) * 0.5f;
-            PointType size = targetBounds.second - targetBounds.first;
-            float maxDim = size.maxCoeff();
-            if (maxDim <= 0.0f) maxDim = 1.0f;
-            PointType halfSize = PointType::Constant(maxDim * 0.5f);
-            root_ = std::make_unique<OctreeNode>(center - halfSize, center + halfSize);
-            return;
-        }
-
-        int maxExpansions = 100;
-        int expansionCount = 0;
-
-        while (true) {
-            if (expansionCount++ > maxExpansions) {
-                std::cerr << "[Octree] WARNING: Max bounds expansion reached. Particle escaped or NaN." << std::endl;
-                break;
-            }
-            BoundingBox RB = root_->bounds();
-
-            bool xInside = RB.first.x() <= targetBounds.first.x() && RB.second.x() >= targetBounds.second.x();
-            bool yInside = RB.first.y() <= targetBounds.first.y() && RB.second.y() >= targetBounds.second.y();
-            bool zInside = RB.first.z() <= targetBounds.first.z() && RB.second.z() >= targetBounds.second.z();
-
-            if (xInside && yInside && zInside) {
-                break;
-            }
-
-            PointType min = RB.first;
-            PointType max = RB.second;
-            PointType size = max - min;
-            
-            if (size.x() <= 0.0f) size.x() = 1.0f;
-            if (size.y() <= 0.0f) size.y() = 1.0f;
-            if (size.z() <= 0.0f) size.z() = 1.0f;
-            
-            int expandX = (targetBounds.first.x() < min.x()) ? -1 : 1;
-            int expandY = (targetBounds.first.y() < min.y()) ? -1 : 1;
-            int expandZ = (targetBounds.first.z() < min.z()) ? -1 : 1;
-            
-            PointType newMin = min;
-            PointType newMax = max;
-            
-            if (expandX < 0) newMin.x() -= size.x();
-            else newMax.x() += size.x();
-            if (expandY < 0) newMin.y() -= size.y();
-            else newMax.y() += size.y();
-            if (expandZ < 0) newMin.z() -= size.z();
-            else newMax.z() += size.z();
-            
-            auto newRoot = std::make_unique<OctreeNode>(newMin, newMax);
-            newRoot->setLeaf(false);
-            
-            uint8_t oldOctant = 0;
-            if (expandX < 0) oldOctant |= 1;
-            if (expandY < 0) oldOctant |= 2;
-            if (expandZ < 0) oldOctant |= 4;
-            
-            newRoot->children[oldOctant] = std::move(root_);
-            root_ = std::move(newRoot);
         }
     }
 
@@ -784,9 +719,10 @@ private:
     void loadSubtreeRecursive(OctreeNode* node) {
         if (!node) return;
         ensureLoaded(node, true);
+        std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
         if (!node->isLeaf()) {
-            for (int i = 0; i < 8; ++i) {
-                loadSubtreeRecursive(node->children[i].get());
+            for (auto& child : node->children) {
+                loadSubtreeRecursive(child.get());
             }
         }
     }
@@ -794,9 +730,10 @@ private:
     void loadAndLodSubtreeRecursive(OctreeNode* node) {
         if (!node) return;
         ensureLOD(node);
+        std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
         if (!node->isLeaf()) {
-            for (int i = 0; i < 8; ++i) {
-                loadAndLodSubtreeRecursive(node->children[i].get());
+            for (auto& child : node->children) {
+                loadAndLodSubtreeRecursive(child.get());
             }
         }
     }
@@ -1531,8 +1468,6 @@ public:
             obj->relativeVoxels.push_back({relPos, rIdx, pIdx, size});
         }
         
-        ensureBounds(pointData->getCubeBounds());
-        
         if (insertRecursive(root_.get(), pointData, 0)) {
             this->size++;
             if (bType != BodyType::STATIC) {
@@ -1640,7 +1575,6 @@ public:
                 obj->relativeVoxels.push_back({relPos, rIdx, pIdx, voxelSize});
             }
             
-            ensureBounds(pointData->getCubeBounds());
             if (insertRecursive(root_.get(), pointData, 0)) {
                 this->size++;
                 if (bType != BodyType::STATIC) {
@@ -1812,7 +1746,6 @@ public:
         }
 
         BoundingBox newBounds = getNodesBounds(nodes);
-        ensureBounds(newBounds);
 
         int newDepth = 0;
         OctreeNode* newStart = getHighestCommonNode(newBounds, root_.get(), 0, newDepth);
@@ -1936,8 +1869,6 @@ public:
 
             Eigen::Vector4f color4(color.x(), color.y(), color.z(), std::clamp(1.0f - transmission, 0.0f, 1.0f));
             auto pointData = std::make_shared<NodeData>(data, pos, visible, color4, size, active, objectId, rIdx, pIdx, bType == BodyType::STATIC);
-            
-            ensureBounds(pointData->getCubeBounds());
             
             if (insertRecursive(root_.get(), pointData, 0)) {
                 this->size++;
@@ -2193,7 +2124,6 @@ public:
         
         pointData->renderMatIdx = obj->getOrAddRenderMaterial(mat);
         
-        ensureBounds(pointData->getCubeBounds());
         bool res = insertRecursive(root_.get(), pointData, 0);
         
         if(!res) {
@@ -2209,7 +2139,6 @@ public:
 
         removeRecursive(root_.get(), pointData->getCubeBounds(), pointData);
         pointData->position = newPos;
-        ensureBounds(pointData->getCubeBounds());
 
         if (insertRecursive(root_.get(), pointData, 0)) {
             return true;
@@ -2225,7 +2154,6 @@ public:
 
             removeRecursive(root_.get(), pointData->getCubeBounds(), pointData);
             pointData->position = newPos;
-            ensureBounds(pointData->getCubeBounds());
 
             if (insertRecursive(root_.get(), pointData, 0)) {
                 return;
@@ -2246,7 +2174,6 @@ public:
             newPointData->position = newPos;
             newPointData->data = newData;
             
-            ensureBounds(newPointData->getCubeBounds());
             if (!insertRecursive(root_.get(), newPointData, 0)) {
                 size--;
             }
@@ -2627,7 +2554,6 @@ public:
         BoundingBox newBounds = oldBounds;
         newBounds.first += offset;
         newBounds.second += offset;
-        ensureBounds(newBounds);
 
         int newDepth = 0;
         OctreeNode* newStart = getHighestCommonNode(newBounds, root_.get(), 0, newDepth);
