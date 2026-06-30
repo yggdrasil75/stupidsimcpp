@@ -74,23 +74,23 @@ static inline Eigen::Vector3f unpackRGB9E5(uint32_t c) {
     return Eigen::Vector3f(r, g, b);
 }
 
-template<typename T, typename IndexType>
+template<typename T>
 struct NodeData_;
-template<typename T, typename IndexType = uint16_t>
+template<typename T>
 struct Bond_ {
-    std::weak_ptr<NodeData_<T, IndexType>> other;
+    std::weak_ptr<NodeData_<T>> other;
     float restLength = 0.0f;
     float strength   = 0.0f;
     bool  toAnchor   = false;
 };
 
-template<typename T, typename IndexType = uint16_t>
+template<typename T>
 struct PhysicsState_ {
     Eigen::Vector3f velocity{0.0f, 0.0f, 0.0f};
     Eigen::Vector3f force{0.0f, 0.0f, 0.0f};
     float density = 1.0f;
     float pressure = 0.0f;
-    std::vector<Bond_<T, IndexType>> bonds;
+    std::vector<Bond_<T>> bonds;
     bool bondsBuilt = false;
 };
 
@@ -429,7 +429,7 @@ struct GasCell_ {
     bool empty(float eps = 1e-5f) const { return totalDensity() <= eps; }
 };
 
-template<typename T, typename IndexType = uint16_t>
+template<typename T>
 struct GasField_ {
     BoundingBox bounds;
     uint16_t res = 0;
@@ -581,7 +581,7 @@ struct GasField_ {
     }
 };
 
-struct Material_ {
+struct RenderMaterial {
     uint32_t emittance;
     float roughness;
     float metallic;
@@ -591,32 +591,32 @@ struct Material_ {
     //bandwidth?
     //dispersion?
 
-    Material_(uint32_t e, float r, float m, const v3half& B, const v3half& C,
+    RenderMaterial(uint32_t e, float r, float m, const v3half& B, const v3half& C,
               Eigen::Vector3f a = Eigen::Vector3f::Zero())
         : emittance(e), roughness(r), metallic(m), sellB(B), sellC(C), absorption(a) {}
 
-    Material_(float e = 0.0f, float r = 1.0f, float m = 0.0f, float i = 1.45f, Eigen::Vector3f a = Eigen::Vector3f::Zero())
+    RenderMaterial(float e = 0.0f, float r = 1.0f, float m = 0.0f, float i = 1.45f, Eigen::Vector3f a = Eigen::Vector3f::Zero())
         : emittance(packRGB9E5(Eigen::Vector3f(e, e, e))), roughness(r), metallic(m), absorption(a) {
         sellmeierFromConstant(i, sellB, sellC);
     }
     float iorGreen() const { return sellmeierN(sellB, sellC, SELL_LAMBDA_G); }
     Eigen::Vector3f emittanceRGB() const { return unpackRGB9E5(emittance); }
 
-    bool operator==(const Material_& o) const {
+    bool operator==(const RenderMaterial& o) const {
         return emittance == o.emittance && roughness == o.roughness &&
                metallic == o.metallic &&
                sellB == o.sellB && sellC == o.sellC
                && absorption == o.absorption;
     }
     
-    bool operator<(const Material_& o) const {
+    bool operator<(const RenderMaterial& o) const {
         if (emittance != o.emittance) return emittance < o.emittance;
         if (roughness != o.roughness) return roughness < o.roughness;
         if (metallic != o.metallic) return metallic < o.metallic;
         return iorGreen() < o.iorGreen();
     }
 
-    float dist(const Material_& o) const {
+    float dist(const RenderMaterial& o) const {
         float dr = roughness - o.roughness;
         float dm = metallic - o.metallic;
         float di = iorGreen() - o.iorGreen();
@@ -650,7 +650,7 @@ struct PhysicsMaterial_ {
 };
 
 struct materialHash {
-    size_t operator()(const Material_& m) const {
+    size_t operator()(const RenderMaterial& m) const {
         std::hash<float> hf;
         size_t h = std::hash<uint32_t>()(m.emittance);
         h ^= hf(m.roughness) + 0x9e3779b9 + (h << 6) + (h >> 2);
@@ -677,23 +677,21 @@ struct physicsMatHash {
     }
 };
 
-template<typename T, typename IndexType = uint16_t>
+template<typename T>
 struct GridObject_ {
     int id;
     uint8_t objectFlags;
     PointType centerPosition = PointType::Zero();
 
-    // std::vector<Material_> renderMaterials;
-    std::vector<Material_> renderMaterials;
-    std::unordered_map<Material_, IndexType, materialHash> renderMatMap;
+    std::vector<RenderMaterial> renderMaterials;
+    std::unordered_map<RenderMaterial, uint16_t, materialHash> renderMatMap;
     std::vector<PhysicsMaterial_> physicsMaterials;
-    std::unordered_map<PhysicsMaterial_, IndexType, physicsMatHash> physicsMatMap;
-    // std::vector<PhysicsMaterial_> physicsMaterials;
+    std::unordered_map<PhysicsMaterial_, uint16_t, physicsMatHash> physicsMatMap;
 
     struct VoxelRel {
         PointType relPos;
-        IndexType renderMatIdx;
-        IndexType physMatIdx;
+        uint16_t renderMatIdx;
+        uint16_t physMatIdx;
         float size;
     };
     std::vector<VoxelRel> relativeVoxels;
@@ -710,7 +708,7 @@ struct GridObject_ {
         else objectFlags &= ~OBJ_ALLOW_PARTIAL_UNLOAD_BIT;
     }
 
-    IndexType getOrAddRenderMaterial(const Material_& renderMat) {
+    uint16_t getOrAddRenderMaterial(const RenderMaterial& renderMat) {
         {
             std::shared_lock<std::shared_mutex> readLock(objMutex);
             auto a = renderMatMap.find(renderMat);
@@ -719,21 +717,21 @@ struct GridObject_ {
             }
         }
 
-        if (renderMaterials.size() < std::numeric_limits<IndexType>::max()) {
+        if (renderMaterials.size() < std::numeric_limits<uint16_t>::max()) {
             std::unique_lock<std::shared_mutex> writeLock(objMutex);
             auto a = renderMatMap.find(renderMat);
             if (a != renderMatMap.end()) {
                 return a->second;
             }
-            IndexType newIndex = static_cast<IndexType>(renderMaterials.size());
+            uint16_t newIndex = static_cast<uint16_t>(renderMaterials.size());
             renderMaterials.push_back(renderMat);
             renderMatMap[renderMat] = newIndex;
             return newIndex;
         } else {
             std::shared_lock<std::shared_mutex> readLock(objMutex);
-            IndexType bestIndex = 0;
+            uint16_t bestIndex = 0;
             float dist = std::numeric_limits<float>::max();
-            for (IndexType i = 0; i < static_cast<IndexType>(renderMaterials.size()); ++i) {
+            for (uint16_t i = 0; i < static_cast<uint16_t>(renderMaterials.size()); ++i) {
                 float dist2 = renderMaterials[i].dist(renderMat);
                 if (dist2 < dist) {
                     dist = dist2;
@@ -744,7 +742,7 @@ struct GridObject_ {
         }
     }
 
-    IndexType getOrAddPhysicsMaterial(const PhysicsMaterial_& pmat) {
+    uint16_t getOrAddPhysicsMaterial(const PhysicsMaterial_& pmat) {
         {
             std::shared_lock<std::shared_mutex> readLock(objMutex);
             auto a = physicsMatMap.find(pmat);
@@ -753,21 +751,21 @@ struct GridObject_ {
             }
         }
 
-        if (physicsMaterials.size() < std::numeric_limits<IndexType>::max()) {
+        if (physicsMaterials.size() < std::numeric_limits<uint16_t>::max()) {
             std::unique_lock<std::shared_mutex> writeLock(objMutex);
             auto a = physicsMatMap.find(pmat);
             if (a != physicsMatMap.end()) {
                 return a->second;
             }
-            IndexType newIndex = static_cast<IndexType>(physicsMaterials.size());
+            uint16_t newIndex = static_cast<uint16_t>(physicsMaterials.size());
             physicsMaterials.push_back(pmat);
             physicsMatMap[pmat] = newIndex;
             return newIndex;
         } else {
             std::shared_lock<std::shared_mutex> readLock(objMutex);
-            IndexType bestIndex = 0;
+            uint16_t bestIndex = 0;
             float dist = std::numeric_limits<float>::max();
-            for (IndexType i = 0; i < static_cast<IndexType>(physicsMaterials.size()); ++i) {
+            for (uint16_t i = 0; i < static_cast<uint16_t>(physicsMaterials.size()); ++i) {
                 float dist2 = physicsMaterials[i].dist(pmat);
                 if (dist2 < dist) {
                     dist = dist2;
@@ -778,33 +776,33 @@ struct GridObject_ {
         }
     }
     
-    Material_ getRenderMaterial(IndexType idx) const {
+    RenderMaterial getRenderMaterial(uint16_t idx) const {
         std::shared_lock<std::shared_mutex> lock(objMutex);
         if (idx < renderMaterials.size()) return renderMaterials[idx];
-        return Material_();
+        return RenderMaterial();
     }
     
-    PhysicsMaterial_ getPhysicsMaterial(IndexType idx) const {
+    PhysicsMaterial_ getPhysicsMaterial(uint16_t idx) const {
         std::shared_lock<std::shared_mutex> lock(objMutex);
         if (idx < physicsMaterials.size()) return physicsMaterials[idx];
         return PhysicsMaterial_();
     }
 };
 
-template<typename T, typename IndexType = uint16_t>
+template<typename T>
 struct NodeData_ {
     T data;
     PointType position;
     int objectId;
     float size;
     Eigen::Vector4f color;
-    IndexType renderMatIdx;
-    IndexType physMatIdx;
+    uint16_t renderMatIdx;
+    uint16_t physMatIdx;
     std::atomic<uint8_t> flags;
-    PhysicsState_<T, IndexType> physics;
+    PhysicsState_<T> physics;
 
     NodeData_(const T& data, const PointType& pos, bool visible, const Eigen::Vector4f& color, float size = 0.01f,
-                bool active = true, int objectId = -1, IndexType rIdx = 0, IndexType pIdx = 0, bool staticbit = 0) 
+                bool active = true, int objectId = -1, uint16_t rIdx = 0, uint16_t pIdx = 0, bool staticbit = 0) 
             : data(data), position(pos), objectId(objectId), size(size), 
                 color(color), renderMatIdx(rIdx), physMatIdx(pIdx), flags(0) {
         setActive(active);
@@ -868,35 +866,46 @@ struct NodeData_ {
     }
 };
 
-template<typename T, typename IndexType = uint16_t>
+template<typename T>
 struct OctreeNode_ {
-    BoundingBox bounds;
-    std::vector<std::shared_ptr<NodeData_<T, IndexType>>> points;
-    std::array<std::unique_ptr<OctreeNode_<T, IndexType>>, 8> children;
+    std::vector<std::shared_ptr<NodeData_<T>>> points;
+    std::array<std::unique_ptr<OctreeNode_<T>>, 8> children;
     PointType center;
     float nodeSize;
     std::atomic<uint8_t> flags;
     
-    mutable std::shared_ptr<NodeData_<T, IndexType>> lodData;
+    mutable std::shared_ptr<NodeData_<T>> lodData;
     mutable std::shared_mutex nodeMutex;
-    std::unique_ptr<GasField_<T, IndexType>> gasField;
+    std::unique_ptr<GasField_<T>> gasField;
 
-    OctreeNode_(const PointType& min, const PointType& max) : bounds(min,max), flags(0), lodData(nullptr) {
+    OctreeNode_(const PointType& min, const PointType& max) : flags(0), lodData(nullptr) {
         setLeaf(true);
         setLoaded(true);
         setDirty(true);
         setLoadQueued(false);
         setSaveQueued(false);
         setKeepLoaded(false);
-        for (std::unique_ptr<OctreeNode_<T, IndexType>>& child : children) {
+        for (std::unique_ptr<OctreeNode_<T>>& child : children) {
             child = nullptr;
         }
-        center = (bounds.first + bounds.second) * 0.5;
-        nodeSize = (bounds.second - bounds.first).norm();
+        center = (min + max) * 0.5;
+        nodeSize = (max - min).norm();
     }
 
-    std::unique_ptr<OctreeNode_<T, IndexType>> clone() const {
-        auto newNode = std::make_unique<OctreeNode_<T, IndexType>>(bounds.first, bounds.second);
+    OctreeNode_(const PointType& center, const float& size) : center(center), nodeSize(size), flags(0), lodData(nullptr) {
+        setLeaf(true);
+        setLoaded(true);
+        setDirty(true);
+        setLoadQueued(false);
+        setSaveQueued(false);
+        setKeepLoaded(false);
+        for (std::unique_ptr<OctreeNode_<T>>& child : children) {
+            child = nullptr;
+        }
+    }
+
+    std::unique_ptr<OctreeNode_<T>> clone() const {
+        auto newNode = std::make_unique<OctreeNode_<T>>(center, nodeSize);
         newNode->flags.store(flags.load(std::memory_order_relaxed), std::memory_order_relaxed);
         
         newNode->points = points;
@@ -905,7 +914,7 @@ struct OctreeNode_ {
         newNode->lodData = lodData;
 
         if (gasField) {
-            auto gf = std::make_unique<GasField_<T, IndexType>>(gasField->bounds, gasField->res);
+            auto gf = std::make_unique<GasField_<T>>(gasField->bounds, gasField->res);
             gf->cellSize = gasField->cellSize;
             gf->cells = gasField->cells;
             gf->slotToGlobal = gasField->slotToGlobal;
@@ -968,9 +977,10 @@ struct OctreeNode_ {
     }
 
     bool contains(const PointType& point) const {
-        return (point[0] >= bounds.first[0] && point[0] <= bounds.second[0] &&
-                point[1] >= bounds.first[1] && point[1] <= bounds.second[1] &&
-                point[2] >= bounds.first[2] && point[2] <= bounds.second[2]);
+        BoundingBox b = bounds();
+        return (point[0] >= b.first[0] && point[0] <= b.second[0] &&
+                point[1] >= b.first[1] && point[1] <= b.second[1] &&
+                point[2] >= b.first[2] && point[2] <= b.second[2]);
     }
 
     bool isEmpty() const {
@@ -1153,7 +1163,7 @@ struct OctreeNode_ {
         readVal(in, pointCount);
         points.reserve(pointCount);
         for (size_t i = 0; i < pointCount; ++i) {
-            auto pt = std::make_shared<NodeData_<T, IndexType>>();
+            auto pt = std::make_shared<NodeData_<T>>();
             deserializeData(in, pt->data);
             readVec3(in, pt->position);
             readVal(in, pt->objectId);
@@ -1169,7 +1179,7 @@ struct OctreeNode_ {
 
         bool hasGas;
         readVal(in, hasGas);
-        if (hasGas) gasField = GasField_<T, IndexType>::deserialize(in);
+        if (hasGas) gasField = GasField_<T>::deserialize(in);
         else gasField.reset();
 
         if (!isLeaf()) {
@@ -1180,10 +1190,10 @@ struct OctreeNode_ {
                     PointType childMin, childMax;
                     for (int d = 0; d < Dim; ++d) {
                         bool high = (i >> d) & 1;
-                        childMin[d] = high ? center[d] : bounds.first[d];
-                        childMax[d] = high ? bounds.second[d] : center[d];
+                        childMin[d] = high ? center[d] : bounds().first[d];
+                        childMax[d] = high ? bounds().second[d] : center[d];
                     }
-                    children[i] = std::make_unique<OctreeNode_<T, IndexType>>(childMin, childMax);
+                    children[i] = std::make_unique<OctreeNode_<T>>(childMin, childMax);
                     std::lock_guard<std::shared_mutex> lock(children[i]->nodeMutex);
                     children[i]->deserializeSubtree(in);
                 } else {
@@ -1293,7 +1303,7 @@ struct OctreeNode_ {
         readVal(in, pointCount);
         points.reserve(pointCount);
         for (size_t i = 0; i < pointCount; ++i) {
-            auto pt = std::make_shared<NodeData_<T, IndexType>>();
+            auto pt = std::make_shared<NodeData_<T>>();
             deserializeData(in, pt->data);
             readVec3(in, pt->position);
             readVal(in, pt->objectId);
@@ -1309,7 +1319,7 @@ struct OctreeNode_ {
 
         bool hasGas;
         readVal(in, hasGas);
-        if (hasGas) gasField = GasField_<T, IndexType>::deserialize(in);
+        if (hasGas) gasField = GasField_<T>::deserialize(in);
         else gasField.reset();
 
         if (!isLeaf()) {
@@ -1320,10 +1330,10 @@ struct OctreeNode_ {
                     PointType childMin, childMax;
                     for (int d = 0; d < Dim; ++d) {
                         bool high = (i >> d) & 1;
-                        childMin[d] = high ? center[d] : bounds.first[d];
-                        childMax[d] = high ? bounds.second[d] : center[d];
+                        childMin[d] = high ? center[d] : bounds().first[d];
+                        childMax[d] = high ? bounds().second[d] : center[d];
                     }
-                    children[i] = std::make_unique<OctreeNode_<T, IndexType>>(childMin, childMax);
+                    children[i] = std::make_unique<OctreeNode_<T>>(childMin, childMax);
                     children[i]->deserialize(in, regionTargetPoints);
                 } else {
                     children[i] = nullptr;
@@ -1333,14 +1343,35 @@ struct OctreeNode_ {
         setLoaded(true);
         setDirty(false);
     }
+
+    BoundingBox bounds() const {
+        float halfsize = static_cast<float>(nodeSize) * 0.5f;
+        PointType hs = PointType::Constant(halfsize);
+        return BoundingBox({center - hs, center + hs});
+    }
 };
 
-template<typename T, typename IndexType = uint16_t>
+template<typename T>
 struct RayHit_ {
-    std::shared_ptr<NodeData_<T, IndexType>> node;
+    std::shared_ptr<NodeData_<T>> node;
     float distance;
     PointType normal;
     PointType hitPoint;
+};
+    
+struct Ray {
+    PointType origin;
+    PointType dir;
+    PointType invDir;
+    uint8_t sign[3];
+    uint8_t signMask;
+    Ray(const PointType& orig, const PointType& dir) : origin(orig), dir(dir) {
+        invDir = dir.cwiseInverse();
+        sign[0] = (invDir[0] < 0);
+        sign[1] = (invDir[1] < 0);
+        sign[2] = (invDir[2] < 0);
+        signMask = (sign[0] | sign[1] << 1 | sign[2] << 2);
+    }
 };
 
 }

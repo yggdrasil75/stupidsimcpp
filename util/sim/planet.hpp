@@ -332,7 +332,7 @@ struct ImpactEvent {
 class planetsim {
 public:
     planetConfig config;
-    Grid::Octree<Particle, int16_t> grid;
+    Grid::Octree<Particle> grid;
     std::vector<PlateConfig> plates;
     std::mt19937 rng = std::mt19937(42);
     bool starAdded = false;
@@ -341,11 +341,11 @@ public:
     std::vector<ImpactEvent> impactHistory;
     int dynMoonId = 10;
 
-    using NodeType = std::shared_ptr<typename decltype(grid)::NodeData>;
+    using NodeType = std::shared_ptr<typename Grid::Octree<Particle>::NodeData>;
 
     planetsim() {
         config = planetConfig();
-        grid = Grid::Octree<Particle, int16_t>(v3(-config.gridSizeCubeMin,-config.gridSizeCubeMin,-config.gridSizeCubeMin),v3(config.gridSizeCubeMin,config.gridSizeCubeMin,config.gridSizeCubeMin), "output/Planet", 16);
+        grid = Grid::Octree<Particle>(v3(-config.gridSizeCubeMin,-config.gridSizeCubeMin,-config.gridSizeCubeMin),v3(config.gridSizeCubeMin,config.gridSizeCubeMin,config.gridSizeCubeMin), "output/Planet", 16);
     }
 
     v3 getOriginColor(const NodeType& pt) {
@@ -367,7 +367,7 @@ public:
         auto pt = grid.find(pos, config.voxelSize * 0.5f);
         if (pt && pt->objectId != newObjectId) {
             auto oldObj = grid.getObject(pt->objectId);
-            typename decltype(grid)::Material mat;
+            typename Grid::RenderMaterial mat;
             if (oldObj) mat = oldObj->getRenderMaterial(pt->renderMatIdx);
             
             auto newObj = grid.getOrCreateObject(newObjectId);
@@ -1644,7 +1644,7 @@ public:
         TIME_FUNCTION;
         auto allNodes = grid.findInRadius(config.center, config.radius * 1.5f);
         
-        std::vector<std::pair<std::shared_ptr<Grid::Octree<Particle, int16_t>::NodeData>, v3>> smoothMoves;
+        std::vector<std::pair<std::shared_ptr<Grid::Octree<Particle>::NodeData>, v3>> smoothMoves;
         
         for (auto& n : allNodes) {
             if (!n->isActive() || n->objectId == config.numPlates) continue;

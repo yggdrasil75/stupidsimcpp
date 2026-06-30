@@ -88,17 +88,15 @@ namespace Grid {
     */
 
 
-template<typename T, typename IndexType = uint16_t>
+template<typename T>
 class Octree {
 public:
-    using NodeData = NodeData_<T, IndexType>;
-    using OctreeNode = OctreeNode_<T, IndexType>;
-    using Material = Material_;
-    using RayHit = RayHit_<T, IndexType>;
-    using RenderNode = RenderNode_<T, IndexType>;
-    using RenderData = RenderData_;
-    using RenderBuffer = RenderBuffer_<T, IndexType>;
-    using GridObject = GridObject_<T, IndexType>;
+    using NodeData = NodeData_<T>;
+    using OctreeNode = OctreeNode_<T>;
+    using RayHit = RayHit_<T>;
+    using RenderNode = RenderNode_<T>;
+    using RenderBuffer = RenderBuffer_<T>;
+    using GridObject = GridObject_<T>;
 
 private:
     int countBits(uint8_t mask) const {
@@ -113,6 +111,7 @@ private:
     std::unique_ptr<OctreeNode> root_;
     size_t size;
     size_t maxPointsPerNode;
+    int nextObjId = 0;
     
     std::unordered_map<int, std::shared_ptr<GridObject>> objects_;
     mutable std::shared_mutex objectsMutex_;
@@ -165,24 +164,6 @@ private:
     float phys_gravityStrength = 9.81f;
     std::atomic<bool> physicsCollidersDirty_{true};
 
-    void collectCollidersRecursive(OctreeNode* node, std::vector<std::pair<PointType, float>>& colliders) {
-        if (!node) return;
-        ensureLoaded(node, false);
-        for (const auto& pt : node->points) {
-            auto obj = getObject(pt->objectId);
-            BodyType bType = obj ? obj->getPhysicsMaterial(pt->physMatIdx).type : BodyType::STATIC;
-            
-            if (pt->isActive() && (bType == BodyType::STATIC || bType == BodyType::KINEMATIC)) {
-                colliders.emplace_back(pt->position, pt->size);
-            }
-        }
-        if (!node->isLeaf()) {
-            for (const auto& child : node->children) {
-                if (child) collectCollidersRecursive(child.get(), colliders);
-            }
-        }
-    }
-
     void lazilyOffload(OctreeNode* node) {
         {
             std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
@@ -195,10 +176,8 @@ private:
         enqueueTask([this, node]() {
             {
                 std::shared_lock<std::shared_mutex> nlock(node->nodeMutex);
-                if (node->isLoaded() && node->isSaveQueued()) {
-                    if (node->isDirty()) {
-                        node->saveRegion(storagepath);
-                    }
+                if (node->isLoaded() && node->isSaveQueued() && node->isDirty()) {
+                    node->saveRegion(storagepath);
                 }
             }
             node->offload();
@@ -211,7 +190,6 @@ private:
 
     void ensureLoaded(OctreeNode* node, bool asyncLoad = false) {
         {
-            // std::unique_lock<std::shared_mutex> lock(node->nodeMutex); // using atomics so dont need this?
             if (node->isLoaded() || node->isQueued()) return; 
             else {
                 node->setLoadQueued(true);
@@ -233,7 +211,6 @@ private:
                 if (justLoaded) {
                     ensureLOD(node);
                 }
-                
             });
         } else {
             {
@@ -297,6 +274,7 @@ private:
         }
         return bounds;
     }
+    
     OctreeNode* getHighestCommonNodeRecursive(const PointType& Min, const PointType& Max, OctreeNode* current, int& depth) const {
         depth++;
         std::shared_lock<std::shared_mutex> lock(current->nodeMutex);
@@ -308,7 +286,7 @@ private:
         return current;
     }
 
-    OctreeNode* getHighestCommonNode(OctreeNode* current, const BoundingBox& bounds, int currentDepth, int& outDepth) const {
+    OctreeNode* getHighestCommonNode(const BoundingBox& bounds, OctreeNode* current, int currentDepth, int& outDepth) const {
         if (!current || current->isLeaf()) {
             outDepth = currentDepth;
             return current;
@@ -354,26 +332,42 @@ private:
         size_t removed = 0;
         {
             std::lock_guard<std::shared_mutex> lock(node->nodeMutex);
-            auto it = std::partition(node->points.begin(), node->points.end(),
-                [objectId](const auto& pt) { return pt->objectId != objectId; });
-            if (it != node->points.end()) {
-                removed += std::distance(it, node->points.end());
-                node->points.erase(it, node->points.end());
-            }
+            int oldSize = node->points.size();
+            std::erase_if(node->points, [objectId](const auto& pt) {
+                return pt->objectId == objectId;
+            });
+            removed += oldSize - node->points.size();
         }
         if (!node->isLeaf()) {
-            for (int i = 0; i < 8; ++i) {
-                if (node->children[i]) {
-                    removed += removeObjectBatchRecursive(node->children[i].get(), objectId);
+            for (auto& child : node->children) {
+                if (child) {
+                    removed += removeObjectBatchRecursive(child.get(), objectId);
                 }
             }
         }
+        
         if (removed > 0) {
             std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
             node->lodData = nullptr;
             node->setDirty(true);
         }
         return removed;
+    }
+    
+
+    bool removeObject(int objectId) {
+        std::vector<std::shared_ptr<NodeData>> nodes;
+        OctreeNode* startNode = collectPointsByObjectId(objectId, nodes);
+        if (nodes.empty()) return false;
+
+        size_t removed = removeObjectBatchRecursive(startNode, objectId);
+        size -= removed;
+
+        {
+            std::unique_lock<std::shared_mutex> lock(objectsMutex_);
+            objects_.erase(objectId);
+        }
+        return true;
     }
 
     size_t removeSpecificNodesBatchRecursive(OctreeNode* node, const std::unordered_set<std::shared_ptr<NodeData>>& nodesToRemove) {
@@ -382,20 +376,20 @@ private:
         size_t removed = 0;
         {
             std::lock_guard<std::shared_mutex> lock(node->nodeMutex);
-            auto it = std::partition(node->points.begin(), node->points.end(),
-                [&](const auto& pt) { return nodesToRemove.find(pt) == nodesToRemove.end(); });
-            if (it != node->points.end()) {
-                removed += std::distance(it, node->points.end());
-                node->points.erase(it, node->points.end());
-            }
+            int oldSize = node->points.size();
+            std::erase_if(node->points, [nodesToRemove](const auto& pt) {
+                nodesToRemove.find(pt) == nodesToRemove.end();
+            });
+            removed += oldSize - node->points.size();
         }
         if (!node->isLeaf()) {
-            for (int i = 0; i < 8; ++i) {
-                if (node->children[i]) {
-                    removed += removeSpecificNodesBatchRecursive(node->children[i].get(), nodesToRemove);
+            for (auto& child : node->children) {
+                if (child) {
+                    removed += removeSpecificNodesBatchRecursive(child.get(), nodesToRemove);
                 }
             }
         }
+
         if (removed > 0) {
             std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
             node->lodData = nullptr;
@@ -406,6 +400,7 @@ private:
 
 public:
     std::shared_ptr<GridObject> getOrCreateObject(int id) {
+        if (id < 0) id = nextObjId++;
         std::unique_lock<std::shared_mutex> lock(objectsMutex_);
         auto it = objects_.find(id);
         if (it != objects_.end()) return it->second;
@@ -470,9 +465,7 @@ public:
     }
 
     void waitForIdle() {
-        if (std::this_thread::get_id() == workerThread_.get_id()) {
-            return;
-        }
+        if (std::this_thread::get_id() == workerThread_.get_id()) return;
         std::promise<void> p;
         auto f = p.get_future();
         enqueueTask([&p]{ p.set_value(); });
@@ -483,24 +476,20 @@ public:
         phys_smoothingRadius = radius;
         kernels_.update(radius);
     }
-
-    void setPhysicsVelocityDamping(float damping) {
-        phys_velocityDamping = damping;
-    }
-    void setPhysicsGasConstant(float c) { phys_gasConstant = c; }
-    void setPhysicsViscosity(float v) { phys_viscosity = v; }
-    void setPhysicsRestDensity(float d) { phys_restDensity = d; }
-    void setPhysicsAirDensity(float d) { phys_airDensity = d; }
-    void setphys_gravityCenter(PointType n) {
-        phys_gravityCenter = n;
-    }
-    void setPhysicsUseGravityPoint(bool use) { phys_useGravityPoint = use; }
+    
     void setPhysicsGravity(const Eigen::Vector3f& g) {
         phys_gravity = g;
         phys_gravityStrength = g.norm();
     }
-    void setPhysicsGravityStrength(float s) { phys_gravityStrength = s; }
 
+    void setPhysicsVelocityDamping(float damping) { phys_velocityDamping = damping; }
+    void setPhysicsGasConstant(float c) { phys_gasConstant = c; }
+    void setPhysicsViscosity(float v) { phys_viscosity = v; }
+    void setPhysicsRestDensity(float d) { phys_restDensity = d; }
+    void setPhysicsAirDensity(float d) { phys_airDensity = d; }
+    void setphys_gravityCenter(PointType n) { phys_gravityCenter = n; }
+    void setPhysicsUseGravityPoint(bool use) { phys_useGravityPoint = use; }
+    void setPhysicsGravityStrength(float s) { phys_gravityStrength = s; }
     void setGasFieldResolution(uint16_t res) { gasFieldResolution_ = std::max<uint16_t>(1, res); }
     uint16_t getGasFieldResolution() const { return gasFieldResolution_; }
     void setGasBuoyancy(float b) { phys_gasBuoyancy = b; }
@@ -522,96 +511,70 @@ private:
     float lodMinDistance_ = 100.0f;
     float maxDistance_ = lodMinDistance_ * lodMinDistance_;
     float keepDistance_ = maxDistance_ * 1.2;
-    
-    struct Ray {
-        PointType origin;
-        PointType dir;
-        PointType invDir;
-        uint8_t sign[3];
-        uint8_t signMask;
-        Ray(const PointType& orig, const PointType& dir) : origin(orig), dir(dir) {
-            invDir = dir.cwiseInverse();
-            sign[0] = (invDir[0] < 0);
-            sign[1] = (invDir[1] < 0);
-            sign[2] = (invDir[2] < 0);
-            signMask = (sign[0] | sign[1] << 1 | sign[2] << 2);
-        }
-    };
 
-    uint8_t getOctant(const PointType& point, const PointType& center) const {
+    inline uint8_t getOctant(const PointType& point, const PointType& center) const {
         return (point[0] >= center[0]) | ((point[1] >= center[1]) << 1) | ((point[2] >= center[2]) << 2);
-        // uint8_t octant = 0;
-        // if (point[0] >= center[0]) octant |= 1;
-        // if (point[1] >= center[1]) octant |= 2;
-        // if (point[2] >= center[2]) octant |= 4;
-        // return octant;
     }
 
     BoundingBox createChildBounds(const OctreeNode* node, uint8_t octant) const {
         PointType childMin, childMax;
         const PointType& center = node->center;
+        const BoundingBox bounds = node->bounds();
         
-        childMin[0] = (octant & 1) ? center[0] : node->bounds.first[0];
-        childMax[0] = (octant & 1) ? node->bounds.second[0] : center[0];
+        childMin[0] = (octant & 1) ? center[0] : bounds.first[0];
+        childMax[0] = (octant & 1) ? bounds.second[0] : center[0];
         
-        childMin[1] = (octant & 2) ? center[1] : node->bounds.first[1];
-        childMax[1] = (octant & 2) ? node->bounds.second[1] : center[1];
+        childMin[1] = (octant & 2) ? center[1] : bounds.first[1];
+        childMax[1] = (octant & 2) ? bounds.second[1] : center[1];
         
-        childMin[2] = (octant & 4) ? center[2] : node->bounds.first[2];
-        childMax[2] = (octant & 4) ? node->bounds.second[2] : center[2];
+        childMin[2] = (octant & 4) ? center[2] : bounds.first[2];
+        childMax[2] = (octant & 4) ? bounds.second[2] : center[2];
 
         return {childMin, childMax};
     }
 
     bool boxIntersectsBox(const BoundingBox& a, const BoundingBox& b) const {
-        return (a.first[0] <= b.second[0] && a.second[0] >= b.first[0] &&
-                a.first[1] <= b.second[1] && a.second[1] >= b.first[1] &&
-                a.first[2] <= b.second[2] && a.second[2] >= b.first[2]);
+        return ((a.first.array() <= b.second.array()) && (a.second.array() >= b.first.array())).all();
     }
 
     bool boxContainsBox(const BoundingBox& outer, const BoundingBox& inner) const {
-        return (inner.first[0] >= outer.first[0] && inner.second[0] <= outer.second[0] &&
-                inner.first[1] >= outer.first[1] && inner.second[1] <= outer.second[1] &&
-                inner.first[2] >= outer.first[2] && inner.second[2] <= outer.second[2]);
+        return ((inner.first.array() >= outer.first.array()) && (inner.second.array() <= outer.second.array())).all();
     }
 
-    void splitNode(OctreeNode* node, int depth) {
+    void splitNodeRecursive(OctreeNode* node, int depth) {
+        std::vector<std::shared_ptr<NodeData>> keep;
+        keep.reserve(node->points.size());
+        std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
         for (int i = 0; i < 8; ++i) {
             BoundingBox childBounds = createChildBounds(node, i);
             node->children[i] = std::make_unique<OctreeNode>(childBounds.first, childBounds.second);
         }
 
-        std::vector<std::shared_ptr<NodeData>> keep;
-        for (const auto& pointData : node->points) {
-            BoundingBox cubeBounds = pointData->getCubeBounds();
-            bool placedInChild = false;
-            for (int i = 0; i < 8; ++i) {
-                if (boxContainsBox(node->children[i]->bounds, cubeBounds)) {
-                    node->children[i]->points.emplace_back(pointData);
-                    placedInChild = true;
-                    break;
-                }
-            }
-            if (!placedInChild) {
-                keep.emplace_back(pointData);
+        for (auto& pointData : node->points) {
+            PointType c = pointData->position;
+            float size = pointData->size;
+            uint8_t targetIndex = getOctant(c, node->center);
+            if (boxContainsBox(node->children[targetIndex]->bounds(), cubeBounds)) {
+                node->children[targetIndex]->points.emplace_back(std::move(pointData));
+            } else {
+                keep.emplace_back(std::move(pointData));
             }
         }
-
         node->points = std::move(keep);
         node->setLeaf(false);
 
-        for (int i = 0; i < 8; ++i) {
-            if (node->children[i]->points.size() > maxPointsPerNode) {
-                splitNode(node->children[i].get(), depth + 1);
+        for (auto& child : node->children) {
+            if (child && child->points.size() > maxPointsPerNode) {
+                splitNodeRecursive(child.get(), depth + 1);
             }
         }
     }
-
+    
     bool insertRecursive(OctreeNode* node, const std::shared_ptr<NodeData>& pointData, int depth) {
         ensureLoaded(node);
 
         BoundingBox cubeBounds = pointData->getCubeBounds();
-        if (!boxIntersectsBox(node->bounds, cubeBounds)) return false;
+        if (!boxIntersectsBox(node->bounds(), cubeBounds)) return false;
 
         {
             std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
@@ -622,7 +585,7 @@ private:
             std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
             node->points.emplace_back(pointData);
             if (node->points.size() > maxPointsPerNode) {
-                splitNode(node, depth);
+                splitNodeRecursive(node, depth);
             }
             node->setDirty(true);
             return true;
@@ -691,7 +654,7 @@ private:
     }
 
     bool invalidateNodeLODRecursive(OctreeNode* node, const BoundingBox& bounds) {
-        if (!boxIntersectsBox(node->bounds, bounds)) return false;
+        if (!boxIntersectsBox(node->bounds(), bounds)) return false;
         ensureLoaded(node);
         
         std::array<OctreeNode*, 8> safeChildren = {nullptr};
@@ -739,17 +702,18 @@ private:
                 std::cerr << "[Octree] WARNING: Max bounds expansion reached. Particle escaped or NaN." << std::endl;
                 break;
             }
+            BoundingBox RB = root_->bounds();
 
-            bool xInside = root_->bounds.first.x() <= targetBounds.first.x() && root_->bounds.second.x() >= targetBounds.second.x();
-            bool yInside = root_->bounds.first.y() <= targetBounds.first.y() && root_->bounds.second.y() >= targetBounds.second.y();
-            bool zInside = root_->bounds.first.z() <= targetBounds.first.z() && root_->bounds.second.z() >= targetBounds.second.z();
+            bool xInside = RB.first.x() <= targetBounds.first.x() && RB.second.x() >= targetBounds.second.x();
+            bool yInside = RB.first.y() <= targetBounds.first.y() && RB.second.y() >= targetBounds.second.y();
+            bool zInside = RB.first.z() <= targetBounds.first.z() && RB.second.z() >= targetBounds.second.z();
 
             if (xInside && yInside && zInside) {
                 break;
             }
 
-            PointType min = root_->bounds.first;
-            PointType max = root_->bounds.second;
+            PointType min = RB.first;
+            PointType max = RB.second;
             PointType size = max - min;
             
             if (size.x() <= 0.0f) size.x() = 1.0f;
@@ -831,7 +795,7 @@ private:
             avgColor += item->color * v;
             
             auto obj = getObject(item->objectId);
-            Material mat = obj ? obj->getRenderMaterial(item->renderMatIdx) : Material();
+            RenderMaterial mat = obj ? obj->getRenderMaterial(item->renderMatIdx) : RenderMaterial();
             
             avgEmittance += mat.emittanceRGB() * v;
             avgRoughness += mat.roughness * v;
@@ -865,7 +829,7 @@ private:
             Eigen::Vector3f e = avgEmittance * float(invVol);
             Grid::v3half B = (avgSellB * invVol).cast<Eigen::half>();
             Grid::v3half C = (avgSellC * invVol).cast<Eigen::half>();
-            Material avgMat(packRGB9E5(e), float(avgRoughness * invVol),
+            RenderMaterial avgMat(packRGB9E5(e), float(avgRoughness * invVol),
                             float(avgMetallic * invVol), B, C);
             
             auto obj = getOrCreateObject(-1);
@@ -911,8 +875,8 @@ private:
         // if (!node->contains(camPos)) {
         for(int i = 0; i < Dim; ++i) {
             float v = camPos[i];
-            float minBound = node->bounds.first[i];
-            float maxBound = node->bounds.second[i];
+            float minBound = node->bounds().first[i];
+            float maxBound = node->bounds().second[i];
             
             float d1 = v - minBound;
             float d2 = v - maxBound;
@@ -929,9 +893,10 @@ private:
 
         bool isBehind = false;
         PointType maxPoint;
-        maxPoint.x() = (camDir.x() >= 0) ? node->bounds.second.x() : node->bounds.first.x();
-        maxPoint.y() = (camDir.y() >= 0) ? node->bounds.second.y() : node->bounds.first.y();
-        maxPoint.z() = (camDir.z() >= 0) ? node->bounds.second.z() : node->bounds.first.z();
+        BoundingBox nb = node->bounds();
+        maxPoint.x() = (camDir.x() >= 0) ? nb.second.x() : nb.first.x();
+        maxPoint.y() = (camDir.y() >= 0) ? nb.second.y() : nb.first.y();
+        maxPoint.z() = (camDir.z() >= 0) ? nb.second.z() : nb.first.z();
         
         if ((maxPoint - camPos).dot(camDir) < -0.05f) {
             isBehind = true;
@@ -1005,7 +970,7 @@ private:
     }
 
     bool removeRecursive(OctreeNode* node, const BoundingBox& bounds, const std::shared_ptr<NodeData>& targetPt) {
-        if (!boxIntersectsBox(node->bounds, bounds)) return false;
+        if (!boxIntersectsBox(node->bounds(), bounds)) return false;
         ensureLoaded(node, false);
         bool foundAny = false;
         
@@ -1051,7 +1016,7 @@ private:
                                std::vector<std::shared_ptr<NodeData>>& results, std::unordered_set<std::shared_ptr<NodeData>>& seen) {
         PointType closestPoint;
         for (int i = 0; i < Dim; ++i) {
-            closestPoint[i] = std::max(node->bounds.first[i], std::min(center[i], node->bounds.second[i]));
+            closestPoint[i] = std::max(node->bounds().first[i], std::min(center[i], node->bounds().second[i]));
         }
         
         float distSq = (closestPoint - center).squaredNorm();
@@ -1417,12 +1382,12 @@ private:
         return hitSomething;
     }
 
-    void buildRender(RenderBuffer_<T, IndexType>& buffer);
+    void buildRender(RenderBuffer_<T>& buffer);
 #ifdef VULKAN_SUPPORT
-    void buildGPUMaterials(const RenderBuffer_<T, IndexType>& buf, std::vector<GPUMaterial>& out);
+    void buildGPUMaterials(const RenderBuffer_<T>& buf, std::vector<GPUMaterial>& out);
 #endif
-    void buildRenderNodeAt(OctreeNode* node, RenderBuffer_<T, IndexType>& buffer, uint32_t nodeIdx, const std::unordered_map<int, std::shared_ptr<GridObject>>& localObjects);
-    std::vector<RenderData*> fastVoxelTraverse(const RenderBuffer_<T, IndexType>& buffer, const Ray& ray, float maxDist);
+    void buildRenderNodeAt(OctreeNode* node, RenderBuffer_<T>& buffer, uint32_t nodeIdx, const std::unordered_map<int, std::shared_ptr<GridObject>>& localObjects);
+    std::vector<RenderData*> fastVoxelTraverse(const RenderBuffer_<T>& buffer, const Ray& ray, float maxDist);
 public:
     Octree(const PointType& minBound, const PointType& maxBound, std::string storagepath, size_t maxPointsPerNode=8) :
             root_(std::make_unique<OctreeNode>(minBound, maxBound)), maxPointsPerNode(maxPointsPerNode),
@@ -1620,11 +1585,11 @@ public:
              float stiffness = 4000.0f, float breakForce = 60.0f, float damping = 0.4f) {
         
         auto obj = getOrCreateObject(objectId);
-        Material mat(emittance, roughness, metallic, ior, absorp);
-        IndexType rIdx = obj->getOrAddRenderMaterial(mat);
+        RenderMaterial mat(emittance, roughness, metallic, ior, absorp);
+        uint16_t rIdx = obj->getOrAddRenderMaterial(mat);
         
         PhysicsMaterial_ pmat{bType, mass, stiffness, breakForce, damping};
-        IndexType pIdx = obj->getOrAddPhysicsMaterial(pmat);
+        uint16_t pIdx = obj->getOrAddPhysicsMaterial(pmat);
         Eigen::Vector4f color4(color.x(), color.y(), color.z(), std::clamp(1.0f - transmission, 0.0f, 1.0f));
 
         auto pointData = std::make_shared<NodeData>(data, pos, visible, color4, size, active, objectId, rIdx, pIdx, bType == BodyType::STATIC);
@@ -1681,20 +1646,20 @@ public:
     }
 
     bool addGas(const PointType& pos, const GasSpecies_& species, float amount, const T& payload = T{}) {
-        IndexType globalIdx = gasRegistry_.getOrAdd(species);
+        uint16_t globalIdx = gasRegistry_.getOrAdd(species);
         return addGas(pos, globalIdx, amount, payload);
     }
-    IndexType registerGasSpecies(const GasSpecies_& species) {
+    uint16_t registerGasSpecies(const GasSpecies_& species) {
         return gasRegistry_.getOrAdd(species);
     }
 
-    GasSpecies_ getGasSpecies(IndexType globalIdx) const {
+    GasSpecies_ getGasSpecies(uint16_t globalIdx) const {
         return gasRegistry_.get(globalIdx);
     }
 
     size_t gasSpeciesCount() const { return gasRegistry_.size(); }
 
-    bool addGas(const PointType& pos, IndexType globalSpeciesIdx, float amount, const T& payload = T{}) {
+    bool addGas(const PointType& pos, uint16_t globalSpeciesIdx, float amount, const T& payload = T{}) {
         if (amount <= 0.0f || !root_) return false;
         ensureBounds({pos, pos});
 
@@ -1704,9 +1669,9 @@ public:
         {
             std::unique_lock<std::shared_mutex> lock(leaf->nodeMutex);
             if (!leaf->gasField) {
-                leaf->gasField = std::make_unique<GasField_<T, IndexType>>(leaf->bounds, gasFieldResolution_);
+                leaf->gasField = std::make_unique<GasField_<T>>(leaf->bounds(), gasFieldResolution_);
             }
-            GasField_<T, IndexType>* field = leaf->gasField.get();
+            GasField_<T>* field = leaf->gasField.get();
 
             int slot = field->getOrAddSlot(globalSpeciesIdx);
             if (slot < 0) return false;
@@ -1745,11 +1710,11 @@ public:
         std::shared_ptr<GridObject> obj = getOrCreateObject(objectId);
         v3half sB, sC;
         sellmeierFromConstant(ior, sB, sC);
-        Material rmat(packRGB9E5(emittance), roughness, reflective, sB, sC, absorption);
-        IndexType rIdx = obj->getOrAddRenderMaterial(rmat);
+        RenderMaterial rmat(packRGB9E5(emittance), roughness, reflective, sB, sC, absorption);
+        uint16_t rIdx = obj->getOrAddRenderMaterial(rmat);
 
         PhysicsMaterial_ pmat{bType, mass};
-        IndexType pIdx = obj->getOrAddPhysicsMaterial(pmat);
+        uint16_t pIdx = obj->getOrAddPhysicsMaterial(pmat);
 
         Eigen::Vector4f albedo = Eigen::Vector4f(color.x(), color.y(), color.z(), transmission);
 
@@ -1785,10 +1750,10 @@ public:
                       Eigen::Vector3f absorp = Eigen::Vector3f::Zero()) {
         if (!root_) return false;
         auto obj = getOrCreateObject(objectId);
-        Material mat(emittance, roughness, metallic, ior, absorp);
-        IndexType rIdx = obj->getOrAddRenderMaterial(mat);
+        RenderMaterial mat(emittance, roughness, metallic, ior, absorp);
+        uint16_t rIdx = obj->getOrAddRenderMaterial(mat);
         PhysicsMaterial_ pmat{bType, mass};
-        IndexType pIdx = obj->getOrAddPhysicsMaterial(pmat);
+        uint16_t pIdx = obj->getOrAddPhysicsMaterial(pmat);
 
         Eigen::Vector4f color4(color.x(), color.y(), color.z(), std::clamp(1.0f - transmission, 0.0f, 1.0f));
         std::vector<std::shared_ptr<NodeData>> newPhysNodes;
@@ -1898,7 +1863,7 @@ public:
         }
     }
 
-    bool updateRenderMaterial(int objectId, uint16_t index, const Material& mat) {
+    bool updateRenderMaterial(int objectId, uint16_t index, const RenderMaterial& mat) {
         auto obj = getObject(objectId);
         if (!obj) return false;
         {
@@ -1956,26 +1921,6 @@ public:
         return commonNode;
     }
 
-    bool removeObject(int objectId) {
-        std::vector<std::shared_ptr<NodeData>> nodes;
-        OctreeNode* startNode = collectPointsByObjectId(objectId, nodes);
-        if (nodes.empty()) return false;
-
-        // BoundingBox oldBounds = getNodesBounds(nodes);
-        // int startDepth = 0;
-        // OctreeNode* r = root_.get()
-        // OctreeNode* startNode = getHighestCommonNode(nodes, r, startDepth);
-
-        size_t removed = removeObjectBatchRecursive(startNode, objectId);
-        size -= removed;
-
-        {
-            std::unique_lock<std::shared_mutex> lock(objectsMutex_);
-            objects_.erase(objectId);
-        }
-        return true;
-    }
-
     bool rotateObject(int objectId, const Eigen::Matrix3f& rotation, const PointType& pivot) {
         if (!root_) return false;
         std::vector<std::shared_ptr<NodeData>> nodes;
@@ -1984,7 +1929,7 @@ public:
 
         BoundingBox oldBounds = getNodesBounds(nodes);
         int oldDepth = 0;
-        OctreeNode* oldStart = getHighestCommonNode(root_.get(), oldBounds, 0, oldDepth);
+        OctreeNode* oldStart = getHighestCommonNode(oldBounds, root_.get(), 0, oldDepth);
 
         size_t removed = removeObjectBatchRecursive(oldStart, objectId);
         size -= removed;
@@ -1998,7 +1943,7 @@ public:
         ensureBounds(newBounds);
 
         int newDepth = 0;
-        OctreeNode* newStart = getHighestCommonNode(root_.get(), newBounds, 0, newDepth);
+        OctreeNode* newStart = getHighestCommonNode(newBounds, root_.get(), 0, newDepth);
 
         size_t added = 0;
         for (auto& n : nodes) {
@@ -2097,7 +2042,7 @@ public:
         if (!toRemoveVec.empty()) {
             BoundingBox remBounds = getNodesBounds(toRemoveVec);
             int remDepth = 0;
-            OctreeNode* start = getHighestCommonNode(root_.get(), remBounds, 0, remDepth);
+            OctreeNode* start = getHighestCommonNode(remBounds, root_.get(), 0, remDepth);
             size_t removed = removeSpecificNodesBatchRecursive(start, toRemove);
             size -= removed;
         }
@@ -2111,11 +2056,11 @@ public:
              BodyType bType = BodyType::STATIC, float mass = 1.0f) {
         enqueueTask([this, data, pos, visible, color, size, active, objectId, emittance, roughness, metallic, transmission, ior, absorp, bType, mass]() {
             auto obj = getOrCreateObject(objectId);
-            Material mat(emittance, roughness, metallic, ior, absorp);
-            IndexType rIdx = obj->getOrAddRenderMaterial(mat);
+            RenderMaterial mat(emittance, roughness, metallic, ior, absorp);
+            uint16_t rIdx = obj->getOrAddRenderMaterial(mat);
             
             PhysicsMaterial_ pmat{bType, mass};
-            IndexType pIdx = obj->getOrAddPhysicsMaterial(pmat);
+            uint16_t pIdx = obj->getOrAddPhysicsMaterial(pmat);
 
             Eigen::Vector4f color4(color.x(), color.y(), color.z(), std::clamp(1.0f - transmission, 0.0f, 1.0f));
             auto pointData = std::make_shared<NodeData>(data, pos, visible, color4, size, active, objectId, rIdx, pIdx, bType == BodyType::STATIC);
@@ -2159,8 +2104,8 @@ public:
         OctreeNode::writeVec3(out, skylight_);
         OctreeNode::writeVec3(out, backgroundColor_);
         
-        OctreeNode::writeVec3(out, root_->bounds.first);
-        OctreeNode::writeVec3(out, root_->bounds.second);
+        OctreeNode::writeVec3(out, root_->bounds().first);
+        OctreeNode::writeVec3(out, root_->bounds().second);
 
         {
             std::shared_lock<std::shared_mutex> lock(objectsMutex_);
@@ -2296,7 +2241,7 @@ public:
         
         auto obj = getOrCreateObject(objectId);
         PhysicsMaterial_ pmat{newType, newMass};
-        IndexType newIdx = obj->getOrAddPhysicsMaterial(pmat);
+        uint16_t newIdx = obj->getOrAddPhysicsMaterial(pmat);
 
         std::lock_guard<std::mutex> lock(physicsMutex_);
         for (auto& n : nodes) {
@@ -2328,12 +2273,12 @@ public:
             if (amount > 0.0f) drops.push_back({ n->position, amount, n->data });
         }
 
-        IndexType speciesIdx = registerGasSpecies(species);
+        uint16_t speciesIdx = registerGasSpecies(species);
 
         {
             BoundingBox bounds = getNodesBounds(nodes);
             int depth = 0;
-            OctreeNode* start = getHighestCommonNode(root_.get(), bounds, 0, depth);
+            OctreeNode* start = getHighestCommonNode(bounds, root_.get(), 0, depth);
             size_t removed = removeObjectBatchRecursive(start, objectId);
             size -= removed;
             std::unique_lock<std::shared_mutex> lock(objectsMutex_);
@@ -2417,7 +2362,7 @@ public:
         pointData->objectId = targetObjId;
         
         auto obj = getOrCreateObject(targetObjId);
-        Material mat = obj->getRenderMaterial(pointData->renderMatIdx);
+        RenderMaterial mat = obj->getRenderMaterial(pointData->renderMatIdx);
         
         if (newEmittance >= 0) mat.emittance = packRGB9E5(Eigen::Vector3f(newEmittance, newEmittance, newEmittance));
         if (newRoughness >= 0) mat.roughness = newRoughness;
@@ -2549,7 +2494,7 @@ public:
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
         auto obj = getOrCreateObject(pointData->objectId);
-        Material mat = obj->getRenderMaterial(pointData->renderMatIdx);
+        RenderMaterial mat = obj->getRenderMaterial(pointData->renderMatIdx);
         mat.emittance = packRGB9E5(emittance);
         pointData->renderMatIdx = obj->getOrAddRenderMaterial(mat);
         invalidateLODForPoint(pointData);
@@ -2560,7 +2505,7 @@ public:
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
         auto obj = getOrCreateObject(pointData->objectId);
-        Material mat = obj->getRenderMaterial(pointData->renderMatIdx);
+        RenderMaterial mat = obj->getRenderMaterial(pointData->renderMatIdx);
         sellmeierFromConstant(ior, mat.sellB, mat.sellC);
         pointData->renderMatIdx = obj->getOrAddRenderMaterial(mat);
         invalidateLODForPoint(pointData);
@@ -2571,7 +2516,7 @@ public:
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
         auto obj = getOrCreateObject(pointData->objectId);
-        Material mat = obj->getRenderMaterial(pointData->renderMatIdx);
+        RenderMaterial mat = obj->getRenderMaterial(pointData->renderMatIdx);
         mat.sellB = B;
         mat.sellC = C;
         pointData->renderMatIdx = obj->getOrAddRenderMaterial(mat);
@@ -2583,7 +2528,7 @@ public:
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
         auto obj = getOrCreateObject(pointData->objectId);
-        Material mat = obj->getRenderMaterial(pointData->renderMatIdx);
+        RenderMaterial mat = obj->getRenderMaterial(pointData->renderMatIdx);
         mat.roughness = roughness;
         pointData->renderMatIdx = obj->getOrAddRenderMaterial(mat);
         invalidateLODForPoint(pointData);
@@ -2594,7 +2539,7 @@ public:
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
         auto obj = getOrCreateObject(pointData->objectId);
-        Material mat = obj->getRenderMaterial(pointData->renderMatIdx);
+        RenderMaterial mat = obj->getRenderMaterial(pointData->renderMatIdx);
         mat.metallic = metallic;
         pointData->renderMatIdx = obj->getOrAddRenderMaterial(mat);
         invalidateLODForPoint(pointData);
@@ -2643,7 +2588,7 @@ public:
         Ray ray(origin, direction.normalized());
         
         float tMin, tMax;
-        if (!rayBoxIntersect(ray, root_->bounds, tMin, tMax)) return false;
+        if (!rayBoxIntersect(ray, root_->bounds(), tMin, tMax)) return false;
         tMax = std::min(tMax, maxDist);
         float currentMaxDist = maxDist;
         
@@ -2854,7 +2799,7 @@ public:
 
         BoundingBox oldBounds = getNodesBounds(nodes);
         int oldDepth = 0;
-        OctreeNode* oldStart = getHighestCommonNode(root_.get(), oldBounds, 0, oldDepth);
+        OctreeNode* oldStart = getHighestCommonNode(oldBounds, root_.get(), 0, oldDepth);
         
         size_t removed = removeObjectBatchRecursive(oldStart, objectId);
         size -= removed;
@@ -2865,7 +2810,7 @@ public:
         ensureBounds(newBounds);
 
         int newDepth = 0;
-        OctreeNode* newStart = getHighestCommonNode(root_.get(), newBounds, 0, newDepth);
+        OctreeNode* newStart = getHighestCommonNode(newBounds, root_.get(), 0, newDepth);
 
         size_t added = 0;
         for(auto& n : nodes) {
@@ -2936,8 +2881,8 @@ public:
         os << "  Points/Leaf (Min) : " << minPointsInLeaf << "\n";
         os << "  Points/Leaf (Max) : " << maxPointsInLeaf << "\n";
         os << "Bounds:\n";
-        os << "  Min               : [" << root_->bounds.first.transpose() << "]\n";
-        os << "  Max               : [" << root_->bounds.second.transpose() << "]\n";
+        os << "  Min               : [" << root_->bounds().first.transpose() << "]\n";
+        os << "  Max               : [" << root_->bounds().second.transpose() << "]\n";
         os << "Memory (Approx):\n";
         os << "  Node Structure    : " << (nodeMem / 1024.0) << " KB\n";
         os << "  Point Data        : " << (dataMem / 1024.0) << " KB\n";

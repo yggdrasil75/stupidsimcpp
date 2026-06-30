@@ -1,13 +1,13 @@
 #include "grid3eigen.hpp"
 namespace Grid {
 
-template<typename T, typename IndexType>
-void Octree<T, IndexType>::buildRender(RenderBuffer_<T, IndexType>& buffer) {
+template<typename T>
+void Octree<T>::buildRender(RenderBuffer_<T>& buffer) {
     buffer.clear();
     if (!root_) return;
     buffer.nodes.emplace_back();
 
-    std::unordered_map<int, std::shared_ptr<GridObject_<T, IndexType>>> localObjects;
+    std::unordered_map<int, std::shared_ptr<GridObject_<T>>> localObjects;
     {
         std::shared_lock<std::shared_mutex> lock(objectsMutex_);
         localObjects = objects_;
@@ -21,14 +21,14 @@ void Octree<T, IndexType>::buildRender(RenderBuffer_<T, IndexType>& buffer) {
         }
     }
     buffer.defaultMatIdx = buffer.materials.size();
-    buffer.materials.push_back(Material_());
+    buffer.materials.push_back(RenderMaterial());
     
     buffer.gasMaterialOffset = static_cast<uint32_t>(buffer.materials.size());
     {
         size_t gasCount = gasRegistry_.size();
         for (size_t i = 0; i < gasCount; ++i) {
             GasSpecies_ s = gasRegistry_.get(static_cast<uint16_t>(i));
-            Material_ gm{};
+            RenderMaterial gm{};
             gm.absorption = s.effectiveAbsorption();
             gm.roughness = 1.0f;
             gm.metallic = 0.0f;
@@ -40,14 +40,14 @@ void Octree<T, IndexType>::buildRender(RenderBuffer_<T, IndexType>& buffer) {
     buildRenderNodeAt(root_.get(), buffer, 0, localObjects);
 }
 
-template<typename T, typename IndexType>
-void Octree<T, IndexType>::buildRenderNodeAt(OctreeNode_<T, IndexType>* node, RenderBuffer_<T, IndexType>& buffer, uint32_t nodeIdx, const std::unordered_map<int, std::shared_ptr<GridObject>>& localObjects) {
+template<typename T>
+void Octree<T>::buildRenderNodeAt(OctreeNode_<T>* node, RenderBuffer_<T>& buffer, uint32_t nodeIdx, const std::unordered_map<int, std::shared_ptr<GridObject>>& localObjects) {
     std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
     bool isLoaded = node->isLoaded();
     
-    RenderNode_<T, IndexType> rnode;
-    rnode.boundsMin = node->bounds.first;
-    rnode.boundsMax = node->bounds.second;
+    RenderNode_<T> rnode;
+    rnode.boundsMin = node->bounds().first;
+    rnode.boundsMax = node->bounds().second;
     rnode.center = node->center;
     rnode.nodeSize = node->nodeSize;
     rnode.isLeaf = node->isLeaf();
@@ -58,7 +58,7 @@ void Octree<T, IndexType>::buildRenderNodeAt(OctreeNode_<T, IndexType>* node, Re
     if (isLoaded) {
         for (const auto& pt : node->points) {
             if (!pt->isActive() || !pt->isVisible()) continue; 
-            RenderData_ rd;
+            RenderData rd;
             rd.position = pt->position;
             rd.size = pt->size;
             rd.color = pt->color;
@@ -92,16 +92,17 @@ void Octree<T, IndexType>::buildRenderNodeAt(OctreeNode_<T, IndexType>* node, Re
         const size_t cellCount = static_cast<size_t>(R) * R * R;
 
         GPUGasField gf{};
-        gf.boundsMin = Eigen::Vector4f(field->bounds.first.x(), field->bounds.first.y(), field->bounds.first.z(), 0.0f);
-        gf.boundsMax = Eigen::Vector4f(field->bounds.second.x(), field->bounds.second.y(), field->bounds.second.z(), 0.0f);
+        BoundingBox fb = field->bounds;
+        gf.boundsMin = Eigen::Vector4f(fb.first.x(), fb.first.y(), fb.first.z(), 0.0f);
+        gf.boundsMax = Eigen::Vector4f(fb.second.x(), fb.second.y(), fb.second.z(), 0.0f);
         gf.cellSize = Eigen::Vector4f(field->cellSize.x(), field->cellSize.y(), field->cellSize.z(), 0.0f);
         gf.res = R;
         gf.slotCount = field->slotCount;
         gf.cellOffset = static_cast<uint32_t>(buffer.gasCells.size() / MAX_GAS_SPECIES);
         for (int s = 0; s < MAX_GAS_SPECIES; ++s) {
             uint16_t g = field->slotToGlobal[s];
-            // Store the global *material* index (offset folded in) or 0xFFFFFFFF.
-            gf.slotToGlobal[s] = (g == GasField_<T, IndexType>::INVALID_SLOT)
+            // Store the global *RenderMaterial* index (offset folded in) or 0xFFFFFFFF.
+            gf.slotToGlobal[s] = (g == GasField_<T>::INVALID_SLOT)
                                      ? 0xFFFFFFFFu
                                      : (buffer.gasMaterialOffset + g);
         }
@@ -121,7 +122,7 @@ void Octree<T, IndexType>::buildRenderNodeAt(OctreeNode_<T, IndexType>* node, Re
     
     rnode.lodPoint = -1;
     if (node->lodData) {
-        RenderData_ ld;
+        RenderData ld;
         ld.position = node->lodData->position;
         ld.size = node->lodData->size;
         ld.color = node->lodData->color;
@@ -178,9 +179,9 @@ void Octree<T, IndexType>::buildRenderNodeAt(OctreeNode_<T, IndexType>* node, Re
     buffer.nodes[nodeIdx] = rnode;
 }
 
-template<typename T, typename IndexType>
-std::vector<RenderData_*> Octree<T, IndexType>::fastVoxelTraverse(const RenderBuffer_<T, IndexType>& buffer, const Ray& ray, float maxDist) {
-    std::vector<RenderData_*> hits;
+template<typename T>
+std::vector<RenderData*> Octree<T>::fastVoxelTraverse(const RenderBuffer_<T>& buffer, const Ray& ray, float maxDist) {
+    std::vector<RenderData*> hits;
     if (buffer.nodes.empty()) return hits;
     std::vector<float> tv;
     float tMin, tMax;
@@ -203,7 +204,7 @@ std::vector<RenderData_*> Octree<T, IndexType>::fastVoxelTraverse(const RenderBu
             StackItem current = stack[--stackPtr];
             if (current.tMin > currentMaxDist) continue;
             
-            const RenderNode_<T, IndexType>& node = buffer.nodes[current.nodeIdx];
+            const RenderNode_<T>& node = buffer.nodes[current.nodeIdx];
 
             if (!node.isLoaded && node.originalNode) {
                 ensureLoaded(node.originalNode, true);
@@ -216,7 +217,7 @@ std::vector<RenderData_*> Octree<T, IndexType>::fastVoxelTraverse(const RenderBu
                     PointType n, h;
                     if (rayCubeIntersect(ray, &buffer.points[node.lodPoint], t, n, h)) {
                         if (t >= 0 && t <= currentMaxDist) {
-                            hits.emplace_back(const_cast<RenderData_*>(&buffer.points[node.lodPoint]));
+                            hits.emplace_back(const_cast<RenderData*>(&buffer.points[node.lodPoint]));
                             tv.emplace_back(t);
                             if (buffer.points[node.lodPoint].color.w() >= 0.9f) {
                                 currentMaxDist = std::min(currentMaxDist, t);
@@ -228,12 +229,12 @@ std::vector<RenderData_*> Octree<T, IndexType>::fastVoxelTraverse(const RenderBu
             }
 
             for (uint32_t i = 0; i < node.pointCount; ++i) {
-                const RenderData_& pt = buffer.points[node.firstPoint + i];
+                const RenderData& pt = buffer.points[node.firstPoint + i];
                 float t;
                 PointType n, h;
                 if (rayCubeIntersect(ray, &pt, t, n, h)) {
                     if (t >= 0 && t <= currentMaxDist) {
-                        hits.emplace_back(const_cast<RenderData_*>(&pt));
+                        hits.emplace_back(const_cast<RenderData*>(&pt));
                         tv.emplace_back(t);
                         if (pt.color.w() >= 0.9f) {
                             currentMaxDist = std::min(currentMaxDist, t);
@@ -283,7 +284,7 @@ std::vector<RenderData_*> Octree<T, IndexType>::fastVoxelTraverse(const RenderBu
             }
         }
     }
-    std::vector<std::pair<RenderData_*, float>> zipped;
+    std::vector<std::pair<RenderData*, float>> zipped;
     zipped.reserve(hits.size());
     for (std::size_t i = 0; i < hits.size(); ++i)
         zipped.emplace_back(hits[i], tv[i]);
@@ -295,14 +296,14 @@ std::vector<RenderData_*> Octree<T, IndexType>::fastVoxelTraverse(const RenderBu
     return hits;
 }
 
-template<typename T, typename IndexType>
-frame Octree<T, IndexType>::fastRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat) {
+template<typename T>
+frame Octree<T>::fastRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat) {
     // TIME_FUNCTION;
     updateStreaming(cam);
     
-    thread_local RenderBuffer_<T, IndexType> tl_buffer;
+    thread_local RenderBuffer_<T> tl_buffer;
     buildRender(tl_buffer);
-    const RenderBuffer_<T, IndexType>& shared_buffer = tl_buffer;
+    const RenderBuffer_<T>& shared_buffer = tl_buffer;
 
     PointType origin = cam.origin;
     PointType dir = cam.direction.normalized();
@@ -341,8 +342,8 @@ frame Octree<T, IndexType>::fastRenderFrame(const Camera& cam, int height, int w
             float accumAlpha = 0.0f;
             Ray ray(origin, rayDir);
             
-            // const RenderData_* hit = nullptr;
-            std::vector<RenderData_*> hits = fastVoxelTraverse(shared_buffer, ray, maxDistance_);
+            // const RenderData* hit = nullptr;
+            std::vector<RenderData*> hits = fastVoxelTraverse(shared_buffer, ray, maxDistance_);
 
             int prevOid = -1;
             bool hasPrev = false;
@@ -357,7 +358,7 @@ frame Octree<T, IndexType>::fastRenderFrame(const Camera& cam, int height, int w
                 rayCubeIntersect(ray, hit, t, normal, hitPoint, &tExit);
                 Eigen::Vector3f hitColor = hit->color.template head<3>();
                 float alpha = hit->color.w();
-                Material_ objMat = shared_buffer.materials[hit->materialIdx];
+                RenderMaterial objMat = shared_buffer.materials[hit->materialIdx];
 
                 float coverage;
                 bool isInternalVoxel = (hasPrev && hit->objectId == prevOid);
@@ -435,7 +436,7 @@ static constexpr int SELL_LUT_SECONDARY   = 8;
 static constexpr float SELL_LMIN = 0.380f; // um
 static constexpr float SELL_LMAX = 0.720f; // um
 
-static inline std::vector<float> buildSellmeierLUT(const std::vector<Grid::Material_>& mats) {
+static inline std::vector<float> buildSellmeierLUT(const std::vector<Grid::RenderMaterial>& mats) {
     int rows = std::max<size_t>(1, mats.size()) * SELL_LUT_SECONDARY;
     std::vector<float> lut(static_cast<size_t>(rows) * SELL_LUT_WAVELENGTHS, 1.0f);
     for (size_t mi = 0; mi < mats.size(); ++mi) {
@@ -460,8 +461,8 @@ struct PointSort {
     bool operator<(const PointSort& o) const { return morton < o.morton; }
 };
 
-template<typename T, typename IndexType>
-void Octree<T, IndexType>::buildGPUMaterials(const RenderBuffer_<T, IndexType>& buf, std::vector<GPUMaterial>& out) {
+template<typename T>
+void Octree<T>::buildGPUMaterials(const RenderBuffer_<T>& buf, std::vector<GPUMaterial>& out) {
     out.clear();
     out.reserve(buf.materials.size());
     size_t gasCount = gasRegistry_.size();
@@ -483,8 +484,8 @@ void Octree<T, IndexType>::buildGPUMaterials(const RenderBuffer_<T, IndexType>& 
     if (out.empty()) out.push_back(GPUMaterial{});
 }
 
-template<typename T, typename IndexType>
-frame Octree<T, IndexType>::renderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat, int samplesPerPixel,
+template<typename T>
+frame Octree<T>::renderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat, int samplesPerPixel,
                 int maxBounces, bool globalIllumination, bool useLod) {
     TIME_FUNCTION;
     updateStreaming(cam);
@@ -621,8 +622,8 @@ frame Octree<T, IndexType>::renderFrameVulkan(const Camera& cam, int height, int
     return outFrame;
 }
 
-template<typename T, typename IndexType>
-frame Octree<T, IndexType>::fastRenderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat) {
+template<typename T>
+frame Octree<T>::fastRenderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat) {
     // TIME_FUNCTION;
     updateStreaming(cam);
     // optimize();
@@ -745,8 +746,8 @@ frame Octree<T, IndexType>::fastRenderFrameVulkan(const Camera& cam, int height,
     return outFrame;
 }
 
-template<typename T, typename IndexType>
-frame Octree<T, IndexType>::blendedRenderFrameVulkan(const Camera& cam, int height, int width, float pbrScale,
+template<typename T>
+frame Octree<T>::blendedRenderFrameVulkan(const Camera& cam, int height, int width, float pbrScale,
                 frame::colormap colorformat, int samplesPerPixel, int maxBounces, bool globalIllumination, bool useLod) {
     TIME_FUNCTION;
     updateStreaming(cam);

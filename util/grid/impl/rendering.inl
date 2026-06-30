@@ -5,7 +5,7 @@
 
 namespace Grid {
 
-struct RenderData_ {
+struct RenderData {
     PointType position;
     float size;
     Eigen::Vector4f color;
@@ -26,7 +26,7 @@ struct GPUGasField {
     uint32_t slotToGlobal[8];
 };
 
-template<typename T, typename IndexType>
+template<typename T>
 struct RenderNode_ {
     PointType boundsMin;
     PointType boundsMax;
@@ -41,14 +41,14 @@ struct RenderNode_ {
     int32_t lodPoint;
     uint32_t firstChild;
     
-    OctreeNode_<T, IndexType>* originalNode;
+    OctreeNode_<T>* originalNode;
 };
 
-template<typename T, typename IndexType>
+template<typename T>
 struct RenderBuffer_ {
-    std::vector<RenderNode_<T, IndexType>> nodes;
-    std::vector<RenderData_> points;
-    std::vector<Material_> materials;
+    std::vector<RenderNode_<T>> nodes;
+    std::vector<RenderData> points;
+    std::vector<RenderMaterial> materials;
     std::unordered_map<int, uint32_t> objMaterialOffsets;
     uint32_t defaultMatIdx;
     uint32_t gasMaterialOffset = 0;

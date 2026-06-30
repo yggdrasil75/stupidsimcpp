@@ -2,9 +2,9 @@
 
 namespace Grid {
 
-template<typename T, typename IndexType>
+template<typename T>
 struct FluidMoveAction {
-    std::shared_ptr<NodeData_<T, IndexType>> node;
+    std::shared_ptr<NodeData_<T>> node;
     PointType oldPos;
     PointType newPos;
 };
@@ -17,8 +17,8 @@ struct Vec3i64Hash {
     }
 };
 
-template<typename T, typename IndexType>
-void Octree<T, IndexType>::stepPhysics(float dt) {
+template<typename T>
+void Octree<T>::stepPhysics(float dt) {
     if (!root_ || dt <= 0.0f) return;
 
     int maxObjId = -1;
@@ -77,7 +77,7 @@ void Octree<T, IndexType>::stepPhysics(float dt) {
 
     stepRigidLattice(dt, rigidNodes, fastMats, fastMatsSize);
 
-    std::vector<FluidMoveAction<T, IndexType>> pendingFluidMoves;
+    std::vector<FluidMoveAction<T>> pendingFluidMoves;
 
     if (!sphNodes.empty()) {
         const SPHKernels& K = kernels_;
@@ -159,7 +159,7 @@ void Octree<T, IndexType>::stepPhysics(float dt) {
             std::vector<OctreeNode*> stack{start};
             while (!stack.empty()) {
                 OctreeNode* cur = stack.back(); stack.pop_back();
-                if (!cur || !boxIntersectsBox(cur->bounds, box) || !cur->isLoaded()) continue;
+                if (!cur || !boxIntersectsBox(cur->bounds(), box) || !cur->isLoaded()) continue;
                 {
                     std::shared_lock<std::shared_mutex> lock(cur->nodeMutex);
                     for (const auto& pt : cur->points) {
@@ -269,7 +269,7 @@ void Octree<T, IndexType>::stepPhysics(float dt) {
         }
 
         // (5) INTEGRATE (parallel). Sleeping: settled particles skip relocation.
-        std::vector<FluidMoveAction<T, IndexType>> perMoves(sphNodes.size());
+        std::vector<FluidMoveAction<T>> perMoves(sphNodes.size());
         std::vector<char> moveValid(sphNodes.size(), 0);
         const float sleepVel2 = (0.02f * h) * (0.02f * h);
         const float maxVel = std::max(h / dt, 25.0f);
@@ -316,7 +316,7 @@ void Octree<T, IndexType>::stepPhysics(float dt) {
         PointType diff = mv.newPos - mv.oldPos;
         float dist = diff.norm();
         if (dist > 1e-5f) {
-            RayHit_<T, IndexType> hit;
+            RayHit_<T> hit;
             PointType dir = diff / dist;
             if (this->raycast(mv.oldPos, dir, dist + mv.node->size * 0.5f, hit, mv.node, true, true)) {
                 mv.newPos = hit.hitPoint + hit.normal * (mv.node->size * 0.51f);
@@ -343,8 +343,8 @@ void Octree<T, IndexType>::stepPhysics(float dt) {
     }
 }
 
-template<typename T, typename IndexType>
-void Octree<T, IndexType>::stepRigidLattice(
+template<typename T>
+void Octree<T>::stepRigidLattice(
         float dt, std::vector<std::shared_ptr<NodeData>>& rigidNodes,
         const std::vector<std::vector<PhysicsMaterial_>>& fastMats, size_t fastMatsSize) {
     if (rigidNodes.empty() || dt <= 0.0f) return;
@@ -396,7 +396,7 @@ void Octree<T, IndexType>::stepRigidLattice(
         node->physics.force = force;
     }
 
-    std::vector<FluidMoveAction<T, IndexType>> moves(rigidNodes.size());
+    std::vector<FluidMoveAction<T>> moves(rigidNodes.size());
     std::vector<char> valid(rigidNodes.size(), 0);
     const float sleepV2 = 1e-5f;
 
@@ -433,7 +433,7 @@ void Octree<T, IndexType>::stepRigidLattice(
     for (auto& node : rigidNodes) {
         auto& b = node->physics.bonds;
         b.erase(std::remove_if(b.begin(), b.end(),
-                   [](const Bond_<T, IndexType>& x){ return x.strength < 0.0f; }),
+                   [](const Bond_<T>& x){ return x.strength < 0.0f; }),
                 b.end());
     }
 
@@ -454,8 +454,8 @@ void Octree<T, IndexType>::stepRigidLattice(
     }
 }
 
-template<typename T, typename IndexType>
-void Octree<T, IndexType>::stepGasFields(float dt) {
+template<typename T>
+void Octree<T>::stepGasFields(float dt) {
     if (!root_ || dt <= 0.0f) return;
 
     std::vector<OctreeNode*> nodes;
@@ -571,7 +571,7 @@ void Octree<T, IndexType>::stepGasFields(float dt) {
                         float a = cur.amount[sp];
                         if (a <= 1e-6f) continue;
                         uint16_t g = field->slotToGlobal[sp];
-                        if (g == GasField_<T, IndexType>::INVALID_SLOT) continue;
+                        if (g == GasField_<T>::INVALID_SLOT) continue;
                         std::lock_guard<std::mutex> ol(outflowMutex);
                         outflows.push_back({outPos, g, a * 0.5f, cur.data});
                     }
