@@ -673,9 +673,10 @@ inline std::shared_ptr<PlantsimParticle> PlantsimParticle::deserialize(std::ifst
 struct PlantConfig {
     float voxelSize = 0.5f;
     float plantVoxelSize = 0.1f;
+    float stemFacetSize = 0.03f;
     float waterVoxelSize = 0.08f;
     float groundSize = 20.0f;
-    float waterLevel = -2.0f;
+    float waterLevel = 0.0f;
     
     float dayDuration = 60.0f;
     float timeOfDay = 0.3f;
@@ -699,14 +700,14 @@ struct PlantConfig {
     float cosmicRayIntensity = 0.0f; 
     float geneticCompatibilityThreshold = 1.2f; 
 
-    int   terrainSeed       = 1337;
+    int   terrainSeed       = 42;
     float terrainScale      = 0.015f;
-    float terrainAmplitude  = 12.0f;
+    float terrainAmplitude  = 2.0f;
     int   terrainOctaves    = 5;
     float terrainPersistence= 0.5f;
     float terrainLacunarity = 2.0f;
-    float ridgeStrength     = 0.4f;
-    float ridgeOffset       = 1.0f;
+    float ridgeStrength     = 0.25f;
+    float ridgeOffset       = 0.1f;
     float ridgeOffsetSafe() const { return ridgeOffset <= 0.0f ? 1.0f : ridgeOffset; }
     float rainfallScale     = 0.01f;
 };
@@ -722,7 +723,7 @@ class PlantSim {
 public:
     enum class WeatherState { CLEAR, RAIN, SNOW };
 
-    Grid::Octree<std::shared_ptr<PlantsimParticle>, uint8_t> grid = Grid::Octree<std::shared_ptr<PlantsimParticle>, uint8_t>(Vector3f::Constant(-16384), Vector3f::Constant(16384), "output/plant", 16, 16);
+    Grid::Octree<std::shared_ptr<PlantsimParticle>, uint8_t> grid = Grid::Octree<std::shared_ptr<PlantsimParticle>, uint8_t>(Vector3f::Constant(-1024), Vector3f::Constant(1024), "output/plant", 16, 16);
     PlantConfig config;
     std::mt19937 rng;
     std::uniform_real_distribution<float> chanceDist{0.0f, 1.0f};
@@ -904,6 +905,124 @@ public:
         
         updateSkyBodies();
         grid.save("output/plants.yggs");
+    }
+
+    float stemRadius(const PlantDNA& dna) const {
+        return config.plantVoxelSize * std::clamp(0.3f + dna.stem.maxGirth * 0.8f, 0.18f, 16.0f);
+    }
+
+    static void perpBasis(const v3& axis, v3& u, v3& w) {
+        v3 a = axis.normalized();
+        v3 ref = (std::abs(a.y()) < 0.9f) ? v3(0,1,0) : v3(1,0,0);
+        u = a.cross(ref).normalized();
+        w = a.cross(u).normalized();
+    }
+
+    void buildDiscRing(const v3& center, const v3& u, const v3& w,
+                       float radius, const PlantDNA& dna, int plantId, bool isRoot) {
+        const float facet = config.stemFacetSize;
+        int barkRings = isRoot ? 0 : (int)std::ceil(dna.stem.barkThickness * 3.0f);
+        barkRings = std::clamp(barkRings, 0, 4);
+        int totalRings = std::max(1, barkRings + 1); // + one wood ring
+
+        v3 woodCol = isRoot ? v3(0.45f, 0.34f, 0.26f) : v3(0.55f, 0.42f, 0.30f);
+        v3 paper(0.85f, 0.82f, 0.75f);
+        v3 barkCol = mixColor(paper, dna.stem.barkColor,
+                              std::clamp(dna.stem.barkThickness * 1.5f, 0.0f, 1.0f));
+
+        for (int ring = 0; ring < totalRings; ++ring) {
+            float r = radius - ring * facet;
+            if (r < facet * 0.5f) break;
+            int N = std::clamp((int)std::round(2.0f * (float)M_PI * r / facet), 6, 1024);
+            bool isBark = (ring < barkRings);
+            // Outer bark rings darken slightly to read as furrows.
+            v3 col = isBark
+                ? mixColor(barkCol, barkCol * 0.7f, (float)ring / std::max(1, barkRings))
+                : woodCol;
+            for (int s = 0; s < N; ++s) {
+                float ang = (float)s / N * 2.0f * (float)M_PI;
+                v3 vp = center + (u * std::cos(ang) + w * std::sin(ang)) * r;
+                if (grid.find(vp, facet * 0.5f)) continue;
+                auto bv = std::make_shared<PlantParticle>(
+                    isRoot ? PlantPart::ROOT : PlantPart::STEM, nullptr, center, w, 0);
+                bv->plantId = plantId;
+                bv->isMature = true; // wall voxels are inert; never growth tips
+                grid.set(bv, vp, true, col, facet, true, 1);
+            }
+        }
+    }
+
+    void buildCylinderSegment(const v3& from, const v3& to, float radius,
+                              const PlantDNA& dna, int plantId, bool isRoot) {
+        v3 axis = to - from;
+        float len = axis.norm();
+        if (len < 1e-5f) { 
+            v3 u, w; perpBasis(v3(0,1,0), u, w);
+            buildDiscRing(from, u, w, radius, dna, plantId, isRoot);
+            return;
+        }
+        axis /= len;
+        v3 u, w; perpBasis(axis, u, w);
+        int rings = std::max(1, (int)std::round(len / config.stemFacetSize));
+        for (int i = 0; i <= rings; ++i) {
+            float t = (float)i / rings;
+            buildDiscRing(from + (to - from) * t, u, w, radius, dna, plantId, isRoot);
+        }
+    }
+    
+    void buildBlob(const v3& center, float radius, const v3& color,
+                   int plantId, PlantPart part) {
+        const float facet = config.stemFacetSize;
+        int n = std::max(1, (int)std::round(radius / facet));
+        float r2 = radius * radius;
+        for (int ix = -n; ix <= n; ++ix)
+        for (int iy = -n; iy <= n; ++iy)
+        for (int iz = -n; iz <= n; ++iz) {
+            v3 off(ix * facet, iy * facet, iz * facet);
+            if (off.squaredNorm() > r2) continue;        // carve a sphere
+            v3 vp = center + off;
+            if (grid.find(vp, facet * 0.5f)) continue;
+            auto bv = std::make_shared<PlantParticle>(part, nullptr, center, v3(0,1,0), 0);
+            bv->plantId = plantId;
+            bv->isMature = true;
+            grid.set(bv, vp, true, color, facet, true, 1);
+        }
+    }
+
+    void buildLeafBlade(const v3& base, const v3& dir, const PlantDNA& dna,
+                        int plantId, float lobing) {
+        const float facet = config.stemFacetSize;
+        float halfW = facet * std::clamp(2.0f * dna.leaf.widthMultiplier, 1.0f, 12.0f);
+        float halfL = facet * std::clamp(3.0f * dna.leaf.lengthMultiplier, 1.5f, 18.0f);
+
+        v3 along = dir.normalized();          // leaf points away from the stem
+        v3 u, w; perpBasis(along, u, w);      // blade spans (along, u); w = normal
+        int nL = std::max(1, (int)std::round(halfL / facet));
+        int nW = std::max(1, (int)std::round(halfW / facet));
+        int layers = (dna.leaf.thickness > 0.5f) ? 2 : 1;
+
+        v3 col = mixColor(dna.leaf.color, dna.leaf.color * 0.7f, lobing);
+
+        for (int il = 0; il <= nL; ++il) {
+            float ly = (float)il / nL;
+            float widthProfile = std::sqrt(std::max(0.0f, 1.0f - (ly - 0.4f) * (ly - 0.4f) / 0.36f));
+            for (int iw = -nW; iw <= nW; ++iw) {
+                float wx = (float)iw / std::max(1, nW);
+                if (std::abs(wx) > widthProfile) continue;
+                if (lobing > 0.05f) {
+                    float lobe = 0.5f + 0.5f * std::cos(ly * (float)M_PI * (3.0f + lobing * 6.0f));
+                    if (std::abs(wx) > widthProfile * (1.0f - lobing * lobe)) continue;
+                }
+                for (int k = 0; k < layers; ++k) {
+                    v3 vp = base + along * (ly * halfL) + u * (wx * halfW) + w * (k * facet);
+                    if (grid.find(vp, facet * 0.5f)) continue;
+                    auto lv = std::make_shared<PlantParticle>(PlantPart::LEAF, nullptr, base, along, 0);
+                    lv->plantId = plantId;
+                    lv->isMature = true;
+                    grid.set(lv, vp, true, col, facet, true, 1);
+                }
+            }
+        }
     }
     
     size_t getActiveWaterVoxelCount() {
@@ -1255,27 +1374,23 @@ private:
                         p->growthDir = (p->growthDir + envForce * 0.35f).normalized();
                     }
 
-                    float pvs = config.plantVoxelSize;
-                    float coreSize = pvs * std::clamp(0.5f + p->dna->stem.maxGirth * 0.5f, 0.5f, 4.0f);
-                    if (p->dna->stem.maxGirth < 1.0f) {
-                        coreSize = pvs * std::max(0.3f, p->dna->stem.maxGirth);
-                    }
-                    float nodeSize = coreSize;
+                    float radius = stemRadius(*p->dna);
+                    float nodeSize = config.plantVoxelSize;
 
                     PlantPart nextPart = p->part == PlantPart::SEED ? PlantPart::STEM : p->part;
                     v3 nextPos = pos + p->growthDir * nodeSize;
                     auto newSegment = std::make_shared<PlantParticle>(nextPart, p->dna, p->seedPos, p->growthDir, p->branchDepth);
                     newSegment->plantId = p->plantId;
                     
-                    bool success = grid.set(newSegment, nextPos, true, 
-                                            nextPart == PlantPart::ROOT ? v3(0.5f, 0.4f, 0.3f) : p->dna->stem.barkColor, 
-                                            coreSize, true, 1);
+                    bool success = grid.set(newSegment, nextPos, true,
+                                            nextPart == PlantPart::ROOT ? v3(0.45f, 0.34f, 0.26f) : p->dna->stem.barkColor,
+                                            config.stemFacetSize, true, 1);
                     
-                    if (success && nextPart == PlantPart::STEM && p->dna->stem.woodiness > 0.3f 
-                        && p->dna->stem.barkThickness > 0.05f) {
-                        addBarkShell(nextPos, p->growthDir, coreSize, *p->dna, p->plantId);
-                    }
                     if (success) {
+                        bool isRoot = (nextPart == PlantPart::ROOT);
+                        float segRadius = isRoot ? radius * 0.45f : radius;
+                        buildCylinderSegment(pos, nextPos, segRadius, *p->dna, p->plantId, isRoot);
+                        
                         toRemove.push_back(pos);
                         newMeristems.push_back(nextPos);
 
@@ -1291,7 +1406,7 @@ private:
                                 v3 branchPos = pos + branchDir * nodeSize;
                                 auto newBranch = std::make_shared<PlantParticle>(PlantPart::STEM, p->dna, p->seedPos, branchDir, p->branchDepth + 1);
                                     newBranch->plantId = p->plantId;
-                                if (grid.set(newBranch, branchPos, true, p->dna->stem.barkColor, nodeSize, true, 1)) {
+                                if (grid.set(newBranch, branchPos, true, p->dna->stem.barkColor, config.stemFacetSize, true, 1)) {
                                     newMeristems.push_back(branchPos);
                                 }
                             }
@@ -1299,7 +1414,7 @@ private:
 
                         if (p->dna->leaf.leafDensity > 0.0f && chance(rng) < p->dna->leaf.leafDensity) {
                             v3 leafDir = v3(chance(rng) - 0.5f, chance(rng) * 0.5f, chance(rng) - 0.5f).normalized();
-                            v3 leafPos = pos + leafDir * nodeSize;
+                            v3 leafPos = pos + leafDir * radius;
                             auto newLeaf = std::make_shared<PlantParticle>(PlantPart::LEAF, p->dna, p->seedPos, leafDir, p->branchDepth + 1);
                             newLeaf->plantId = p->plantId;
                             float lob = std::max(p->dna->leaf.lobingDepth, p->dna->form.leafLobing);
@@ -1307,7 +1422,8 @@ private:
                             float leafScale = config.plantVoxelSize * std::clamp(leafDim, 0.3f, 4.0f) * (1.0f + lob * 0.6f) *
                                                 std::clamp(0.4f + p->dna->leaf.thickness * 2.0f, 0.4f, 2.0f);
                             v3 leafCol = mixColor(p->dna->leaf.color, p->dna->leaf.color * 0.7f, lob);
-                            if (grid.set(newLeaf, leafPos, true, leafCol, leafScale, true, 1)) {
+                            if (grid.set(newLeaf, leafPos, true, leafCol, config.stemFacetSize, true, 1)) {
+                                buildLeafBlade(leafPos, leafDir, *p->dna, p->plantId, lob);
                                 activeLeaves.push_back(leafPos);
                                     state->leafCount += 1;
                             }
@@ -1318,10 +1434,11 @@ private:
                                                         p->dna->form.floweringInvestment);
                         if (inBloom && flowerChance > 0.0f && chance(rng) < flowerChance * 0.3f) {
                             v3 fDir = v3(chance(rng) - 0.5f, chance(rng) * 0.5f + 0.3f, chance(rng) - 0.5f).normalized();
-                            v3 fPos = pos + fDir * nodeSize;
+                            v3 fPos = pos + fDir * radius;
                             auto flower = std::make_shared<PlantParticle>(PlantPart::FLOWER, p->dna, p->seedPos, fDir, p->branchDepth + 1);
                             flower->plantId = p->plantId;
-                            if (grid.set(flower, fPos, true, p->dna->special.flowerColor, nodeSize * 1.2f, true, 1)) {
+                            if (grid.set(flower, fPos, true, p->dna->special.flowerColor, config.stemFacetSize, true, 1)) {
+                                buildBlob(fPos, config.stemFacetSize * 2.5f, p->dna->special.flowerColor, p->plantId, PlantPart::FLOWER);
                                 activeFlowers.push_back(fPos);
                             }
                         }
@@ -1329,22 +1446,22 @@ private:
                             state->energy > energyCost * 4.0f &&
                             chance(rng) < p->dna->form.fruitInvestment * 0.1f) {
                             v3 frDir = v3(chance(rng) - 0.5f, -chance(rng) * 0.5f, chance(rng) - 0.5f).normalized();
-                            v3 frPos = pos + frDir * nodeSize;
+                            v3 frPos = pos + frDir * radius;
                             auto fruit = std::make_shared<PlantParticle>(PlantPart::FRUIT, p->dna, p->seedPos, frDir, p->branchDepth + 1);
                             fruit->plantId = p->plantId;
                             v3 fruitColor = v3(0.8f, 0.2f, 0.15f);
-                            if (grid.set(fruit, frPos, true, fruitColor, nodeSize * 1.3f, true, 1)) {
+                            if (grid.set(fruit, frPos, true, fruitColor, config.stemFacetSize, true, 1)) {
+                                buildBlob(frPos, config.stemFacetSize * 3.0f, fruitColor, p->plantId, PlantPart::FRUIT);
                                 state->energy -= energyCost * 2.0f;
                             }
                         }
 
                             if (pos.y() <= p->seedPos.y() + config.voxelSize * 2.0f) {
                                 v3 rootDir = v3(chance(rng) - 0.5f, -1.0f, chance(rng) - 0.5f).normalized();
-                                float rootSize = config.plantVoxelSize * 0.6f;
-                                v3 rootPos = pos + rootDir * rootSize;
+                                v3 rootPos = pos + rootDir * config.plantVoxelSize;
                                 auto newRoot = std::make_shared<PlantParticle>(PlantPart::ROOT, p->dna, p->seedPos, rootDir, p->branchDepth + 1);
                                 newRoot->plantId = p->plantId;
-                                if (grid.set(newRoot, rootPos, true, v3(0.5f, 0.4f, 0.3f), rootSize, true, 1)) {
+                                if (grid.set(newRoot, rootPos, true, v3(0.45f, 0.34f, 0.26f), config.stemFacetSize, true, 1)) {
                                     activeRoots.push_back(rootPos);
                                     newMeristems.push_back(rootPos);
                                     state->rootCount += 1;
@@ -1353,11 +1470,10 @@ private:
                         } else {
                             if (chance(rng) < 0.15f && p->branchDepth < p->dna->stem.maxBranchDepth + 2) {
                                 v3 branchDir = v3(chance(rng) - 0.5f, -chance(rng) - 0.2f, chance(rng) - 0.5f).normalized();
-                                float rootSize = config.plantVoxelSize * 0.6f;
-                                v3 branchPos = pos + branchDir * rootSize;
+                                v3 branchPos = pos + branchDir * config.plantVoxelSize;
                                 auto newBranch = std::make_shared<PlantParticle>(PlantPart::ROOT, p->dna, p->seedPos, branchDir, p->branchDepth + 1);
                                 newBranch->plantId = p->plantId;
-                                if (grid.set(newBranch, branchPos, true, v3(0.5f, 0.4f, 0.3f), rootSize, true, 1)) {
+                                if (grid.set(newBranch, branchPos, true, v3(0.45f, 0.34f, 0.26f), config.stemFacetSize, true, 1)) {
                                     newMeristems.push_back(branchPos);
                                     activeRoots.push_back(branchPos);
                                     state->rootCount += 1;
@@ -1380,38 +1496,6 @@ private:
 
         for (const v3& pos : newMeristems) {
             activeMeristems.push_back(pos);
-        }
-    }
-    
-    void addBarkShell(const v3& center, const v3& axis, float coreSize,
-                      const PlantDNA& dna, int plantId) {
-        float pvs = config.plantVoxelSize;
-        float bvs = pvs * 0.5f;
-        int rings = (int)std::ceil(dna.stem.barkThickness * 3.0f);
-        rings = std::clamp(rings, 1, 4);
-
-        v3 a = axis.normalized();
-        v3 ref = (std::abs(a.y()) < 0.9f) ? v3(0,1,0) : v3(1,0,0);
-        v3 u = a.cross(ref).normalized();
-        v3 v = a.cross(u).normalized();
-
-        v3 paper(0.85f, 0.82f, 0.75f);
-        v3 barkCol = mixColor(paper, dna.stem.barkColor, std::clamp(dna.stem.barkThickness * 1.5f, 0.0f, 1.0f));
-
-        int segments = 8;
-        for (int r = 1; r <= rings; ++r) {
-            float radius = coreSize * 0.5f + bvs * r;
-            for (int s = 0; s < segments; ++s) {
-                float ang = (float)s / segments * 2.0f * M_PI;
-                v3 offset = (u * std::cos(ang) + v * std::sin(ang)) * radius;
-                v3 bpos = center + offset;
-                if (grid.find(bpos, bvs * 0.5f)) continue;
-                auto bark = std::make_shared<PlantParticle>(PlantPart::STEM, nullptr, center, a, 0);
-                bark->plantId = plantId;
-                bark->isMature = true;
-                v3 c = mixColor(barkCol, barkCol * 0.7f, (float)(r-1) / std::max(1, rings-1));
-                grid.set(bark, bpos, true, c, bvs, true, 1);
-            }
         }
     }
 

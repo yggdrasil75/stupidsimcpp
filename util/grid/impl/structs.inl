@@ -34,6 +34,11 @@ template<typename T> struct is_shared_ptr<std::shared_ptr<T>> : std::true_type {
 using PointType = Eigen::Matrix<float, Dim, 1>;
 using BoundingBox = std::pair<PointType, PointType>;
 namespace fs = std::filesystem;
+struct GridHash3 {
+    std::size_t operator()(const std::array<int64_t, 3>& v) const {
+        return (std::size_t)((v[0] * 73856093) ^ (v[1] * 19349663) ^ (v[2] * 83492791));
+    }
+};
 
 enum class BodyType : uint8_t {
     STATIC = 0,
