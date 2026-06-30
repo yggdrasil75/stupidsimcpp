@@ -34,11 +34,6 @@ template<typename T> struct is_shared_ptr<std::shared_ptr<T>> : std::true_type {
 using PointType = Eigen::Matrix<float, Dim, 1>;
 using BoundingBox = std::pair<PointType, PointType>;
 namespace fs = std::filesystem;
-struct GridHash3 {
-    std::size_t operator()(const std::array<int64_t, 3>& v) const {
-        return (std::size_t)((v[0] * 73856093) ^ (v[1] * 19349663) ^ (v[2] * 83492791));
-    }
-};
 
 enum class BodyType : uint8_t {
     STATIC = 0,
@@ -79,12 +74,24 @@ static inline Eigen::Vector3f unpackRGB9E5(uint32_t c) {
     return Eigen::Vector3f(r, g, b);
 }
 
+template<typename T, typename IndexType>
+struct NodeData_;
+template<typename T, typename IndexType = uint16_t>
+struct Bond_ {
+    std::weak_ptr<NodeData_<T, IndexType>> other;
+    float restLength = 0.0f;
+    float strength   = 0.0f;
+    bool  toAnchor   = false;
+};
+
 template<typename T, typename IndexType = uint16_t>
 struct PhysicsState_ {
     Eigen::Vector3f velocity{0.0f, 0.0f, 0.0f};
     Eigen::Vector3f force{0.0f, 0.0f, 0.0f};
     float density = 1.0f;
     float pressure = 0.0f;
+    std::vector<Bond_<T, IndexType>> bonds;
+    bool bondsBuilt = false;
 };
 
 struct SPHKernels {
@@ -623,18 +630,22 @@ struct Material_ {
 struct PhysicsMaterial_ {
     BodyType type = BodyType::STATIC;
     float mass = 1.0f;
+    float stiffness  = 4000.0f;
+    float breakForce = 60.0f;
+    float damping    = 0.4f;
     ///TODO: restitution, density
     
     bool operator==(const PhysicsMaterial_& o) const {
-        return type == o.type && mass == o.mass;
+        return type == o.type && mass == o.mass && stiffness == o.stiffness &&
+               breakForce == o.breakForce && damping == o.damping;
     }
 
     float dist(const PhysicsMaterial_& o) const {
         float dm = mass - o.mass;
-        // float dr = restitution - o.restitution;
-        // float dd = density - o.density;
+        float ds = (stiffness - o.stiffness) * 0.001f;
+        float db = (breakForce - o.breakForce) * 0.01f;
         float typePenalty = (type != o.type) ? 10.0f : 0.0f;
-        return dm*dm + typePenalty;
+        return dm*dm + ds*ds + db*db + typePenalty;
     }
 };
 
@@ -660,6 +671,8 @@ struct physicsMatHash {
         std::hash<float> hf;
         size_t h = std::hash<uint8_t>()(static_cast<uint8_t>(m.type));
         h ^= hf(m.mass) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= hf(m.stiffness) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= hf(m.breakForce) + 0x9e3779b9 + (h << 6) + (h >> 2);
         return h;
     }
 };

@@ -343,7 +343,7 @@ int main() {
     defaults config;
     PointType minBound(-config.gridSizecube, -config.gridSizecube, -config.gridSizecube);
     PointType maxBound(config.gridSizecube, config.gridSizecube, config.gridSizecube);
-    Octree<int> grid(minBound, maxBound, 8, 32);
+    Octree<int> grid(minBound, maxBound, 8);
     bool gridInitialized = false;
     float ghalf = config.gridSizecube / 2.f;
     

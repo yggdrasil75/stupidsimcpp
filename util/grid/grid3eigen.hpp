@@ -111,7 +111,6 @@ private:
     }
 
     std::unique_ptr<OctreeNode> root_;
-    size_t maxDepth;
     size_t size;
     size_t maxPointsPerNode;
     
@@ -577,7 +576,6 @@ private:
     }
 
     void splitNode(OctreeNode* node, int depth) {
-        if (depth >= maxDepth) return;
         for (int i = 0; i < 8; ++i) {
             BoundingBox childBounds = createChildBounds(node, i);
             node->children[i] = std::make_unique<OctreeNode>(childBounds.first, childBounds.second);
@@ -623,7 +621,7 @@ private:
         if (node->isLeaf()) {
             std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
             node->points.emplace_back(pointData);
-            if (node->points.size() > maxPointsPerNode && depth < maxDepth) {
+            if (node->points.size() > maxPointsPerNode) {
                 splitNode(node, depth);
             }
             node->setDirty(true);
@@ -782,8 +780,6 @@ private:
             
             newRoot->children[oldOctant] = std::move(root_);
             root_ = std::move(newRoot);
-            
-            maxDepth++;
         }
     }
 
@@ -1428,15 +1424,15 @@ private:
     void buildRenderNodeAt(OctreeNode* node, RenderBuffer_<T, IndexType>& buffer, uint32_t nodeIdx, const std::unordered_map<int, std::shared_ptr<GridObject>>& localObjects);
     std::vector<RenderData*> fastVoxelTraverse(const RenderBuffer_<T, IndexType>& buffer, const Ray& ray, float maxDist);
 public:
-    Octree(const PointType& minBound, const PointType& maxBound, std::string storagepath, size_t maxPointsPerNode=8, size_t maxDepth = 16) :
+    Octree(const PointType& minBound, const PointType& maxBound, std::string storagepath, size_t maxPointsPerNode=8) :
             root_(std::make_unique<OctreeNode>(minBound, maxBound)), maxPointsPerNode(maxPointsPerNode),
-            maxDepth(maxDepth), size(0), skybox_(1024, 1024), storagepath(storagepath),
+            size(0), skybox_(1024, 1024), storagepath(storagepath),
             streamingQueued_(false) {
         skybox_.setBackground(backgroundColor_.x(), backgroundColor_.y(), backgroundColor_.z(), 1.0f);
         startWorkerThread();
     }
 
-    Octree() : root_(nullptr), maxPointsPerNode(8), maxDepth(16), size(0), skybox_(1024, 1024), streamingQueued_(false) {
+    Octree() : root_(nullptr), maxPointsPerNode(8), size(0), skybox_(1024, 1024), streamingQueued_(false) {
         skybox_.setBackground(backgroundColor_.x(), backgroundColor_.y(), backgroundColor_.z(), 1.0f);
         startWorkerThread();
     }
@@ -1453,7 +1449,7 @@ public:
         return storagepath;
     }
     
-    Octree(const Octree& other) : maxDepth(other.maxDepth), size(other.size), maxPointsPerNode(other.maxPointsPerNode),
+    Octree(const Octree& other) : size(other.size), maxPointsPerNode(other.maxPointsPerNode),
             skylight_(other.skylight_), backgroundColor_(other.backgroundColor_), autoOptimize_(other.autoOptimize_.load()),
             streamingQueued_(false), skybox_(other.skybox_), regionTargetPoints_(other.regionTargetPoints_),
             minLodSize_(other.minLodSize_), minLodVolume_(other.minLodVolume_) {
@@ -1470,7 +1466,7 @@ public:
         startWorkerThread();
     }
 
-    Octree(Octree&& other) noexcept : maxDepth(other.maxDepth), size(other.size), maxPointsPerNode(other.maxPointsPerNode),
+    Octree(Octree&& other) noexcept : size(other.size), maxPointsPerNode(other.maxPointsPerNode),
             skylight_(std::move(other.skylight_)), backgroundColor_(std::move(other.backgroundColor_)),
             autoOptimize_(other.autoOptimize_.load()),
             streamingQueued_(false), skybox_(std::move(other.skybox_)), regionTargetPoints_(other.regionTargetPoints_),
@@ -1500,7 +1496,6 @@ public:
         stopWorkerThread();
         clear();
         
-        maxDepth = other.maxDepth;
         size = other.size;
         maxPointsPerNode = other.maxPointsPerNode;
         skylight_ = other.skylight_;
@@ -1534,7 +1529,6 @@ public:
         stopWorkerThread();
         other.stopWorkerThread();
 
-        maxDepth = other.maxDepth;
         size = other.size;
         maxPointsPerNode = other.maxPointsPerNode;
         skylight_ = std::move(other.skylight_);
@@ -1622,13 +1616,14 @@ public:
 
     bool set(const T& data, const PointType& pos, bool visible, Eigen::Vector3f color, float size = 0.01f, bool active = true,
              int objectId = -1, float emittance = 0.0f, float roughness = 1.0f, float metallic = 0.0f, float transmission = 0.0f,
-             float ior = 1.45f, Eigen::Vector3f absorp = Eigen::Vector3f::Zero(), BodyType bType = BodyType::STATIC, float mass = 1.0f) {
+             float ior = 1.45f, Eigen::Vector3f absorp = Eigen::Vector3f::Zero(), BodyType bType = BodyType::STATIC, float mass = 1.0f,
+             float stiffness = 4000.0f, float breakForce = 60.0f, float damping = 0.4f) {
         
         auto obj = getOrCreateObject(objectId);
         Material mat(emittance, roughness, metallic, ior, absorp);
         IndexType rIdx = obj->getOrAddRenderMaterial(mat);
         
-        PhysicsMaterial_ pmat{bType, mass};
+        PhysicsMaterial_ pmat{bType, mass, stiffness, breakForce, damping};
         IndexType pIdx = obj->getOrAddPhysicsMaterial(pmat);
         Eigen::Vector4f color4(color.x(), color.y(), color.z(), std::clamp(1.0f - transmission, 0.0f, 1.0f));
 
@@ -1648,10 +1643,43 @@ public:
                 std::lock_guard<std::mutex> lock(physicsMutex_);
                 activePhysicsNodes_.push_back(pointData);
             }
+            if (bType == BodyType::RIGID) {
+                bondRigidVoxel(pointData);
+            }
             return true;
         }
         return false;
     }
+    
+    void bondRigidVoxel(const std::shared_ptr<NodeData>& node) {
+        float reach = node->size * 1.8f;
+        auto neighbors = findInRadius(node->position, reach, -1);
+
+        float strength = 60.0f;
+        if (auto obj = getObject(node->objectId))
+            strength = obj->getPhysicsMaterial(node->physMatIdx).breakForce;
+
+        for (auto& nb : neighbors) {
+            if (nb.get() == node.get() || !nb->isActive()) continue;
+
+            BodyType nbType = BodyType::STATIC;
+            if (auto obj = getObject(nb->objectId))
+                nbType = obj->getPhysicsMaterial(nb->physMatIdx).type;
+
+            float restLen = (node->position - nb->position).norm();
+            if (restLen < 1e-5f) continue;
+
+            if (nbType == BodyType::STATIC) {
+                if (nb->objectId != node->objectId)
+                    node->physics.bonds.push_back({nb, restLen, strength, true});
+            } else if (nbType == BodyType::RIGID && nb->objectId == node->objectId) {
+                node->physics.bonds.push_back({nb, restLen, strength, false});
+                nb->physics.bonds.push_back({node, restLen, strength, false});
+            }
+        }
+        node->physics.bondsBuilt = true;
+    }
+
     bool addGas(const PointType& pos, const GasSpecies_& species, float amount, const T& payload = T{}) {
         IndexType globalIdx = gasRegistry_.getOrAdd(species);
         return addGas(pos, globalIdx, amount, payload);
@@ -2124,7 +2152,6 @@ public:
 
         uint32_t magic = 0x79676733;
         OctreeNode::writeVal(out, magic);
-        OctreeNode::writeVal(out, maxDepth);
         OctreeNode::writeVal(out, maxPointsPerNode);
         OctreeNode::writeVal(out, size);
         OctreeNode::writeVal(out, regionTargetPoints_);
@@ -2180,7 +2207,6 @@ public:
             return false;
         }
 
-        OctreeNode::readVal(in, maxDepth);
         OctreeNode::readVal(in, maxPointsPerNode);
         OctreeNode::readVal(in, size);
         OctreeNode::readVal(in, regionTargetPoints_);
@@ -2757,6 +2783,8 @@ public:
     frame renderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB,
         int samplesPerPixel = 2, int maxBounces = 4, bool globalIllumination = false, bool useLod = true);
     void stepPhysics(float dt);
+    void stepRigidLattice(float dt, std::vector<std::shared_ptr<NodeData>>& rigidNodes,
+                          const std::vector<std::vector<PhysicsMaterial_>>& fastMats, size_t fastMatsSize);
     void stepGasFields(float dt);
 
     std::vector<std::shared_ptr<NodeData>> getExternalNodes(int targetObjectId) {
@@ -2892,7 +2920,6 @@ public:
         os << "             OCTREE STATS               \n";
         os << "========================================\n";
         os << "Config:\n";
-        os << "  Max Depth Allowed : " << maxDepth << "\n";
         os << "  Max Pts Per Node  : " << maxPointsPerNode << "\n";
         os << "  LOD Falloff Rate  : " << lodFalloffRate_ << "\n";
         os << "  LOD Min Distance  : " << lodMinDistance_ << "\n";

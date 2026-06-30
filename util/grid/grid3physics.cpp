@@ -40,6 +40,7 @@ void Octree<T, IndexType>::stepPhysics(float dt) {
     size_t fastMatsSize = fastMats.size();
 
     std::vector<std::shared_ptr<NodeData>> sphNodes;
+    std::vector<std::shared_ptr<NodeData>> rigidNodes;
 
     {
         std::lock_guard<std::mutex> lock(physicsMutex_);
@@ -64,6 +65,8 @@ void Octree<T, IndexType>::stepPhysics(float dt) {
                             BodyType bType = mats[sp->physMatIdx].type;
                             if (bType == BodyType::FLUID) {
                                 sphNodes.push_back(sp);
+                            } else if (bType == BodyType::RIGID) {
+                                rigidNodes.push_back(sp);
                             }
                         }
                     }
@@ -71,6 +74,8 @@ void Octree<T, IndexType>::stepPhysics(float dt) {
             }
         }
     }
+
+    stepRigidLattice(dt, rigidNodes, fastMats, fastMatsSize);
 
     std::vector<FluidMoveAction<T, IndexType>> pendingFluidMoves;
 
@@ -329,6 +334,117 @@ void Octree<T, IndexType>::stepPhysics(float dt) {
         OctreeNode* start = getHighestCommonNode(span, root_.get(), depth);
         if (!start) start = root_.get();
 
+        if (!removeRecursive(start, pd->getCubeBounds(), pd))
+            removeRecursive(root_.get(), pd->getCubeBounds(), pd);
+        pd->position = mv.newPos;
+        ensureBounds(pd->getCubeBounds());
+        if (!insertRecursive(start, pd, depth))
+            if (!insertRecursive(root_.get(), pd, 0)) size--;
+    }
+}
+
+template<typename T, typename IndexType>
+void Octree<T, IndexType>::stepRigidLattice(
+        float dt, std::vector<std::shared_ptr<NodeData>>& rigidNodes,
+        const std::vector<std::vector<PhysicsMaterial_>>& fastMats, size_t fastMatsSize) {
+    if (rigidNodes.empty() || dt <= 0.0f) return;
+
+    auto matOf = [&](const std::shared_ptr<NodeData>& n) -> const PhysicsMaterial_* {
+        int oi = n->objectId + 1;
+        if (oi < 0 || oi >= (int)fastMatsSize) return nullptr;
+        if (n->physMatIdx >= fastMats[oi].size()) return nullptr;
+        return &fastMats[oi][n->physMatIdx];
+    };
+
+    #pragma omp parallel for schedule(dynamic, 64)
+    for (int i = 0; i < (int)rigidNodes.size(); ++i) {
+        auto& node = rigidNodes[i];
+        const PhysicsMaterial_* m = matOf(node);
+        if (!m) { node->physics.force.setZero(); continue; }
+
+        float mass = std::max(m->mass, 1e-4f);
+
+        Eigen::Vector3f g = phys_gravity;
+        if (phys_useGravityPoint) {
+            Eigen::Vector3f toC = phys_gravityCenter - node->position;
+            float d = toC.norm();
+            g = (d > 1e-4f) ? (toC / d) * phys_gravityStrength : Eigen::Vector3f(0,0,0);
+        }
+        Eigen::Vector3f force = g * mass;
+
+        for (auto& bond : node->physics.bonds) {
+            auto other = bond.other.lock();
+            if (!other || !other->isActive()) { bond.strength = -1.0f; continue; }
+
+            Eigen::Vector3f d = other->position - node->position;
+            float len = d.norm();
+            if (len < 1e-6f) continue;
+            Eigen::Vector3f dir = d / len;
+
+            float ext = len - bond.restLength;
+            float springF = m->stiffness * ext;
+
+            Eigen::Vector3f relVel = other->physics.velocity - node->physics.velocity;
+            float dampF = m->damping * relVel.dot(dir) * m->stiffness * 0.02f;
+
+            float total = springF + dampF;
+            force += dir * total;
+
+            if (std::abs(springF) > bond.strength) bond.strength = -1.0f;
+        }
+
+        node->physics.force = force;
+    }
+
+    std::vector<FluidMoveAction<T, IndexType>> moves(rigidNodes.size());
+    std::vector<char> valid(rigidNodes.size(), 0);
+    const float sleepV2 = 1e-5f;
+
+    #pragma omp parallel for schedule(static)
+    for (int i = 0; i < (int)rigidNodes.size(); ++i) {
+        auto& node = rigidNodes[i];
+        const PhysicsMaterial_* m = matOf(node);
+        if (!m) continue;
+        float mass = std::max(m->mass, 1e-4f);
+
+        Eigen::Vector3f accel = node->physics.force / mass;
+        if (!accel.allFinite()) accel = Eigen::Vector3f(0,0,0);
+        float maxA = 2000.0f;
+        if (accel.squaredNorm() > maxA*maxA) accel = accel.normalized() * maxA;
+
+        node->physics.velocity += accel * dt;
+        node->physics.velocity *= std::max(0.0f, 1.0f - phys_velocityDamping * dt);
+        if (!node->physics.velocity.allFinite()) node->physics.velocity.setZero();
+
+        float maxV = std::max(node->size / dt, 20.0f);
+        if (node->physics.velocity.squaredNorm() > maxV*maxV)
+            node->physics.velocity = node->physics.velocity.normalized() * maxV;
+
+        if (node->physics.velocity.squaredNorm() < sleepV2) {
+            node->physics.velocity.setZero();
+            continue;
+        }
+        moves[i].node = node;
+        moves[i].oldPos = node->position;
+        moves[i].newPos = node->position + node->physics.velocity * dt;
+        valid[i] = 1;
+    }
+
+    for (auto& node : rigidNodes) {
+        auto& b = node->physics.bonds;
+        b.erase(std::remove_if(b.begin(), b.end(),
+                   [](const Bond_<T, IndexType>& x){ return x.strength < 0.0f; }),
+                b.end());
+    }
+
+    for (int i = 0; i < (int)rigidNodes.size(); ++i) {
+        if (!valid[i]) continue;
+        auto& mv = moves[i];
+        auto pd = mv.node;
+        std::vector<PointType> span = { mv.oldPos, mv.newPos };
+        int depth = 0;
+        OctreeNode* start = getHighestCommonNode(span, root_.get(), depth);
+        if (!start) start = root_.get();
         if (!removeRecursive(start, pd->getCubeBounds(), pd))
             removeRecursive(root_.get(), pd->getCubeBounds(), pd);
         pd->position = mv.newPos;

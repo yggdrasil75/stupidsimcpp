@@ -723,7 +723,7 @@ class PlantSim {
 public:
     enum class WeatherState { CLEAR, RAIN, SNOW };
 
-    Grid::Octree<std::shared_ptr<PlantsimParticle>, uint8_t> grid = Grid::Octree<std::shared_ptr<PlantsimParticle>, uint8_t>(Vector3f::Constant(-1024), Vector3f::Constant(1024), "output/plant", 16, 16);
+    Grid::Octree<std::shared_ptr<PlantsimParticle>, uint8_t> grid = Grid::Octree<std::shared_ptr<PlantsimParticle>, uint8_t>(Vector3f::Constant(-128), Vector3f::Constant(128), "output/plant", 16);
     PlantConfig config;
     std::mt19937 rng;
     std::uniform_real_distribution<float> chanceDist{0.0f, 1.0f};
@@ -911,6 +911,18 @@ public:
         return config.plantVoxelSize * std::clamp(0.3f + dna.stem.maxGirth * 0.8f, 0.18f, 16.0f);
     }
 
+    struct RigidParams { float mass, stiffness, breakForce, damping; };
+    RigidParams rigidParams(const PlantDNA& dna) const {
+        float wood = std::clamp(dna.stem.woodiness, 0.0f, 1.0f);
+        float bark = std::clamp(dna.stem.barkThickness, 0.0f, 1.0f);
+        RigidParams r;
+        r.mass       = 0.02f * (0.5f + wood);
+        r.stiffness  = 1500.0f + 6000.0f * wood;
+        r.breakForce = 25.0f + 120.0f * wood * (0.5f + bark);
+        r.damping    = 0.5f;
+        return r;
+    }
+
     static void perpBasis(const v3& axis, v3& u, v3& w) {
         v3 a = axis.normalized();
         v3 ref = (std::abs(a.y()) < 0.9f) ? v3(0,1,0) : v3(1,0,0);
@@ -930,6 +942,8 @@ public:
         v3 barkCol = mixColor(paper, dna.stem.barkColor,
                               std::clamp(dna.stem.barkThickness * 1.5f, 0.0f, 1.0f));
 
+        RigidParams rp = rigidParams(dna);
+
         for (int ring = 0; ring < totalRings; ++ring) {
             float r = radius - ring * facet;
             if (r < facet * 0.5f) break;
@@ -946,8 +960,10 @@ public:
                 auto bv = std::make_shared<PlantParticle>(
                     isRoot ? PlantPart::ROOT : PlantPart::STEM, nullptr, center, w, 0);
                 bv->plantId = plantId;
-                bv->isMature = true; // wall voxels are inert; never growth tips
-                grid.set(bv, vp, true, col, facet, true, 1);
+                bv->isMature = true;
+                grid.set(bv, vp, true, col, facet, true, 1,
+                         0.0f, 1.0f, 0.0f, 0.0f, 1.45f, v3(0,0,0),
+                         Grid::BodyType::RIGID, rp.mass, rp.stiffness, rp.breakForce, rp.damping);
             }
         }
     }
@@ -1400,61 +1416,61 @@ private:
                         }
 
                         if (p->part != PlantPart::ROOT) {
-                        if (chance(rng) < (1.0f - p->dna->stem.apicalDominance)) {
-                            if (p->branchDepth < p->dna->stem.maxBranchDepth) {
-                                    v3 branchDir = v3(chance(rng) - 0.5f, chance(rng) + 0.2f, chance(rng) - 0.5f).normalized();
-                                v3 branchPos = pos + branchDir * nodeSize;
-                                auto newBranch = std::make_shared<PlantParticle>(PlantPart::STEM, p->dna, p->seedPos, branchDir, p->branchDepth + 1);
-                                    newBranch->plantId = p->plantId;
-                                if (grid.set(newBranch, branchPos, true, p->dna->stem.barkColor, config.stemFacetSize, true, 1)) {
-                                    newMeristems.push_back(branchPos);
+                            if (chance(rng) < (1.0f - p->dna->stem.apicalDominance)) {
+                                if (p->branchDepth < p->dna->stem.maxBranchDepth) {
+                                        v3 branchDir = v3(chance(rng) - 0.5f, chance(rng) + 0.2f, chance(rng) - 0.5f).normalized();
+                                    v3 branchPos = pos + branchDir * nodeSize;
+                                    auto newBranch = std::make_shared<PlantParticle>(PlantPart::STEM, p->dna, p->seedPos, branchDir, p->branchDepth + 1);
+                                        newBranch->plantId = p->plantId;
+                                    if (grid.set(newBranch, branchPos, true, p->dna->stem.barkColor, config.stemFacetSize, true, 1)) {
+                                        newMeristems.push_back(branchPos);
+                                    }
                                 }
                             }
-                        }
 
-                        if (p->dna->leaf.leafDensity > 0.0f && chance(rng) < p->dna->leaf.leafDensity) {
-                            v3 leafDir = v3(chance(rng) - 0.5f, chance(rng) * 0.5f, chance(rng) - 0.5f).normalized();
-                            v3 leafPos = pos + leafDir * radius;
-                            auto newLeaf = std::make_shared<PlantParticle>(PlantPart::LEAF, p->dna, p->seedPos, leafDir, p->branchDepth + 1);
-                            newLeaf->plantId = p->plantId;
-                            float lob = std::max(p->dna->leaf.lobingDepth, p->dna->form.leafLobing);
-                            float leafDim = 0.5f * (p->dna->leaf.widthMultiplier + p->dna->leaf.lengthMultiplier);
-                            float leafScale = config.plantVoxelSize * std::clamp(leafDim, 0.3f, 4.0f) * (1.0f + lob * 0.6f) *
-                                                std::clamp(0.4f + p->dna->leaf.thickness * 2.0f, 0.4f, 2.0f);
-                            v3 leafCol = mixColor(p->dna->leaf.color, p->dna->leaf.color * 0.7f, lob);
-                            if (grid.set(newLeaf, leafPos, true, leafCol, config.stemFacetSize, true, 1)) {
-                                buildLeafBlade(leafPos, leafDir, *p->dna, p->plantId, lob);
-                                activeLeaves.push_back(leafPos);
-                                    state->leafCount += 1;
+                            if (p->dna->leaf.leafDensity > 0.0f && chance(rng) < p->dna->leaf.leafDensity) {
+                                v3 leafDir = v3(chance(rng) - 0.5f, chance(rng) * 0.5f, chance(rng) - 0.5f).normalized();
+                                v3 leafPos = pos + leafDir * radius;
+                                auto newLeaf = std::make_shared<PlantParticle>(PlantPart::LEAF, p->dna, p->seedPos, leafDir, p->branchDepth + 1);
+                                newLeaf->plantId = p->plantId;
+                                float lob = std::max(p->dna->leaf.lobingDepth, p->dna->form.leafLobing);
+                                float leafDim = 0.5f * (p->dna->leaf.widthMultiplier + p->dna->leaf.lengthMultiplier);
+                                float leafScale = config.plantVoxelSize * std::clamp(leafDim, 0.3f, 4.0f) * (1.0f + lob * 0.6f) *
+                                                    std::clamp(0.4f + p->dna->leaf.thickness * 2.0f, 0.4f, 2.0f);
+                                v3 leafCol = mixColor(p->dna->leaf.color, p->dna->leaf.color * 0.7f, lob);
+                                if (grid.set(newLeaf, leafPos, true, leafCol, config.stemFacetSize, true, 1)) {
+                                    buildLeafBlade(leafPos, leafDir, *p->dna, p->plantId, lob);
+                                    activeLeaves.push_back(leafPos);
+                                        state->leafCount += 1;
+                                }
                             }
-                        }
 
-                        bool inBloom = std::abs(config.season - p->dna->special.flowerBloomSeason) < 0.2f;
-                        float flowerChance = std::max(p->dna->special.flowerProbability,
-                                                        p->dna->form.floweringInvestment);
-                        if (inBloom && flowerChance > 0.0f && chance(rng) < flowerChance * 0.3f) {
-                            v3 fDir = v3(chance(rng) - 0.5f, chance(rng) * 0.5f + 0.3f, chance(rng) - 0.5f).normalized();
-                            v3 fPos = pos + fDir * radius;
-                            auto flower = std::make_shared<PlantParticle>(PlantPart::FLOWER, p->dna, p->seedPos, fDir, p->branchDepth + 1);
-                            flower->plantId = p->plantId;
-                            if (grid.set(flower, fPos, true, p->dna->special.flowerColor, config.stemFacetSize, true, 1)) {
-                                buildBlob(fPos, config.stemFacetSize * 2.5f, p->dna->special.flowerColor, p->plantId, PlantPart::FLOWER);
-                                activeFlowers.push_back(fPos);
+                            bool inBloom = std::abs(config.season - p->dna->special.flowerBloomSeason) < 0.2f;
+                            float flowerChance = std::max(p->dna->special.flowerProbability,
+                                                            p->dna->form.floweringInvestment);
+                            if (inBloom && flowerChance > 0.0f && chance(rng) < flowerChance * 0.3f) {
+                                v3 fDir = v3(chance(rng) - 0.5f, chance(rng) * 0.5f + 0.3f, chance(rng) - 0.5f).normalized();
+                                v3 fPos = pos + fDir * radius;
+                                auto flower = std::make_shared<PlantParticle>(PlantPart::FLOWER, p->dna, p->seedPos, fDir, p->branchDepth + 1);
+                                flower->plantId = p->plantId;
+                                if (grid.set(flower, fPos, true, p->dna->special.flowerColor, config.stemFacetSize, true, 1)) {
+                                    buildBlob(fPos, config.stemFacetSize * 2.5f, p->dna->special.flowerColor, p->plantId, PlantPart::FLOWER);
+                                    activeFlowers.push_back(fPos);
+                                }
                             }
-                        }
-                        if (p->dna->form.fruitInvestment > 0.0f &&
-                            state->energy > energyCost * 4.0f &&
-                            chance(rng) < p->dna->form.fruitInvestment * 0.1f) {
-                            v3 frDir = v3(chance(rng) - 0.5f, -chance(rng) * 0.5f, chance(rng) - 0.5f).normalized();
-                            v3 frPos = pos + frDir * radius;
-                            auto fruit = std::make_shared<PlantParticle>(PlantPart::FRUIT, p->dna, p->seedPos, frDir, p->branchDepth + 1);
-                            fruit->plantId = p->plantId;
-                            v3 fruitColor = v3(0.8f, 0.2f, 0.15f);
-                            if (grid.set(fruit, frPos, true, fruitColor, config.stemFacetSize, true, 1)) {
-                                buildBlob(frPos, config.stemFacetSize * 3.0f, fruitColor, p->plantId, PlantPart::FRUIT);
-                                state->energy -= energyCost * 2.0f;
+                            if (p->dna->form.fruitInvestment > 0.0f &&
+                                state->energy > energyCost * 4.0f &&
+                                chance(rng) < p->dna->form.fruitInvestment * 0.1f) {
+                                v3 frDir = v3(chance(rng) - 0.5f, -chance(rng) * 0.5f, chance(rng) - 0.5f).normalized();
+                                v3 frPos = pos + frDir * radius;
+                                auto fruit = std::make_shared<PlantParticle>(PlantPart::FRUIT, p->dna, p->seedPos, frDir, p->branchDepth + 1);
+                                fruit->plantId = p->plantId;
+                                v3 fruitColor = v3(0.8f, 0.2f, 0.15f);
+                                if (grid.set(fruit, frPos, true, fruitColor, config.stemFacetSize, true, 1)) {
+                                    buildBlob(frPos, config.stemFacetSize * 3.0f, fruitColor, p->plantId, PlantPart::FRUIT);
+                                    state->energy -= energyCost * 2.0f;
+                                }
                             }
-                        }
 
                             if (pos.y() <= p->seedPos.y() + config.voxelSize * 2.0f) {
                                 v3 rootDir = v3(chance(rng) - 0.5f, -1.0f, chance(rng) - 0.5f).normalized();

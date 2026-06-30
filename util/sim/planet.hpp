@@ -345,7 +345,7 @@ public:
 
     planetsim() {
         config = planetConfig();
-        grid = Grid::Octree<Particle, int16_t>(v3(-config.gridSizeCubeMin,-config.gridSizeCubeMin,-config.gridSizeCubeMin),v3(config.gridSizeCubeMin,config.gridSizeCubeMin,config.gridSizeCubeMin), "output/Planet", 4, 64);
+        grid = Grid::Octree<Particle, int16_t>(v3(-config.gridSizeCubeMin,-config.gridSizeCubeMin,-config.gridSizeCubeMin),v3(config.gridSizeCubeMin,config.gridSizeCubeMin,config.gridSizeCubeMin), "output/Planet", 16);
     }
 
     v3 getOriginColor(const NodeType& pt) {
