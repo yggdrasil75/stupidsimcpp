@@ -488,8 +488,11 @@ private:
     float lodFalloffRate_ = 0.1f; // Lower = better, higher = worse. 0-1
     float invLodf = 1 / lodFalloffRate_;
     float lodMinDistance_ = 100.0f;
+    float lodMinDistanceSq = 100 * 100;
     float maxDistance_ = lodMinDistance_ * lodMinDistance_;
+    float maxDistSq_max = maxDistance_ * maxDistance_;
     float keepDistance_ = maxDistance_ * 1.2;
+    float keepDistSq = keepDistance_ * keepDistance_;
 
     inline uint8_t getOctant(const PointType& point, const PointType& center) const {
         return (point[0] >= center[0]) | ((point[1] >= center[1]) << 1) | ((point[2] >= center[2]) << 2);
@@ -742,12 +745,12 @@ private:
         
         float minDistSq = 0.0f;
         float maxDistSq = 0.0f;
+        BoundingBox nb = node->bounds();
 
-        // if (!node->contains(camPos)) {
         for(int i = 0; i < Dim; ++i) {
             float v = camPos[i];
-            float minBound = node->bounds().first[i];
-            float maxBound = node->bounds().second[i];
+            float minBound = nb.first[i];
+            float maxBound = nb.second[i];
             
             float d1 = v - minBound;
             float d2 = v - maxBound;
@@ -764,7 +767,6 @@ private:
 
         bool isBehind = false;
         PointType maxPoint;
-        BoundingBox nb = node->bounds();
         maxPoint.x() = (camDir.x() >= 0) ? nb.second.x() : nb.first.x();
         maxPoint.y() = (camDir.y() >= 0) ? nb.second.y() : nb.first.y();
         maxPoint.z() = (camDir.z() >= 0) ? nb.second.z() : nb.first.z();
@@ -773,16 +775,12 @@ private:
             isBehind = true;
         }
         
-        float lodDistSq = lodMinDistance_ * lodMinDistance_;
-        float maxDistSq_max = maxDistance_ * maxDistance_;
-        float keepDistSq = keepDistance_ * keepDistance_;
-        
-        if (maxDistSq <= lodDistSq) {
+        if (maxDistSq <= lodMinDistanceSq) {
             loadSubtreeRecursive(node);
             return;
         }
 
-        if (maxDistSq <= maxDistSq_max && minDistSq > lodDistSq) {
+        if (maxDistSq <= maxDistSq_max && minDistSq > lodMinDistanceSq) {
             loadAndLodSubtreeRecursive(node);
             return;
         }
@@ -804,11 +802,12 @@ private:
             return;
         }
 
-        if (minDistSq > lodDistSq) {
+        if (minDistSq > lodMinDistanceSq) {
             ensureLOD(node);
         } else {
             ensureLoaded(node, true);
         }
+
         if (!node->isLeaf()) {
             for (int i = 0; i < 8; ++i) {
                 if (node->children[i]) {
@@ -821,10 +820,10 @@ private:
     std::shared_ptr<NodeData> findRecursive(OctreeNode* node, const PointType& pos, int objectId, float tolerance) {
         if (!node->contains(pos)) return nullptr;
         ensureLoaded(node, false);
-        std::lock_guard<std::shared_mutex> lock(node->nodeMutex);
+        std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
         
         for (const auto& pointData : node->points) {
-            if (pointData->objectId != objectId && objectId != -2) continue;
+            if (pointData->objectId != objectId && objectId >= 0) continue;
             float distSq = (pointData->position - pos).squaredNorm();
             if (distSq <= tolerance * tolerance) {
                 return pointData;
@@ -1428,10 +1427,15 @@ public:
         lodFalloffRate_ = rate;
         invLodf = 1 / rate;
     }
-    void setLODMinDistance(float dist) { lodMinDistance_ = dist; }
+    void setLODMinDistance(float dist) {
+        lodMinDistance_ = dist;
+        lodMinDistanceSq = dist * dist;
+    }
     void setMaxDistance(float dist) {
         maxDistance_ = dist;
         keepDistance_ = dist * 1.2;
+        maxDistSq_max = dist * dist;
+        keepDistSq = keepDistance_ * keepDistance_;
     }
     void setMinLODSize(float size) {
         minLodSize_ = size;
