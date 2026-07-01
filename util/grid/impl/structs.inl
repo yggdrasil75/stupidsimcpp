@@ -565,7 +565,7 @@ struct OctreeNode_ {
             child = nullptr;
         }
         center = (min + max) * 0.5;
-        nodeSize = (max - min).norm();
+        nodeSize = (max - min).maxCoeff();
     }
 
     OctreeNode_(const Vec3& center, const float& size) : center(center), nodeSize(size), flags(0), lodData(nullptr) {

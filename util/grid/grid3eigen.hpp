@@ -1088,6 +1088,13 @@ public:
         skybox_.setBackground(backgroundColor_.x(), backgroundColor_.y(), backgroundColor_.z(), 1.0f);
         startWorkerThread();
     }
+    Octree(const Vec3& center, const float radius, std::string storagepath, size_t maxPointsPerNode=8) :
+            root_(std::make_unique<OctreeNode>(center, radius)), maxPointsPerNode(maxPointsPerNode),
+            size(0), skybox_(1024, 1024), storagepath(storagepath),
+            streamingQueued_(false) {
+        skybox_.setBackground(backgroundColor_.x(), backgroundColor_.y(), backgroundColor_.z(), 1.0f);
+        startWorkerThread();
+    }
 
     Octree() : root_(std::make_unique<OctreeNode>(Vec3::Constant(-0.5f), Vec3::Constant(0.5f))), maxPointsPerNode(8), size(0), skybox_(1024, 1024), streamingQueued_(false) {
         skybox_.setBackground(backgroundColor_.x(), backgroundColor_.y(), backgroundColor_.z(), 1.0f);
