@@ -57,7 +57,6 @@ namespace Grid {
     //     The object ID matching fallback radius is 9 = 18 full-res pixels
     //     This is likely causing excessive blurring at geometric edges. You need to adapt the radius to your scale:
     // */
-    // change emittance to a GL_RGB9_E5 to support color light/hdr
 
 // importance sampling: first hit finds objects that are more complex to render, less complex objects have less samples.
 // every 1/10th the samples per pixel, find regions with little variance, drop those in favor of focusing on the ones with large variance.
@@ -1826,7 +1825,7 @@ public:
         auto obj = getOrCreateObject(targetObjId);
         RenderMaterial mat = obj->getRenderMaterial(pointData->renderMatIdx);
         
-        if (newEmittance >= 0) mat.emittance = packRGB9E5(Eigen::Vector3f(newEmittance, newEmittance, newEmittance));
+        if (newEmittance >= 0) mat.chromaticity = packRGB9E5(Eigen::Vector3f::Constant(newEmittance));
         if (newRoughness >= 0) mat.roughness = newRoughness;
         if (newMetallic >= 0) mat.metallic = newMetallic;
         if (newTransmission >= 0) pointData->color.w() = std::clamp(1.0f - newTransmission, 0.0f, 1.0f);
@@ -1945,15 +1944,15 @@ public:
     }
 
     bool setEmittance(const PointType& pos, float emittance, float tolerance = EPSILON) {
-        return setEmittance(pos, Eigen::Vector3f(emittance, emittance, emittance), tolerance);
+        return setEmittance(pos, Eigen::Vector3f::Constant(emittance), tolerance);
     }
 
-    bool setEmittance(const PointType& pos, const Eigen::Vector3f& emittance, float tolerance = EPSILON) {
+    bool setChromaticity(const PointType& pos, const Eigen::Vector3f& chromaticity, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
         auto obj = getOrCreateObject(pointData->objectId);
         RenderMaterial mat = obj->getRenderMaterial(pointData->renderMatIdx);
-        mat.emittance = packRGB9E5(emittance);
+        mat.chromaticity = packRGB9E5(chromaticity);
         pointData->renderMatIdx = obj->getOrAddRenderMaterial(mat);
         invalidateLODForPoint(pointData);
         return true;
@@ -2017,7 +2016,7 @@ public:
         {
             std::unique_lock<std::shared_mutex> lock(obj->objMutex);
             for (auto& mat : obj->renderMaterials) {
-                mat.emittance = packRGB9E5(Eigen::Vector3f(emittance, emittance, emittance));
+                mat.chromaticity = packRGB9E5(Eigen::Vector3f::Constant(emittance));
                 mat.roughness = roughness;
                 mat.metallic = metallic;
             }

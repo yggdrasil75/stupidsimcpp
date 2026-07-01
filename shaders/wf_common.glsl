@@ -11,7 +11,7 @@ const int MAX_TRANSPARENT_BOUNCES = 12;
 const int MAX_VOLUMETRIC_BOUNCES  = 8;
 
 struct GPUMaterial {
-    uint emittance;
+    uint chromaticity;
     uint  materialProps;
     uint  absorption;
     uint  albedo;

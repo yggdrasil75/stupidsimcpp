@@ -12,7 +12,7 @@ struct GPUFastRenderData {
 layout(std430, binding = 0) readonly buffer PointBuffer { GPUFastRenderData points[]; };
 
 struct GPUMaterial {
-    uint emittance;
+    uint chromaticity;
     uint materialProps;
     uint absorption;
     uint albedoPacked;
@@ -58,7 +58,7 @@ void main() {
     GPUMaterial mat = materials[pt.materialIdx];
 
     vec3 radiance;
-    vec3 emit = unpackRGB9E5(mat.emittance);
+    vec3 emit = unpackRGB9E5(mat.chromaticity);
     if (dot(emit, emit) > 0.0) {
         radiance = albedo.rgb * emit;
     } else {

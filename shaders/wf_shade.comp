@@ -85,8 +85,8 @@ void main() {
         int hero = GET_HERO(p.i1.w);
         float lambda = heroLambda(hero == 0 ? 2 : hero);
         float ior = sampleIor(sellRow, lambda);
-        vec3 emittanceRGB = unpackRGB9E5(surfaceMat.emittance);
-        bool isEmissive = surfaceMat.emittance != 0u;
+        vec3 emittanceRGB = unpackRGB9E5(surfaceMat.chromaticity);
+        bool isEmissive = surfaceMat.chromaticity != 0u;
 
         roughness = max(roughness, pathRoughness);
         pathRoughness = max(pathRoughness, roughness);
@@ -166,7 +166,7 @@ void main() {
                 float shadowMaxDist = distToLight - DIST_EPSILON * 2.0;
                 if (NdotL > 0.0 && shadowMaxDist > 0.0) {
                     vec4 lightAlbedo = unpackRGBA8(lightPt.color);
-                    vec3 lightEmission = lightAlbedo.rgb * unpackRGB9E5(lightMat.emittance);
+                    vec3 lightEmission = lightAlbedo.rgb * unpackRGB9E5(lightMat.chromaticity);
                     float area = lightPt.size * lightPt.size;
                     float solidAngle = min(area / max(distSq, area * 0.25), 2.0 * PI);
                     vec3 H_nee = normalize(V + L);

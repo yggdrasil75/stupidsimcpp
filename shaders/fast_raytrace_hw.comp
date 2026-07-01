@@ -35,7 +35,7 @@ struct GPURenderNode {
 };
 
 struct GPUMaterial {
-    uint emittance;
+    uint chromaticity;
     uint materialProps;
     uint absorption;
     uint padding;
@@ -341,8 +341,8 @@ void main() {
         bool isInternalVoxel = (hasPrev && hitData.objectId == prevOid);
 
         vec3 surfaceColor;
-        if (mat.emittance != 0u) {
-            surfaceColor = albedo.rgb * unpackRGB9E5(mat.emittance);
+        if (mat.chromaticity != 0u) {
+            surfaceColor = albedo.rgb * unpackRGB9E5(mat.chromaticity);
         } else {
             vec3 lightDir = normalize(-cam.dir);
             float diffuse = 0.0;

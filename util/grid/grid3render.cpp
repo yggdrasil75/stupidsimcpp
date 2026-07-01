@@ -309,7 +309,7 @@ frame Octree<T>::fastRenderFrame(const Camera& cam, int height, int width, frame
                     coverage = alpha;
                 }
                 
-                if (objMat.emittance != 0u) {
+                if (objMat.chromaticity != 0u) {
                     hitColor = hitColor.cwiseProduct(objMat.emittanceRGB());
                 } else {
                     float diffuse = 0.0f;
@@ -409,7 +409,7 @@ void Octree<T>::buildGPUMaterials(const RenderBuffer_<T>& buf, std::vector<GPUMa
         uint32_t sellRow = static_cast<uint32_t>(mi) * SELL_LUT_SECONDARY;
         uint32_t albedoPacked = 0;
         out.push_back({
-            m.emittance,
+            m.chromaticity,
             packMaterialProps(m.roughness, m.metallic, sellRow),
             packRGB8(m.absorption),
             albedoPacked
@@ -489,7 +489,7 @@ frame Octree<T>::renderFrameVulkan(const Camera& cam, int height, int width, fra
             p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId
         });
 
-        if (tl_buffer.materials[p.materialIdx].emittance != 0u) {
+        if (tl_buffer.materials[p.materialIdx].chromaticity != 0u) {
             gpuLights.push_back(gpuPoints.size() - 1);
         }
     }
@@ -586,7 +586,7 @@ frame Octree<T>::fastRenderFrameVulkan(const Camera& cam, int height, int width,
         
         gpuPoints.push_back({p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId});
         
-        if (tl_buffer.materials[p.materialIdx].emittance != 0u) {
+        if (tl_buffer.materials[p.materialIdx].chromaticity != 0u) {
             gpuLights.push_back(gpuPoints.size() - 1);
         }
 
@@ -753,7 +753,7 @@ frame Octree<T>::blendedRenderFrameVulkan(const Camera& cam, int height, int wid
             p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId
         });
 
-        if (tl_buffer.materials[p.materialIdx].emittance != 0u) {
+        if (tl_buffer.materials[p.materialIdx].chromaticity != 0u) {
             gpuLights.push_back(gpuPBRPoints.size() - 1);
         }
     }

@@ -122,7 +122,7 @@ struct alignas(16) GPURenderNode {
 };
 
 struct alignas(16) GPUMaterial {
-    uint32_t emittance;
+    uint32_t chromaticity;
     uint32_t materialProps;
     uint32_t absorption;
     uint32_t albedo;

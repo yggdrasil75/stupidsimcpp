@@ -22,7 +22,7 @@ struct GPUFastRenderData {
     vec3 position;
     float size;
     vec3 color;
-    float emittance;
+    float chromaticity;
     vec3 boundsMin;
     float objectId;
     vec3 boundsMax;
@@ -285,8 +285,8 @@ void main() {
     if (hitResult == 1) {
         GPUFastRenderData hitData = points[hitIndex];
         vec3 surfaceColor;
-        if (hitData.emittance > 0.0) {
-            surfaceColor = hitData.color * hitData.emittance;
+        if (hitData.chromaticity > 0.0) {
+            surfaceColor = hitData.color * hitData.chromaticity;
         } else {
             vec3 lightDir = normalize(-cam.dir);
             float diffuse = max(0.0, dot(normal, lightDir));

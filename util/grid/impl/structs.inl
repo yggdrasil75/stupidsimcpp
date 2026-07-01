@@ -45,12 +45,12 @@ static inline uint32_t packRGB9E5(const Eigen::Vector3f& c) {
     float rc = std::max(0.0f, c.x());
     float gc = std::max(0.0f, c.y());
     float bc = std::max(0.0f, c.z());
-    float max_c = std::max({rc, gc, bc});
+    float max_c = c.maxCoeff();
     if (max_c <= 0.0f) return 0;
 
     int exp_val;
     std::frexp(max_c, &exp_val);
-    exp_val = std::max(-15, std::min(16, exp_val));
+    exp_val = std::clamp(exp_val, -15, 16);
     float scale = std::pow(2.0f, -(exp_val - 9));
     
     uint32_t r = static_cast<uint32_t>(std::clamp(rc * scale, 0.0f, 511.0f));
@@ -73,6 +73,7 @@ static inline Eigen::Vector3f unpackRGB9E5(uint32_t c) {
 
 template<typename T>
 struct NodeData_;
+
 template<typename T>
 struct Bond_ {
     std::weak_ptr<NodeData_<T>> other;
@@ -228,38 +229,6 @@ struct SPHKernels {
     }
 };
 
-struct SPHIntegratePC {
-    float dt;
-    float velocityDamping;
-    uint32_t numParticles;
-};
-
-struct SPHDensityPC {
-    float h;
-    float h2;
-    float poly6_k;
-    float restDensity;
-    float gasConstant;
-    uint32_t numParticles;
-};
-
-struct SPHForcePC {
-    float h;
-    float spiky_k;
-    float visc_l_k;
-    float viscosity;
-    float gravX;
-    float gravY;
-    float gravZ;
-    float gravStrength;
-    float gravCX;
-    float gravCY;
-    float gravCZ;
-    uint32_t useGravityPoint;
-    uint32_t numParticles;
-    float airDensity;
-};
-
 using v3half = Eigen::Matrix<Eigen::half, 3, 1>;
 static constexpr float SELL_LAMBDA_R = 0.610f;
 static constexpr float SELL_LAMBDA_G = 0.550f;
@@ -284,7 +253,7 @@ static inline void sellmeierFromConstant(float n, v3half& B, v3half& C) {
 }
 
 struct RenderMaterial {
-    uint32_t emittance;
+    uint32_t chromaticity;
     float roughness;
     float metallic;
     v3half sellB;
@@ -295,24 +264,24 @@ struct RenderMaterial {
 
     RenderMaterial(uint32_t e, float r, float m, const v3half& B, const v3half& C,
               Eigen::Vector3f a = Eigen::Vector3f::Zero())
-        : emittance(e), roughness(r), metallic(m), sellB(B), sellC(C), absorption(a) {}
+        : chromaticity(e), roughness(r), metallic(m), sellB(B), sellC(C), absorption(a) {}
 
     RenderMaterial(float e = 0.0f, float r = 1.0f, float m = 0.0f, float i = 1.45f, Eigen::Vector3f a = Eigen::Vector3f::Zero())
-        : emittance(packRGB9E5(Eigen::Vector3f(e, e, e))), roughness(r), metallic(m), absorption(a) {
+        : chromaticity(packRGB9E5(Eigen::Vector3f(e, e, e))), roughness(r), metallic(m), absorption(a) {
         sellmeierFromConstant(i, sellB, sellC);
     }
     float iorGreen() const { return sellmeierN(sellB, sellC, SELL_LAMBDA_G); }
-    Eigen::Vector3f emittanceRGB() const { return unpackRGB9E5(emittance); }
+    Eigen::Vector3f emittanceRGB() const { return unpackRGB9E5(chromaticity); }
 
     bool operator==(const RenderMaterial& o) const {
-        return emittance == o.emittance && roughness == o.roughness &&
+        return chromaticity == o.chromaticity && roughness == o.roughness &&
                metallic == o.metallic &&
                sellB == o.sellB && sellC == o.sellC
                && absorption == o.absorption;
     }
     
     bool operator<(const RenderMaterial& o) const {
-        if (emittance != o.emittance) return emittance < o.emittance;
+        if (chromaticity != o.chromaticity) return chromaticity < o.chromaticity;
         if (roughness != o.roughness) return roughness < o.roughness;
         if (metallic != o.metallic) return metallic < o.metallic;
         return iorGreen() < o.iorGreen();
@@ -354,7 +323,7 @@ struct PhysicsMaterial_ {
 struct materialHash {
     size_t operator()(const RenderMaterial& m) const {
         std::hash<float> hf;
-        size_t h = std::hash<uint32_t>()(m.emittance);
+        size_t h = std::hash<uint32_t>()(m.chromaticity);
         h ^= hf(m.roughness) + 0x9e3779b9 + (h << 6) + (h >> 2);
         h ^= hf(m.metallic) + 0x9e3779b9 + (h << 6) + (h >> 2);
         for (int j = 0; j < 3; ++j)
