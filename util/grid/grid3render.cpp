@@ -9,13 +9,13 @@ void Octree<T>::buildRender(RenderBuffer_<T>& buffer) {
 
     std::unordered_map<int, std::shared_ptr<GridObject_<T>>> localObjects;
     {
-        std::shared_lock<std::shared_mutex> lock(objectsMutex_);
+        s_lock lock(objectsMutex_);
         localObjects = objects_;
     }
 
     for (auto& kv : localObjects) {
         buffer.objMaterialOffsets[kv.first] = buffer.materials.size();
-        std::shared_lock<std::shared_mutex> oLock(kv.second->objMutex);
+        s_lock oLock(kv.second->objMutex);
         for (auto& m : kv.second->renderMaterials) {
             buffer.materials.push_back(m);
         }
@@ -28,7 +28,7 @@ void Octree<T>::buildRender(RenderBuffer_<T>& buffer) {
 
 template<typename T>
 void Octree<T>::buildRenderNodeAt(OctreeNode_<T>* node, RenderBuffer_<T>& buffer, uint32_t nodeIdx, const std::unordered_map<int, std::shared_ptr<GridObject>>& localObjects) {
-    std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
+    s_lock lock(node->nodeMutex);
     bool isLoaded = node->isLoaded();
     
     RenderNode_<T> rnode;
@@ -153,7 +153,7 @@ std::vector<RenderData*> Octree<T>::fastVoxelTraverse(const RenderBuffer_<T>& bu
                 float dist = (node.center - ray.origin).norm();
                 if (dist > lodMinDistance_ && (dist / node.nodeSize) > invLodf) {
                     float t;
-                    PointType n, h;
+                    Vec3 n, h;
                     if (rayCubeIntersect(ray, &buffer.points[node.lodPoint], t, n, h)) {
                         if (t >= 0 && t <= currentMaxDist) {
                             hits.emplace_back(const_cast<RenderData*>(&buffer.points[node.lodPoint]));
@@ -170,7 +170,7 @@ std::vector<RenderData*> Octree<T>::fastVoxelTraverse(const RenderBuffer_<T>& bu
             for (uint32_t i = 0; i < node.pointCount; ++i) {
                 const RenderData& pt = buffer.points[node.firstPoint + i];
                 float t;
-                PointType n, h;
+                Vec3 n, h;
                 if (rayCubeIntersect(ray, &pt, t, n, h)) {
                     if (t >= 0 && t <= currentMaxDist) {
                         hits.emplace_back(const_cast<RenderData*>(&pt));
@@ -187,7 +187,7 @@ std::vector<RenderData*> Octree<T>::fastVoxelTraverse(const RenderBuffer_<T>& bu
             float t0 = current.tMin;
             float t1 = current.tMax;
 
-            Eigen::Vector3f ttt = (node.center - ray.origin).cwiseProduct(ray.invDir);
+            Vec3 ttt = (node.center - ray.origin).cwiseProduct(ray.invDir);
             int currIdx = ((t0 >= ttt.x()) ? 1 : 0) | ((t0 >= ttt.y()) ? 2 : 0) | ((t0 >= ttt.z()) ? 4 : 0);
             
             struct ChildInterval {
@@ -199,7 +199,7 @@ std::vector<RenderData*> Octree<T>::fastVoxelTraverse(const RenderBuffer_<T>& bu
             int childCount = 0;
 
             while(t0 < t1 && t0 <= currentMaxDist) {
-                Eigen::Vector3f next_t;
+                Vec3 next_t;
                 next_t[0] = (currIdx & 1) ? t1 : ttt[0];
                 next_t[1] = (currIdx & 2) ? t1 : ttt[1];
                 next_t[2] = (currIdx & 4) ? t1 : ttt[2];
@@ -244,10 +244,10 @@ frame Octree<T>::fastRenderFrame(const Camera& cam, int height, int width, frame
     buildRender(tl_buffer);
     const RenderBuffer_<T>& shared_buffer = tl_buffer;
 
-    PointType origin = cam.origin;
-    PointType dir = cam.direction.normalized();
-    PointType up = cam.up.normalized();
-    PointType right = cam.right();
+    Vec3 origin = cam.origin;
+    Vec3 dir = cam.direction.normalized();
+    Vec3 up = cam.up.normalized();
+    Vec3 right = cam.right();
     
     frame outFrame(width, height, colorformat);
     std::vector<float> colorBuffer;
@@ -259,7 +259,7 @@ frame Octree<T>::fastRenderFrame(const Camera& cam, int height, int width, frame
     const float tanfovy = tanHalfFov;
     const float tanfovx = tanHalfFov * aspect;
     
-    const PointType globalLightDir = (-cam.direction * 0.2f).normalized();
+    const Vec3 globalLightDir = (-cam.direction * 0.2f).normalized();
     const float minVisibility = 0.1f;
     float maxmin = (maxDistance_ - lodMinDistance_);
     float invMaxMin = 1 / maxmin;
@@ -273,11 +273,11 @@ frame Octree<T>::fastRenderFrame(const Camera& cam, int height, int width, frame
             float px = (2.0f * (x + 0.5f) / width - 1.0f) * tanfovx;
             float py = (1.0f - 2.0f * (y + 0.5f) / height) * tanfovy;
             
-            PointType rayDir = dir + (right * px) + (up * py);
+            Vec3 rayDir = dir + (right * px) + (up * py);
             rayDir.normalize();
 
-            Eigen::Vector3f scolor = skybox_.sampleVector(rayDir);
-            Eigen::Vector3f color = Eigen::Vector3f(0.0f, 0.0f, 0.0f);
+            Vec3 scolor = skybox_.sampleVector(rayDir);
+            Vec3 color = Vec3(0.0f, 0.0f, 0.0f);
             float accumAlpha = 0.0f;
             Ray ray(origin, rayDir);
             
@@ -292,10 +292,10 @@ frame Octree<T>::fastRenderFrame(const Camera& cam, int height, int width, frame
                 if (hit == nullptr) continue;
                 float t = 0.0f;
                 float tExit = 0.0f;
-                PointType normal, hitPoint;
+                Vec3 normal, hitPoint;
 
                 rayCubeIntersect(ray, hit, t, normal, hitPoint, &tExit);
-                Eigen::Vector3f hitColor = hit->color.template head<3>();
+                Vec3 hitColor = hit->color.template head<3>();
                 float alpha = hit->color.w();
                 RenderMaterial objMat = shared_buffer.materials[hit->materialIdx];
 
@@ -349,7 +349,7 @@ frame Octree<T>::fastRenderFrame(const Camera& cam, int height, int width, frame
 
 #ifdef VULKAN_SUPPORT
 
-static inline uint32_t packRGB8(const Eigen::Vector3f& c) {
+static inline uint32_t packRGB8(const Vec3& c) {
     uint32_t r = static_cast<uint32_t>(std::clamp(c.x(), 0.0f, 1.0f) * 255.0f);
     uint32_t g = static_cast<uint32_t>(std::clamp(c.y(), 0.0f, 1.0f) * 255.0f);
     uint32_t b = static_cast<uint32_t>(std::clamp(c.z(), 0.0f, 1.0f) * 255.0f);
@@ -441,8 +441,8 @@ frame Octree<T>::renderFrameVulkan(const Camera& cam, int height, int width, fra
         if(n.lodPoint != -1) isLodPoint[n.lodPoint] = true;
     }
 
-    Eigen::Vector3f globalMin = Eigen::Vector3f::Constant(std::numeric_limits<float>::max());
-    Eigen::Vector3f globalMax = Eigen::Vector3f::Constant(std::numeric_limits<float>::lowest());
+    Vec3 globalMin = Vec3::Constant(std::numeric_limits<float>::max());
+    Vec3 globalMax = Vec3::Constant(std::numeric_limits<float>::lowest());
     
     std::vector<size_t> validIndices;
     validIndices.reserve(tl_buffer.points.size());
@@ -453,16 +453,16 @@ frame Octree<T>::renderFrameVulkan(const Camera& cam, int height, int width, fra
         globalMax = globalMax.cwiseMax(tl_buffer.points[i].position);
     }
     
-    Eigen::Vector3f extent = globalMax - globalMin;
+    Vec3 extent = globalMax - globalMin;
     if (extent.x() <= 0.0f) extent.x() = 1.0f;
     if (extent.y() <= 0.0f) extent.y() = 1.0f;
     if (extent.z() <= 0.0f) extent.z() = 1.0f;
-    Eigen::Vector3f invExtent = extent.cwiseInverse();
+    Vec3 invExtent = extent.cwiseInverse();
 
     std::vector<PointSort> sortedPoints;
     sortedPoints.reserve(validIndices.size());
     for(size_t idx : validIndices) {
-        Eigen::Vector3f normPos = (tl_buffer.points[idx].position - globalMin).cwiseProduct(invExtent);
+        Vec3 normPos = (tl_buffer.points[idx].position - globalMin).cwiseProduct(invExtent);
         uint32_t x = std::min(std::max(normPos.x() * 2097151.0f, 0.0f), 2097151.0f);
         uint32_t y = std::min(std::max(normPos.y() * 2097151.0f, 0.0f), 2097151.0f);
         uint32_t z = std::min(std::max(normPos.z() * 2097151.0f, 0.0f), 2097151.0f);
@@ -578,8 +578,8 @@ frame Octree<T>::fastRenderFrameVulkan(const Camera& cam, int height, int width,
     std::vector<GPUFastRenderData> gpuPoints;
     std::vector<uint32_t> gpuLights;
     gpuPoints.reserve(tl_buffer.points.size());
-    Eigen::Vector3f vctMin = Eigen::Vector3f::Constant(std::numeric_limits<float>::max());
-    Eigen::Vector3f vctMax = Eigen::Vector3f::Constant(std::numeric_limits<float>::lowest());
+    Vec3 vctMin = Vec3::Constant(std::numeric_limits<float>::max());
+    Vec3 vctMax = Vec3::Constant(std::numeric_limits<float>::lowest());
     for(size_t i = 0; i < tl_buffer.points.size(); ++i) {
         if(isLodPoint[i]) continue;
         const auto& p = tl_buffer.points[i];
@@ -591,8 +591,8 @@ frame Octree<T>::fastRenderFrameVulkan(const Camera& cam, int height, int width,
         }
 
         float h = p.size * 0.5f;
-        vctMin = vctMin.cwiseMin(p.position - Eigen::Vector3f::Constant(h));
-        vctMax = vctMax.cwiseMax(p.position + Eigen::Vector3f::Constant(h));
+        vctMin = vctMin.cwiseMin(p.position - Vec3::Constant(h));
+        vctMax = vctMax.cwiseMax(p.position + Vec3::Constant(h));
     }
     if (vctMin.x() > vctMax.x()) { vctMin.setZero(); vctMax.setOnes(); } // empty scene guard
 
@@ -622,7 +622,7 @@ frame Octree<T>::fastRenderFrameVulkan(const Camera& cam, int height, int width,
     vkCtx.updateFastBuffers(gpuPoints);
 
     {
-        Eigen::Vector3f keyLight = (-cam.direction.normalized());
+        Vec3 keyLight = (-cam.direction.normalized());
         vkCtx.vctBuildVolume(vkCtx.fastPointBuffer, (uint32_t)gpuPoints.size(),
                              vctMin, vctMax, keyLight, /*enabled=*/true);
     }
@@ -700,8 +700,8 @@ frame Octree<T>::blendedRenderFrameVulkan(const Camera& cam, int height, int wid
         if(n.lodPoint != -1) isLodPoint[n.lodPoint] = true;
     }
 
-    Eigen::Vector3f globalMin = Eigen::Vector3f::Constant(std::numeric_limits<float>::max());
-    Eigen::Vector3f globalMax = Eigen::Vector3f::Constant(std::numeric_limits<float>::lowest());
+    Vec3 globalMin = Vec3::Constant(std::numeric_limits<float>::max());
+    Vec3 globalMax = Vec3::Constant(std::numeric_limits<float>::lowest());
     
     std::vector<size_t> validIndices;
     validIndices.reserve(tl_buffer.points.size());
@@ -712,16 +712,16 @@ frame Octree<T>::blendedRenderFrameVulkan(const Camera& cam, int height, int wid
         globalMax = globalMax.cwiseMax(tl_buffer.points[i].position);
     }
     
-    Eigen::Vector3f extent = globalMax - globalMin;
+    Vec3 extent = globalMax - globalMin;
     if (extent.x() <= 0.0f) extent.x() = 1.0f;
     if (extent.y() <= 0.0f) extent.y() = 1.0f;
     if (extent.z() <= 0.0f) extent.z() = 1.0f;
-    Eigen::Vector3f invExtent = extent.cwiseInverse();
+    Vec3 invExtent = extent.cwiseInverse();
 
     std::vector<PointSort> sortedPoints;
     sortedPoints.reserve(validIndices.size());
     for(size_t idx : validIndices) {
-        Eigen::Vector3f normPos = (tl_buffer.points[idx].position - globalMin).cwiseProduct(invExtent);
+        Vec3 normPos = (tl_buffer.points[idx].position - globalMin).cwiseProduct(invExtent);
         uint32_t x = std::min(std::max(normPos.x() * 2097151.0f, 0.0f), 2097151.0f);
         uint32_t y = std::min(std::max(normPos.y() * 2097151.0f, 0.0f), 2097151.0f);
         uint32_t z = std::min(std::max(normPos.z() * 2097151.0f, 0.0f), 2097151.0f);
@@ -822,7 +822,7 @@ frame Octree<T>::blendedRenderFrameVulkan(const Camera& cam, int height, int wid
 
     // VCT: build the radiance volume once for the whole frame (shared across tiles).
     {
-        Eigen::Vector3f keyLight = (-cam.direction.normalized());
+        Vec3 keyLight = (-cam.direction.normalized());
         vkCtx.vctBuildVolume(vkCtx.fastPointBuffer, (uint32_t)gpuFastPoints.size(),
                              globalMin, globalMax, keyLight, /*enabled=*/true);
     }

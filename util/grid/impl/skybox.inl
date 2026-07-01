@@ -2,7 +2,7 @@
 namespace Grid {
 
 struct CelestialBody {
-    PointType direction;
+    Vec3 direction;
     float angularRadius;
     float cosAngularRadius;
     uint8_t r, g, b, emittance;
@@ -23,24 +23,24 @@ struct Skybox {
 
     Skybox(size_t w = 1024, size_t h = 1024) : skybox(w, h, frame::colormap::RGBA), skyRotation(Eigen::Quaternionf::Identity()) { }
 
-    void dirToUV(const PointType& dir, float& u, float& v) const {
-        PointType d = dir.normalized();
+    void dirToUV(const Vec3& dir, float& u, float& v) const {
+        Vec3 d = dir.normalized();
         u = 0.5f + (std::atan2(d.z(), d.x()) / (2.0f * M_PI));
         v = 0.5f - (std::asin(d.y()) / M_PI);
     }
 
-    const PointType uvToDir(float u, float v) const {
+    const Vec3 uvToDir(float u, float v) const {
         float theta = (u - 0.5f) * 2.0f * M_PI;
         float phi = (0.5f - v) * M_PI;
         float y = std::sin(phi);
         float cosphi = std::cos(phi);
         float x = std::cos(theta) * cosphi;
         float z = std::sin(theta) * cosphi;
-        return PointType(x, y, z);
+        return Vec3(x, y, z);
     }
     
-    std::vector<uint8_t> sample(const PointType& dir) {
-        PointType rotatedDir = skyRotation * dir;
+    std::vector<uint8_t> sample(const Vec3& dir) {
+        Vec3 rotatedDir = skyRotation * dir;
         for (auto it = bodies.rbegin(); it != bodies.rend(); ++it) {
             if (!it->second.baked) {
                 if (rotatedDir.dot(it->second.direction) >= it->second.cosAngularRadius) {
@@ -60,16 +60,16 @@ struct Skybox {
         return skybox.getPixel(x, y);
     }
 
-    Eigen::Vector3f sampleVector(const PointType& dir) {
+    Vec3 sampleVector(const Vec3& dir) {
         std::vector<uint8_t> px = sample(dir);
         if (px.size() >= 3) {
             float r = px[0] / 255.0f;
             float g = px[1] / 255.0f;
             float b = px[2] / 255.0f;
             float e = px.size() >= 4 ? (px[3] / 255.0f) : 1.0f;
-            return Eigen::Vector3f(r, g, b) * e;
+            return Vec3(r, g, b) * e;
         }
-        return Eigen::Vector3f::Zero();
+        return Vec3::Zero();
     }
 
     void setBackground(float r, float g, float b, float e) {
@@ -86,7 +86,7 @@ struct Skybox {
         skybox.setData(data, frame::colormap::RGBA);
     }
     
-    void addBody(int id, const PointType& dir, float angularRadius, uint8_t r, uint8_t g, uint8_t b, uint8_t emittance) {
+    void addBody(int id, const Vec3& dir, float angularRadius, uint8_t r, uint8_t g, uint8_t b, uint8_t emittance) {
         removeBody(id);
         CelestialBody body;
         body.direction = dir.normalized();
@@ -110,7 +110,7 @@ struct Skybox {
         }
     }
 
-    void moveBody(int id, const PointType& newDir) {
+    void moveBody(int id, const Vec3& newDir) {
         auto it = bodies.find(id);
         if (it != bodies.end()) {
             bool wasBaked = it->second.baked;
@@ -136,7 +136,7 @@ struct Skybox {
             float v = (static_cast<float>(y) + 0.5f) / h; 
             for (size_t x = 0; x < w; ++x) {
                 float u = (static_cast<float>(x) + 0.5f) / w;
-                PointType pixelDir = uvToDir(u, v);
+                Vec3 pixelDir = uvToDir(u, v);
                 
                 if (pixelDir.dot(it->second.direction) >= it->second.cosAngularRadius) {
                     typename CelestialBody::PixelBackup backup;

@@ -5,17 +5,12 @@ namespace Grid {
 template<typename T>
 struct FluidMoveAction {
     std::shared_ptr<NodeData_<T>> node;
-    PointType oldPos;
-    PointType newPos;
+    Vec3 oldPos;
+    Vec3 newPos;
 };
 
-struct SolidNb { PointType pos; float size; };
+struct SolidNb { Vec3 pos; float size; };
 
-struct Vec3i64Hash {
-    std::size_t operator()(const std::array<int64_t, 3>& v) const {
-        return (std::size_t)((v[0] * 73856093) ^ (v[1] * 19349663) ^ (v[2] * 83492791));
-    }
-};
 
 template<typename T>
 void Octree<T>::stepPhysics(float dt) {
@@ -25,7 +20,7 @@ void Octree<T>::stepPhysics(float dt) {
     ScopedFunctionTimer _tSetup("stepPhysics.setupMaterials");
     int maxObjId = -1;
     {
-        std::shared_lock<std::shared_mutex> lock(objectsMutex_);
+        s_lock lock(objectsMutex_);
         for (const auto& pair : objects_) {
             if (pair.first > maxObjId) maxObjId = pair.first;
         }
@@ -33,9 +28,9 @@ void Octree<T>::stepPhysics(float dt) {
 
     std::vector<std::vector<PhysicsMaterial_>> fastMats(maxObjId + 2);
     {
-        std::shared_lock<std::shared_mutex> lock(objectsMutex_);
+        s_lock lock(objectsMutex_);
         for (const auto& pair : objects_) {
-            std::shared_lock<std::shared_mutex> objLock(pair.second->objMutex);
+            s_lock objLock(pair.second->objMutex);
             fastMats[pair.first + 1] = pair.second->physicsMaterials;
         }
     }
@@ -94,7 +89,7 @@ void Octree<T>::stepPhysics(float dt) {
         const float invC = 1.0f / C;
 
         // Cell key for a position.
-        auto keyOf = [invC](const PointType& p) -> std::array<int64_t,3> {
+        auto keyOf = [invC](const Vec3& p) -> std::array<int64_t,3> {
             return { (int64_t)std::floor(p.x() * invC),
                      (int64_t)std::floor(p.y() * invC),
                      (int64_t)std::floor(p.z() * invC) };
@@ -150,13 +145,13 @@ void Octree<T>::stepPhysics(float dt) {
             }
 
         // Fluid region expanded by one cell (== one smoothing radius, C == h).
-        PointType regionLo((keyMin[0]-1)*C, (keyMin[1]-1)*C, (keyMin[2]-1)*C);
-        PointType regionHi((keyMax[0]+2)*C, (keyMax[1]+2)*C, (keyMax[2]+2)*C);
+        Vec3 regionLo((keyMin[0]-1)*C, (keyMin[1]-1)*C, (keyMin[2]-1)*C);
+        Vec3 regionHi((keyMax[0]+2)*C, (keyMax[1]+2)*C, (keyMax[2]+2)*C);
         BoundingBox region{regionLo, regionHi};
 
         std::unordered_map<std::array<int64_t,3>, std::vector<SolidNb>, Vec3i64Hash> solidCells;
 
-        std::vector<PointType> regionCorners = {regionLo, regionHi};
+        std::vector<Vec3> regionCorners = {regionLo, regionHi};
         int rd = 0;
         OctreeNode* solidStart = getHighestCommonNode(regionCorners, root_.get(), rd);
         if (!solidStart) solidStart = root_.get();
@@ -165,13 +160,13 @@ void Octree<T>::stepPhysics(float dt) {
         while (!stack.empty()) {
             OctreeNode* cur = stack.back(); stack.pop_back();
             if (!cur || !boxIntersectsBox(cur->bounds(), region) || !cur->isLoaded()) continue;
-            std::shared_lock<std::shared_mutex> lock(cur->nodeMutex);
+            s_lock lock(cur->nodeMutex);
             for (const auto& pt : cur->points) {
                 if (!pt->isActive()) continue;
                 int oi = pt->objectId + 1;
                 if (oi < 0 || oi >= (int)fastMatsSize) continue;
                 if (fastMats[oi][pt->physMatIdx].type == BodyType::FLUID) continue;
-                const PointType& pp = pt->position;
+                const Vec3& pp = pt->position;
                 if (pp.x() < regionLo.x() || pp.x() > regionHi.x() ||
                     pp.y() < regionLo.y() || pp.y() > regionHi.y() ||
                     pp.z() < regionLo.z() || pp.z() > regionHi.z()) continue;
@@ -237,32 +232,32 @@ void Octree<T>::stepPhysics(float dt) {
             float V_i = std::min(node->size * node->size * node->size, maxKernelVol);
             float mass_i = std::max(V_i * phys_restDensity, 1e-6f);
 
-            Eigen::Vector3f gravityDir = phys_gravity;
+            Vec3 gravityDir = phys_gravity;
             if (phys_useGravityPoint) {
-                Eigen::Vector3f toCenter = phys_gravityCenter - node->position;
+                Vec3 toCenter = phys_gravityCenter - node->position;
                 float dist = toCenter.norm();
                 gravityDir = (dist > 1e-4f) ? (toCenter / dist) * phys_gravityStrength
-                                            : Eigen::Vector3f(0,0,0);
+                                            : Vec3(0,0,0);
             }
             node->physics.force = gravityDir * mass_i;
 
-            Eigen::Vector3f fPress = Eigen::Vector3f::Zero();
-            Eigen::Vector3f fVisc = Eigen::Vector3f::Zero();
+            Vec3 fPress = Vec3::Zero();
+            Vec3 fVisc = Vec3::Zero();
 
             // Fluid-fluid.
             for (int j : cell.fluidNeighbors) {
                 if (j == i) continue;
                 auto& neighbor = sphNodes[j];
-                PointType diff = node->position - neighbor->position;
+                Vec3 diff = node->position - neighbor->position;
                 float r = diff.norm();
                 if (r < 1e-5f) {
-                    Eigen::Vector3f rnd = Eigen::Vector3f::Random();
-                    if (rnd.squaredNorm() < 1e-8f) rnd = Eigen::Vector3f(1,0,0);
+                    Vec3 rnd = Vec3::Random();
+                    if (rnd.squaredNorm() < 1e-8f) rnd = Vec3(1,0,0);
                     fPress += rnd.normalized() * mass_i * K.Poly6(0) * 10.0f;
                     continue;
                 }
                 if (r < h) {
-                    PointType dir = diff / r;
+                    Vec3 dir = diff / r;
                     float V_j = std::min(neighbor->size * neighbor->size * neighbor->size, maxKernelVol);
                     float P_sum = node->physics.pressure + neighbor->physics.pressure;
                     fPress += dir * (-V_i * V_j * P_sum * K.WendlandGrad(r));
@@ -274,17 +269,17 @@ void Octree<T>::stepPhysics(float dt) {
             // Fluid-solid (static voxels from the SVO walk; velocity == 0).
             float baseG = (phys_gravityStrength > 0.1f) ? phys_gravityStrength : 9.81f;
             for (const auto& solid : cell.solids) {
-                PointType diff = node->position - solid.pos;
+                Vec3 diff = node->position - solid.pos;
                 float r = diff.norm();
                 float minDist = (node->size + solid.size) * 0.5f;
                 if (r >= minDist) continue;
                 if (r < 1e-5f) {
-                    Eigen::Vector3f rnd = Eigen::Vector3f::Random();
-                    if (rnd.squaredNorm() < 1e-8f) rnd = Eigen::Vector3f(1,0,0);
+                    Vec3 rnd = Vec3::Random();
+                    if (rnd.squaredNorm() < 1e-8f) rnd = Vec3(1,0,0);
                     fPress += rnd.normalized() * mass_i * K.Poly6(0) * 10.0f;
                     continue;
                 }
-                PointType dir = diff / r;
+                Vec3 dir = diff / r;
                 // Boundary repulsion scaled to the local cell spacing.
                 float q = r / minDist;
                 float oq = 1.0f - q;
@@ -313,12 +308,12 @@ void Octree<T>::stepPhysics(float dt) {
             float V_i = std::min(node->size * node->size * node->size, maxKernelVol);
             float mass_i = std::max(V_i * phys_restDensity, 1e-6f);
 
-            Eigen::Vector3f accel = node->physics.force / mass_i;
-            if (!accel.allFinite()) accel = Eigen::Vector3f::Zero();
+            Vec3 accel = node->physics.force / mass_i;
+            if (!accel.allFinite()) accel = Vec3::Zero();
             if (accel.squaredNorm() > 1000.0f * 1000.0f) accel = accel.normalized() * 1000.0f;
 
             node->physics.velocity += accel * dt;
-            if (!node->physics.velocity.allFinite()) node->physics.velocity = Eigen::Vector3f::Zero();
+            if (!node->physics.velocity.allFinite()) node->physics.velocity = Vec3::Zero();
             
             node->physics.velocity *= std::max(0.0f, 1.0f - phys_velocityDamping * dt);
             if (node->physics.velocity.squaredNorm() > maxVel * maxVel)
@@ -345,14 +340,17 @@ void Octree<T>::stepPhysics(float dt) {
     //     common ancestor of (oldPos,newPos) rather than the root, keeping each
     //     edit shallow.
     ScopedFunctionTimer _tRelocate("stepPhysics.fluidRelocate_SERIAL");
+    RayHit_<T> hit;                   // reused; only read after a successful cast
+    std::vector<Vec3> span(2);   // reused to avoid a heap alloc per particle
     for (size_t i = 0; i < pendingFluidMoves.size(); ++i) {
         auto& mv = pendingFluidMoves[i];
-        PointType diff = mv.newPos - mv.oldPos;
+        Vec3 diff = mv.newPos - mv.oldPos;
         float dist = diff.norm();
         if (dist > 1e-5f) {
-            RayHit_<T> hit;
-            PointType dir = diff / dist;
-            if (this->raycast(mv.oldPos, dir, dist + mv.node->size * 0.5f, hit, mv.node, true, true)) {
+            Vec3 dir = diff / dist;
+            // Pass fastMats so the solid-only filter is lock-free (no objectsMutex_
+            // / material-copy per point) — this is the dominant relocate cost.
+            if (this->raycast(mv.oldPos, dir, dist + mv.node->size * 0.5f, hit, mv.node, true, true, &fastMats)) {
                 mv.newPos = hit.hitPoint + hit.normal * (mv.node->size * 0.51f);
                 float vn = mv.node->physics.velocity.dot(hit.normal);
                 if (vn < 0.0f) {
@@ -363,7 +361,8 @@ void Octree<T>::stepPhysics(float dt) {
         }
 
         auto pd = mv.node;
-        std::vector<PointType> span = { mv.oldPos, mv.newPos };
+        span[0] = mv.oldPos;
+        span[1] = mv.newPos;
         int depth = 0;
         OctreeNode* start = getHighestCommonNode(span, root_.get(), depth);
         if (!start) start = root_.get();
@@ -399,27 +398,27 @@ void Octree<T>::stepRigidLattice(
 
         float mass = std::max(m->mass, 1e-4f);
 
-        Eigen::Vector3f g = phys_gravity;
+        Vec3 g = phys_gravity;
         if (phys_useGravityPoint) {
-            Eigen::Vector3f toC = phys_gravityCenter - node->position;
+            Vec3 toC = phys_gravityCenter - node->position;
             float d = toC.norm();
-            g = (d > 1e-4f) ? (toC / d) * phys_gravityStrength : Eigen::Vector3f(0,0,0);
+            g = (d > 1e-4f) ? (toC / d) * phys_gravityStrength : Vec3(0,0,0);
         }
-        Eigen::Vector3f force = g * mass;
+        Vec3 force = g * mass;
 
         for (auto& bond : node->physics.bonds) {
             auto other = bond.other.lock();
             if (!other || !other->isActive()) { bond.strength = -1.0f; continue; }
 
-            Eigen::Vector3f d = other->position - node->position;
+            Vec3 d = other->position - node->position;
             float len = d.norm();
             if (len < 1e-6f) continue;
-            Eigen::Vector3f dir = d / len;
+            Vec3 dir = d / len;
 
             float ext = len - bond.restLength;
             float springF = m->stiffness * ext;
 
-            Eigen::Vector3f relVel = other->physics.velocity - node->physics.velocity;
+            Vec3 relVel = other->physics.velocity - node->physics.velocity;
             float dampF = m->damping * relVel.dot(dir) * m->stiffness * 0.02f;
 
             float total = springF + dampF;
@@ -444,8 +443,8 @@ void Octree<T>::stepRigidLattice(
         if (!m) continue;
         float mass = std::max(m->mass, 1e-4f);
 
-        Eigen::Vector3f accel = node->physics.force / mass;
-        if (!accel.allFinite()) accel = Eigen::Vector3f(0,0,0);
+        Vec3 accel = node->physics.force / mass;
+        if (!accel.allFinite()) accel = Vec3(0,0,0);
         float maxA = 2000.0f;
         if (accel.squaredNorm() > maxA*maxA) accel = accel.normalized() * maxA;
 
@@ -481,7 +480,7 @@ void Octree<T>::stepRigidLattice(
         if (!valid[i]) continue;
         auto& mv = moves[i];
         auto pd = mv.node;
-        std::vector<PointType> span = { mv.oldPos, mv.newPos };
+        std::vector<Vec3> span = { mv.oldPos, mv.newPos };
         int depth = 0;
         OctreeNode* start = getHighestCommonNode(span, root_.get(), depth);
         if (!start) start = root_.get();

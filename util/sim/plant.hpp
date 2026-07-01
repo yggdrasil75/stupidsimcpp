@@ -767,7 +767,7 @@ struct PlantState {
 class PlantSim {
 public:
     enum class WeatherState { CLEAR, RAIN, SNOW };
-    int gridsize = 1024;
+    float gridsize = 16;
 
     Grid::Octree<std::shared_ptr<PlantsimParticle>> grid = Grid::Octree<std::shared_ptr<PlantsimParticle>>(Vector3f::Constant(-gridsize), Vector3f::Constant(gridsize), "output/plant", 16);
     PlantConfig config;

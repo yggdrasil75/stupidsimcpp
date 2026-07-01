@@ -1,13 +1,13 @@
 static constexpr uint32_t VCT_RES = 128;
 
 struct alignas(16) VCTParams {
-    Eigen::Vector3f volMin;
+    Vec3 volMin;
     float voxelSize;
-    Eigen::Vector3f volExtent;
+    Vec3 volExtent;
     float invVoxelSize;
     Eigen::Vector3i gridRes;
     int maxMip;
-    Eigen::Vector3f lightDir;
+    Vec3 lightDir;
     float enabled;
 };
 
@@ -250,15 +250,15 @@ void vctImageBarrier(VkCommandBuffer cmd, VkImageLayout oldL, VkImageLayout newL
 }
 
 void vctBuildVolume(VkBuffer pointBuf, uint32_t pointCount,
-                    const Eigen::Vector3f& aabbMin, const Eigen::Vector3f& aabbMax,
-                    const Eigen::Vector3f& lightDir, bool enabled) {
+                    const Vec3& aabbMin, const Vec3& aabbMax,
+                    const Vec3& lightDir, bool enabled) {
     if (!vctReady) return;
 
-    Eigen::Vector3f ext = aabbMax - aabbMin;
+    Vec3 ext = aabbMax - aabbMin;
     for (int i = 0; i < 3; ++i) if (ext[i] <= 1e-6f) ext[i] = 1.0f;
-    Eigen::Vector3f pad = ext * 0.02f;
-    Eigen::Vector3f vmin = aabbMin - pad;
-    Eigen::Vector3f vext = ext + pad * 2.0f;
+    Vec3 pad = ext * 0.02f;
+    Vec3 vmin = aabbMin - pad;
+    Vec3 vext = ext + pad * 2.0f;
 
     vctParams.volMin = vmin;
     vctParams.volExtent = vext;

@@ -101,8 +101,8 @@ private:
     mutable std::shared_mutex objectsMutex_;
     
     Skybox skybox_;
-    Eigen::Vector3f skylight_ = {0.1f, 0.1f, 0.1f};
-    Eigen::Vector3f backgroundColor_ = {0.53f, 0.81f, 0.92f};
+    Vec3 skylight_ = {0.1f, 0.1f, 0.1f};
+    Vec3 backgroundColor_ = {0.53f, 0.81f, 0.92f};
     mutable std::vector<Eigen::Vector4f> skyDataCache_;
     mutable size_t skyDataCacheW_ = 0;
     mutable size_t skyDataCacheH_ = 0;
@@ -132,18 +132,18 @@ private:
     float phys_viscosity = 200.0f;
     float phys_velocityDamping = 0.5f;
     float phys_airDensity = 1.225f;
-    Eigen::Vector3f phys_gravity{0.0f, -9.81f, 0.0f};
+    Vec3 phys_gravity{0.0f, -9.81f, 0.0f};
 
     SPHKernels kernels_{phys_smoothingRadius};
     
     bool phys_useGravityPoint = true;
-    PointType phys_gravityCenter{0.0f, 0.0f, 0.0f};
+    Vec3 phys_gravityCenter{0.0f, 0.0f, 0.0f};
     float phys_gravityStrength = 9.81f;
     std::atomic<bool> physicsCollidersDirty_{true};
 
     void lazilyOffload(OctreeNode* node) {
         {
-            std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
+            u_lock lock(node->nodeMutex);
             if (!node->isLoaded() || node->isSaveQueued()) return;
 
             node->setSaveQueued(true);
@@ -152,14 +152,14 @@ private:
 
         enqueueTask([this, node]() {
             {
-                std::shared_lock<std::shared_mutex> nlock(node->nodeMutex);
+                s_lock nlock(node->nodeMutex);
                 if (node->isLoaded() && node->isSaveQueued() && node->isDirty()) {
                     node->saveRegion(storagepath);
                 }
             }
             node->offload();
             {
-                std::unique_lock<std::shared_mutex> nlock(node->nodeMutex);
+                u_lock nlock(node->nodeMutex);
                 node->setSaveQueued(false);
             }
         });
@@ -178,7 +178,7 @@ private:
             enqueueTask([this, node]() {
                 bool justLoaded = false;
                 {
-                    std::unique_lock<std::shared_mutex> nlock(node->nodeMutex);
+                    u_lock nlock(node->nodeMutex);
                     if (!node->isLoaded()) {
                         node->loadRegion(storagepath);
                         justLoaded = node->isLoaded();
@@ -191,7 +191,7 @@ private:
             });
         } else {
             {
-                std::unique_lock<std::shared_mutex> nlock(node->nodeMutex);
+                u_lock nlock(node->nodeMutex);
                 if (!node->isLoaded()) node->loadRegion(storagepath);
                 node->setLoadQueued(false);
             }
@@ -242,7 +242,7 @@ private:
     }
 
     BoundingBox getNodesBounds(const std::vector<std::shared_ptr<NodeData>>& nodes) const {
-        if (nodes.empty()) return {PointType::Zero(), PointType::Zero()};
+        if (nodes.empty()) return {Vec3::Zero(), Vec3::Zero()};
         BoundingBox bounds = nodes[0]->getCubeBounds();
         for (size_t i = 1; i < nodes.size(); ++i) {
             BoundingBox cb = nodes[i]->getCubeBounds();
@@ -252,9 +252,9 @@ private:
         return bounds;
     }
     
-    OctreeNode* getHighestCommonNodeRecursive(const PointType& Min, const PointType& Max, OctreeNode* current, int& depth) const {
+    OctreeNode* getHighestCommonNodeRecursive(const Vec3& Min, const Vec3& Max, OctreeNode* current, int& depth) const {
         depth++;
-        std::shared_lock<std::shared_mutex> lock(current->nodeMutex);
+        s_lock lock(current->nodeMutex);
         uint8_t mcell = getOctant(Min, current->center);
         if (mcell == getOctant(Max, current->center) && current->children[mcell]) {
             return getHighestCommonNodeRecursive(Min, Max, current->children[mcell].get(), depth);
@@ -280,10 +280,10 @@ private:
         return current;
     }
 
-    OctreeNode* getHighestCommonNode(const std::vector<PointType>& positions, OctreeNode* current = nullptr, int& depth = 0) const {
+    OctreeNode* getHighestCommonNode(const std::vector<Vec3>& positions, OctreeNode* current = nullptr, int& depth = 0) const {
         if (!current) current = root_.get();
-        PointType min = positions[0];
-        PointType max = positions[0];
+        Vec3 min = positions[0];
+        Vec3 max = positions[0];
         for (const auto& pos : positions) {
             min = min.cwiseMin(pos);
             max = max.cwiseMax(pos);
@@ -294,8 +294,8 @@ private:
 
     OctreeNode* getHighestCommonNode(const std::vector<std::shared_ptr<NodeData>>& nodes, OctreeNode* current = nullptr, int& depth = 0) const {
         if (!current) current = root_.get();
-        PointType min = nodes[0]->position;
-        PointType max = nodes[0]->position;
+        Vec3 min = nodes[0]->position;
+        Vec3 max = nodes[0]->position;
         for (const auto& node : nodes) {
             min = min.cwiseMin(node->position);
             max = max.cwiseMax(node->position);
@@ -324,7 +324,7 @@ private:
         }
         
         if (removed > 0) {
-            std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
+            u_lock lock(node->nodeMutex);
             node->lodData = nullptr;
             node->setDirty(true);
         }
@@ -340,7 +340,7 @@ private:
         size -= removed;
 
         {
-            std::unique_lock<std::shared_mutex> lock(objectsMutex_);
+            u_lock lock(objectsMutex_);
             objects_.erase(objectId);
         }
         return true;
@@ -367,7 +367,7 @@ private:
         }
 
         if (removed > 0) {
-            std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
+            u_lock lock(node->nodeMutex);
             node->lodData = nullptr;
             node->setDirty(true);
         }
@@ -377,7 +377,7 @@ private:
 public:
     std::shared_ptr<GridObject> getOrCreateObject(int id) {
         if (id < 0) id = nextObjId++;
-        std::unique_lock<std::shared_mutex> lock(objectsMutex_);
+        u_lock lock(objectsMutex_);
         auto it = objects_.find(id);
         if (it != objects_.end()) return it->second;
         auto obj = std::make_shared<GridObject>(id);
@@ -386,7 +386,7 @@ public:
     }
 
     std::shared_ptr<GridObject> getObject(int id) const {
-        std::shared_lock<std::shared_mutex> lock(objectsMutex_);
+        s_lock lock(objectsMutex_);
         auto it = objects_.find(id);
         if (it != objects_.end()) return it->second;
         return nullptr;
@@ -405,8 +405,8 @@ public:
                     float v = (static_cast<float>(y) + 0.5f) / skyH;
                     for (size_t x = 0; x < skyW; ++x) {
                         float u = (static_cast<float>(x) + 0.5f) / skyW;
-                        PointType skyDir = skybox_.uvToDir(u, v);
-                        Eigen::Vector3f color = skybox_.sampleVector(skyDir);
+                        Vec3 skyDir = skybox_.uvToDir(u, v);
+                        Vec3 color = skybox_.sampleVector(skyDir);
                         skyDataCache_[y * skyW + x] = Eigen::Vector4f(color.x(), color.y(), color.z(), 1.0f);
                     }
                 }
@@ -420,12 +420,12 @@ public:
         return skyDataCache_;
     }
     
-    void addSkyBody(int id, const PointType& dir, float angularRadius, uint8_t r, uint8_t g, uint8_t b, uint8_t emittance = 255) {
+    void addSkyBody(int id, const Vec3& dir, float angularRadius, uint8_t r, uint8_t g, uint8_t b, uint8_t emittance = 255) {
         skybox_.addBody(id, dir, angularRadius, r, g, b, emittance);
         skyboxVersion_++;
     }
 
-    void moveSkyBody(int id, const PointType& newDir) {
+    void moveSkyBody(int id, const Vec3& newDir) {
         skybox_.moveBody(id, newDir);
         skyboxVersion_++;
     }
@@ -453,7 +453,7 @@ public:
         kernels_.update(radius);
     }
     
-    void setPhysicsGravity(const Eigen::Vector3f& g) {
+    void setPhysicsGravity(const Vec3& g) {
         phys_gravity = g;
         phys_gravityStrength = g.norm();
     }
@@ -463,7 +463,7 @@ public:
     void setPhysicsViscosity(float v) { phys_viscosity = v; }
     void setPhysicsRestDensity(float d) { phys_restDensity = d; }
     void setPhysicsAirDensity(float d) { phys_airDensity = d; }
-    void setphys_gravityCenter(PointType n) { phys_gravityCenter = n; }
+    void setphys_gravityCenter(Vec3 n) { phys_gravityCenter = n; }
     void setPhysicsUseGravityPoint(bool use) { phys_useGravityPoint = use; }
     void setPhysicsGravityStrength(float s) { phys_gravityStrength = s; }
 private:
@@ -477,13 +477,13 @@ private:
     float keepDistance_ = maxDistance_ * 1.2;
     float keepDistSq = keepDistance_ * keepDistance_;
 
-    inline uint8_t getOctant(const PointType& point, const PointType& center) const {
+    inline uint8_t getOctant(const Vec3& point, const Vec3& center) const {
         return (point[0] >= center[0]) | ((point[1] >= center[1]) << 1) | ((point[2] >= center[2]) << 2);
     }
 
     BoundingBox createChildBounds(const OctreeNode* node, uint8_t octant) const {
-        PointType childMin, childMax;
-        const PointType& center = node->center;
+        Vec3 childMin, childMax;
+        const Vec3& center = node->center;
         const BoundingBox bounds = node->bounds();
         
         childMin[0] = (octant & 1) ? center[0] : bounds.first[0];
@@ -509,14 +509,14 @@ private:
     void splitNodeRecursive(OctreeNode* node, int depth) {
         std::vector<std::shared_ptr<NodeData>> keep;
         keep.reserve(node->points.size());
-        std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
+        u_lock lock(node->nodeMutex);
         for (int i = 0; i < 8; ++i) {
             BoundingBox childBounds = createChildBounds(node, i);
             node->children[i] = std::make_unique<OctreeNode>(childBounds.first, childBounds.second);
         }
 
         for (auto& pointData : node->points) {
-            PointType c = pointData->position;
+            Vec3 c = pointData->position;
             float size = pointData->size;
             BoundingBox cubeBounds = pointData->getCubeBounds();
             uint8_t targetIndex = getOctant(c, node->center);
@@ -543,14 +543,14 @@ private:
         if (!boxContainsBox(node->bounds(), cubeBounds)) return false;
 
         {
-            std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
+            u_lock lock(node->nodeMutex);
             node->lodData = nullptr;
         }
 
         if (node->isLeaf() && node->points.size() == maxPointsPerNode) {
             splitNodeRecursive(node, depth);
         }
-        std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
+        u_lock lock(node->nodeMutex);
 
         if (node->isLeaf()) {
             node->points.emplace_back(pointData);
@@ -566,7 +566,7 @@ private:
             }
             
             if (!insertedInChild) {
-                std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
+                u_lock lock(node->nodeMutex);
                 node->points.emplace_back(pointData);
                 node->setDirty(true);
             }
@@ -629,14 +629,14 @@ private:
             }
         }
 
-        Eigen::Vector3f avgPos = Eigen::Vector3f::Zero();
+        Vec3 avgPos = Vec3::Zero();
         Eigen::Vector4f avgColor = Eigen::Vector4f::Zero();
-        Eigen::Vector3f avgEmittance = Eigen::Vector3f::Zero();
+        Vec3 avgEmittance = Vec3::Zero();
         float avgRoughness = 0.0;
         float avgMetallic = 0.0;
         float avgTransmission = 0.0;
-        Eigen::Vector3f avgSellB = Eigen::Vector3f::Zero();
-        Eigen::Vector3f avgSellC = Eigen::Vector3f::Zero();
+        Vec3 avgSellB = Vec3::Zero();
+        Vec3 avgSellC = Vec3::Zero();
         float totalVolume = 0.0;
         int count = 0;
 
@@ -681,7 +681,7 @@ private:
             lod->size = std::cbrt(totalVolume);
 
             lod->color = (avgColor * invVol);
-            Eigen::Vector3f e = avgEmittance * float(invVol);
+            Vec3 e = avgEmittance * float(invVol);
             Grid::v3half B = (avgSellB * invVol).cast<Eigen::half>();
             Grid::v3half C = (avgSellC * invVol).cast<Eigen::half>();
             RenderMaterial avgMat(packRGB9E5(e), float(avgRoughness * invVol),
@@ -704,7 +704,7 @@ private:
     void loadSubtreeRecursive(OctreeNode* node) {
         if (!node) return;
         ensureLoaded(node, true);
-        std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
+        s_lock lock(node->nodeMutex);
         if (!node->isLeaf()) {
             for (auto& child : node->children) {
                 loadSubtreeRecursive(child.get());
@@ -715,7 +715,7 @@ private:
     void loadAndLodSubtreeRecursive(OctreeNode* node) {
         if (!node) return;
         ensureLOD(node);
-        std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
+        s_lock lock(node->nodeMutex);
         if (!node->isLeaf()) {
             for (auto& child : node->children) {
                 loadAndLodSubtreeRecursive(child.get());
@@ -723,7 +723,7 @@ private:
         }
     }
 
-    void updateStreamingRecursive(OctreeNode* node, const PointType& camPos, const PointType& camDir) {
+    void updateStreamingRecursive(OctreeNode* node, const Vec3& camPos, const Vec3& camDir) {
         if (!node) return;
         
         float minDistSq = 0.0f;
@@ -749,7 +749,7 @@ private:
         }
 
         bool isBehind = false;
-        PointType maxPoint;
+        Vec3 maxPoint;
         maxPoint.x() = (camDir.x() >= 0) ? nb.second.x() : nb.first.x();
         maxPoint.y() = (camDir.y() >= 0) ? nb.second.y() : nb.first.y();
         maxPoint.z() = (camDir.z() >= 0) ? nb.second.z() : nb.first.z();
@@ -800,10 +800,10 @@ private:
         }
     }
 
-    std::shared_ptr<NodeData> findRecursive(OctreeNode* node, const PointType& pos, int objectId, float tolerance) {
+    std::shared_ptr<NodeData> findRecursive(OctreeNode* node, const Vec3& pos, int objectId, float tolerance) {
         if (!node->contains(pos)) return nullptr;
         ensureLoaded(node, false);
-        std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
+        s_lock lock(node->nodeMutex);
         
         for (const auto& pointData : node->points) {
             if (pointData->objectId != objectId && objectId >= 0) continue;
@@ -847,7 +847,7 @@ private:
                 }
             }
             if (foundAny) {
-                std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
+                u_lock lock(node->nodeMutex);
                 node->lodData = nullptr;
                 node->setDirty(true);
             }
@@ -855,10 +855,10 @@ private:
         return foundAny;
     }
 
-    void searchNodeRecursive(OctreeNode* node, const PointType& center, float radiusSq, int objectid, 
+    void searchNodeRecursive(OctreeNode* node, const Vec3& center, float radiusSq, int objectid, 
                                std::vector<std::shared_ptr<NodeData>>& results) {
         ensureLoaded(node, false);
-        std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
+        s_lock lock(node->nodeMutex);
         
         for (const auto& pointData : node->points) {
             if (!pointData->isActive()) continue;
@@ -879,7 +879,7 @@ private:
     void clearNode(OctreeNode* node) {
         if (!node) return;
         
-        std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
+        u_lock lock(node->nodeMutex);
         node->points.clear();
         node->points.shrink_to_fit();
         node->lodData = nullptr;
@@ -906,7 +906,7 @@ private:
             return;
         }
 
-        std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
+        s_lock lock(node->nodeMutex);
         if (node->lodData) lodGeneratedNodes++;
         
         size_t pts = node->points.size();
@@ -937,7 +937,7 @@ private:
 
         bool childrenAreLeaves = true;
         {
-            std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
+            s_lock lock(node->nodeMutex);
             for (auto& child : node->children) {
                 if (child && !child->isLeaf()) {
                     childrenAreLeaves = false;
@@ -947,7 +947,7 @@ private:
         }
 
         if (childrenAreLeaves) {
-            std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
+            u_lock lock(node->nodeMutex);
             bool stillLeaves = true;
             for (auto& child : node->children) {
                 if (child && !child->isLeaf()) {
@@ -960,7 +960,7 @@ private:
                 std::vector<std::shared_ptr<NodeData>> allPoints = node->points;
                 for (auto& child : node->children) {
                     if (child) {
-                        std::shared_lock<std::shared_mutex> childLock(child->nodeMutex);
+                        s_lock childLock(child->nodeMutex);
                         allPoints.insert(allPoints.end(), child->points.begin(), child->points.end());
                     }
                 }
@@ -987,7 +987,7 @@ private:
         
         if (subPoints > 0 && (subPoints <= regionTargetPoints_ || node->isLeaf()) && fullyLoaded) {
             if (node->isDirty()) {
-                std::unique_lock<std::shared_mutex> lock(node->nodeMutex);
+                u_lock lock(node->nodeMutex);
                 node->saveRegion(storagepath);
             }
             node->offload();
@@ -1023,7 +1023,7 @@ private:
         return tMax >= std::max(0.0f, tMin);
     }
 
-    bool rayCubeIntersect(const Ray& ray, const RenderData* cube, float& t, PointType& normal, PointType& hitPoint, float* tExit = nullptr) const {
+    bool rayCubeIntersect(const Ray& ray, const RenderData* cube, float& t, Vec3& normal, Vec3& hitPoint, float* tExit = nullptr) const {
         float t0x = (cube->boundsMin[0] - ray.origin[0]) * ray.invDir[0];
         float t1x = (cube->boundsMax[0] - ray.origin[0]) * ray.invDir[0];
         if (ray.invDir[0] < 0.0f) std::swap(t0x, t1x);
@@ -1049,8 +1049,8 @@ private:
         
         hitPoint = ray.origin + ray.dir * t;
         
-        PointType dMin = (hitPoint - cube->boundsMin).cwiseAbs();
-        PointType dMax = (hitPoint - cube->boundsMax).cwiseAbs();
+        Vec3 dMin = (hitPoint - cube->boundsMin).cwiseAbs();
+        Vec3 dMax = (hitPoint - cube->boundsMax).cwiseAbs();
         
         float minDist = std::numeric_limits<float>::max();
         int minAxis = 0;
@@ -1069,7 +1069,7 @@ private:
             }
         }
         
-        normal = PointType::Zero();
+        normal = Vec3::Zero();
         normal[minAxis] = sign;
         return true;
     }
@@ -1081,7 +1081,7 @@ private:
     void buildRenderNodeAt(OctreeNode* node, RenderBuffer_<T>& buffer, uint32_t nodeIdx, const std::unordered_map<int, std::shared_ptr<GridObject>>& localObjects);
     std::vector<RenderData*> fastVoxelTraverse(const RenderBuffer_<T>& buffer, const Ray& ray, float maxDist);
 public:
-    Octree(const PointType& minBound, const PointType& maxBound, std::string storagepath, size_t maxPointsPerNode=8) :
+    Octree(const Vec3& minBound, const Vec3& maxBound, std::string storagepath, size_t maxPointsPerNode=8) :
             root_(std::make_unique<OctreeNode>(minBound, maxBound)), maxPointsPerNode(maxPointsPerNode),
             size(0), skybox_(1024, 1024), storagepath(storagepath),
             streamingQueued_(false) {
@@ -1089,7 +1089,7 @@ public:
         startWorkerThread();
     }
 
-    Octree() : root_(std::make_unique<OctreeNode>(PointType::Constant(-0.5f), PointType::Constant(0.5f))), maxPointsPerNode(8), size(0), skybox_(1024, 1024), streamingQueued_(false) {
+    Octree() : root_(std::make_unique<OctreeNode>(Vec3::Constant(-0.5f), Vec3::Constant(0.5f))), maxPointsPerNode(8), size(0), skybox_(1024, 1024), streamingQueued_(false) {
         skybox_.setBackground(backgroundColor_.x(), backgroundColor_.y(), backgroundColor_.z(), 1.0f);
         startWorkerThread();
     }
@@ -1113,8 +1113,8 @@ public:
         if (other.root_) root_ = other.root_->clone();
         
         {
-            std::shared_lock<std::shared_mutex> lockOther(other.objectsMutex_);
-            std::unique_lock<std::shared_mutex> lockThis(objectsMutex_);
+            s_lock lockOther(other.objectsMutex_);
+            u_lock lockThis(objectsMutex_);
             for (const auto& pair : other.objects_) {
                 objects_[pair.first] = std::make_shared<GridObject>(*pair.second);
             }
@@ -1131,8 +1131,8 @@ public:
         root_ = std::move(other.root_);
         
         {
-            std::unique_lock<std::shared_mutex> lockOther(other.objectsMutex_);
-            std::unique_lock<std::shared_mutex> lockThis(objectsMutex_);
+            u_lock lockOther(other.objectsMutex_);
+            u_lock lockThis(objectsMutex_);
             objects_ = std::move(other.objects_);
         }
         
@@ -1165,8 +1165,8 @@ public:
         if (other.root_) root_ = other.root_->clone();
         
         {
-            std::shared_lock<std::shared_mutex> lockOther(other.objectsMutex_);
-            std::unique_lock<std::shared_mutex> lockThis(objectsMutex_);
+            s_lock lockOther(other.objectsMutex_);
+            u_lock lockThis(objectsMutex_);
             objects_.clear();
             for (const auto& pair : other.objects_) {
                 objects_[pair.first] = std::make_shared<GridObject>(*pair.second);
@@ -1197,8 +1197,8 @@ public:
         root_ = std::move(other.root_);
         
         {
-            std::unique_lock<std::shared_mutex> lockOther(other.objectsMutex_);
-            std::unique_lock<std::shared_mutex> lockThis(objectsMutex_);
+            u_lock lockOther(other.objectsMutex_);
+            u_lock lockThis(objectsMutex_);
             objects_ = std::move(other.objects_);
         }
 
@@ -1228,20 +1228,20 @@ public:
         autoOptimize_.store(v); 
     }
 
-    void setSkylight(const Eigen::Vector3f& skylight) { 
+    void setSkylight(const Vec3& skylight) { 
         skylight_ = skylight; 
     }
 
-    Eigen::Vector3f getSkylight() const { 
+    Vec3 getSkylight() const { 
         return skylight_; 
     }
 
-    void setBackgroundColor(const Eigen::Vector3f& color) { 
+    void setBackgroundColor(const Vec3& color) { 
         backgroundColor_ = color; 
         skybox_.setBackground(color.x(), color.y(), color.z(), 1.0f);
     }
 
-    Eigen::Vector3f getBackgroundColor() const { 
+    Vec3 getBackgroundColor() const { 
         return backgroundColor_; 
     }
 
@@ -1273,9 +1273,9 @@ public:
         ensureLOD(root_.get());
     }
 
-    bool insert(const T& data, const PointType& pos, bool visible, Eigen::Vector3f color, float size = 0.01f, bool active = true,
+    bool insert(const T& data, const Vec3& pos, bool visible, Vec3 color, float size = 0.01f, bool active = true,
              int objectId = -1, float emittance = 0.0f, float roughness = 1.0f, float metallic = 0.0f, float transmission = 0.0f,
-             float ior = 1.45f, Eigen::Vector3f absorp = Eigen::Vector3f::Zero(), BodyType bType = BodyType::STATIC, float mass = 1.0f,
+             float ior = 1.45f, Vec3 absorp = Vec3::Zero(), BodyType bType = BodyType::STATIC, float mass = 1.0f,
              float stiffness = 4000.0f, float breakForce = 60.0f, float damping = 0.4f) {
         if (!pos.allFinite() || !root_->contains(pos)) {
             return false;
@@ -1290,9 +1290,9 @@ public:
 
         auto pointData = std::make_shared<NodeData>(data, pos, visible, color4, size, active, objectId, rIdx, pIdx, bType == BodyType::STATIC);
         
-        PointType relPos = pos - obj->centerPosition;
+        Vec3 relPos = pos - obj->centerPosition;
         {
-            std::unique_lock<std::shared_mutex> lock(obj->objMutex);
+            u_lock lock(obj->objMutex);
             obj->relativeVoxels.push_back({relPos});
         }
         
@@ -1338,13 +1338,13 @@ public:
         node->physics.bondsBuilt = true;
     }
 
-    int getRenderMaterialIndex(const PointType& pos, float tolerance = 0.0001f) {
+    int getRenderMaterialIndex(const Vec3& pos, float tolerance = 0.0001f) {
         auto pt = find(pos, tolerance);
         if (!pt) return -1;
         return pt->renderMatIdx;
     }
 
-    int getPhysicsMaterialIndex(const PointType& pos, float tolerance = 0.0001f) {
+    int getPhysicsMaterialIndex(const Vec3& pos, float tolerance = 0.0001f) {
         auto pt = find(pos, tolerance);
         if (!pt) return -1;
         return pt->physMatIdx;
@@ -1354,9 +1354,9 @@ public:
         auto obj = getObject(id);
         if (!obj) return;
         
-        std::vector<PointType> absolutePositions;
+        std::vector<Vec3> absolutePositions;
         {
-            std::shared_lock<std::shared_mutex> lock(obj->objMutex);
+            s_lock lock(obj->objMutex);
             if (obj->relativeVoxels.empty()) return;
             
             absolutePositions.reserve(obj->relativeVoxels.size());
@@ -1381,7 +1381,7 @@ public:
         auto obj = getObject(objectId);
         if (!obj) return false;
         {
-            std::unique_lock<std::shared_mutex> lock(obj->objMutex);
+            u_lock lock(obj->objMutex);
             if (index >= obj->renderMaterials.size()) return false;
             obj->renderMaterialIndex.erase(obj->renderMaterials[index]);
             obj->renderMaterials[index] = mat;
@@ -1397,7 +1397,7 @@ public:
         auto obj = getObject(objectId);
         if (!obj) return false;
         {
-            std::unique_lock<std::shared_mutex> lock(obj->objMutex);
+            u_lock lock(obj->objMutex);
             if (index >= obj->physicsMaterials.size()) return false;
             obj->physicsMaterialIndex.erase(obj->physicsMaterials[index]);
             obj->physicsMaterials[index] = pmat;
@@ -1407,7 +1407,7 @@ public:
         return true;
     }
 
-    bool rotateObject(int objectId, const Eigen::Matrix3f& rotation, const PointType& pivot) {
+    bool rotateObject(int objectId, const Eigen::Matrix3f& rotation, const Vec3& pivot) {
         if (!root_) return false;
         std::vector<std::shared_ptr<NodeData>> nodes;
         collectNodesByObjectId(objectId, nodes);
@@ -1421,7 +1421,7 @@ public:
         size -= removed;
 
         for (auto& n : nodes) {
-            PointType offset = n->position - pivot;
+            Vec3 offset = n->position - pivot;
             n->position = pivot + (rotation * offset);
         }
 
@@ -1440,7 +1440,7 @@ public:
         
         auto obj = getObject(objectId);
         if (obj) {
-            std::unique_lock<std::shared_mutex> lock(obj->objMutex);
+            u_lock lock(obj->objMutex);
             obj->centerPosition = pivot + (rotation * (obj->centerPosition - pivot));
             for (auto& rv : obj->relativeVoxels) {
                 rv.relPos = rotation * rv.relPos;
@@ -1475,7 +1475,7 @@ public:
             float offset = newSize * 0.5f;
             
             for (int i = 0; i < 8; ++i) {
-                PointType newPos = n->position;
+                Vec3 newPos = n->position;
                 newPos.x() += (i & 1) ? offset : -offset;
                 newPos.y() += (i & 2) ? offset : -offset;
                 newPos.z() += (i & 4) ? offset : -offset;
@@ -1505,10 +1505,10 @@ public:
         for (auto& n : nodes) {
             int exposedFaces = 0;
             float step = n->size;
-            const std::array<PointType, 6> dirs = {
-                PointType(1, 0, 0), PointType(-1, 0, 0),
-                PointType(0, 1, 0), PointType(0, -1, 0),
-                PointType(0, 0, 1), PointType(0, 0, -1)
+            const std::array<Vec3, 6> dirs = {
+                Vec3(1, 0, 0), Vec3(-1, 0, 0),
+                Vec3(0, 1, 0), Vec3(0, -1, 0),
+                Vec3(0, 0, 1), Vec3(0, 0, -1)
             };
             
             for (const auto& dir : dirs) {
@@ -1535,9 +1535,9 @@ public:
         return true;
     }
 
-    void queuedset(const T& data, const PointType& pos, bool visible, Eigen::Vector3f color, float size = 0.01f, bool active = true,
+    void queuedset(const T& data, const Vec3& pos, bool visible, Vec3 color, float size = 0.01f, bool active = true,
              int objectId = -1, float emittance = 0.0f, float roughness = 1.0f, float metallic = 0.0f, float transmission = 0.0f,
-             float ior = 1.45f, Eigen::Vector3f absorp = Eigen::Vector3f::Zero(),
+             float ior = 1.45f, Vec3 absorp = Vec3::Zero(),
              BodyType bType = BodyType::STATIC, float mass = 1.0f) {
         enqueueTask([this, data, pos, visible, color, size, active, objectId, emittance, roughness, metallic, transmission, ior, absorp, bType, mass]() {
             if (!pos.allFinite() || !root_->contains(pos)) {
@@ -1553,9 +1553,9 @@ public:
             Eigen::Vector4f color4(color.x(), color.y(), color.z(), std::clamp(1.0f - transmission, 0.0f, 1.0f));
             auto pointData = std::make_shared<NodeData>(data, pos, visible, color4, size, active, objectId, rIdx, pIdx, bType == BodyType::STATIC);
             
-            PointType relPos = pos - obj->centerPosition;
+            Vec3 relPos = pos - obj->centerPosition;
             {
-                std::unique_lock<std::shared_mutex> lock(obj->objMutex);
+                u_lock lock(obj->objMutex);
                 obj->relativeVoxels.push_back({relPos});
             }
 
@@ -1574,8 +1574,8 @@ public:
 
     void updateStreaming(const Camera& cam) {
         if (streamingQueued_.exchange(true, std::memory_order_acquire)) return;
-        PointType camPos = cam.origin;
-        PointType camDir = cam.direction.normalized();
+        Vec3 camPos = cam.origin;
+        Vec3 camDir = cam.direction.normalized();
         enqueueTask([this, camPos, camDir]() {
             if (root_) {
                 updateStreamingRecursive(root_.get(), camPos, camDir);
@@ -1603,14 +1603,14 @@ public:
         OctreeNode::writeVec3(out, root_->bounds().second);
 
         {
-            std::shared_lock<std::shared_mutex> lock(objectsMutex_);
+            s_lock lock(objectsMutex_);
             uint32_t numObjects = objects_.size();
             OctreeNode::writeVal(out, numObjects);
             for (const auto& pair : objects_) {
                 OctreeNode::writeVal(out, pair.first);
                 auto obj = pair.second;
                 
-                std::shared_lock<std::shared_mutex> objLock(obj->objMutex);
+                s_lock objLock(obj->objMutex);
                 OctreeNode::writeVal(out, obj->objectFlags);
                 OctreeNode::writeVec3(out, obj->centerPosition);
                 
@@ -1628,7 +1628,7 @@ public:
             }
         }
 
-        std::unique_lock<std::shared_mutex> rlock(root_->nodeMutex);
+        u_lock rlock(root_->nodeMutex);
         root_->serialize(out, regionTargetPoints_, storagepath);
         
         out.close();
@@ -1654,12 +1654,12 @@ public:
         OctreeNode::readVec3(in, skylight_);
         OctreeNode::readVec3(in, backgroundColor_);
 
-        PointType minBound, maxBound;
+        Vec3 minBound, maxBound;
         OctreeNode::readVec3(in, minBound);
         OctreeNode::readVec3(in, maxBound);
 
         {
-            std::unique_lock<std::shared_mutex> lock(objectsMutex_);
+            u_lock lock(objectsMutex_);
             objects_.clear();
             uint32_t numObjects = 0;
             OctreeNode::readVal(in, numObjects);
@@ -1695,21 +1695,21 @@ public:
         return true;
     }
 
-    std::shared_ptr<NodeData> find(const PointType& pos, int objectId = -2, float tolerance = EPSILON, OctreeNode* node = nullptr) {
+    std::shared_ptr<NodeData> find(const Vec3& pos, int objectId = -2, float tolerance = EPSILON, OctreeNode* node = nullptr) {
         if (!node) node = root_.get();
         return findRecursive(node, pos, objectId, tolerance);
     }
 
-    std::shared_ptr<NodeData> findwNode(const PointType& pos, OctreeNode* node, int objectId = -2, float tolerance = EPSILON) {
+    std::shared_ptr<NodeData> findwNode(const Vec3& pos, OctreeNode* node, int objectId = -2, float tolerance = EPSILON) {
         // node = root_.get();
         return findRecursive(node, pos, objectId, tolerance);
     }
 
-    bool inGrid(PointType pos) {
+    bool inGrid(Vec3 pos) {
         return root_->contains(pos);
     }
 
-    bool remove(const PointType& pos, float tolerance = EPSILON) {
+    bool remove(const Vec3& pos, float tolerance = EPSILON) {
         auto pt = find(pos, tolerance);
         if (!pt) return false;
         if (removeRecursive(root_.get(), pt->getCubeBounds(), pt)) {
@@ -1719,12 +1719,12 @@ public:
         return false;
     }
 
-    std::vector<std::shared_ptr<NodeData>> findInRadius(const PointType& center, float radius, int objectid = -1) {
+    std::vector<std::shared_ptr<NodeData>> findInRadius(const Vec3& center, float radius, int objectid = -1) {
         std::vector<std::shared_ptr<NodeData>> results;
         
         float radiusSq = radius * radius;
         int depth = 0;
-        OctreeNode* startingPoint = getHighestCommonNodeRecursive(center - PointType::Constant(radius), center + PointType::Constant(radius), root_.get(), depth);
+        OctreeNode* startingPoint = getHighestCommonNodeRecursive(center - Vec3::Constant(radius), center + Vec3::Constant(radius), root_.get(), depth);
         searchNodeRecursive(startingPoint, center, radiusSq, objectid, results);
         
         return results;
@@ -1762,7 +1762,7 @@ public:
         return weakNodes;
     }
 
-    bool update(const PointType& pos, const T& newData) {
+    bool update(const Vec3& pos, const T& newData) {
         auto pointData = find(pos);
         if (!pointData) return false;
         else pointData->data = newData;
@@ -1770,7 +1770,7 @@ public:
         return true;
     }
 
-    void queuedupdate(const PointType pos, const T newData) {
+    void queuedupdate(const Vec3 pos, const T newData) {
         enqueueTask([this, pos, newData]() {
             OctreeNode* node = root_.get();
             auto pointData = findwNode(pos, node, -2);
@@ -1784,8 +1784,8 @@ public:
         });
     }
 
-    bool update(const PointType& oldPos, const PointType& newPos, const T& newData, bool newVisible = true, 
-                Eigen::Vector3f newColor = Eigen::Vector3f(1.0f, 1.0f, 1.0f), float newSize = 0.01f, bool newActive = true,
+    bool update(const Vec3& oldPos, const Vec3& newPos, const T& newData, bool newVisible = true, 
+                Vec3 newColor = Vec3(1.0f, 1.0f, 1.0f), float newSize = 0.01f, bool newActive = true,
                 int newObjectId = -2, float newEmittance = -1.0f, float newRoughness = -1.0f, 
                 float newMetallic = -1.0f, float newTransmission = -1.0f, float newIor = -1.0f, float tolerance = EPSILON) {
 
@@ -1800,7 +1800,7 @@ public:
         pointData->position = newPos;
         pointData->setVisible(newVisible);
         
-        if (newColor != Eigen::Vector3f(1.0f, 1.0f, 1.0f)) {
+        if (newColor != Vec3(1.0f, 1.0f, 1.0f)) {
             pointData->color.template head<3>() = newColor;
         }
         if (newSize > 0) pointData->size = newSize;
@@ -1810,7 +1810,7 @@ public:
         auto obj = getOrCreateObject(targetObjId);
         RenderMaterial mat = obj->getRenderMaterial(pointData->renderMatIdx);
         
-        if (newEmittance >= 0) mat.chromaticity = packRGB9E5(Eigen::Vector3f::Constant(newEmittance));
+        if (newEmittance >= 0) mat.chromaticity = packRGB9E5(Vec3::Constant(newEmittance));
         if (newRoughness >= 0) mat.roughness = newRoughness;
         if (newMetallic >= 0) mat.metallic = newMetallic;
         if (newTransmission >= 0) pointData->color.w() = std::clamp(1.0f - newTransmission, 0.0f, 1.0f);
@@ -1827,7 +1827,7 @@ public:
         return res;
     }
 
-    bool move(const PointType& pos, const PointType& newPos) {
+    bool move(const Vec3& pos, const Vec3& newPos) {
         auto pointData = find(pos);
         if (!pointData) return false;
 
@@ -1841,7 +1841,7 @@ public:
         return false;
     }
 
-    void queuedmove(const PointType pos, const PointType newPos) {
+    void queuedmove(const Vec3 pos, const Vec3 newPos) {
         enqueueTask([this, pos, newPos]() {
             auto pointData = find(pos);
             if (!pointData) return;
@@ -1857,7 +1857,7 @@ public:
         });
     }
 
-    void queuedupdate(const PointType pos, const PointType newPos, const T newData) {
+    void queuedupdate(const Vec3 pos, const Vec3 newPos, const T newData) {
         enqueueTask([this, pos, newPos, newData]() {
             auto pointData = find(pos);
             if (!pointData) return;
@@ -1874,7 +1874,7 @@ public:
         });
     }
 
-    bool setObjectId(const PointType& pos, int objectId, float tolerance = EPSILON) {
+    bool setObjectId(const Vec3& pos, int objectId, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
         pointData->objectId = objectId;
@@ -1882,7 +1882,7 @@ public:
         return true;
     }
 
-    bool updateData(const PointType& pos, const T& newData, float tolerance = EPSILON) {
+    bool updateData(const Vec3& pos, const T& newData, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
         pointData->data = newData;
@@ -1890,7 +1890,7 @@ public:
         return true;
     }
 
-    bool setActive(const PointType& pos, bool active, float tolerance = EPSILON) {
+    bool setActive(const Vec3& pos, bool active, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
         pointData->setActive(active);
@@ -1898,7 +1898,7 @@ public:
         return true;
     }
 
-    bool setVisible(const PointType& pos, bool visible, float tolerance = EPSILON) {
+    bool setVisible(const Vec3& pos, bool visible, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
         pointData->setVisible(visible);
@@ -1906,7 +1906,7 @@ public:
         return true;
     }
 
-    bool setColor(const PointType& pos, Eigen::Vector3f color, float tolerance = EPSILON) {
+    bool setColor(const Vec3& pos, Vec3 color, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
         pointData->color.template head<3>() = color;
@@ -1914,7 +1914,7 @@ public:
         return true;
     }
 
-    void queuedsetColor(const PointType& pos, Eigen::Vector3f color, float tolerance = EPSILON) {
+    void queuedsetColor(const Vec3& pos, Vec3 color, float tolerance = EPSILON) {
         enqueueTask([this, pos, color, tolerance]() {
             OctreeNode* node = root_.get();
             auto pointData = findwNode(pos, node, -2, tolerance);
@@ -1928,11 +1928,11 @@ public:
         });
     }
 
-    bool setEmittance(const PointType& pos, float emittance, float tolerance = EPSILON) {
-        return setEmittance(pos, Eigen::Vector3f::Constant(emittance), tolerance);
+    bool setEmittance(const Vec3& pos, float emittance, float tolerance = EPSILON) {
+        return setEmittance(pos, Vec3::Constant(emittance), tolerance);
     }
 
-    bool setChromaticity(const PointType& pos, const Eigen::Vector3f& chromaticity, float tolerance = EPSILON) {
+    bool setChromaticity(const Vec3& pos, const Vec3& chromaticity, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
         auto obj = getOrCreateObject(pointData->objectId);
@@ -1943,7 +1943,7 @@ public:
         return true;
     }
 
-    bool setIor(const PointType& pos, float ior, float tolerance = EPSILON) {
+    bool setIor(const Vec3& pos, float ior, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
         auto obj = getOrCreateObject(pointData->objectId);
@@ -1954,7 +1954,7 @@ public:
         return true;
     }
 
-    bool setSellmeier(const PointType& pos, const v3half& B, const v3half& C, float tolerance = EPSILON) {
+    bool setSellmeier(const Vec3& pos, const v3half& B, const v3half& C, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
         auto obj = getOrCreateObject(pointData->objectId);
@@ -1966,7 +1966,7 @@ public:
         return true;
     }
 
-    bool setRoughness(const PointType& pos, float roughness, float tolerance = EPSILON) {
+    bool setRoughness(const Vec3& pos, float roughness, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
         auto obj = getOrCreateObject(pointData->objectId);
@@ -1977,7 +1977,7 @@ public:
         return true;
     }
 
-    bool setMetallic(const PointType& pos, float metallic, float tolerance = EPSILON) {
+    bool setMetallic(const Vec3& pos, float metallic, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
         auto obj = getOrCreateObject(pointData->objectId);
@@ -1988,7 +1988,7 @@ public:
         return true;
     }
 
-    bool setTransmission(const PointType& pos, float transmission, float tolerance = EPSILON) {
+    bool setTransmission(const Vec3& pos, float transmission, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
         pointData->color.w() = std::clamp(1.0f - transmission, 0.0f, 1.0f);
@@ -1999,9 +1999,9 @@ public:
     void setMaterialByObjectId(int objectId, float emittance, float roughness, float metallic) {
         auto obj = getOrCreateObject(objectId);
         {
-            std::unique_lock<std::shared_mutex> lock(obj->objMutex);
+            u_lock lock(obj->objMutex);
             for (auto& mat : obj->renderMaterials) {
-                mat.chromaticity = packRGB9E5(Eigen::Vector3f::Constant(emittance));
+                mat.chromaticity = packRGB9E5(Vec3::Constant(emittance));
                 mat.roughness = roughness;
                 mat.metallic = metallic;
             }
@@ -2013,8 +2013,9 @@ public:
         }
     }
 
-    bool raycast(const PointType& origin, const PointType& direction, float maxDist, RayHit& hit,
-                 const std::shared_ptr<NodeData>& ignoreNode = nullptr, bool hitOnlySolid = false, bool resolvePenetration = false) {
+    bool raycast(const Vec3& origin, const Vec3& direction, float maxDist, RayHit& hit,
+                 const std::shared_ptr<NodeData>& ignoreNode = nullptr, bool hitOnlySolid = false, bool resolvePenetration = false,
+                 const std::vector<std::vector<PhysicsMaterial_>>* solidClassMats = nullptr) {
         if (!root_) return false;
         
         Ray ray(origin, direction.normalized());
@@ -2052,15 +2053,26 @@ public:
                 continue;
             }
 
-            std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
+            s_lock lock(node->nodeMutex);
 
             for (const auto& pt : node->points) {
                 if (!pt->isActive() || pt == ignoreNode) continue;
                 if (hitOnlySolid) {
-                    std::shared_lock<std::shared_mutex> objLock(objectsMutex_);
-                    auto it = objects_.find(pt->objectId);
-                    BodyType bType = (it != objects_.end()) ? it->second->getPhysicsMaterial(pt->physMatIdx).type : BodyType::STATIC;
-                    if (bType == BodyType::FLUID) continue;
+                    bool isFluid = false;
+                    if (solidClassMats) {
+                        int oi = pt->objectId + 1;
+                        if (oi >= 0 && oi < (int)solidClassMats->size()) {
+                            const auto& mats = (*solidClassMats)[oi];
+                            if (pt->physMatIdx < mats.size() && mats[pt->physMatIdx].type == BodyType::FLUID)
+                                isFluid = true;
+                        }
+                    } else {
+                        s_lock objLock(objectsMutex_);
+                        auto it = objects_.find(pt->objectId);
+                        if (it != objects_.end() && it->second->getPhysicsMaterial(pt->physMatIdx).type == BodyType::FLUID)
+                            isFluid = true;
+                    }
+                    if (isFluid) continue;
                 }
                 
                 BoundingBox bounds = pt->getCubeBounds();
@@ -2141,8 +2153,8 @@ public:
             hit.hitPoint = ray.origin + ray.dir * currentMaxDist;
 
             BoundingBox bounds = bestNode->getCubeBounds();
-            PointType dMin = (hit.hitPoint - bounds.first).cwiseAbs();
-            PointType dMax = (hit.hitPoint - bounds.second).cwiseAbs();
+            Vec3 dMin = (hit.hitPoint - bounds.first).cwiseAbs();
+            Vec3 dMax = (hit.hitPoint - bounds.second).cwiseAbs();
             
             float minDist = std::numeric_limits<float>::max();
             int minAxis = 0;
@@ -2160,7 +2172,7 @@ public:
                     sign = 1.0f;
                 }
             }
-            hit.normal = PointType::Zero();
+            hit.normal = Vec3::Zero();
             hit.normal[minAxis] = sign;
             return true;
         }
@@ -2240,7 +2252,7 @@ public:
 
     bool empty() const { return size == 0; }
 
-    void clear(PointType minBound = Eigen::Vector3f::Constant(-1.0), PointType maxBound = Eigen::Vector3f::Constant(1.0)) {
+    void clear(Vec3 minBound = Vec3::Constant(-1.0), Vec3 maxBound = Vec3::Constant(1.0)) {
         if (root_) {
             clearNode(root_.get());
             root_.reset();
@@ -2253,7 +2265,7 @@ public:
         if (!node) return;
         loadedNodes++;
         
-        std::shared_lock<std::shared_mutex> lock(node->nodeMutex);
+        s_lock lock(node->nodeMutex);
         if (!node->isLoaded()) return;
         
         loadedPoints += node->points.size();

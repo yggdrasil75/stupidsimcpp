@@ -6,20 +6,20 @@
 namespace Grid {
 
 struct RenderData {
-    PointType position;
+    Vec3 position;
     float size;
     Eigen::Vector4f color;
     uint32_t materialIdx;
-    PointType boundsMin;
-    PointType boundsMax;
+    Vec3 boundsMin;
+    Vec3 boundsMax;
     int objectId;
 };
 
 template<typename T>
 struct RenderNode_ {
-    PointType boundsMin;
-    PointType boundsMax;
-    PointType center;
+    Vec3 boundsMin;
+    Vec3 boundsMax;
+    Vec3 center;
     float nodeSize;
     bool isLeaf;
     bool isLoaded;
@@ -50,7 +50,7 @@ struct RenderBuffer_ {
     }
 };
 
-static PointType sampleGGX(const PointType& n, float roughness, uint32_t& state) {
+static Vec3 sampleGGX(const Vec3& n, float roughness, uint32_t& state) {
     float alpha = std::max(EPSILON, roughness * roughness);
     float r1 = float(rand_r(&state)) / float(RAND_MAX);
     float r2 = float(rand_r(&state)) / float(RAND_MAX);
@@ -61,19 +61,19 @@ static PointType sampleGGX(const PointType& n, float roughness, uint32_t& state)
     float cosTheta = std::sqrt(std::max(0.0f, (1.0f - r2) / denom));
     float sinTheta = std::sqrt(std::max(0.0f, 1.0f - cosTheta * cosTheta));
     
-    PointType h;
+    Vec3 h;
     h[0] = sinTheta * std::cos(phi);
     h[1] = sinTheta * std::sin(phi);
     h[2] = cosTheta;
     
-    PointType up = std::abs(n.z()) < 0.999f ? PointType(0,0,1) : PointType(1,0,0);
-    PointType tangent = up.cross(n).normalized();
-    PointType bitangent = n.cross(tangent);
+    Vec3 up = std::abs(n.z()) < 0.999f ? Vec3(0,0,1) : Vec3(1,0,0);
+    Vec3 tangent = up.cross(n).normalized();
+    Vec3 bitangent = n.cross(tangent);
     
     return (tangent * h[0] + bitangent * h[1] + n * h[2]).normalized();
 }
 
-static PointType sampleCosineHemisphere(const PointType& n, uint32_t& state) {
+static Vec3 sampleCosineHemisphere(const Vec3& n, uint32_t& state) {
     float r1 = float(rand_r(&state)) / float(RAND_MAX);
     float r2 = float(rand_r(&state)) / float(RAND_MAX);
     float phi = 2.0f * M_PI * r1;
@@ -82,9 +82,9 @@ static PointType sampleCosineHemisphere(const PointType& n, uint32_t& state) {
     float y = r * std::sin(phi);
     float z = std::sqrt(std::max(0.0f, 1.0f - x*x - y*y));
     
-    PointType up = std::abs(n.z()) < 0.999f ? PointType(0,0,1) : PointType(1,0,0);
-    PointType tangent = up.cross(n).normalized();
-    PointType bitangent = n.cross(tangent);
+    Vec3 up = std::abs(n.z()) < 0.999f ? Vec3(0,0,1) : Vec3(1,0,0);
+    Vec3 tangent = up.cross(n).normalized();
+    Vec3 bitangent = n.cross(tangent);
     
     return (tangent * x + bitangent * y + n * z).normalized();
 }
@@ -105,11 +105,11 @@ static PFN_vkDestroyAccelerationStructureKHR pfn_vkDestroyAccelerationStructureK
 static PFN_vkGetAccelerationStructureDeviceAddressKHR pfn_vkGetAccelerationStructureDeviceAddressKHR = nullptr;
 
 struct alignas(16) GPURenderNode {
-    Eigen::Vector3f boundsMin;
+    Vec3 boundsMin;
     float padding1;
-    Eigen::Vector3f boundsMax;
+    Vec3 boundsMax;
     float padding2;
-    Eigen::Vector3f center;
+    Vec3 center;
     float nodeSize;
     uint32_t isLeaf;
     uint32_t isLoaded;
@@ -129,7 +129,7 @@ struct alignas(16) GPUMaterial {
 };
 
 struct alignas(16) GPUFastRenderData {
-    Eigen::Vector3f position;
+    Vec3 position;
     float size;
     uint32_t color;
     uint32_t materialIdx;
@@ -137,7 +137,7 @@ struct alignas(16) GPUFastRenderData {
 };
 
 struct alignas(16) GPUPBRRenderData {
-    Eigen::Vector3f position;
+    Vec3 position;
     float size;
     uint32_t color;
     uint32_t materialIdx;
@@ -145,17 +145,17 @@ struct alignas(16) GPUPBRRenderData {
 };
 
 struct alignas(16) GPUCameraData {
-    Eigen::Vector3f origin;
+    Vec3 origin;
     float lodMinDist;
-    Eigen::Vector3f dir;
+    Vec3 dir;
     float invLodf;
-    Eigen::Vector3f up;
+    Vec3 up;
     float minVisibility;
-    Eigen::Vector3f right;
+    Vec3 right;
     float maxDist;
-    Eigen::Vector3f skylight;
+    Vec3 skylight;
     float tanfovx;
-    Eigen::Vector3f bgColor;
+    Vec3 bgColor;
     float tanfovy;
     int width;
     int height;
@@ -186,11 +186,11 @@ struct alignas(16) GPUParticle {
 };
 
 struct WavefrontRay {
-    Eigen::Vector3f origin;
+    Vec3 origin;
     uint32_t pixelIndex;
-    Eigen::Vector3f dir;
+    Vec3 dir;
     uint32_t rng_state;
-    Eigen::Vector3f throughput;
+    Vec3 throughput;
     uint32_t bounce;
     int active;
     float primaryDepth;
@@ -199,11 +199,11 @@ struct WavefrontRay {
 };
 
 struct WavefrontHit {
-    Eigen::Vector3f normal;
+    Vec3 normal;
     float t;
     int hitIndex;
     int hitFound;
-    Eigen::Vector3f hitPoint;
+    Vec3 hitPoint;
     float padding1;
 };
 

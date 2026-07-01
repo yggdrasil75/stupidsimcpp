@@ -29,8 +29,10 @@ static constexpr uint8_t OBJ_ALLOW_PARTIAL_UNLOAD_BIT = 1 << 0;
 
 template<typename> struct is_shared_ptr : std::false_type {};
 template<typename T> struct is_shared_ptr<std::shared_ptr<T>> : std::true_type {};
-using PointType = Eigen::Matrix<float, Dim, 1>;
-using BoundingBox = std::pair<PointType, PointType>;
+using Vec3 = Eigen::Vector3f;
+using BoundingBox = std::pair<Vec3, Vec3>;
+using u_lock = std::unique_lock<std::shared_mutex>;
+using s_lock = std::shared_lock<std::shared_mutex>;
 namespace fs = std::filesystem;
 
 enum class BodyType : uint8_t {
@@ -41,7 +43,7 @@ enum class BodyType : uint8_t {
     FLUID = 4
 };
 
-static inline uint32_t packRGB9E5(const Eigen::Vector3f& c) {
+static inline uint32_t packRGB9E5(const Vec3& c) {
     float rc = std::max(0.0f, c.x());
     float gc = std::max(0.0f, c.y());
     float bc = std::max(0.0f, c.z());
@@ -61,14 +63,14 @@ static inline uint32_t packRGB9E5(const Eigen::Vector3f& c) {
     return r | (g << 9) | (b << 18) | (e << 27);
 }
 
-static inline Eigen::Vector3f unpackRGB9E5(uint32_t c) {
-    if (c == 0) return Eigen::Vector3f::Zero();
+static inline Vec3 unpackRGB9E5(uint32_t c) {
+    if (c == 0) return Vec3::Zero();
     int e = static_cast<int>(c >> 27) - 15;
     float scale = std::pow(2.0f, static_cast<float>(e - 9));
     float r = static_cast<float>(c & 0x1FF) * scale;
     float g = static_cast<float>((c >> 9) & 0x1FF) * scale;
     float b = static_cast<float>((c >> 18) & 0x1FF) * scale;
-    return Eigen::Vector3f(r, g, b);
+    return Vec3(r, g, b);
 }
 
 template<typename T>
@@ -84,8 +86,8 @@ struct Bond_ {
 
 template<typename T>
 struct PhysicsState_ {
-    Eigen::Vector3f velocity{0.0f, 0.0f, 0.0f};
-    Eigen::Vector3f force{0.0f, 0.0f, 0.0f};
+    Vec3 velocity{0.0f, 0.0f, 0.0f};
+    Vec3 force{0.0f, 0.0f, 0.0f};
     float density = 1.0f;
     float pressure = 0.0f;
     std::vector<Bond_<T>> bonds;
@@ -258,12 +260,12 @@ struct RenderMaterial {
     float metallic;
     v3half sellB;
     v3half sellC;
-    Eigen::Vector3f absorption;
+    Vec3 absorption;
     //bandwidth?
     //dispersion?
 
     RenderMaterial(uint32_t e, float r, float m, const v3half& B, const v3half& C,
-              Eigen::Vector3f a = Eigen::Vector3f::Zero())
+              Vec3 a = Eigen::Vector3f::Zero())
         : chromaticity(e), roughness(r), metallic(m), sellB(B), sellC(C), absorption(a) {}
 
     RenderMaterial(float e = 0.0f, float r = 1.0f, float m = 0.0f, float i = 1.45f, Eigen::Vector3f a = Eigen::Vector3f::Zero())
@@ -271,7 +273,7 @@ struct RenderMaterial {
         sellmeierFromConstant(i, sellB, sellC);
     }
     float iorGreen() const { return sellmeierN(sellB, sellC, SELL_LAMBDA_G); }
-    Eigen::Vector3f emittanceRGB() const { return unpackRGB9E5(chromaticity); }
+    Vec3 emittanceRGB() const { return unpackRGB9E5(chromaticity); }
 
     bool operator==(const RenderMaterial& o) const {
         return chromaticity == o.chromaticity && roughness == o.roughness &&
@@ -291,7 +293,7 @@ struct RenderMaterial {
         float dr = roughness - o.roughness;
         float dm = metallic - o.metallic;
         float di = iorGreen() - o.iorGreen();
-        Eigen::Vector3f de = emittanceRGB() - o.emittanceRGB();
+        Vec3 de = emittanceRGB() - o.emittanceRGB();
         float empenalty = de.norm();
         float absPenalty = (absorption != o.absorption) ? 0.5f : 0.0f;
         return dr*dr + dm*dm + di*di + empenalty + absPenalty;
@@ -349,14 +351,20 @@ struct physicsMatHash {
 };
 
 struct VoxelRel {
-    PointType relPos;
+    Vec3 relPos;
+};
+
+struct Vec3i64Hash {
+    std::size_t operator()(const std::array<int64_t, 3>& v) const {
+        return (std::size_t)((v[0] * 73856093) ^ (v[1] * 19349663) ^ (v[2] * 83492791));
+    }
 };
 
 template<typename T>
 struct GridObject_ {
     int id;
     uint8_t objectFlags;
-    PointType centerPosition = PointType::Zero();
+    Vec3 centerPosition = Vec3::Zero();
 
     std::vector<RenderMaterial> renderMaterials;
     std::unordered_map<RenderMaterial, uint16_t, materialHash> renderMatMap;
@@ -379,7 +387,7 @@ struct GridObject_ {
 
     uint16_t getOrAddRenderMaterial(const RenderMaterial& renderMat) {
         {
-            std::shared_lock<std::shared_mutex> readLock(objMutex);
+            s_lock readLock(objMutex);
             auto a = renderMatMap.find(renderMat);
             if (a != renderMatMap.end()) {
                 return a->second;
@@ -387,7 +395,7 @@ struct GridObject_ {
         }
 
         if (renderMaterials.size() < std::numeric_limits<uint16_t>::max()) {
-            std::unique_lock<std::shared_mutex> writeLock(objMutex);
+            u_lock writeLock(objMutex);
             auto a = renderMatMap.find(renderMat);
             if (a != renderMatMap.end()) {
                 return a->second;
@@ -397,7 +405,7 @@ struct GridObject_ {
             renderMatMap[renderMat] = newIndex;
             return newIndex;
         } else {
-            std::shared_lock<std::shared_mutex> readLock(objMutex);
+            s_lock readLock(objMutex);
             uint16_t bestIndex = 0;
             float dist = std::numeric_limits<float>::max();
             for (uint16_t i = 0; i < static_cast<uint16_t>(renderMaterials.size()); ++i) {
@@ -413,7 +421,7 @@ struct GridObject_ {
 
     uint16_t getOrAddPhysicsMaterial(const PhysicsMaterial_& pmat) {
         {
-            std::shared_lock<std::shared_mutex> readLock(objMutex);
+            s_lock readLock(objMutex);
             auto a = physicsMatMap.find(pmat);
             if (a != physicsMatMap.end()) {
                 return a->second;
@@ -421,7 +429,7 @@ struct GridObject_ {
         }
 
         if (physicsMaterials.size() < std::numeric_limits<uint16_t>::max()) {
-            std::unique_lock<std::shared_mutex> writeLock(objMutex);
+            u_lock writeLock(objMutex);
             auto a = physicsMatMap.find(pmat);
             if (a != physicsMatMap.end()) {
                 return a->second;
@@ -431,7 +439,7 @@ struct GridObject_ {
             physicsMatMap[pmat] = newIndex;
             return newIndex;
         } else {
-            std::shared_lock<std::shared_mutex> readLock(objMutex);
+            s_lock readLock(objMutex);
             uint16_t bestIndex = 0;
             float dist = std::numeric_limits<float>::max();
             for (uint16_t i = 0; i < static_cast<uint16_t>(physicsMaterials.size()); ++i) {
@@ -446,13 +454,13 @@ struct GridObject_ {
     }
     
     RenderMaterial getRenderMaterial(uint16_t idx) const {
-        std::shared_lock<std::shared_mutex> lock(objMutex);
+        s_lock lock(objMutex);
         if (idx < renderMaterials.size()) return renderMaterials[idx];
         return RenderMaterial();
     }
     
     PhysicsMaterial_ getPhysicsMaterial(uint16_t idx) const {
-        std::shared_lock<std::shared_mutex> lock(objMutex);
+        s_lock lock(objMutex);
         if (idx < physicsMaterials.size()) return physicsMaterials[idx];
         return PhysicsMaterial_();
     }
@@ -461,7 +469,7 @@ struct GridObject_ {
 template<typename T>
 struct NodeData_ {
     T data;
-    PointType position;
+    Vec3 position;
     int objectId;
     float size;
     Eigen::Vector4f color;
@@ -470,7 +478,7 @@ struct NodeData_ {
     std::atomic<uint8_t> flags;
     PhysicsState_<T> physics;
 
-    NodeData_(const T& data, const PointType& pos, bool visible, const Eigen::Vector4f& color, float size = 0.01f,
+    NodeData_(const T& data, const Vec3& pos, bool visible, const Eigen::Vector4f& color, float size = 0.01f,
                 bool active = true, int objectId = -1, uint16_t rIdx = 0, uint16_t pIdx = 0, bool staticbit = 0) 
             : data(data), position(pos), objectId(objectId), size(size), 
                 color(color), renderMatIdx(rIdx), physMatIdx(pIdx), flags(0) {
@@ -525,12 +533,12 @@ struct NodeData_ {
         else flags.fetch_and(~STATIC_BIT, std::memory_order_relaxed);
     }
     
-    PointType getHalfSize() const {
-        return PointType(size * 0.5f, size * 0.5f, size * 0.5f);
+    Vec3 getHalfSize() const {
+        return Vec3(size * 0.5f, size * 0.5f, size * 0.5f);
     }
     
     BoundingBox getCubeBounds() const {
-        PointType halfSize = getHalfSize();
+        Vec3 halfSize = getHalfSize();
         return {position - halfSize, position + halfSize};
     }
 };
@@ -539,14 +547,14 @@ template<typename T>
 struct OctreeNode_ {
     std::vector<std::shared_ptr<NodeData_<T>>> points;
     std::array<std::unique_ptr<OctreeNode_<T>>, 8> children;
-    PointType center;
+    Vec3 center;
     float nodeSize;
     std::atomic<uint8_t> flags;
     
     mutable std::shared_ptr<NodeData_<T>> lodData;
     mutable std::shared_mutex nodeMutex;
 
-    OctreeNode_(const PointType& min, const PointType& max) : flags(0), lodData(nullptr) {
+    OctreeNode_(const Vec3& min, const Vec3& max) : flags(0), lodData(nullptr) {
         setLeaf(true);
         setLoaded(true);
         setDirty(true);
@@ -560,7 +568,7 @@ struct OctreeNode_ {
         nodeSize = (max - min).norm();
     }
 
-    OctreeNode_(const PointType& center, const float& size) : center(center), nodeSize(size), flags(0), lodData(nullptr) {
+    OctreeNode_(const Vec3& center, const float& size) : center(center), nodeSize(size), flags(0), lodData(nullptr) {
         setLeaf(true);
         setLoaded(true);
         setDirty(true);
@@ -635,7 +643,7 @@ struct OctreeNode_ {
         else flags.fetch_and(~KEEPLOADED_BIT, std::memory_order_relaxed);
     }
 
-    bool contains(const PointType& point) const {
+    bool contains(const Vec3& point) const {
         BoundingBox b = bounds();
         return (point[0] >= b.first[0] && point[0] <= b.second[0] &&
                 point[1] >= b.first[1] && point[1] <= b.second[1] &&
@@ -689,18 +697,18 @@ struct OctreeNode_ {
         in.read(reinterpret_cast<char*>(&val), sizeof(V));
     }
 
-    static void writeVec3(std::ofstream& out, const Eigen::Vector3f& vec) {
+    static void writeVec3(std::ofstream& out, const Vec3& vec) {
         writeVal(out, vec.x());
         writeVal(out, vec.y());
         writeVal(out, vec.z());
     }
 
-    static void readVec3(std::ifstream& in, Eigen::Vector3f& vec) {
+    static void readVec3(std::ifstream& in, Vec3& vec) {
         float x, y, z;
         readVal(in, x);
         readVal(in, y);
         readVal(in, z);
-        vec = Eigen::Vector3f(x, y, z);
+        vec = Vec3(x, y, z);
     }
 
     static void writeVec4(std::ofstream& out, const Eigen::Vector4f& vec) {
@@ -836,7 +844,7 @@ struct OctreeNode_ {
             readVal(in, childMask);
             for (int i = 0; i < 8; ++i) {
                 if ((childMask >> i) & 1) {
-                    PointType childMin, childMax;
+                    Vec3 childMin, childMax;
                     for (int d = 0; d < Dim; ++d) {
                         bool high = (i >> d) & 1;
                         childMin[d] = high ? center[d] : bounds().first[d];
@@ -966,7 +974,7 @@ struct OctreeNode_ {
             readVal(in, childMask);
             for (int i = 0; i < 8; ++i) {
                 if ((childMask >> i) & 1) {
-                    PointType childMin, childMax;
+                    Vec3 childMin, childMax;
                     for (int d = 0; d < Dim; ++d) {
                         bool high = (i >> d) & 1;
                         childMin[d] = high ? center[d] : bounds().first[d];
@@ -985,7 +993,7 @@ struct OctreeNode_ {
 
     BoundingBox bounds() const {
         float halfsize = static_cast<float>(nodeSize) * 0.5f;
-        PointType hs = PointType::Constant(halfsize);
+        Vec3 hs = Vec3::Constant(halfsize);
         return BoundingBox({center - hs, center + hs});
     }
 };
@@ -994,17 +1002,17 @@ template<typename T>
 struct RayHit_ {
     std::shared_ptr<NodeData_<T>> node;
     float distance;
-    PointType normal;
-    PointType hitPoint;
+    Vec3 normal;
+    Vec3 hitPoint;
 };
     
 struct Ray {
-    PointType origin;
-    PointType dir;
-    PointType invDir;
+    Vec3 origin;
+    Vec3 dir;
+    Vec3 invDir;
     uint8_t sign[3];
     uint8_t signMask;
-    Ray(const PointType& orig, const PointType& dir) : origin(orig), dir(dir) {
+    Ray(const Vec3& orig, const Vec3& dir) : origin(orig), dir(dir) {
         invDir = dir.cwiseInverse();
         sign[0] = (invDir[0] < 0);
         sign[1] = (invDir[1] < 0);
