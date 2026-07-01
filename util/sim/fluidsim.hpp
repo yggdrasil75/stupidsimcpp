@@ -197,7 +197,7 @@ public:
             Eigen::Matrix<float, 3, 1> pos = posGen();
             int id = nextObjectId++;
             
-            grid.set(toSpawn, pos, true, color, 10, true, id, (toSpawn.mass > 100) ? true : false, 1);
+            grid.insert(toSpawn, pos, true, color, 10, true, id, (toSpawn.mass > 100) ? true : false, 1);
             idposMap.emplace(id, pos);
         }
         if (resize){

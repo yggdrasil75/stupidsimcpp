@@ -379,6 +379,10 @@ struct physicsMatHash {
     }
 };
 
+struct VoxelRel {
+    PointType relPos;
+};
+
 template<typename T>
 struct GridObject_ {
     int id;
@@ -390,12 +394,6 @@ struct GridObject_ {
     std::vector<PhysicsMaterial_> physicsMaterials;
     std::unordered_map<PhysicsMaterial_, uint16_t, physicsMatHash> physicsMatMap;
 
-    struct VoxelRel {
-        PointType relPos;
-        uint16_t renderMatIdx;
-        uint16_t physMatIdx;
-        float size;
-    };
     std::vector<VoxelRel> relativeVoxels;
 
     mutable std::shared_mutex objMutex;

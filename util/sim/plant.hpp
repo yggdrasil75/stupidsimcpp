@@ -766,7 +766,7 @@ public:
         w->size = config.waterVoxelSize;
         w->velocity = vel;
         float mass = config.waterVoxelSize * config.waterVoxelSize * config.waterVoxelSize * 1000.0f;
-        bool ok = grid.set(w, pos, true, v3(0.1f, 0.4f, 0.8f), config.waterVoxelSize,
+        bool ok = grid.insert(w, pos, true, v3(0.1f, 0.4f, 0.8f), config.waterVoxelSize,
                            true, WATER_OBJ, 0.0f, 0.0f, 0.0f, 0.6f, 1.33f,
                            v3(0.2f, 0.1f, 0.0f), Grid::BodyType::FLUID, mass);
         return ok;
@@ -962,7 +962,7 @@ public:
                     isRoot ? PlantPart::ROOT : PlantPart::STEM, nullptr, center, w, 0);
                 bv->plantId = plantId;
                 bv->isMature = true;
-                grid.set(bv, vp, true, col, facet, true, 1,
+                grid.insert(bv, vp, true, col, facet, true, 1,
                          0.0f, 1.0f, 0.0f, 0.0f, 1.45f, v3(0,0,0),
                          Grid::BodyType::RIGID, rp.mass, rp.stiffness, rp.breakForce, rp.damping);
             }
@@ -1002,7 +1002,7 @@ public:
             auto bv = std::make_shared<PlantParticle>(part, nullptr, center, v3(0,1,0), 0);
             bv->plantId = plantId;
             bv->isMature = true;
-            grid.set(bv, vp, true, color, facet, true, 1);
+            grid.insert(bv, vp, true, color, facet, true, 1);
         }
     }
 
@@ -1036,7 +1036,7 @@ public:
                     auto lv = std::make_shared<PlantParticle>(PlantPart::LEAF, nullptr, base, along, 0);
                     lv->plantId = plantId;
                     lv->isMature = true;
-                    grid.set(lv, vp, true, col, facet, true, 1);
+                    grid.insert(lv, vp, true, col, facet, true, 1);
                 }
             }
         }
@@ -1399,7 +1399,7 @@ private:
                     auto newSegment = std::make_shared<PlantParticle>(nextPart, p->dna, p->seedPos, p->growthDir, p->branchDepth);
                     newSegment->plantId = p->plantId;
                     
-                    bool success = grid.set(newSegment, nextPos, true,
+                    bool success = grid.insert(newSegment, nextPos, true,
                                             nextPart == PlantPart::ROOT ? v3(0.45f, 0.34f, 0.26f) : p->dna->stem.barkColor,
                                             config.stemFacetSize, true, 1);
                     
@@ -1423,7 +1423,7 @@ private:
                                     v3 branchPos = pos + branchDir * nodeSize;
                                     auto newBranch = std::make_shared<PlantParticle>(PlantPart::STEM, p->dna, p->seedPos, branchDir, p->branchDepth + 1);
                                         newBranch->plantId = p->plantId;
-                                    if (grid.set(newBranch, branchPos, true, p->dna->stem.barkColor, config.stemFacetSize, true, 1)) {
+                                    if (grid.insert(newBranch, branchPos, true, p->dna->stem.barkColor, config.stemFacetSize, true, 1)) {
                                         newMeristems.push_back(branchPos);
                                     }
                                 }
@@ -1439,7 +1439,7 @@ private:
                                 float leafScale = config.plantVoxelSize * std::clamp(leafDim, 0.3f, 4.0f) * (1.0f + lob * 0.6f) *
                                                     std::clamp(0.4f + p->dna->leaf.thickness * 2.0f, 0.4f, 2.0f);
                                 v3 leafCol = mixColor(p->dna->leaf.color, p->dna->leaf.color * 0.7f, lob);
-                                if (grid.set(newLeaf, leafPos, true, leafCol, config.stemFacetSize, true, 1)) {
+                                if (grid.insert(newLeaf, leafPos, true, leafCol, config.stemFacetSize, true, 1)) {
                                     buildLeafBlade(leafPos, leafDir, *p->dna, p->plantId, lob);
                                     activeLeaves.push_back(leafPos);
                                         state->leafCount += 1;
@@ -1454,7 +1454,7 @@ private:
                                 v3 fPos = pos + fDir * radius;
                                 auto flower = std::make_shared<PlantParticle>(PlantPart::FLOWER, p->dna, p->seedPos, fDir, p->branchDepth + 1);
                                 flower->plantId = p->plantId;
-                                if (grid.set(flower, fPos, true, p->dna->special.flowerColor, config.stemFacetSize, true, 1)) {
+                                if (grid.insert(flower, fPos, true, p->dna->special.flowerColor, config.stemFacetSize, true, 1)) {
                                     buildBlob(fPos, config.stemFacetSize * 2.5f, p->dna->special.flowerColor, p->plantId, PlantPart::FLOWER);
                                     activeFlowers.push_back(fPos);
                                 }
@@ -1467,7 +1467,7 @@ private:
                                 auto fruit = std::make_shared<PlantParticle>(PlantPart::FRUIT, p->dna, p->seedPos, frDir, p->branchDepth + 1);
                                 fruit->plantId = p->plantId;
                                 v3 fruitColor = v3(0.8f, 0.2f, 0.15f);
-                                if (grid.set(fruit, frPos, true, fruitColor, config.stemFacetSize, true, 1)) {
+                                if (grid.insert(fruit, frPos, true, fruitColor, config.stemFacetSize, true, 1)) {
                                     buildBlob(frPos, config.stemFacetSize * 3.0f, fruitColor, p->plantId, PlantPart::FRUIT);
                                     state->energy -= energyCost * 2.0f;
                                 }
@@ -1478,7 +1478,7 @@ private:
                                 v3 rootPos = pos + rootDir * config.plantVoxelSize;
                                 auto newRoot = std::make_shared<PlantParticle>(PlantPart::ROOT, p->dna, p->seedPos, rootDir, p->branchDepth + 1);
                                 newRoot->plantId = p->plantId;
-                                if (grid.set(newRoot, rootPos, true, v3(0.45f, 0.34f, 0.26f), config.stemFacetSize, true, 1)) {
+                                if (grid.insert(newRoot, rootPos, true, v3(0.45f, 0.34f, 0.26f), config.stemFacetSize, true, 1)) {
                                     activeRoots.push_back(rootPos);
                                     newMeristems.push_back(rootPos);
                                     state->rootCount += 1;
@@ -1490,7 +1490,7 @@ private:
                                 v3 branchPos = pos + branchDir * config.plantVoxelSize;
                                 auto newBranch = std::make_shared<PlantParticle>(PlantPart::ROOT, p->dna, p->seedPos, branchDir, p->branchDepth + 1);
                                 newBranch->plantId = p->plantId;
-                                if (grid.set(newBranch, branchPos, true, v3(0.45f, 0.34f, 0.26f), config.stemFacetSize, true, 1)) {
+                                if (grid.insert(newBranch, branchPos, true, v3(0.45f, 0.34f, 0.26f), config.stemFacetSize, true, 1)) {
                                     newMeristems.push_back(branchPos);
                                     activeRoots.push_back(branchPos);
                                     state->rootCount += 1;
@@ -1585,7 +1585,7 @@ private:
                 plantStates[pId] = st;
                 auto seed = std::make_shared<PlantParticle>(PlantPart::SEED, childDNA, seedPos, v3(0,1,0), 0);
                 seed->plantId = pId;
-                if (grid.set(seed, seedPos, true, v3(0.2f, 0.8f, 0.2f), config.plantVoxelSize, true, 1)) {
+                if (grid.insert(seed, seedPos, true, v3(0.2f, 0.8f, 0.2f), config.plantVoxelSize, true, 1)) {
                     activeMeristems.push_back(seedPos);
                     seeds.push_back(seedPos);
                     newSeedSites.push_back(seedPos);
@@ -1621,7 +1621,7 @@ private:
             auto dirt = std::make_shared<DirtParticle>();
             dirt->hydration = 60.0f;
             dirt->nitrogen += 40.0f;
-            grid.set(dirt, pos, true, v3(0.3f, 0.2f, 0.12f), config.voxelSize, true, 0);
+            grid.insert(dirt, pos, true, v3(0.3f, 0.2f, 0.12f), config.voxelSize, true, 0);
         };
 
         auto prune = [&](std::vector<v3>& list) {

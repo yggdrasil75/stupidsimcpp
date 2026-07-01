@@ -453,7 +453,7 @@ public:
             pt.noiseDisplacement = 0.0f;
             pt.surface = true;
             config.surfaceNodes[i] = pt.currentPos;
-            grid.set(pt, pt.currentPos, true, config.color, config.voxelSize, true, -1, 0.0f, 1.0f, 0.0f, 0.0f, 1.45f, config.color);
+            grid.insert(pt, pt.currentPos, true, config.color, config.voxelSize, true, -1, 0.0f, 1.0f, 0.0f, 0.0f, 1.45f, config.color);
         }
         config.currentStep = 1;
         std::cout << "Step 1 done. base sphere generated" << std::endl;

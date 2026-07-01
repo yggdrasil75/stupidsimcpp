@@ -513,7 +513,7 @@ private:
         auto seed = std::make_shared<PlantParticle>(PlantPart::SEED, dna, pos, v3(0.0f, 1.0f, 0.0f), 0);
         seed->plantId = pId;
 
-        if (sim.grid.set(seed, pos, true, v3(0.2f, 0.8f, 0.2f), startSize, true, 1)) {
+        if (sim.grid.insert(seed, pos, true, v3(0.2f, 0.8f, 0.2f), startSize, true, 1)) {
             sim.activeMeristems.push_back(pos);
             sim.seeds.push_back(pos);
         } else {

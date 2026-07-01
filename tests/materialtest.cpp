@@ -33,7 +33,7 @@ void createBox(Grid::Octree<int>& octree, const Eigen::Vector3f& center, const E
             for (float z = minB.z(); z <= maxB.z(); z += step) {
                 Eigen::Vector3f pos(x + jitter(rng), y + jitter(rng), z + jitter(rng));
                 
-                octree.set(1, pos, true, albedo, step, true, oid, emission, roughness, metallic, transmission, ior, absorp, bType, mass);
+                octree.insert(1, pos, true, albedo, step, true, oid, emission, roughness, metallic, transmission, ior, absorp, bType, mass);
             }
         }
     }
@@ -61,7 +61,7 @@ void createCheckerBox(Grid::Octree<int>& octree, const Eigen::Vector3f& center, 
                 bool isEven = ((cx + cy + cz) % 2 == 0);
                 Eigen::Vector3f albedo = isEven ? color1 : color2;
                 
-                octree.set(1, pos, true, albedo, step, true, 100, 0.0f, 0.01f, 0.0f, 0.0f, 1.486f);
+                octree.insert(1, pos, true, albedo, step, true, 100, 0.0f, 0.01f, 0.0f, 0.0f, 1.486f);
             }
         }
     }
@@ -143,9 +143,9 @@ int main() {
                     bool isExposedLightLayer = isLightArea && (z < minCeiling.z() + step);
 
                     if (isExposedLightLayer) {
-                        octree.set(1, pos, true, cWhite, step, true, 10, 15.0f, 0.8f, 0.0f, 1.0f, 1.45f, Eigen::Vector3f::Zero(), Grid::BodyType::STATIC, 1.0f);
+                        octree.insert(1, pos, true, cWhite, step, true, 10, 15.0f, 0.8f, 0.0f, 1.0f, 1.45f, Eigen::Vector3f::Zero(), Grid::BodyType::STATIC, 1.0f);
                     } else {
-                        octree.set(1, pos, true, cBlack, step, true, 100, 0.0f, 0.8f, 0.2f, 1.0f, 1.45f, Eigen::Vector3f::Zero(), Grid::BodyType::STATIC, 1.0f);
+                        octree.insert(1, pos, true, cBlack, step, true, 100, 0.0f, 0.8f, 0.2f, 1.0f, 1.45f, Eigen::Vector3f::Zero(), Grid::BodyType::STATIC, 1.0f);
                     }
                 }
             }
