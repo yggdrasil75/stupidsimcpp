@@ -182,7 +182,6 @@ private:
     }
 
     void ensureLoaded(OctreeNode* node, bool asyncLoad = false) {
-        if (!node) return;
         {
             if (node->isLoaded() || node->isQueued()) return; 
             else {
@@ -552,6 +551,7 @@ private:
     }
     
     bool insertRecursive(OctreeNode* node, const std::shared_ptr<NodeData>& pointData, int depth) {
+        if (!node) return false;
         ensureLoaded(node);
         BoundingBox cubeBounds = pointData->getCubeBounds();
         if (!boxContainsBox(node->bounds(), cubeBounds)) return false;
@@ -575,7 +575,6 @@ private:
             bool insertedInChild = false;
             uint8_t targetIndex = getOctant(pointData->position, node->center);
             OctreeNode* targetChild = node->children[targetIndex].get();
-            std::unique_lock<std::shared_mutex> clock(targetChild->nodeMutex);
             if (targetChild) {
                 insertedInChild = insertRecursive(targetChild, pointData, depth);
             }
@@ -1269,7 +1268,7 @@ public:
         startWorkerThread();
     }
 
-    Octree() : root_(nullptr), maxPointsPerNode(8), size(0), skybox_(1024, 1024), streamingQueued_(false) {
+    Octree() : root_(std::make_unique<OctreeNode>(PointType::Constant(-0.5f), PointType::Constant(0.5f))), maxPointsPerNode(8), size(0), skybox_(1024, 1024), streamingQueued_(false) {
         skybox_.setBackground(backgroundColor_.x(), backgroundColor_.y(), backgroundColor_.z(), 1.0f);
         startWorkerThread();
     }
@@ -1452,6 +1451,9 @@ public:
              float ior = 1.45f, Eigen::Vector3f absorp = Eigen::Vector3f::Zero(), BodyType bType = BodyType::STATIC, float mass = 1.0f,
              float stiffness = 4000.0f, float breakForce = 60.0f, float damping = 0.4f) {
         
+        if (!pos.allFinite() || !root_->contains(pos)) {
+            return false;
+        }
         auto obj = getOrCreateObject(objectId);
         RenderMaterial mat(emittance, roughness, metallic, ior, absorp);
         uint16_t rIdx = obj->getOrAddRenderMaterial(mat);
@@ -1870,6 +1872,11 @@ public:
             Eigen::Vector4f color4(color.x(), color.y(), color.z(), std::clamp(1.0f - transmission, 0.0f, 1.0f));
             auto pointData = std::make_shared<NodeData>(data, pos, visible, color4, size, active, objectId, rIdx, pIdx, bType == BodyType::STATIC);
             
+            if (!pos.allFinite() || !root_->contains(pos)) {
+                pointData->setActive(false);
+                return;
+            }
+
             if (insertRecursive(root_.get(), pointData, 0)) {
                 this->size++;
                 if (bType != BodyType::STATIC) {
@@ -2637,12 +2644,12 @@ public:
 
     bool empty() const { return size == 0; }
 
-    void clear() {
+    void clear(PointType minBound = Eigen::Vector3f::Constant(-1.0), PointType maxBound = Eigen::Vector3f::Constant(1.0)) {
         if (root_) {
             clearNode(root_.get());
             root_.reset();
         }
-        
+        root_ = std::make_unique<OctreeNode>(minBound, maxBound);
         size = 0;
     }
     

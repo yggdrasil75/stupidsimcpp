@@ -722,8 +722,9 @@ struct PlantState {
 class PlantSim {
 public:
     enum class WeatherState { CLEAR, RAIN, SNOW };
+    int gridsize = 1024;
 
-    Grid::Octree<std::shared_ptr<PlantsimParticle>> grid = Grid::Octree<std::shared_ptr<PlantsimParticle>>(Vector3f::Constant(-16), Vector3f::Constant(16), "output/plant", 16);
+    Grid::Octree<std::shared_ptr<PlantsimParticle>> grid = Grid::Octree<std::shared_ptr<PlantsimParticle>>(Vector3f::Constant(-gridsize), Vector3f::Constant(gridsize), "output/plant", 16);
     PlantConfig config;
     std::mt19937 rng;
     std::uniform_real_distribution<float> chanceDist{0.0f, 1.0f};
@@ -829,7 +830,7 @@ public:
     }
 
     void initWorld(bool spawnDefaultSeed = true) {
-        grid.clear();
+        grid.clear(Vector3f::Constant(-gridsize), Vector3f::Constant(gridsize));
         plantStates.clear();
         nextPlantId = 1;
         
