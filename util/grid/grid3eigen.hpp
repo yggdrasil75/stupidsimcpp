@@ -2283,6 +2283,13 @@ public:
         getLoadedStatsSafe(root_.get(), loadedNodes, loadedPoints);
         return loadedPoints;
     }
+
+    void multiStepPhysics(float dt, int steps) {
+        while (steps > 0) {
+            stepPhysics(dt);
+            steps--;
+        }
+    }
 };
 }
 #endif

@@ -22,6 +22,7 @@ void Octree<T>::stepPhysics(float dt) {
     TIME_FUNCTION;
     if (!root_ || dt <= 0.0f) return;
 
+    ScopedFunctionTimer _tSetup("stepPhysics.setupMaterials");
     int maxObjId = -1;
     {
         std::shared_lock<std::shared_mutex> lock(objectsMutex_);
@@ -39,11 +40,13 @@ void Octree<T>::stepPhysics(float dt) {
         }
     }
     size_t fastMatsSize = fastMats.size();
+    _tSetup.stop();
 
     std::vector<std::shared_ptr<NodeData>> sphNodes;
     std::vector<std::shared_ptr<NodeData>> rigidNodes;
 
     {
+        ScopedFunctionTimer _tClassify("stepPhysics.classifyActive");
         std::lock_guard<std::mutex> lock(physicsMutex_);
         
         size_t writeIdx = 0;
@@ -76,7 +79,10 @@ void Octree<T>::stepPhysics(float dt) {
         }
     }
 
-    stepRigidLattice(dt, rigidNodes, fastMats, fastMatsSize);
+    {
+        ScopedFunctionTimer _tRigid("stepPhysics.rigidLattice");
+        stepRigidLattice(dt, rigidNodes, fastMats, fastMatsSize);
+    }
 
     std::vector<FluidMoveAction<T>> pendingFluidMoves;
 
@@ -98,6 +104,7 @@ void Octree<T>::stepPhysics(float dt) {
         //     list so we can iterate cells in parallel. Particles in the same
         //     cell share the same neighbor cells, so neighbor data is gathered
         //     once per cell rather than once per particle.
+        ScopedFunctionTimer _tBin("stepPhysics.fluidBin");
         std::unordered_map<std::array<int64_t,3>, int, Vec3i64Hash> cellIndex;
         cellIndex.reserve(sphNodes.size());
         struct Cell {
@@ -124,6 +131,7 @@ void Octree<T>::stepPhysics(float dt) {
             cells[ci].members.push_back(i);
             partCell[i] = ci;
         }
+        _tBin.stop();
 
         // (2) Per-cell neighbor gathering (parallel). Fluid neighbors come from
         //     the 27 surrounding cells. Solid neighbors are read straight from
@@ -132,6 +140,47 @@ void Octree<T>::stepPhysics(float dt) {
         //     itself is the broad-phase — no duplicate collider structure, no
         //     extra memory. The walk only takes shared locks (read-only), so
         //     cells process concurrently.
+        ScopedFunctionTimer _tGather("stepPhysics.fluidNeighborGather");
+
+        std::array<int64_t,3> keyMin = cells[0].key, keyMax = cells[0].key;
+        for (const auto& cl : cells)
+            for (int a = 0; a < 3; ++a) {
+                keyMin[a] = std::min(keyMin[a], cl.key[a]);
+                keyMax[a] = std::max(keyMax[a], cl.key[a]);
+            }
+
+        // Fluid region expanded by one cell (== one smoothing radius, C == h).
+        PointType regionLo((keyMin[0]-1)*C, (keyMin[1]-1)*C, (keyMin[2]-1)*C);
+        PointType regionHi((keyMax[0]+2)*C, (keyMax[1]+2)*C, (keyMax[2]+2)*C);
+        BoundingBox region{regionLo, regionHi};
+
+        std::unordered_map<std::array<int64_t,3>, std::vector<SolidNb>, Vec3i64Hash> solidCells;
+
+        std::vector<PointType> regionCorners = {regionLo, regionHi};
+        int rd = 0;
+        OctreeNode* solidStart = getHighestCommonNode(regionCorners, root_.get(), rd);
+        if (!solidStart) solidStart = root_.get();
+
+        std::vector<OctreeNode*> stack{solidStart};
+        while (!stack.empty()) {
+            OctreeNode* cur = stack.back(); stack.pop_back();
+            if (!cur || !boxIntersectsBox(cur->bounds(), region) || !cur->isLoaded()) continue;
+            std::shared_lock<std::shared_mutex> lock(cur->nodeMutex);
+            for (const auto& pt : cur->points) {
+                if (!pt->isActive()) continue;
+                int oi = pt->objectId + 1;
+                if (oi < 0 || oi >= (int)fastMatsSize) continue;
+                if (fastMats[oi][pt->physMatIdx].type == BodyType::FLUID) continue;
+                const PointType& pp = pt->position;
+                if (pp.x() < regionLo.x() || pp.x() > regionHi.x() ||
+                    pp.y() < regionLo.y() || pp.y() > regionHi.y() ||
+                    pp.z() < regionLo.z() || pp.z() > regionHi.z()) continue;
+                solidCells[keyOf(pp)].push_back({pp, pt->size});
+            }
+            if (!cur->isLeaf())
+                for (int i=0;i<8;++i) if (cur->children[i]) stack.push_back(cur->children[i].get());
+        }
+
         #pragma omp parallel for schedule(dynamic, 32)
         for (int c = 0; c < (int)cells.size(); ++c) {
             Cell& cell = cells[c];
@@ -140,48 +189,24 @@ void Octree<T>::stepPhysics(float dt) {
             for (int dx=-1; dx<=1; ++dx)
             for (int dy=-1; dy<=1; ++dy)
             for (int dz=-1; dz<=1; ++dz) {
-                auto it = cellIndex.find({base[0]+dx, base[1]+dy, base[2]+dz});
-                if (it != cellIndex.end()) {
-                    const auto& m = cells[it->second].members;
+                std::array<int64_t,3> nk{base[0]+dx, base[1]+dy, base[2]+dz};
+                auto fit = cellIndex.find(nk);
+                if (fit != cellIndex.end()) {
+                    const auto& m = cells[fit->second].members;
                     cell.fluidNeighbors.insert(cell.fluidNeighbors.end(), m.begin(), m.end());
                 }
-            }
-
-            // Search box: this cell expanded by one smoothing radius.
-            PointType lo((base[0]    ) * C - h, (base[1]    ) * C - h, (base[2]    ) * C - h);
-            PointType hi((base[0]+1.0f) * C + h, (base[1]+1.0f) * C + h, (base[2]+1.0f) * C + h);
-            BoundingBox box{lo, hi};
-
-            std::vector<PointType> corners = {lo, hi};
-            int d = 0;
-            OctreeNode* start = getHighestCommonNode(corners, root_.get(), d);
-            if (!start) start = root_.get();
-
-            std::vector<OctreeNode*> stack{start};
-            while (!stack.empty()) {
-                OctreeNode* cur = stack.back(); stack.pop_back();
-                if (!cur || !boxIntersectsBox(cur->bounds(), box) || !cur->isLoaded()) continue;
-                {
-                    std::shared_lock<std::shared_mutex> lock(cur->nodeMutex);
-                    for (const auto& pt : cur->points) {
-                        if (!pt->isActive()) continue;
-                        int oi = pt->objectId + 1;
-                        if (oi < 0 || oi >= (int)fastMatsSize) continue;
-                        if (fastMats[oi][pt->physMatIdx].type == BodyType::FLUID) continue;
-                        const PointType& pp = pt->position;
-                        if (pp.x() >= lo.x() && pp.x() <= hi.x() &&
-                            pp.y() >= lo.y() && pp.y() <= hi.y() &&
-                            pp.z() >= lo.z() && pp.z() <= hi.z()) {
-                            cell.solids.push_back({pp, pt->size});
-                        }
-                    }
-                    if (!cur->isLeaf())
-                        for (int i=0;i<8;++i) if (cur->children[i]) stack.push_back(cur->children[i].get());
+                auto sit = solidCells.find(nk);
+                if (sit != solidCells.end()) {
+                    const auto& s = sit->second;
+                    cell.solids.insert(cell.solids.end(), s.begin(), s.end());
                 }
             }
         }
 
+        _tGather.stop();
+
         // (3) DENSITY + PRESSURE pass — parallel over particles.
+        ScopedFunctionTimer _tDensity("stepPhysics.fluidDensity");
         #pragma omp parallel for schedule(dynamic, 64)
         for (int i = 0; i < (int)sphNodes.size(); ++i) {
             auto& node = sphNodes[i];
@@ -200,7 +225,10 @@ void Octree<T>::stepPhysics(float dt) {
             node->physics.pressure = phys_gasConstant * std::min(over_density, 1.5f);
         }
 
+        _tDensity.stop();
+
         // (4) FORCES (parallel over particles).
+        ScopedFunctionTimer _tForces("stepPhysics.fluidForces");
         #pragma omp parallel for schedule(dynamic, 64)
         for (int i = 0; i < (int)sphNodes.size(); ++i) {
             auto& node = sphNodes[i];
@@ -269,7 +297,10 @@ void Octree<T>::stepPhysics(float dt) {
             node->physics.force += fPress + fVisc;
         }
 
+        _tForces.stop();
+
         // (5) INTEGRATE (parallel). Sleeping: settled particles skip relocation.
+        ScopedFunctionTimer _tIntegrate("stepPhysics.fluidIntegrate");
         std::vector<FluidMoveAction<T>> perMoves(sphNodes.size());
         std::vector<char> moveValid(sphNodes.size(), 0);
         const float sleepVel2 = (0.02f * h) * (0.02f * h);
@@ -306,12 +337,14 @@ void Octree<T>::stepPhysics(float dt) {
 
         for (int i = 0; i < (int)sphNodes.size(); ++i)
             if (moveValid[i]) pendingFluidMoves.push_back(std::move(perMoves[i]));
+        _tIntegrate.stop();
     }
 
     // (6) Collision resolve + relocation (serial: mutates the tree). Relocation
     //     reuses removeRecursive/insertRecursive but starts from the lowest
     //     common ancestor of (oldPos,newPos) rather than the root, keeping each
     //     edit shallow.
+    ScopedFunctionTimer _tRelocate("stepPhysics.fluidRelocate_SERIAL");
     for (size_t i = 0; i < pendingFluidMoves.size(); ++i) {
         auto& mv = pendingFluidMoves[i];
         PointType diff = mv.newPos - mv.oldPos;
@@ -348,6 +381,7 @@ void Octree<T>::stepRigidLattice(
         float dt, std::vector<std::shared_ptr<NodeData>>& rigidNodes,
         const std::vector<std::vector<PhysicsMaterial_>>& fastMats, size_t fastMatsSize) {
     if (rigidNodes.empty() || dt <= 0.0f) return;
+    TIME_FUNCTION;
 
     auto matOf = [&](const std::shared_ptr<NodeData>& n) -> const PhysicsMaterial_* {
         int oi = n->objectId + 1;
@@ -356,6 +390,7 @@ void Octree<T>::stepRigidLattice(
         return &fastMats[oi][n->physMatIdx];
     };
 
+    ScopedFunctionTimer _tRForces("stepRigidLattice.forces");
     #pragma omp parallel for schedule(dynamic, 64)
     for (int i = 0; i < (int)rigidNodes.size(); ++i) {
         auto& node = rigidNodes[i];
@@ -395,7 +430,9 @@ void Octree<T>::stepRigidLattice(
 
         node->physics.force = force;
     }
+    _tRForces.stop();
 
+    ScopedFunctionTimer _tRIntegrate("stepRigidLattice.integrate");
     std::vector<FluidMoveAction<T>> moves(rigidNodes.size());
     std::vector<char> valid(rigidNodes.size(), 0);
     const float sleepV2 = 1e-5f;
@@ -430,6 +467,9 @@ void Octree<T>::stepRigidLattice(
         valid[i] = 1;
     }
 
+    _tRIntegrate.stop();
+
+    ScopedFunctionTimer _tRRelocate("stepRigidLattice.relocate_SERIAL");
     for (auto& node : rigidNodes) {
         auto& b = node->physics.bonds;
         b.erase(std::remove_if(b.begin(), b.end(),

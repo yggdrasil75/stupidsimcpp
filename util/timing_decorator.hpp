@@ -63,6 +63,12 @@ public:
         : func_name_(func_name), start_(std::chrono::steady_clock::now()) {}
     
     ~ScopedFunctionTimer() {
+        stop();
+    }
+
+    void stop() {
+        if (stopped_) return;
+        stopped_ = true;
         auto end = std::chrono::steady_clock::now();
         auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(end - start_);
         FunctionTimer::recordTiming(func_name_, elapsed.count() / 1000000.0);
@@ -71,6 +77,7 @@ public:
 private:
     std::string func_name_;
     std::chrono::steady_clock::time_point start_;
+    bool stopped_ = false;
 };
 
 // Template decorator for functions (similar to Python)

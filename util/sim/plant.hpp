@@ -1141,8 +1141,7 @@ public:
             TIME_FUNCTION;
             simulateEnvironment(dt);
             int substeps = 4;
-            float subDt = dt * substeps;
-            grid.stepPhysics(subDt);
+            grid.multiStepPhysics(dt, substeps);
             processSoilAbsorption(dt);
             processMetabolism(dt);
             processGrowth(dt);
