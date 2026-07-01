@@ -7,6 +7,7 @@ struct FluidMoveAction {
     std::shared_ptr<NodeData_<T>> node;
     Vec3 oldPos;
     Vec3 newPos;
+    bool solidNearby = true;
 };
 
 struct SolidNb { Vec3 pos; float size; };
@@ -353,6 +354,7 @@ void Octree<T>::stepPhysics(float dt) {
             perMoves[i].node = node;
             perMoves[i].oldPos = node->position;
             perMoves[i].newPos = node->position + node->physics.velocity * dt;
+            perMoves[i].solidNearby = !cells[partCell[i]].solids.empty();
             moveValid[i] = 1;
         }
 
@@ -361,19 +363,16 @@ void Octree<T>::stepPhysics(float dt) {
         _tIntegrate.stop();
     }
 
-    // (6) Collision resolve + relocation (serial: mutates the tree). Relocation
-    //     reuses removeRecursive/insertRecursive but starts from the lowest
-    //     common ancestor of (oldPos,newPos) rather than the root, keeping each
-    //     edit shallow.
     ScopedFunctionTimer _tRelocate("stepPhysics.fluidRelocate_SERIAL");
-    RayHit_<T> hit;                   // reused; only read after a successful cast
-    std::vector<Vec3> span(2);   // reused to avoid a heap alloc per particle
+
+    #pragma omp parallel for schedule(dynamic, 64)
     for (size_t i = 0; i < pendingFluidMoves.size(); ++i) {
         auto& mv = pendingFluidMoves[i];
         Vec3 diff = mv.newPos - mv.oldPos;
         float dist = diff.norm();
-        if (dist > 1e-5f) {
+        if (dist > 1e-5f && mv.solidNearby) {
             Vec3 dir = diff / dist;
+            RayHit_<T> hit;               // thread-local
             // Pass fastMats so the solid-only filter is lock-free (no objectsMutex_
             // / material-copy per point) — this is the dominant relocate cost.
             if (this->raycast(mv.oldPos, dir, dist + mv.node->size * 0.5f, hit, mv.node, true, true, &fastMats)) {
@@ -402,7 +401,12 @@ void Octree<T>::stepPhysics(float dt) {
                 }
             }
         }
+    }
 
+    // Phase B: serial tree edits.
+    std::vector<Vec3> span(2);   // reused to avoid a heap alloc per particle
+    for (size_t i = 0; i < pendingFluidMoves.size(); ++i) {
+        auto& mv = pendingFluidMoves[i];
         auto pd = mv.node;
         span[0] = mv.oldPos;
         span[1] = mv.newPos;
