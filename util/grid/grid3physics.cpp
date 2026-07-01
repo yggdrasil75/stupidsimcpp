@@ -16,6 +16,10 @@ template<typename T>
 void Octree<T>::stepPhysics(float dt) {
     TIME_FUNCTION;
     if (!root_ || dt <= 0.0f) return;
+    
+    const BoundingBox domainBounds = root_->bounds();
+    const Vec3 domLo = domainBounds.first;
+    const Vec3 domHi = domainBounds.second;
 
     ScopedFunctionTimer _tSetup("stepPhysics.setupMaterials");
     int maxObjId = -1;
@@ -288,6 +292,28 @@ void Octree<T>::stepPhysics(float dt) {
                 float approach = node->physics.velocity.dot(dir);
                 if (approach < 0.0f) fVisc += -dir * (approach * mass_i * 50.0f * (1.0f - q));
             }
+            
+            if (phys_solidBoundary) {
+                const float wallH = h;
+                for (int a = 0; a < 3; ++a) {
+                    float dLo = node->position[a] - domLo[a]; // distance to low face
+                    if (dLo < wallH) {
+                        float q = std::min(std::max(dLo, 1e-4f) / wallH, 1.0f);
+                        float oq = 1.0f - q;
+                        fPress[a] += mass_i * baseG * 250.0f * (oq*oq*oq*oq) * (4.0f*q + 1.0f);
+                        float approach = -node->physics.velocity[a]; // >0 means moving into wall
+                        if (approach > 0.0f) fVisc[a] += approach * mass_i * 50.0f * (1.0f - q);
+                    }
+                    float dHi = domHi[a] - node->position[a]; // distance to high face
+                    if (dHi < wallH) {
+                        float q = std::min(std::max(dHi, 1e-4f) / wallH, 1.0f);
+                        float oq = 1.0f - q;
+                        fPress[a] -= mass_i * baseG * 250.0f * (oq*oq*oq*oq) * (4.0f*q + 1.0f);
+                        float approach = node->physics.velocity[a]; // >0 means moving into wall
+                        if (approach > 0.0f) fVisc[a] -= approach * mass_i * 50.0f * (1.0f - q);
+                    }
+                }
+            }
 
             node->physics.force += fPress + fVisc;
         }
@@ -356,6 +382,23 @@ void Octree<T>::stepPhysics(float dt) {
                 if (vn < 0.0f) {
                     mv.node->physics.velocity -= vn * hit.normal;
                     mv.node->physics.velocity *= 0.5f;
+                }
+            }
+        }
+        
+        if (phys_solidBoundary) {
+            float half = mv.node->size * 0.5f;
+            for (int a = 0; a < 3; ++a) {
+                float lo = domLo[a] + half, hi = domHi[a] - half;
+                if (lo > hi) { mv.newPos[a] = (domLo[a] + domHi[a]) * 0.5f; continue; }
+                if (mv.newPos[a] < lo) {
+                    mv.newPos[a] = lo;
+                    if (mv.node->physics.velocity[a] < 0.0f)
+                        mv.node->physics.velocity[a] *= -0.3f;
+                } else if (mv.newPos[a] > hi) {
+                    mv.newPos[a] = hi;
+                    if (mv.node->physics.velocity[a] > 0.0f)
+                        mv.node->physics.velocity[a] *= -0.3f;
                 }
             }
         }

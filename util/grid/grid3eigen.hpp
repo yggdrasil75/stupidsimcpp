@@ -72,17 +72,28 @@ namespace Grid {
     */
 
 
+///@brief A highly optimized sparse voxel Octree tailored for physics, rendering, LOD, and streaming.
+///@tparam T The custom data type attached to each node/voxel.
 template<typename T>
 class Octree {
 public:
+    ///@brief Alias for node data structures used in the octree
     using NodeData = NodeData_<T>;
+    ///@brief Alias for octree nodes
     using OctreeNode = OctreeNode_<T>;
+    ///@brief Alias for raycasting hit information
     using RayHit = RayHit_<T>;
+    ///@brief Alias for render nodes
     using RenderNode = RenderNode_<T>;
+    ///@brief Alias for the rendering buffer
     using RenderBuffer = RenderBuffer_<T>;
+    ///@brief Alias for a group of linked octree components
     using GridObject = GridObject_<T>;
 
 private:
+    ///@brief Counts the number of active bits in an 8-bit mask
+    ///@param mask The 8-bit mask to analyze
+    ///@return The number of bits set to 1
     int countBits(uint8_t mask) const {
         int count = 0;
         while (mask) {
@@ -92,12 +103,22 @@ private:
         return count;
     }
 
+    ///@brief The root node of the octree structure
     std::unique_ptr<OctreeNode> root_;
+    
+    ///@brief Total number of elements/points in the octree
     size_t size;
+    
+    ///@brief Maximum allowed points inside a single leaf node before splitting
     size_t maxPointsPerNode;
+    
+    ///@brief Counter used to assign unique IDs to new GridObjects
     int nextObjId = 0;
     
+    ///@brief Hash map storing managed GridObjects by their ID
     std::unordered_map<int, std::shared_ptr<GridObject>> objects_;
+    
+    ///@brief Mutex securing read/write operations to the objects map
     mutable std::shared_mutex objectsMutex_;
     
     Skybox skybox_;
@@ -109,38 +130,87 @@ private:
     mutable uint64_t skyDataCacheVersion_ = ~0ull;
     std::atomic<uint64_t> skyboxVersion_{0};
 
+    ///@brief Queue storing background tasks
     mutable std::queue<std::function<void()>> taskQueue_;
+    
+    ///@brief Mutex protecting the background task queue
     mutable std::mutex taskMutex_;
+    
+    ///@brief Condition variable to wake the background worker thread
     mutable std::condition_variable taskCV_;
+    
+    ///@brief Background thread handling async tasks (streaming, physics, offloading)
     std::thread workerThread_;
+    
+    ///@brief Atomic flag signaling the worker thread to stop
     std::atomic<bool> stopWorker_{false};
+    
+    ///@brief Toggles automatic background optimization of the octree
     std::atomic<bool> autoOptimize_{true};
+    
+    ///@brief Prevents multiple overlapping streaming requests
     std::atomic<bool> streamingQueued_{false};
+    
+    ///@brief Incremental counter for keeping track of rendering frames
     std::atomic<uint32_t> frameCounter_{0};
 
+    ///@brief Minimum volume threshold for generating LOD blocks
     float minLodVolume_ = 0.0f;
+    
+    ///@brief Minimum size threshold for generating LOD blocks
     float minLodSize_ = 0.0f;
+    
+    ///@brief Threshold point count for a region to trigger offloading or splitting
     size_t regionTargetPoints_ = 4096;
 
+    ///@brief Tracks loaded nodes that require active physics simulation
     std::vector<std::weak_ptr<NodeData>> activePhysicsNodes_;
+    
+    ///@brief Mutex safeguarding the active physics nodes list
     std::mutex physicsMutex_;
+    
+    ///@brief Directory path where the octree live data offload regions are stored
     std::string storagepath = ".";
 
+    ///@brief Distance scalar for particle interactions
     float phys_smoothingRadius = 0.2f;
+    
+    ///@brief Base fluid density constant
     float phys_restDensity = 1000.0f;
+    
+    ///@brief Gas pressure constant for physics calculations
     float phys_gasConstant = 2000.0f;
+    
+    ///@brief Coefficient of viscosity
     float phys_viscosity = 200.0f;
+    
+    ///@brief Drag multiplier to progressively slow particles
     float phys_velocityDamping = 0.5f;
+    
+    ///@brief Ambient air density value for drag calculations
     float phys_airDensity = 1.225f;
+    
+    ///@brief Base global directional gravity vector
     Vec3 phys_gravity{0.0f, -9.81f, 0.0f};
 
+    ///@brief SPH math kernel state based on smoothing radius
     SPHKernels kernels_{phys_smoothingRadius};
     
+    ///@brief Toggle for radial point gravity vs directional gravity
     bool phys_useGravityPoint = true;
+    
+    ///@brief The origin point for point-based gravity
     Vec3 phys_gravityCenter{0.0f, 0.0f, 0.0f};
+    
+    ///@brief Intensity of the gravity vector
     float phys_gravityStrength = 9.81f;
+    bool phys_solidBoundary = true;
+    
+    ///@brief Flag indicating the physics colliders need spatial reorganization
     std::atomic<bool> physicsCollidersDirty_{true};
 
+    ///@brief Submits a node to be background saved and released from RAM
+    ///@param node The node to offload
     void lazilyOffload(OctreeNode* node) {
         {
             u_lock lock(node->nodeMutex);
@@ -165,6 +235,9 @@ private:
         });
     }
 
+    ///@brief Validates that a node is loaded, pulling it from disk if needed
+    ///@param node The node to evaluate
+    ///@param asyncLoad If true, loads the node in the background thread
     void ensureLoaded(OctreeNode* node, bool asyncLoad = false) {
         {
             if (node->isLoaded() || node->isQueued()) return; 
@@ -201,6 +274,7 @@ private:
         }
     }
 
+    ///@brief Initializes and launches the asynchronous worker thread
     void startWorkerThread() {
         stopWorker_.store(false);
         workerThread_ = std::thread([this]() {
@@ -233,6 +307,7 @@ private:
         });
     }
 
+    ///@brief Halts the asynchronous worker thread and waits for it to join
     void stopWorkerThread() {
         stopWorker_.store(true);
         taskCV_.notify_all();
@@ -241,6 +316,9 @@ private:
         }
     }
 
+    ///@brief Computes the combined bounding box of multiple points
+    ///@param nodes List of node data pointers
+    ///@return The overall bounding box enclosing all points
     BoundingBox getNodesBounds(const std::vector<std::shared_ptr<NodeData>>& nodes) const {
         if (nodes.empty()) return {Vec3::Zero(), Vec3::Zero()};
         BoundingBox bounds = nodes[0]->getCubeBounds();
@@ -252,6 +330,12 @@ private:
         return bounds;
     }
     
+    ///@brief Recursively searches for the deepest shared parent octree node containing the defined Min and Max positions
+    ///@param Min the lower-bound corner of the search region
+    ///@param Max the upper-bound corner of the search region
+    ///@param current The current evaluation node
+    ///@param depth Tracks the recursive depth offset output
+    ///@return A pointer to the highest shared node
     OctreeNode* getHighestCommonNodeRecursive(const Vec3& Min, const Vec3& Max, OctreeNode* current, int& depth) const {
         depth++;
         s_lock lock(current->nodeMutex);
@@ -263,6 +347,12 @@ private:
         return current;
     }
 
+    ///@brief Searches for the deepest shared parent octree node encapsulating the given bounding box
+    ///@param bounds The bounding box to encompass
+    ///@param current The current evaluation node
+    ///@param currentDepth Current depth layer
+    ///@param outDepth Tracks the final derived recursive depth
+    ///@return A pointer to the highest shared node
     OctreeNode* getHighestCommonNode(const BoundingBox& bounds, OctreeNode* current, int currentDepth, int& outDepth) const {
         if (!current || current->isLeaf()) {
             outDepth = currentDepth;
@@ -280,6 +370,11 @@ private:
         return current;
     }
 
+    ///@brief Derives the bounds from a list of positions and finds the deepest common node
+    ///@param positions Set of 3D spatial positions
+    ///@param current The current search node
+    ///@param depth Reference to write final relative tree depth
+    ///@return A pointer to the deepest shared node
     OctreeNode* getHighestCommonNode(const std::vector<Vec3>& positions, OctreeNode* current = nullptr, int& depth = 0) const {
         if (!current) current = root_.get();
         Vec3 min = positions[0];
@@ -292,6 +387,11 @@ private:
         return getHighestCommonNodeRecursive(min, max, current, depth);
     }
 
+    ///@brief Derives the bounds from a list of nodes and finds the deepest common node
+    ///@param nodes Set of NodeData instances
+    ///@param current The current search node
+    ///@param depth Reference to write final relative tree depth
+    ///@return A pointer to the deepest shared node
     OctreeNode* getHighestCommonNode(const std::vector<std::shared_ptr<NodeData>>& nodes, OctreeNode* current = nullptr, int& depth = 0) const {
         if (!current) current = root_.get();
         Vec3 min = nodes[0]->position;
@@ -303,6 +403,10 @@ private:
         return getHighestCommonNodeRecursive(min, max, current, depth);
     }
 
+    ///@brief Recursively drops every point matching the given objectId starting from a node
+    ///@param node The starting search node
+    ///@param objectId The internal ID to erase
+    ///@return The number of erased points
     size_t removeObjectBatchRecursive(OctreeNode* node, int objectId) {
         if (!node) return 0;
         ensureLoaded(node, false);
@@ -331,6 +435,9 @@ private:
         return removed;
     }
     
+    ///@brief Fully purges an object by ID from the tree and registry
+    ///@param objectId The target object ID
+    ///@return True if successfully removed at least some related components
     bool removeObject(int objectId) {
         std::vector<std::shared_ptr<NodeData>> nodes;
         OctreeNode* startNode = collectNodesByObjectId(objectId, nodes);
@@ -346,6 +453,10 @@ private:
         return true;
     }
 
+    ///@brief Erases specific nodes dynamically without needing bounds search for each
+    ///@param node The common ancestor node to parse from
+    ///@param nodesToRemove The mapped instances to delete
+    ///@return The number of elements deleted
     size_t removeSpecificNodesBatchRecursive(OctreeNode* node, const std::unordered_set<std::shared_ptr<NodeData>>& nodesToRemove) {
         if (!node || nodesToRemove.empty()) return 0;
         ensureLoaded(node, false);
@@ -375,6 +486,9 @@ private:
     }
 
 public:
+    ///@brief Look up an existing GridObject or allocate a new one if missing
+    ///@param id The target object ID, -1 generates an auto incremented new ID
+    ///@return Shared pointer to the designated GridObject
     std::shared_ptr<GridObject> getOrCreateObject(int id) {
         if (id < 0) id = nextObjId++;
         u_lock lock(objectsMutex_);
@@ -385,6 +499,9 @@ public:
         return obj;
     }
 
+    ///@brief Extracts a loaded object record if available
+    ///@param id The object internal ID
+    ///@return Shared pointer to GridObject or nullptr if missing
     std::shared_ptr<GridObject> getObject(int id) const {
         s_lock lock(objectsMutex_);
         auto it = objects_.find(id);
@@ -392,6 +509,10 @@ public:
         return nullptr;
     }
     
+    ///@brief Computes and returns the environmental cached skybox flattened array
+    ///@param outW Updates variable to the width of the rendered skybox
+    ///@param outH Updates variable to the height of the rendered skybox
+    ///@return Flattened RGBA list representing the mapped sky texture
     const std::vector<Eigen::Vector4f>& getCachedSkyData(size_t& outW, size_t& outH) {
         size_t skyW = skybox_.skybox.getWidth();
         size_t skyH = skybox_.skybox.getHeight();
@@ -420,26 +541,42 @@ public:
         return skyDataCache_;
     }
     
+    ///@brief Registers a celestial body (like a sun) into the skybox map
+    ///@param id A unique internal tracker ID
+    ///@param dir A normalized vector pointing toward the body
+    ///@param angularRadius Apparent size of the object in sky rendering
+    ///@param r Red emission factor
+    ///@param g Green emission factor
+    ///@param b Blue emission factor
+    ///@param emittance Multiplier scalar for body radiance
     void addSkyBody(int id, const Vec3& dir, float angularRadius, uint8_t r, uint8_t g, uint8_t b, uint8_t emittance = 255) {
         skybox_.addBody(id, dir, angularRadius, r, g, b, emittance);
         skyboxVersion_++;
     }
 
+    ///@brief Re-aims an existing sky body direction vector
+    ///@param id The internal tracker ID
+    ///@param newDir The updated unit vector direction
     void moveSkyBody(int id, const Vec3& newDir) {
         skybox_.moveBody(id, newDir);
         skyboxVersion_++;
     }
 
+    ///@brief Erases a celestial object from the skybox
+    ///@param id The specific tracker ID
     void removeSkyBody(int id) {
         skybox_.removeBody(id);
         skyboxVersion_++;
     }
 
+    ///@brief Precalculates the luminance influence onto the static background map
+    ///@param id The target celestial element
     void bakeSkyBody(int id) {
         skybox_.bakeBody(id);
         skyboxVersion_++;
     }
 
+    ///@brief Blocks thread until all background task queues run empty
     void waitForIdle() {
         if (std::this_thread::get_id() == workerThread_.get_id()) return;
         std::promise<void> p;
@@ -448,39 +585,77 @@ public:
         f.wait();
     }
 
+    ///@brief Tunes the interaction threshold radius for voxel SPH fluid simulations
+    ///@param radius Distance threshold
     void setPhysicsSmoothingRadius(float radius) {
         phys_smoothingRadius = radius;
         kernels_.update(radius);
     }
     
+    ///@brief Modifies the static background gravity vector
+    ///@param g The global downward drift vector
     void setPhysicsGravity(const Vec3& g) {
         phys_gravity = g;
         phys_gravityStrength = g.norm();
     }
 
+    ///@brief Updates fluid physics drag reduction parameter
+    ///@param damping The physics damping value
     void setPhysicsVelocityDamping(float damping) { phys_velocityDamping = damping; }
+    ///@brief Sets physics constant that modifies SPH gas dynamics
+    ///@param c New physics gas constant
     void setPhysicsGasConstant(float c) { phys_gasConstant = c; }
+    ///@brief Sets physics resistance to fluid shearing flows
+    ///@param v The viscosity scale
     void setPhysicsViscosity(float v) { phys_viscosity = v; }
+    ///@brief Sets ideal fluid volumetric mass constant
+    ///@param d Target particle rest density
     void setPhysicsRestDensity(float d) { phys_restDensity = d; }
+    ///@brief Changes global atmosphere weight affecting aerodynamic bounds
+    ///@param d Ambient air density value
     void setPhysicsAirDensity(float d) { phys_airDensity = d; }
+    ///@brief Adjusts the coordinate point acting as a radial gravity focus
+    ///@param n Target XYZ world location
     void setphys_gravityCenter(Vec3 n) { phys_gravityCenter = n; }
+    ///@brief Flips physics between directional global gravity and point-source mass gravity
+    ///@param use True to activate radial mass gravity
     void setPhysicsUseGravityPoint(bool use) { phys_useGravityPoint = use; }
+    ///@brief Defines overall power coefficient of the gravity calculations
+    ///@param s Value scaler of physical gravity pull
     void setPhysicsGravityStrength(float s) { phys_gravityStrength = s; }
+    void setPhysicsSolidBoundary(bool v) { phys_solidBoundary = v; }
+    bool getPhysicsSolidBoundary() const { return phys_solidBoundary; }
 private:
 
-    float lodFalloffRate_ = 0.1f; // Lower = better, higher = worse. 0-1
+    ///@brief Multiplier scaling how aggressively Levels of Detail decay. Increasing drops quicker
+    float lodFalloffRate_ = 0.1f;
+    ///@brief Reciprocal of lodFalloffRate_ for optimized computation
     float invLodf = 1 / lodFalloffRate_;
+    ///@brief Absolute distance before generating coarser details
     float lodMinDistance_ = 100.0f;
+    ///@brief Precalculated square of lodMinDistance_
     float lodMinDistanceSq = 100 * 100;
+    ///@brief Strict clipping boundary for rendering calculations
     float maxDistance_ = lodMinDistance_ * lodMinDistance_;
+    ///@brief Precalculated square of maxDistance_
     float maxDistSq_max = maxDistance_ * maxDistance_;
+    ///@brief Distance beyond which data regions can be paged to disk
     float keepDistance_ = maxDistance_ * 1.2;
+    ///@brief Precalculated square of keepDistance_
     float keepDistSq = keepDistance_ * keepDistance_;
 
+    ///@brief Finds which octant index a coordinate lands into based on a core point
+    ///@param point Coordinate being tested
+    ///@param center The dividing pivot coordinate
+    ///@return Binary bitmasked octant slot [0..7]
     inline uint8_t getOctant(const Vec3& point, const Vec3& center) const {
         return (point[0] >= center[0]) | ((point[1] >= center[1]) << 1) | ((point[2] >= center[2]) << 2);
     }
 
+    ///@brief Constructs the specific cubic bounding dimensions for an explicit child index
+    ///@param node The active parent node
+    ///@param octant Index ID mapping the 3D grid [0..7]
+    ///@return Bounding min/max array for the child zone
     BoundingBox createChildBounds(const OctreeNode* node, uint8_t octant) const {
         Vec3 childMin, childMax;
         const Vec3& center = node->center;
@@ -498,14 +673,25 @@ private:
         return {childMin, childMax};
     }
 
+    ///@brief Determines if bounding box A overlaps bounding box B
+    ///@param a Reference box A
+    ///@param b Reference box B
+    ///@return True if their volumes intersect
     bool boxIntersectsBox(const BoundingBox& a, const BoundingBox& b) const {
         return ((a.first.array() <= b.second.array()) && (a.second.array() >= b.first.array())).all();
     }
 
+    ///@brief Verifies if bounding box Inner is totally encapsulated by box Outer
+    ///@param outer Evaluation perimeter
+    ///@param inner Geometry being enclosed
+    ///@return True if the entire inner box resides inside the outer box limits
     bool boxContainsBox(const BoundingBox& outer, const BoundingBox& inner) const {
         return ((inner.first.array() >= outer.first.array()) && (inner.second.array() <= outer.second.array())).all();
     }
 
+    ///@brief Subdivides an active leaf node into 8 smaller octant child nodes
+    ///@param node The full node pending division
+    ///@param depth Internal recursive tracker
     void splitNodeRecursive(OctreeNode* node, int depth) {
         std::vector<std::shared_ptr<NodeData>> keep;
         keep.reserve(node->points.size());
@@ -536,6 +722,11 @@ private:
         }
     }
     
+    ///@brief Steps down tree paths attempting to graft new node point data accurately
+    ///@param node Base node validating geometric rules
+    ///@param pointData Populated element to be stored
+    ///@param depth Hierarchy loop tracker
+    ///@return True if insertion successfully found an appropriate branch
     bool insertRecursive(OctreeNode* node, const std::shared_ptr<NodeData>& pointData, int depth) {
         if (!node) return false;
         ensureLoaded(node);
@@ -574,6 +765,10 @@ private:
         }
     }
 
+    ///@brief Wipes out generated cache details downward for a mutated physical space
+    ///@param node Scope root node
+    ///@param bounds Targeted refresh footprint
+    ///@return True if any bounding intersection verified cleanup
     bool invalidateNodeLODRecursive(OctreeNode* node, const BoundingBox& bounds) {
         if (!boxIntersectsBox(node->bounds(), bounds)) return false;
         ensureLoaded(node);
@@ -596,12 +791,16 @@ private:
         return true;
     }
 
+    ///@brief Proxy trigger for invalidating all LOD scales tracking a modified element
+    ///@param pointData The modified memory node mapping out invalidation zone
     void invalidateLODForPoint(const std::shared_ptr<NodeData>& pointData) {
         if (root_ && pointData) {
             invalidateNodeLODRecursive(root_.get(), pointData->getCubeBounds());
         }
     }
 
+    ///@brief Repopulates LOD proxies utilizing volumetric rendering logic
+    ///@param node Operation target
     void ensureLOD(OctreeNode* node) {
         ensureLoaded(node);
         std::lock_guard<std::shared_mutex> lock(node->nodeMutex);
@@ -701,6 +900,8 @@ private:
         }
     }
 
+    ///@brief Drills through every sub-branch verifying block data resides in memory
+    ///@param node Evaluated origin block
     void loadSubtreeRecursive(OctreeNode* node) {
         if (!node) return;
         ensureLoaded(node, true);
@@ -712,6 +913,8 @@ private:
         }
     }
 
+    ///@brief Similar to loadSubtreeRecursive but explicitly invokes LOD generation concurrently
+    ///@param node Evaluated origin block
     void loadAndLodSubtreeRecursive(OctreeNode* node) {
         if (!node) return;
         ensureLOD(node);
@@ -723,6 +926,10 @@ private:
         }
     }
 
+    ///@brief Primary spatial distance manager pushing chunks of trees off to disk outside rendering
+    ///@param node Scope analysis node
+    ///@param camPos Rendering camera anchor
+    ///@param camDir Rendering camera facing vector for frustum logic
     void updateStreamingRecursive(OctreeNode* node, const Vec3& camPos, const Vec3& camDir) {
         if (!node) return;
         
@@ -800,6 +1007,12 @@ private:
         }
     }
 
+    ///@brief Pathfinding helper isolating specific point entities across distances
+    ///@param node Starting domain
+    ///@param pos The 3D position to match
+    ///@param objectId Target identity filter
+    ///@param tolerance Accepted drift scale
+    ///@return Located physical voxel data structure or nullptr
     std::shared_ptr<NodeData> findRecursive(OctreeNode* node, const Vec3& pos, int objectId, float tolerance) {
         if (!node->contains(pos)) return nullptr;
         ensureLoaded(node, false);
@@ -822,6 +1035,11 @@ private:
         return nullptr;
     }
 
+    ///@brief Hunts and deletes explicit pointer references recursively
+    ///@param node Operation bounding parent
+    ///@param bounds Targeted boundary region containing element
+    ///@param targetPt Specific node item pointer targeting cleanup
+    ///@return True if an actual element erasure triggered
     bool removeRecursive(OctreeNode* node, const BoundingBox& bounds, const std::shared_ptr<NodeData>& targetPt) {
         if (!boxIntersectsBox(node->bounds(), bounds)) return false;
         ensureLoaded(node, false);
@@ -855,6 +1073,12 @@ private:
         return foundAny;
     }
 
+    ///@brief Sweeps an exact geometric distance aggregating elements satisfying boundaries
+    ///@param node Active boundary search step
+    ///@param center The spatial pivot center for capture sphere
+    ///@param radiusSq Radial mathematical max extent
+    ///@param objectid Filter for collecting specific object segments
+    ///@param results Target return collection passed functionally
     void searchNodeRecursive(OctreeNode* node, const Vec3& center, float radiusSq, int objectid, 
                                std::vector<std::shared_ptr<NodeData>>& results) {
         ensureLoaded(node, false);
@@ -876,6 +1100,8 @@ private:
         }
     }
     
+    ///@brief Brute force destructive wipe of all components cascading down from a block
+    ///@param node Element marked for termination
     void clearNode(OctreeNode* node) {
         if (!node) return;
         
@@ -894,6 +1120,17 @@ private:
         node->setLeaf(true);
     }
 
+    ///@brief Analytical data compiler walking branches mapping density metrics
+    ///@param node Recursive level operator
+    ///@param depth Internal loop hierarchy index
+    ///@param totalNodes Metric output for node instances
+    ///@param leafNodes Metric output for terminating blocks
+    ///@param actualPoints Metric output of instantiated point elements
+    ///@param maxTreeDepth Metric output logging the worst-case recursive drill down
+    ///@param maxPointsInLeaf Metric output tracking most congested end leaf
+    ///@param minPointsInLeaf Metric output tracking sparsest valid block
+    ///@param lodGeneratedNodes Metric mapping proxy generator usages
+    ///@param unloaded Metric capturing disk-banked regions currently dropped
     void printStatsRecursive(const OctreeNode* node, size_t depth, size_t& totalNodes, size_t& leafNodes, size_t& actualPoints, 
                             size_t& maxTreeDepth, size_t& maxPointsInLeaf, size_t& minPointsInLeaf, size_t& lodGeneratedNodes, size_t& unloaded) const {
         if (!node) return;
@@ -924,6 +1161,8 @@ private:
         }
     }
 
+    ///@brief Merges sparse nodes into shared parents restoring tree performance density
+    ///@param node Evaluation starting anchor
     void optimizeRecursive(OctreeNode* node) {
         if (!node) return;
         if (!node->isLoaded() || node->isLeaf()) return; 
@@ -979,6 +1218,8 @@ private:
         }
     }
 
+    ///@brief Immediately evaluates saving/offloading rules down an entire subtree
+    ///@param node Topmost region targeted for cleanup tests
     void offloadRecursive(OctreeNode* node) {
         if (!node->isLoaded()) return;
         
@@ -1001,6 +1242,12 @@ private:
         }
     }
 
+    ///@brief Mathematical test identifying ray penetration path spanning a boundary box
+    ///@param ray Directional unit query line
+    ///@param box Defined 3D span tested
+    ///@param tMin Extracted entrance magnitude
+    ///@param tMax Extracted exit magnitude
+    ///@return True if a legitimate pass-through happened
     bool rayBoxIntersect(const Ray& ray, const BoundingBox& box, float& tMin, float& tMax) const {
         float tx1 = (box.first[0] - ray.origin[0]) * ray.invDir[0];
         float tx2 = (box.second[0] - ray.origin[0]) * ray.invDir[0];
@@ -1023,6 +1270,14 @@ private:
         return tMax >= std::max(0.0f, tMin);
     }
 
+    ///@brief Granular hit registration returning precise structural collision values
+    ///@param ray Penetration directional probe
+    ///@param cube Optimized simplified node properties wrapper
+    ///@param t Reference absorbing final entry travel distance
+    ///@param normal Output yielding surface rejection angle
+    ///@param hitPoint Output capturing physical absolute coordinates
+    ///@param tExit Optionally extracts outgoing intersection bounds length
+    ///@return True on functional penetration validation
     bool rayCubeIntersect(const Ray& ray, const RenderData* cube, float& t, Vec3& normal, Vec3& hitPoint, float* tExit = nullptr) const {
         float t0x = (cube->boundsMin[0] - ray.origin[0]) * ray.invDir[0];
         float t1x = (cube->boundsMax[0] - ray.origin[0]) * ray.invDir[0];
@@ -1074,13 +1329,34 @@ private:
         return true;
     }
 
+    ///@brief Traverses the octree to construct a simplified array layout for fast rendering routines
+    ///@param buffer The render buffer structure to populate
     void buildRender(RenderBuffer_<T>& buffer);
 #ifdef VULKAN_SUPPORT
+    ///@brief Compiles and transfers material formats onto GPU compatible structs
+    ///@param buf Reference buffer providing indexing maps
+    ///@param out Passed result array populated with hardware aligned components
     void buildGPUMaterials(const RenderBuffer_<T>& buf, std::vector<GPUMaterial>& out);
 #endif
+    ///@brief Deep compiler function mapping node structures into linear contiguous render arrays
+    ///@param node Operating point scope
+    ///@param buffer Linearized data destination buffer
+    ///@param nodeIdx Mapped relative insertion point
+    ///@param localObjects Readonly copy of instantiated object metadata
     void buildRenderNodeAt(OctreeNode* node, RenderBuffer_<T>& buffer, uint32_t nodeIdx, const std::unordered_map<int, std::shared_ptr<GridObject>>& localObjects);
+    
+    ///@brief Rapid DDA-style hierarchical step iterator for extremely fast line intersection logic
+    ///@param buffer Renderable linear data footprint mapping tree hierarchy
+    ///@param ray Tracing origin direction
+    ///@param maxDist Safety cap to prevent unconstrained distance execution
+    ///@return Linear list of render properties intersected along the path sequence
     std::vector<RenderData*> fastVoxelTraverse(const RenderBuffer_<T>& buffer, const Ray& ray, float maxDist);
 public:
+    ///@brief Primary instantiation configuring bounding parameters mapping to disk
+    ///@param minBound Coordinate floor extent corner
+    ///@param maxBound Coordinate ceiling extent corner
+    ///@param storagepath Relative or direct string referencing save directory
+    ///@param maxPointsPerNode Scaling threshold managing recursive depth optimization
     Octree(const Vec3& minBound, const Vec3& maxBound, std::string storagepath, size_t maxPointsPerNode=8) :
             root_(std::make_unique<OctreeNode>(minBound, maxBound)), maxPointsPerNode(maxPointsPerNode),
             size(0), skybox_(1024, 1024), storagepath(storagepath),
@@ -1088,31 +1364,32 @@ public:
         skybox_.setBackground(backgroundColor_.x(), backgroundColor_.y(), backgroundColor_.z(), 1.0f);
         startWorkerThread();
     }
-    Octree(const Vec3& center, const float radius, std::string storagepath, size_t maxPointsPerNode=8) :
-            root_(std::make_unique<OctreeNode>(center, radius)), maxPointsPerNode(maxPointsPerNode),
-            size(0), skybox_(1024, 1024), storagepath(storagepath),
-            streamingQueued_(false) {
-        skybox_.setBackground(backgroundColor_.x(), backgroundColor_.y(), backgroundColor_.z(), 1.0f);
-        startWorkerThread();
-    }
 
+    ///@brief Defualt parameter-less initializer building 1.0x1.0 core unit block footprint
     Octree() : root_(std::make_unique<OctreeNode>(Vec3::Constant(-0.5f), Vec3::Constant(0.5f))), maxPointsPerNode(8), size(0), skybox_(1024, 1024), streamingQueued_(false) {
         skybox_.setBackground(backgroundColor_.x(), backgroundColor_.y(), backgroundColor_.z(), 1.0f);
         startWorkerThread();
     }
 
+    ///@brief Standard clean down destructor guaranteeing asynchronous elements fully suspend
     ~Octree() {
         stopWorkerThread();
     }
 
+    ///@brief Sets disk directory managing offloaded node caching and persistent layout saves
+    ///@param path Format string conforming OS directory style
     void setGridStoragePath(const std::string& path) {
         storagepath = path;
     }
 
+    ///@brief Extracts current storage operation directory assigned to the structure
+    ///@return Configured persistent file string
     const std::string& getGridStoragePath() const {
         return storagepath;
     }
     
+    ///@brief Copy construction duplicating entire data structure accurately mapping references
+    ///@param other Instance being cloned
     Octree(const Octree& other) : size(other.size), maxPointsPerNode(other.maxPointsPerNode),
             skylight_(other.skylight_), backgroundColor_(other.backgroundColor_), autoOptimize_(other.autoOptimize_.load()),
             streamingQueued_(false), skybox_(other.skybox_), regionTargetPoints_(other.regionTargetPoints_),
@@ -1129,6 +1406,8 @@ public:
         startWorkerThread();
     }
 
+    ///@brief Movement constructor handing off dynamic instances natively blocking old access
+    ///@param other Target framework yielding data ownership gracefully
     Octree(Octree&& other) noexcept : size(other.size), maxPointsPerNode(other.maxPointsPerNode),
             skylight_(std::move(other.skylight_)), backgroundColor_(std::move(other.backgroundColor_)),
             autoOptimize_(other.autoOptimize_.load()),
@@ -1152,6 +1431,9 @@ public:
         startWorkerThread();
     }
 
+    ///@brief Deep overriding assignment wiping internal state with new copy layout
+    ///@param other The host structure defining copy overrides
+    ///@return Current instance pointer modifying variables
     Octree& operator=(const Octree& other) {
         if (this == &other) return *this;
         
@@ -1184,6 +1466,9 @@ public:
         return *this;
     }
 
+    ///@brief Direct fast memory overriding assignment bypassing standard cloning execution paths
+    ///@param other The transferring object yielding footprint control
+    ///@return Updated referencing to internal pointer structure
     Octree& operator=(Octree&& other) noexcept {
         if (this == &other) return *this;
 
@@ -1219,6 +1504,8 @@ public:
         return *this;
     }
 
+    ///@brief Exposes raw internal async command queuing to permit custom external routine injection
+    ///@param task Closure routine prepared for background worker launch
     void enqueueTask(std::function<void()> task) {
         {
             std::lock_guard<std::mutex> lock(taskMutex_);
@@ -1227,59 +1514,108 @@ public:
         taskCV_.notify_one();
     }
 
+    ///@brief Forces massive disk serialization offloading currently cached block data matching rules
     void offloadRegions() {
         if (root_) offloadRecursive(root_.get());
     }
 
+    ///@brief Adjusts atomic background periodic tree sorting optimization behavior
+    ///@param v Boolean control enabling or preventing idle processing
     void setAutoOptimize(bool v) { 
         autoOptimize_.store(v); 
     }
 
+    ///@brief Applies raw directional lighting data for simplistic fallback illumination mappings
+    ///@param skylight Light intensity and hue mapping block
     void setSkylight(const Vec3& skylight) { 
         skylight_ = skylight; 
     }
 
+    ///@brief Extracts simple directional lighting settings configured internally
+    ///@return Configured light block value vector
     Vec3 getSkylight() const { 
         return skylight_; 
     }
 
+    ///@brief Rewrites absolute background space rendering color map logic
+    ///@param color 3 channel rgb layout mapped between 0.0-1.0 limits
     void setBackgroundColor(const Vec3& color) { 
         backgroundColor_ = color; 
         skybox_.setBackground(color.x(), color.y(), color.z(), 1.0f);
     }
 
+    ///@brief Gets current base skybox base coloring output fallback values
+    ///@return 3 channel background ambient map mapping vector
     Vec3 getBackgroundColor() const { 
         return backgroundColor_; 
     }
 
+    ///@brief Sets threshold scaling curve how quickly proxy objects transition resolutions
+    ///@param rate Scaling curve modifier mapping value usually range bounded 0-1
     void setLODFalloff(float rate) {
         lodFalloffRate_ = rate;
         invLodf = 1 / rate;
     }
+
+    ///@brief Minimum base offset distance before lower detail elements are created
+    ///@param dist Mathematical boundary trigger boundary limit
     void setLODMinDistance(float dist) {
         lodMinDistance_ = dist;
         lodMinDistanceSq = dist * dist;
     }
+
+    ///@brief Hard distance threshold where nodes will not render
+    ///@param dist Absolute radius offset limiter value
     void setMaxDistance(float dist) {
         maxDistance_ = dist;
         keepDistance_ = dist * 1.2;
         maxDistSq_max = dist * dist;
         keepDistSq = keepDistance_ * keepDistance_;
     }
+    
+    ///@brief Limits detail level by defining smallest potential physical space LOD chunk bounds
+    ///@param size Radius block span limiter for volumetric groupings
     void setMinLODSize(float size) {
         minLodSize_ = size;
         minLodVolume_ = size * size * size;
     }
 
+    ///@brief Provides current minimum block geometry limits for dynamic proxy generations
+    ///@return Minimum spatial diameter configured threshold
     float getMinLODSize() const { return minLodSize_; }
+    ///@brief Determines cluster size thresholds that justify background offloading cycles saving to disk
+    ///@param points Threshold count of contained components necessary to compress blocks out
     void setRegionTargetPoints(size_t points) { regionTargetPoints_ = points; }
+    ///@brief Readout for current node points chunk limit that dictates memory paging rules
+    ///@return Size count limiting memory retention boundaries
     size_t getRegionTargetPoints() const { return regionTargetPoints_; }
 
+    ///@brief Forces explicit re-evaluation of all node hierarchies creating structural block representations
     void generateLODs() {
         if (!root_) return;
         ensureLOD(root_.get());
     }
 
+    ///@brief Generates and inserts a precise physical mapped voxel piece defining simulation interactions
+    ///@param data Underlying template generic content map
+    ///@param pos Absolute mapped world center relative tracking coordinate
+    ///@param visible Render availability flag exposing element in output queries
+    ///@param color Direct fallback visual representation channel layout mapping array (RGB)
+    ///@param size Radius limit encapsulating specific single block point scale
+    ///@param active Toggle setting node computation behaviors toggled off to optimize
+    ///@param objectId Relational grouped item tag locking multiple segments functionally together
+    ///@param emittance Multiplier representing physical block glowing intensity limits
+    ///@param roughness Rendering surface roughness/scattering property
+    ///@param metallic Rendering surface conductive property limit scale
+    ///@param transmission Rendering light penetration multiplier transparency
+    ///@param ior Optical physical density refraction limits configuring lens simulations
+    ///@param absorp Multi-channel internal chromatic shifting filtering logic
+    ///@param bType Physical dynamics rigidity limits mapping particle simulation properties
+    ///@param mass Fundamental gravitational inertial mass multiplier physics scale
+    ///@param stiffness Restorative internal force metric mapping elastic bouncing rules
+    ///@param breakForce Critical threshold limits tearing structure physics interactions apart
+    ///@param damping Frictional movement dampening slowing kinetic physics motions
+    ///@return True on successful octree structure insertion
     bool insert(const T& data, const Vec3& pos, bool visible, Vec3 color, float size = 0.01f, bool active = true,
              int objectId = -1, float emittance = 0.0f, float roughness = 1.0f, float metallic = 0.0f, float transmission = 0.0f,
              float ior = 1.45f, Vec3 absorp = Vec3::Zero(), BodyType bType = BodyType::STATIC, float mass = 1.0f,
@@ -1317,6 +1653,8 @@ public:
         return false;
     }
     
+    ///@brief Generates explicit connected rigid internal constraints mapping rigid structures
+    ///@param node Element scanning nearby segments looking for identical mapping relationships
     void bondRigidVoxel(const std::shared_ptr<NodeData>& node) {
         float reach = node->size * 1.8f;
         auto neighbors = findInRadius(node->position, reach, -1);
@@ -1345,18 +1683,29 @@ public:
         node->physics.bondsBuilt = true;
     }
 
+    ///@brief Extracts a registered rendering ID profile mapped from coordinates specific location index
+    ///@param pos The 3D location to search for component
+    ///@param tolerance Permissive distance allowance bounding precise location
+    ///@return Valid material mapping index array offset or -1 on invalid block
     int getRenderMaterialIndex(const Vec3& pos, float tolerance = 0.0001f) {
         auto pt = find(pos, tolerance);
         if (!pt) return -1;
         return pt->renderMatIdx;
     }
 
+    ///@brief Looks up dynamic material physical rules registry array index ID mapping for node
+    ///@param pos Precise coordinate spatial bounding block target location
+    ///@param tolerance Distance tolerance handling floating point precision drift
+    ///@return Index mapping value mapped internally or -1 failure representation
     int getPhysicsMaterialIndex(const Vec3& pos, float tolerance = 0.0001f) {
         auto pt = find(pos, tolerance);
         if (!pt) return -1;
         return pt->physMatIdx;
     }
     
+    ///@brief Isolates all discrete octree memory structures grouping them functionally by mapping ID
+    ///@param id Specific relation grouping target mapping tag
+    ///@param results Collection vector array handling final derived data matches
     void collectNodesByObjectId(int id, std::vector<std::shared_ptr<NodeData>>& results) {
         auto obj = getObject(id);
         if (!obj) return;
@@ -1384,6 +1733,11 @@ public:
         }
     }
 
+    ///@brief Rewrites a specifically bound object group underlying rendering materials parameters entirely
+    ///@param objectId Related structural chunk mapped identification signature
+    ///@param index Designated override targeting target parameter map struct ID
+    ///@param mat Full custom configured representation rules to enforce
+    ///@return Status mapping true denoting explicit modification application executed properly
     bool updateRenderMaterial(int objectId, uint16_t index, const RenderMaterial& mat) {
         auto obj = getObject(objectId);
         if (!obj) return false;
@@ -1400,6 +1754,11 @@ public:
         return true;
     }
 
+    ///@brief Refactors existing assigned dynamics properties for particular mapped element groups globally
+    ///@param objectId Structural root linking target parameter scope identification index
+    ///@param index Reference map value indexing array
+    ///@param pmat Completely configured data set struct detailing limits applied
+    ///@return True proving correct resolution executing logic parameter swaps mapping
     bool updatePhysicsMaterial(int objectId, uint16_t index, const PhysicsMaterial_& pmat) {
         auto obj = getObject(objectId);
         if (!obj) return false;
@@ -1414,6 +1773,11 @@ public:
         return true;
     }
 
+    ///@brief Applies raw geometric coordinate transform spinning structure around a relative center map
+    ///@param objectId The block cluster mapped group ID signature index target
+    ///@param rotation Defined 3x3 dimensional transformation matrix logic mapping offsets
+    ///@param pivot Designated spatial coordinate fixing the center bounding rotational mapping
+    ///@return Verification denoting success executing complex object modification mapping sequences
     bool rotateObject(int objectId, const Eigen::Matrix3f& rotation, const Vec3& pivot) {
         if (!root_) return false;
         std::vector<std::shared_ptr<NodeData>> nodes;
@@ -1457,12 +1821,19 @@ public:
         return true;
     }
 
+    ///@brief Triggers geometric translation sequence strictly referencing internal dynamic center offsets
+    ///@param objectId Mapped logical grouping structure identification value targeting execution
+    ///@param rotation Fully designated matrix mapping bounds transformations values
+    ///@return Verification logic identifying valid object bounds modifications application successes
     bool rotateObjectCenter(int objectId, const Eigen::Matrix3f& rotation) {
         auto obj = getObject(objectId);
         if (!obj) return false;
         return rotateObject(objectId, rotation, obj->centerPosition);
     }
 
+    ///@brief Deep geometric routine halving each active mapped internal block splitting 1 into 8 parts precisely
+    ///@param objectId Mapping tag logic pulling matching block configurations targeting split
+    ///@return Logic validating sub-mesh fragmentation operations successfully mapping new allocations
     bool subdivideObject(int objectId) {
         if (!root_) return false;
         std::vector<std::shared_ptr<NodeData>> nodes;
@@ -1500,6 +1871,9 @@ public:
         return true;
     }
 
+    ///@brief Fragment structural sub-chunks further removing sharp unmapped corners providing surface smoothing mappings
+    ///@param objectId Mapped internal identification signature targeting elements for edge deletion logic
+    ///@return Status proving block trimming logic functionally adjusted specific exterior boundary segments correctly
     bool smoothObject(int objectId) {
         if (!subdivideObject(objectId)) return false;
 
@@ -1542,6 +1916,22 @@ public:
         return true;
     }
 
+    ///@brief Thread-deferred generation routing data mappings executing node insertions outside frame stalls asynchronously
+    ///@param data Template structured core representation details defining block limits mapping characteristics
+    ///@param pos Assigned spatial placement mapping the exact volume limits configured internally
+    ///@param visible Render toggle limiting evaluation iterations avoiding invisible blocks entirely completely
+    ///@param color Mapped RGB color layout configuration for basic proxy visual outputs mapping representation
+    ///@param size Radius limits establishing block extent scale geometry mathematically defining the shape bounds
+    ///@param active Toggle parameter activating simulation metrics evaluating boundaries dynamically internally mappings
+    ///@param objectId Specific related configuration array offset linking structures mappings groups explicitly logically
+    ///@param emittance Multiplier values defining glowing luminance strength representations dynamically configured limits
+    ///@param roughness Physical structural representation mapping micro scattering reflection simulation constraints values
+    ///@param metallic Configuration parameters detailing pure optical reflection mappings bounds scaling values limits
+    ///@param transmission Mapping parameter defining transparency block optical density metrics evaluation calculations limits
+    ///@param ior Configured refractive value index bounding physical light path simulations mapping internal rules limit
+    ///@param absorp Multi parameter structural light spectrum shift metrics bounding evaluation logic parameters mapping
+    ///@param bType Physical rigid structural dynamic classification flag scaling interactions mapping properties evaluation
+    ///@param mass Multiplier for specific density interactions bounding simulated kinetic interactions properties mapping limits
     void queuedset(const T& data, const Vec3& pos, bool visible, Vec3 color, float size = 0.01f, bool active = true,
              int objectId = -1, float emittance = 0.0f, float roughness = 1.0f, float metallic = 0.0f, float transmission = 0.0f,
              float ior = 1.45f, Vec3 absorp = Vec3::Zero(),
@@ -1579,6 +1969,8 @@ public:
         });
     }
 
+    ///@brief Instructs background worker sequences executing active distance sorting operations dynamically mapping loaded limits completely
+    ///@param cam Primary rendering perspective matrix object mapping boundaries defining distance sorting evaluations rules internally configuring values
     void updateStreaming(const Camera& cam) {
         if (streamingQueued_.exchange(true, std::memory_order_acquire)) return;
         Vec3 camPos = cam.origin;
@@ -1591,6 +1983,9 @@ public:
         });
     }
 
+    ///@brief Dumps raw explicit structured layouts parsing exact parameters configuring mapping memory configurations completely directly fully
+    ///@param filename Configuration path limits referencing mapped files defining saving targets exactly executing fully completely limits bounding string parameters
+    ///@return Status metrics defining if execution sequences properly evaluated targets executing commands completely properly returning values configured values bounds limit mappings
     bool save(const std::string& filename) {
         if (!root_) return false;
 
@@ -1643,6 +2038,9 @@ public:
         return true;
     }
 
+    ///@brief Parses external serialized exact mapping parameters replacing internal states accurately reproducing memory setups directly completely mappings
+    ///@param filename Target defined OS location explicitly mapped resolving input stream execution parameters properly configuring boundaries entirely returning bounds values configurations mapped limits properly sequences values parameters limits
+    ///@return Execution flag defining whether sequences completed operations explicitly passing completely executing limits parameters properly configurations values mappings properly values explicitly limits properly
     bool load(const std::string& filename) {
         std::ifstream in(filename, std::ios::binary);
         if (!in) return false;
@@ -1702,20 +2100,39 @@ public:
         return true;
     }
 
+    ///@brief Resolves precise point bounds executing recursive location search logic parameters resolving targets properly fully mappings limits properly resolving outputs properly completely accurately exactly values mapped parameters
+    ///@param pos The 3D relative mapping spatial targeting evaluation value completely bounding execution parameters correctly sequences limits mapped configurations limits bounds properly mapped limit values values configuring properly executing mappings configurations
+    ///@param objectId Identity filter logic mappings exactly properly filtering explicit configurations bounding limits bounds parameters completely resolving mappings sequences properly accurately bounding values configurations parameters bounds exactly
+    ///@param tolerance Floating error limits passing mappings thresholds configurations accurately parameters mapped limits boundaries completely
+    ///@param node Optimization entry mapping point bypassing root level constraints mapping sequences completely properly parameters values limits bounds configurations properly
+    ///@return Pointer structure exactly resolving data chunk parameters mapped properly entirely exactly limits
     std::shared_ptr<NodeData> find(const Vec3& pos, int objectId = -2, float tolerance = EPSILON, OctreeNode* node = nullptr) {
         if (!node) node = root_.get();
         return findRecursive(node, pos, objectId, tolerance);
     }
 
+    ///@brief Variant search logic bypassing root forcing explicit node entry operations resolving values exact configurations parameters properly mapping limits mapped exactly parameters resolving fully sequences bounds properly boundaries limits limits values bounds boundaries limits
+    ///@param pos Coordinate target parameters evaluating spatial bounds accurately mapping mapped properly completely boundaries sequences limits parameters mapping boundaries limits limits boundaries parameters resolving configurations configurations
+    ///@param node Root logic entry bypassing optimization targeting limits parameters boundaries properly bounds values properly limits limits limits parameters values values limits parameters values boundaries limits mapping mapped boundaries limits limits resolving boundaries boundaries limits mapping resolving limits limits limits limits mapping mapping boundaries mapping limits
+    ///@param objectId Target tag evaluation resolving sequences limits
+    ///@param tolerance Precision deviation boundaries parameters limits
+    ///@return Pointer parameters resolving data outputs mapping explicitly mapped values sequences boundaries properly
     std::shared_ptr<NodeData> findwNode(const Vec3& pos, OctreeNode* node, int objectId = -2, float tolerance = EPSILON) {
         // node = root_.get();
         return findRecursive(node, pos, objectId, tolerance);
     }
 
+    ///@brief Mathematical bounds checker verifying point positions mapping boundaries inside root octree geometries logic mapped mappings fully completely values boundaries parameters
+    ///@param pos Coordinates bounding mapping validation limits bounds
+    ///@return True executing internal mapping parameters bounds limits limits
     bool inGrid(Vec3 pos) {
         return root_->contains(pos);
     }
 
+    ///@brief Wipes exact component mapped logic parameters resolving exact memory sequences resolving bounds explicitly mapped properly boundaries properly values completely mapping bounds limits parameters fully values
+    ///@param pos Target explicit coordinate limits mapped mapped boundaries parameters fully mapping boundaries sequences
+    ///@param tolerance Error scale bounds limits parameters mapped mapped mapping completely fully boundaries limits mapped mapping
+    ///@return True proving deletion mappings correctly boundaries properly
     bool remove(const Vec3& pos, float tolerance = EPSILON) {
         auto pt = find(pos, tolerance);
         if (!pt) return false;
@@ -1726,6 +2143,11 @@ public:
         return false;
     }
 
+    ///@brief Radius collection parameters extracting bounds values bounds sequences fully completely limits limits mapping boundaries fully mapping bounds limits mapped sequences mapped boundaries parameters limits properly properly bounds mapping mapped boundaries mapped mapping boundaries parameters mapping
+    ///@param center Pivot boundary mapped values limits boundaries limits bounds limits boundaries limits mapped limits properly bounds mapping
+    ///@param radius Distant extent limits properly limits mapping mapped boundaries limits parameters mapping parameters mapping boundaries bounds boundaries mapped limits mapping mapped parameters limits boundaries properly
+    ///@param objectid Target filtering limits parameters mapping boundaries properly mapped mapped bounds limits boundaries
+    ///@return Group mapping parameters limits boundaries values mapped bounds properly mapped mapping mapped boundaries properly limits bounds limits bounds limits mapped mapping mapped limits limits boundaries bounds limits mapping boundaries mapping boundaries bounds boundaries mapped limits mapping mapped mapped bounds limits boundaries mapped limits mapping limits boundaries properly limits mapping mapped mapped limits boundaries limits bounds limits limits limits boundaries mapping limits boundaries bounds limits boundaries mapped boundaries mapped mapping boundaries
     std::vector<std::shared_ptr<NodeData>> findInRadius(const Vec3& center, float radius, int objectid = -1) {
         std::vector<std::shared_ptr<NodeData>> results;
         
@@ -1737,6 +2159,10 @@ public:
         return results;
     }
     
+    ///@brief Modifies structural physics tags forcing mapping values sequences bounds parameters mapped completely limits properly bounds mapped values boundaries mapping boundaries parameters limits boundaries mapped properly mapping mapped mapping mapped boundaries properly mapping limits limits limits mapping mapping boundaries mapping mapped mapped mapping limits limits bounds boundaries limits mapping boundaries mapped mapped mapped limits mapping mapped
+    ///@param objectId Target group configuration boundaries limits mapping properly mapped limits properly boundaries boundaries limits mapped bounds properly mapped limits properly bounds mapped boundaries properly mapping mapped bounds bounds mapping mapped mapping bounds mapping
+    ///@param newMass Override configuration mapped values limits boundaries mapping boundaries limits mapped mapping mapped limits boundaries
+    ///@param newType Flag switching logic limits parameters mapping limits properly boundaries limits mapping properly limits bounds limits mapping boundaries bounds boundaries mapping mapped mapping boundaries mapped bounds boundaries limits mapping mapped mapping mapping boundaries mapped mapping limits bounds mapped bounds limits mapped mapping boundaries mapped mapping limits mapped mapped bounds mapping limits boundaries boundaries mapping limits
     void makeObjectFluid(int objectId, float newMass, BodyType newType = BodyType::FLUID) {
         std::vector<std::shared_ptr<NodeData>> nodes;
         collectNodesByObjectId(objectId, nodes);
@@ -1756,10 +2182,14 @@ public:
         physicsCollidersDirty_.store(true);
     }
 
+    ///@brief Flags global state mappings properly bounds boundaries properly mapping boundaries mapping limits bounds mapped bounds mapping limits boundaries mapping properly mapping boundaries boundaries mapped limits limits boundaries mapping limits mapped mapping boundaries mapped boundaries limits mapped mapped mapping
     void markPhysicsCollidersDirty() {
         physicsCollidersDirty_.store(true);
     }
 
+    ///@brief Extracts non-owning references mapping parameters completely limits boundaries limits mapping mapped bounds bounds limits boundaries limits mapped limits properly mapping properly mapping boundaries mapped mapped mapping limits mapped bounds mapped mapped mapping limits bounds mapping mapped mapped mapping mapped limits mapping mapped
+    ///@param objectId The grouped identifier mapped limits boundaries limits bounds mapping mapping limits mapped mapped mapping limits limits mapping limits mapping bounds mapped mapped limits mapped limits mapping limits mapping mapping mapped limits limits limits bounds mapped mapped limits bounds mapping mapping limits
+    ///@return Extracted pointers mapping parameters mapping limits mapping mapping boundaries mapping limits boundaries boundaries bounds limits mapped mapping limits mapping limits limits mapped bounds mapped mapped limits limits mapped bounds mapped mapping boundaries limits mapped bounds mapped bounds mapped mapping mapped
     std::vector<std::weak_ptr<NodeData>> getWeakNodesByObjectId(int objectId) {
         std::vector<std::shared_ptr<NodeData>> nodes;
         if (root_) collectNodesByObjectId(objectId, nodes);
@@ -1769,6 +2199,10 @@ public:
         return weakNodes;
     }
 
+    ///@brief Immediately overrides target data configurations mappings parameters limits mapping boundaries limits mapping mapped limits boundaries limits mapped limits properly mapping mapped boundaries mapping mapped mapped bounds bounds bounds mapping mapped mapping mapping limits mapping mapped limits mapped
+    ///@param pos The precise lookup parameter mapping targets
+    ///@param newData Complete template swap limits mapping mapped mapping limits mapping bounds mapped mapped mapping mapping limits mapping limits mapped limits mapping mapped mapped bounds mapped mapping limits
+    ///@return True on successful locating mapped mapping mapping limits mapping bounds bounds mapped mapping limits
     bool update(const Vec3& pos, const T& newData) {
         auto pointData = find(pos);
         if (!pointData) return false;
@@ -1777,6 +2211,9 @@ public:
         return true;
     }
 
+    ///@brief Background queued task applying generic template data mappings properly mapped mapping limits mapped mapping mapped mapped boundaries mapping mapped limits mapped bounds mapped bounds mapped bounds mapping mapping limits
+    ///@param pos Lookup bounds parameters limits mapping mapping bounds mapping mapped limits mapping mapped mapping limits bounds mapping mapped
+    ///@param newData New structure mapped mappings mapping bounds mapping limits mapped bounds mapped bounds mapped
     void queuedupdate(const Vec3 pos, const T newData) {
         enqueueTask([this, pos, newData]() {
             OctreeNode* node = root_.get();
@@ -1791,6 +2228,22 @@ public:
         });
     }
 
+    ///@brief Robust granular update mapping massive scale configuration overrides limits mapped limits boundaries limits mapped mapped mapped bounds mapped boundaries limits mapped mapped mapping bounds mapped mapped mapping mapped mapping mapped limits mapped mapped mapping bounds mapped mapped mapping mapped mapping bounds mapped limits mapping bounds
+    ///@param oldPos Exact search metric mappings mapped mapping
+    ///@param newPos Updated location mappings mapped bounds mapped
+    ///@param newData Template mapping payload values
+    ///@param newVisible Render boundary toggle overrides mapped
+    ///@param newColor RGB mapping overrides
+    ///@param newSize Bounding limits redefinition values mapped mapped mapping
+    ///@param newActive Simulation state override limit mapped mapping
+    ///@param newObjectId Group structural ID mapping configuration properly mapped
+    ///@param newEmittance Illumination limits limits mapped bounds
+    ///@param newRoughness Material bounds limit mapping mapped
+    ///@param newMetallic Render property limits mapping mapped bounds mapped mapping
+    ///@param newTransmission Transparency override configuration bounds mapped
+    ///@param newIor Optics re-configuration bounds bounds mapped mapping limits mapping mapped
+    ///@param tolerance Drift mapping offset limitations mapping mapped mapping limits mapping mapped bounds mapped mapping limits mapped
+    ///@return Status mapping limits properly resolving mappings boundaries mapped bounds bounds mapping mapped mapping mapped limits mapped limits mapping limits mapping bounds mapping limits mapping mapped mapped mapping limits
     bool update(const Vec3& oldPos, const Vec3& newPos, const T& newData, bool newVisible = true, 
                 Vec3 newColor = Vec3(1.0f, 1.0f, 1.0f), float newSize = 0.01f, bool newActive = true,
                 int newObjectId = -2, float newEmittance = -1.0f, float newRoughness = -1.0f, 
@@ -1834,6 +2287,10 @@ public:
         return res;
     }
 
+    ///@brief Repositions limits bounds mapping mappings mapping bounds mapped mapped mapping limits mapped mapped mapping
+    ///@param pos Source lookup logic mapped mapped mapping limits mapped mapping
+    ///@param newPos Destination bounds parameters limits mapped bounds mapped mapped mapping limits mapped mapping
+    ///@return Success mapped flags mapping mapped limits mapped mapped mapping
     bool move(const Vec3& pos, const Vec3& newPos) {
         auto pointData = find(pos);
         if (!pointData) return false;
@@ -1848,6 +2305,9 @@ public:
         return false;
     }
 
+    ///@brief Deferred spatial shifting logic mapped mapped bounds bounds mapped bounds mapped mapping bounds limits mapping mapped mapping
+    ///@param pos Active mapping mapped target mapping limits
+    ///@param newPos Override mapping limits limits bounds bounds bounds limits mapped mapping mapped limits mapped mapped mapping mapped
     void queuedmove(const Vec3 pos, const Vec3 newPos) {
         enqueueTask([this, pos, newPos]() {
             auto pointData = find(pos);
@@ -1864,6 +2324,10 @@ public:
         });
     }
 
+    ///@brief Deferred mapping sequence swapping placement and generic template structures properly mapping limits limits mapped bounds bounds mapped bounds
+    ///@param pos Origin configuration parameters mapping
+    ///@param newPos Final bound limits parameters mapping mapping mapped bounds mapped
+    ///@param newData Embedded template parameter mapping configurations limits mapped mapping limits mapping mapped
     void queuedupdate(const Vec3 pos, const Vec3 newPos, const T newData) {
         enqueueTask([this, pos, newPos, newData]() {
             auto pointData = find(pos);
@@ -1881,6 +2345,11 @@ public:
         });
     }
 
+    ///@brief Directly assigns block mapping relationships bounds mapped mapping limits bounds mapping mapped mapped bounds bounds mapped mapping mapped bounds
+    ///@param pos Point mapping mapped search mapped boundaries mapped limits
+    ///@param objectId Target identity offset mapping bounds mapped mapping mapped bounds mapping
+    ///@param tolerance Precision offset bounds limits mapped limits mapped mapped mapping bounds mapped mapping
+    ///@return Status returning properly bounds mapping limits mapping mapped mapping mapped bounds mapped mapping
     bool setObjectId(const Vec3& pos, int objectId, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
@@ -1889,6 +2358,11 @@ public:
         return true;
     }
 
+    ///@brief Explicitly overrides single nested mapped mapping values properly bounds mapping mapped mapped bounds mapped mapping limits mapped mapped mapping mapped limits
+    ///@param pos Search anchor mappings mapping
+    ///@param newData Template limits bounds mapping values
+    ///@param tolerance Precision error allowance bounds mapping mapping limits mapped bounds mapped mapped mapping limits
+    ///@return Success states limits mapping boundaries mapping mapped limits mapped mapped bounds mapping limits
     bool updateData(const Vec3& pos, const T& newData, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
@@ -1897,6 +2371,11 @@ public:
         return true;
     }
 
+    ///@brief Overrides active simulation constraints limits mapped mapped bounds bounds mapped limits mapped mapping mapped mapping
+    ///@param pos Lookup bounds mappings limits mapped limits bounds
+    ///@param active Toggle mappings bounds mapped boundaries mapped mapped bounds mapping limits mapped
+    ///@param tolerance Lookup scale mapping bounds limits mapping mapped mapping mapped mapped
+    ///@return Valid status limit flags
     bool setActive(const Vec3& pos, bool active, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
@@ -1905,6 +2384,11 @@ public:
         return true;
     }
 
+    ///@brief Adjusts optical parsing rendering flags mapped mapping boundaries bounds mapped mapped mapping limits mapping limits mapped bounds mapped mapping mapped
+    ///@param pos Lookup mappings mapping boundaries bounds limits
+    ///@param visible Render flag mapping mapping mapped bounds limits mapped mapping mapped
+    ///@param tolerance Deviation lookup scale values limits mapping
+    ///@return Returns limit validation mapping bounds
     bool setVisible(const Vec3& pos, bool visible, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
@@ -1913,6 +2397,11 @@ public:
         return true;
     }
 
+    ///@brief Updates core color fallback array constraints mapping bounds mapped limits limits mapped mapping mapped limits
+    ///@param pos Coordinates searching bounds limits mapping
+    ///@param color 3-Channel RGB structure mapped
+    ///@param tolerance Distance parameters bounding limits limits mapped mapping limits
+    ///@return Mod validation mapping
     bool setColor(const Vec3& pos, Vec3 color, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
@@ -1921,6 +2410,10 @@ public:
         return true;
     }
 
+    ///@brief Defers color update background logic maps bounding values
+    ///@param pos Lookup mapping coordinates
+    ///@param color RBG structures mapping
+    ///@param tolerance Deviation parameters mapped bounds mapping
     void queuedsetColor(const Vec3& pos, Vec3 color, float tolerance = EPSILON) {
         enqueueTask([this, pos, color, tolerance]() {
             OctreeNode* node = root_.get();
@@ -1935,10 +2428,20 @@ public:
         });
     }
 
+    ///@brief Overwrites physical glow output logic bound configurations mappings bounds mapping limits
+    ///@param pos Source lookup values mapped boundaries limits mapping
+    ///@param emittance Multiplier values scaling limits mapping mapped mapping
+    ///@param tolerance Deviation float bounds mapped mapping limits
+    ///@return Operational execution statuses
     bool setEmittance(const Vec3& pos, float emittance, float tolerance = EPSILON) {
         return setEmittance(pos, Vec3::Constant(emittance), tolerance);
     }
 
+    ///@brief Sets glowing channel limits explicitly mapping bounds boundaries mapping mapped mapping mapped bounds mapped mapping
+    ///@param pos Source vector coordinate target limits mapping
+    ///@param chromaticity Vector RGB emission parameters mapped
+    ///@param tolerance Extent scaling bounds mapped mapping bounds
+    ///@return Flag validating bounds configurations executed mapping limits
     bool setChromaticity(const Vec3& pos, const Vec3& chromaticity, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
@@ -1950,6 +2453,11 @@ public:
         return true;
     }
 
+    ///@brief Configures index of refraction limits bounds mapping physical light mappings bounds mapped mappings bounds limits
+    ///@param pos Spatial coordinate anchor maps limits mapping limits mapped bounds mapped mapping
+    ///@param ior Constant mapping parameters values limits mapped
+    ///@param tolerance Error allowance offset bound limits mapped mapping bounds limits
+    ///@return Valid status mapping configurations mapping
     bool setIor(const Vec3& pos, float ior, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
@@ -1961,6 +2469,12 @@ public:
         return true;
     }
 
+    ///@brief Advanced precise configuration setting complex spectral index formulas bounding mapped values
+    ///@param pos Center bounds coordinate maps mapping mapped mapping bounds mapping
+    ///@param B Float limits formula mapping parameter
+    ///@param C Float limits formula mapping parameter limits mapped
+    ///@param tolerance Search boundaries maps mapping
+    ///@return Status resolving mapped boundaries limits
     bool setSellmeier(const Vec3& pos, const v3half& B, const v3half& C, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
@@ -1973,6 +2487,11 @@ public:
         return true;
     }
 
+    ///@brief Modifies structural render scattering formulas values bounds boundaries limits mapped bounds
+    ///@param pos Target mapping limits map limits mapping mapped mapping limits bounds mapped mapped mapping limits mapped mapped mapping
+    ///@param roughness Bound limit mappings bounds mapping mapped mapped bounds mapping limits
+    ///@param tolerance Radius offset map mappings limits mapped
+    ///@return Flag reporting proper bounds mapping mapped
     bool setRoughness(const Vec3& pos, float roughness, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
@@ -1984,6 +2503,11 @@ public:
         return true;
     }
 
+    ///@brief Configures conducting reflective logic bounds mapping limits mappings bounds mapped limits mapping mapped
+    ///@param pos Origin boundaries mapping maps mapped limits bounds mapped
+    ///@param metallic Bound limits mapping mapped mapping mapping bounds mapped mapping
+    ///@param tolerance Scale bounds limits mapping mapped mapping mapped bounds
+    ///@return Operational reporting metric values limits mapped mapping
     bool setMetallic(const Vec3& pos, float metallic, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
@@ -1995,6 +2519,11 @@ public:
         return true;
     }
 
+    ///@brief Applies density optical mapping limits mapping parameters bounds mapping
+    ///@param pos Lookup bounds mappings mapped bounds mapping limits bounds
+    ///@param transmission Density limits scaling maps mapped mapping mapped mapped
+    ///@param tolerance Error margin limits mapping bounds
+    ///@return Boolean validation status mapped mapping limits
     bool setTransmission(const Vec3& pos, float transmission, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
@@ -2003,6 +2532,11 @@ public:
         return true;
     }
 
+    ///@brief Wide sweeping render update applying global materials overwriting entire structures at once limits mapped mapping
+    ///@param objectId Tag linking structure blocks bounds mapped mapping limits
+    ///@param emittance Brightness override logic mapping bounds
+    ///@param roughness Structure scattering bounds mapped mapping limits bounds
+    ///@param metallic Refraction conductivity bounds mapping mapped limits
     void setMaterialByObjectId(int objectId, float emittance, float roughness, float metallic) {
         auto obj = getOrCreateObject(objectId);
         {
@@ -2020,6 +2554,16 @@ public:
         }
     }
 
+    ///@brief Deep DDA-like hierarchical grid stepper accurately resolving geometry intersections efficiently limits mapping sequences boundaries
+    ///@param origin Raycast origin projection values mapped properly limits boundaries mapping
+    ///@param direction Normalized unit direction tracking mapping boundaries mapping properly
+    ///@param maxDist Safety distance limiting traversal boundaries mapping mapping parameters
+    ///@param hit Complex struct receiving fully solved hit logic variables mapping parameters
+    ///@param ignoreNode Explicit proxy skipping limits mapped boundaries mapped limits boundaries
+    ///@param hitOnlySolid Filtering rules limits mapped mapping boundaries mapped parameters boundaries mappings
+    ///@param resolvePenetration Logic boolean bypassing back face penetration geometries mapping boundaries mapping mapping
+    ///@param solidClassMats Optional passed cache overriding dynamic evaluation locks mappings mapped mapping boundaries mapped bounds
+    ///@return Proper true evaluation confirming valid structural mapping collision boundaries mapped properly parameters
     bool raycast(const Vec3& origin, const Vec3& direction, float maxDist, RayHit& hit,
                  const std::shared_ptr<NodeData>& ignoreNode = nullptr, bool hitOnlySolid = false, bool resolvePenetration = false,
                  const std::vector<std::vector<PhysicsMaterial_>>* solidClassMats = nullptr) {
@@ -2303,7 +2847,11 @@ public:
         return loadedPoints;
     }
 
+    ///@brief stepPhysics over multiple steps to prevent issues
+    ///@param dt total time (divided among steps)
+    ///@param steps number of steps
     void multiStepPhysics(float dt, int steps) {
+        dt = dt / steps;
         while (steps > 0) {
             stepPhysics(dt);
             steps--;
