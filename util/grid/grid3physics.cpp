@@ -19,6 +19,7 @@ struct Vec3i64Hash {
 
 template<typename T>
 void Octree<T>::stepPhysics(float dt) {
+    TIME_FUNCTION;
     if (!root_ || dt <= 0.0f) return;
 
     int maxObjId = -1;

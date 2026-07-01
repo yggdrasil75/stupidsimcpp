@@ -149,6 +149,13 @@ private:
             ImGui::Text("Day: %d / %d", sim.config.currentDay + 1, sim.config.daysPerYear);
             ImGui::Text("Season: %s", getSeasonName(sim.config.season, sim.config.latitude));
             ImGui::Text("Global Temperature: %.1f °C", sim.currentTemperature);
+            if (sim.currentTemperature <= sim.config.frostThreshold) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "(Freezing)");
+            } else if (sim.currentTemperature > 35.0f) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "(Heat)");
+            }
             
             ImVec4 weatherColor = ImVec4(1, 1, 1, 1);
             if (sim.currentWeather == PlantSim::WeatherState::RAIN) weatherColor = ImVec4(0.3f, 0.5f, 1.0f, 1.0f);
@@ -170,13 +177,17 @@ private:
             
             int totalLeaves = 0;
             int totalRoots = 0;
+            int totalTrunkNodes = 0;
             float avgEnergy = 0.0f;
             float avgWater = 0.0f;
+            float oldestAge = 0.0f;
             for (auto& pair : sim.plantStates) {
                 totalLeaves += pair.second->leafCount;
                 totalRoots += pair.second->rootCount;
+                totalTrunkNodes += static_cast<int>(pair.second->trunk.size());
                 avgEnergy += pair.second->energy;
                 avgWater += pair.second->water;
+                oldestAge = std::max(oldestAge, pair.second->age);
             }
             if (!sim.plantStates.empty()) {
                 avgEnergy /= sim.plantStates.size();
@@ -185,6 +196,8 @@ private:
             
             ImGui::BulletText("Total Leaves: %d", totalLeaves);
             ImGui::BulletText("Total Roots: %d", totalRoots);
+            ImGui::BulletText("Woody Trunk Nodes: %d", totalTrunkNodes);
+            ImGui::BulletText("Oldest Plant Age: %.1f s", oldestAge);
             
             float eCap = std::max(100.0f, static_cast<float>(totalLeaves + totalRoots) * 20.0f);
             if (sim.plantStates.size() > 0) eCap /= sim.plantStates.size();
@@ -220,6 +233,14 @@ private:
             
             ImGui::Separator();
             ImGui::DragFloat("Precipitation Rate", &sim.config.precipRate, 1.0f, 0.0f, 1000.0f);
+
+            ImGui::Separator();
+            ImGui::Text("Climate");
+            ImGui::DragFloat("Base Temperature", &sim.config.baseTemperature, 0.1f, -20.0f, 40.0f, "%.1f °C");
+            ImGui::DragFloat("Seasonal Amplitude", &sim.config.seasonalAmplitude, 0.1f, 0.0f, 40.0f, "%.1f °C");
+            ImGui::DragFloat("Diurnal Amplitude", &sim.config.diurnalAmplitude, 0.1f, 0.0f, 30.0f, "%.1f °C");
+            ImGui::DragFloat("Latitude Cooling", &sim.config.latitudeCooling, 0.01f, 0.0f, 1.0f, "%.2f °C/°lat");
+            ImGui::DragFloat("Frost Threshold", &sim.config.frostThreshold, 0.1f, -20.0f, 10.0f, "%.1f °C ( snow below )");
         }
 
         if (ImGui::CollapsingHeader("Render Settings")) {
@@ -265,30 +286,51 @@ private:
             selectedSpeciesIndex = static_cast<int>(speciesLibrary.size()) - 1;
         }
 
+        ImGui::SameLine();
+        ImGui::Text("Form: %s | Gen %d",
+                    PlantDNA::formName(currentDesignerDNA->classifyForm()),
+                    currentDesignerDNA->generation);
+        ImGui::Checkbox("Sterile", &currentDesignerDNA->isSterile);
+
         ImGui::Separator();
 
         if (ImGui::CollapsingHeader("Stem Morphology")) {
             ImGui::SliderFloat("Woodiness", &currentDesignerDNA->stem.woodiness, 0.0f, 1.0f);
+            ImGui::SliderFloat("Hollowness", &currentDesignerDNA->stem.hollowness, 0.0f, 1.0f);
             ImGui::SliderFloat("Flexibility", &currentDesignerDNA->stem.flexibility, 0.0f, 1.0f);
-            ImGui::SliderFloat("Max Height", &currentDesignerDNA->stem.maxHeight, 1.0f, 100.0f);
-            ImGui::SliderFloat("Max Girth", &currentDesignerDNA->stem.maxGirth, 0.01f, 10.0f);
-            ImGui::SliderInt("Max Branch Depth", &currentDesignerDNA->stem.maxBranchDepth, 0, 6);
+            ImGui::SliderFloat("Bark Thickness", &currentDesignerDNA->stem.barkThickness, 0.0f, 1.0f);
+            ImGui::SliderFloat("Max Height", &currentDesignerDNA->stem.maxHeight, 0.5f, 150.0f);
+            ImGui::SliderFloat("Max Girth", &currentDesignerDNA->stem.maxGirth, 0.01f, 15.0f);
+            ImGui::SliderInt("Max Branch Depth", &currentDesignerDNA->stem.maxBranchDepth, 0, 5);
+            ImGui::SliderFloat("Internode Length", &currentDesignerDNA->stem.internodeLength, 0.1f, 10.0f);
             ImGui::SliderFloat("Apical Dominance", &currentDesignerDNA->stem.apicalDominance, 0.0f, 1.0f);
-            
-            ImGui::Text("Tropisms (Behavioral growth)");
+            ImGui::SliderFloat("Branch Angle", &currentDesignerDNA->stem.branchAngle, 0.1f, 3.14f);
+            ImGui::SliderFloat("Branch Angle Variance", &currentDesignerDNA->stem.branchAngleVariance, 0.0f, 1.0f);
+            ImGui::SliderInt("Nodes Per Whorl", &currentDesignerDNA->stem.nodesPerWhorl, 1, 5);
+            ImGui::SliderFloat("Divergence Angle", &currentDesignerDNA->stem.divergenceAngle, 10.0f, 180.0f);
+            ImGui::ColorEdit3("Bark Color", currentDesignerDNA->stem.barkColor.data());
+        }
+
+        if (ImGui::CollapsingHeader("Tropisms")) {
             ImGui::SliderFloat("Gravitropism", &currentDesignerDNA->stem.gravitropism, -1.0f, 1.0f, "%.2f ( -1=Up )");
             ImGui::SliderFloat("Phototropism", &currentDesignerDNA->stem.phototropism, 0.0f, 1.0f, "%.2f ( Seeks Light )");
             ImGui::SliderFloat("Skototropism", &currentDesignerDNA->stem.skototropism, 0.0f, 1.0f, "%.2f ( Seeks Shade )");
             ImGui::SliderFloat("Thigmotropism", &currentDesignerDNA->stem.thigmotropism, 0.0f, 1.0f, "%.2f ( Climbs Solids )");
             ImGui::SliderFloat("Aerotropism", &currentDesignerDNA->stem.aerotropism, 0.0f, 1.0f, "%.2f ( Up from Water )");
-            ImGui::ColorEdit3("Bark Color", currentDesignerDNA->stem.barkColor.data());
+            ImGui::SliderFloat("Hydrotropism", &currentDesignerDNA->stem.hydrotropism, 0.0f, 1.0f, "%.2f ( Toward Water )");
+            ImGui::SliderFloat("Thermotropism", &currentDesignerDNA->stem.thermotropism, 0.0f, 1.0f, "%.2f ( Toward Warmth )");
+            ImGui::SliderFloat("Heliotropism", &currentDesignerDNA->stem.heliotropism, 0.0f, 1.0f, "%.2f ( Tracks Sun )");
         }
 
         if (ImGui::CollapsingHeader("Leaf Genetics")) {
             ImGui::SliderFloat("Leaf Density", &currentDesignerDNA->leaf.leafDensity, 0.0f, 1.0f);
             ImGui::SliderFloat("Length Multiplier", &currentDesignerDNA->leaf.lengthMultiplier, 0.1f, 5.0f);
             ImGui::SliderFloat("Width Multiplier", &currentDesignerDNA->leaf.widthMultiplier, 0.1f, 5.0f);
+            ImGui::SliderFloat("Thickness", &currentDesignerDNA->leaf.thickness, 0.01f, 1.0f);
+            ImGui::SliderFloat("Lobing Depth", &currentDesignerDNA->leaf.lobingDepth, 0.0f, 1.0f);
+            ImGui::SliderFloat("Leaf Drop Temp", &currentDesignerDNA->leaf.leafDropTemp, -10.0f, 20.0f);
             ImGui::Checkbox("Deciduous", &currentDesignerDNA->leaf.isDeciduous);
+            ImGui::SameLine();
             ImGui::Checkbox("Evergreen", &currentDesignerDNA->leaf.evergreen);
             ImGui::ColorEdit3("Summer Color", currentDesignerDNA->leaf.color.data());
             ImGui::ColorEdit3("Autumn Color", currentDesignerDNA->leaf.autumnColor.data());
@@ -296,17 +338,43 @@ private:
 
         if (ImGui::CollapsingHeader("Root Genetics")) {
             ImGui::SliderFloat("Max Depth", &currentDesignerDNA->root.maxDepth, 1.0f, 50.0f);
-            ImGui::SliderFloat("Spread Radius", &currentDesignerDNA->root.spreadRadius, 1.0f, 50.0f);
+            ImGui::SliderFloat("Spread Radius", &currentDesignerDNA->root.spreadRadius, 1.0f, 30.0f);
             ImGui::SliderFloat("Vertical Drive", &currentDesignerDNA->root.verticalDrive, 0.0f, 1.0f);
-            ImGui::SliderFloat("Water Seeking (Hydrotropism)", &currentDesignerDNA->root.waterSeekStrength, 0.0f, 1.0f);
+            ImGui::SliderFloat("Horizontal Drive", &currentDesignerDNA->root.horizontalDrive, 0.0f, 1.0f);
+            ImGui::SliderFloat("Adventitious Rate", &currentDesignerDNA->root.adventitiousRate, 0.0f, 1.0f);
+            ImGui::SliderFloat("Water Seeking", &currentDesignerDNA->root.waterSeekStrength, 0.0f, 1.0f);
         }
 
-        if (ImGui::CollapsingHeader("Metabolism & Resistance")) {
-            ImGui::SliderFloat("Optimal Temp", &currentDesignerDNA->optimalTemp, 0.0f, 40.0f);
+        if (ImGui::CollapsingHeader("Growth Form")) {
+            ImGui::SliderFloat("Form Woodiness", &currentDesignerDNA->form.woodiness, 0.0f, 1.0f);
+            ImGui::SliderFloat("Caulescence", &currentDesignerDNA->form.caulescence, 0.0f, 1.0f, "%.2f ( Stem Dev. )");
+            ImGui::SliderFloat("Secondary Growth", &currentDesignerDNA->form.secondaryGrowth, 0.0f, 1.0f);
+            ImGui::SliderFloat("Flowering Investment", &currentDesignerDNA->form.floweringInvestment, 0.0f, 1.0f);
+            ImGui::SliderFloat("Fruit Investment", &currentDesignerDNA->form.fruitInvestment, 0.0f, 1.0f);
+            ImGui::SliderFloat("Leaf Lobing", &currentDesignerDNA->form.leafLobing, 0.0f, 1.0f);
+            ImGui::SliderFloat("Succulence", &currentDesignerDNA->form.succulence, 0.0f, 1.0f);
+        }
+
+        if (ImGui::CollapsingHeader("Flowers & Special")) {
+            ImGui::SliderFloat("Flower Probability", &currentDesignerDNA->special.flowerProbability, 0.0f, 1.0f);
+            ImGui::SliderFloat("Bloom Temp", &currentDesignerDNA->special.flowerBloomTemp, 0.0f, 40.0f);
+            ImGui::SliderFloat("Bloom Season", &currentDesignerDNA->special.flowerBloomSeason, 0.0f, 1.0f);
+            ImGui::ColorEdit3("Flower Color", currentDesignerDNA->special.flowerColor.data());
+            ImGui::Separator();
+            ImGui::SliderFloat("Carnivory Trap Prob.", &currentDesignerDNA->special.carnivorousTrapProbability, 0.0f, 1.0f);
+            ImGui::SliderFloat("Passive Digestion", &currentDesignerDNA->special.passiveDigestionRate, 0.0f, 5.0f);
+            ImGui::SliderFloat("Pitcher Formation", &currentDesignerDNA->special.pitcherFormationDrive, 0.0f, 1.0f);
+            ImGui::SliderFloat("Fungal Saprotrophy", &currentDesignerDNA->special.fungalSaprotrophy, 0.0f, 1.0f, "%.2f ( Feeds on damp dirt )");
+        }
+
+        if (ImGui::CollapsingHeader("Metabolism & Reproduction")) {
+            ImGui::SliderFloat("Optimal Temp", &currentDesignerDNA->optimalTemp, -10.0f, 45.0f);
             ImGui::SliderFloat("Temp Tolerance", &currentDesignerDNA->tempTolerance, 5.0f, 30.0f);
             ImGui::SliderFloat("Photosynthesis Eff.", &currentDesignerDNA->photosynthesisEfficiency, 0.0f, 5.0f);
             ImGui::SliderFloat("Water Absorption", &currentDesignerDNA->waterAbsorptionRate, 1.0f, 20.0f);
-            ImGui::SliderFloat("Fungal Saprotrophy", &currentDesignerDNA->special.fungalSaprotrophy, 0.0f, 1.0f, "%.2f ( Feeds on damp dirt )");
+            ImGui::SliderFloat("Maintenance Cost x", &currentDesignerDNA->maintenanceCostMultiplier, 0.1f, 3.0f);
+            ImGui::Separator();
+            ImGui::SliderFloat("Seed Dispersal Radius", &currentDesignerDNA->seedDispersalRadius, 1.0f, 100.0f);
             ImGui::SliderFloat("Growth Cost (Energy)", &currentDesignerDNA->growthCostEnergy, 0.1f, 50.0f);
             ImGui::SliderFloat("Growth Cost (Water)", &currentDesignerDNA->growthCostWater, 0.1f, 50.0f);
         }
@@ -381,6 +449,30 @@ private:
         ImGui::Text("Evolution Parameters");
         ImGui::SliderFloat("Base Mutation Rate", &sim.config.baseMutationRate, 0.0f, 0.5f);
         ImGui::SliderFloat("Somatic Mutation Rate", &sim.config.somaticMutationRate, 0.0f, 0.1f);
+        ImGui::SliderFloat("Cosmic Ray Intensity", &sim.config.cosmicRayIntensity, 0.0f, 1.0f,
+                           "%.2f ( amplifies somatic drift )");
+
+        ImGui::Separator();
+        ImGui::Text("Secondary (Girth) Growth");
+        ImGui::SliderFloat("Thickening Interval", &sim.config.secondaryGrowthInterval, 0.5f, 20.0f,
+                           "%.1f s ( time between passes )");
+        ImGui::SliderFloat("Thickening Rate", &sim.config.secondaryGrowthRate, 0.001f, 0.1f,
+                           "%.3f ( radius/pass )");
+        ImGui::SliderFloat("Max Trunk Multiplier", &sim.config.secondaryGrowthMaxMult, 1.0f, 8.0f,
+                           "%.1fx ( vs primary radius )");
+
+        ImGui::Separator();
+        ImGui::Text("Germination & Seedlings");
+        ImGui::SliderFloat("Germination Threshold", &sim.config.germinationThreshold, 0.1f, 5.0f,
+                           "%.2f ( progress needed to sprout )");
+        ImGui::SliderFloat("Germination Rate", &sim.config.germinationRate, 0.05f, 2.0f,
+                           "%.2f ( progress/sec, ideal )");
+        ImGui::SliderFloat("Seed Snap Depth", &sim.config.seedSnapDepth, 0.5f, 5.0f,
+                           "%.2f voxels ( settle distance )");
+        ImGui::SliderFloat("Seedling Girth Fraction", &sim.config.seedlingGirthFraction, 0.05f, 1.0f,
+                           "%.2f ( start thickness vs full )");
+        ImGui::SliderFloat("Girth Maturation Height", &sim.config.girthMaturationHeight, 0.5f, 30.0f,
+                           "%.1f ( height to reach full girth )");
     }
 
     void generateEcosystem() {
@@ -503,6 +595,13 @@ private:
         if (dna->stem.maxGirth < 1.0f) {
             startSize *= std::max(0.3f, dna->stem.maxGirth);
         }
+
+        // Rest the seed on the solid soil surface so it doesn't hover. Callers
+        // pass either y==0 (meaning "drop it on the ground here") or an explicit
+        // terrain height; either way we resolve to the true soil top.
+        float groundY = sim.solidGroundTop(pos.x(), pos.z()) + sim.config.plantVoxelSize * 0.5f;
+        if (groundY < sim.config.waterLevel) groundY = sim.config.waterLevel;
+        pos.y() = groundY;
 
         int pId = sim.nextPlantId++;
         auto state = std::make_shared<PlantState>();

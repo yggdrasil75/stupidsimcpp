@@ -59,9 +59,9 @@ struct StemDNA {
     float divergenceAngle = 137.5f;
     
     float maxHeight = 20.0f;
-    float maxGirth = 3.0f;           
-    int maxBranchDepth = 3;          
-    float internodeLength = 1.0f;    
+    float maxGirth = 3.0f;
+    int maxBranchDepth = 3;
+    float internodeLength = 1.0f;
     float apicalDominance = 0.9f;
     float branchAngle = 1.0f;
     float branchAngleVariance = 0.2f;
@@ -146,7 +146,7 @@ struct LeafDNA {
     float thickness = 0.1f;
     float lobingDepth = 0.0f;
     
-    float leafDensity = 0.8f;        
+    float leafDensity = 0.8f;
     bool isDeciduous = true;
     float leafDropTemp = 5.0f;
     v3 color = v3(0.1f, 0.6f, 0.1f);
@@ -189,7 +189,7 @@ struct RootDNA {
     
     float maxDepth = 10.0f;
     float spreadRadius = 5.0f;
-    float waterSeekStrength = 0.8f;  
+    float waterSeekStrength = 0.8f;
 
     void mutate(float rate, std::mt19937& rng) {
         mutateFloat(verticalDrive, 0.0f, 1.0f, rate, 0.1f, rng);
@@ -281,7 +281,7 @@ struct GrowthFormDNA {
 
 struct PlantDNA {
     std::string speciesName = "Emergent Plant";
-    int generation = 0; 
+    int generation = 0;
     
     std::vector<float> genomeMarker = std::vector<float>(10, 0.5f);
     bool isSterile = false;
@@ -317,7 +317,7 @@ struct PlantDNA {
     float tempTolerance = 15.0f;
     float photosynthesisEfficiency = 2.5f;
     float waterAbsorptionRate = 5.0f;
-    float maintenanceCostMultiplier = 1.0f; 
+    float maintenanceCostMultiplier = 1.0f;
     
     // Reproduction
     float seedDispersalRadius = 10.0f;
@@ -325,6 +325,7 @@ struct PlantDNA {
     float growthCostWater = 5.0f;
 
     float calculateGeneticDistance(const PlantDNA& other) const {
+        TIME_FUNCTION;
         float sumSq = 0.0f;
         for (size_t i = 0; i < genomeMarker.size(); ++i) {
             float diff = genomeMarker[i] - other.genomeMarker[i];
@@ -334,6 +335,7 @@ struct PlantDNA {
     }
 
     void mutate(float rate, std::mt19937& rng) {
+        TIME_FUNCTION;
         generation++;
         
         for (float& marker : genomeMarker) {
@@ -354,12 +356,13 @@ struct PlantDNA {
     }
 
     static std::shared_ptr<PlantDNA> crossbreed(const PlantDNA& mother, const PlantDNA& father, float compatibilityThreshold, std::mt19937& rng) {
+        TIME_FUNCTION;
         auto child = std::make_shared<PlantDNA>();
         
         float distance = mother.calculateGeneticDistance(father);
         if (distance > compatibilityThreshold) {
             // Too genetically drifted to produce offspring
-            return nullptr; 
+            return nullptr;
         }
 
         std::uniform_real_distribution<float> weightDist(0.0f, 1.0f);
@@ -387,7 +390,7 @@ struct PlantDNA {
         child->waterAbsorptionRate = mixFloat(mother.waterAbsorptionRate, father.waterAbsorptionRate, w);
         child->seedDispersalRadius = mixFloat(mother.seedDispersalRadius, father.seedDispersalRadius, w);
 
-        child->mutate(0.02f, rng); 
+        child->mutate(0.02f, rng);
         return child;
     }
     
@@ -480,8 +483,7 @@ struct AirParticle : public PlantsimParticle {
     float temperature;
     float oxygen;
 
-    AirParticle(float c = 400.0f, float t = 20.0f) : PlantsimParticle(ParticleType::AIR, 0.0f), co2(c), temperature(t), oxygen(21.0f) {
-        }
+    AirParticle(float c = 400.0f, float t = 20.0f) : PlantsimParticle(ParticleType::AIR, 0.0f), co2(c), temperature(t), oxygen(21.0f) {}
         
     void serializeDerived(std::ofstream& out) const override {
         out.write(reinterpret_cast<const char*>(&co2), sizeof(co2));
@@ -546,9 +548,10 @@ struct PlantParticle : public PlantsimParticle {
 
     float age = 0.0f;
     float water = 10.0f;
+    float germinationProgress = 0.0f;
     
     float nitrogen = 0.0f, phosphorus = 0.0f, potassium = 0.0f, carbon = 0.0f, magnesium = 0.0f;
-    float totalBiomass = 1.0f; 
+    float totalBiomass = 1.0f;
 
     PlantParticle(PlantPart p = PlantPart::SEED, std::shared_ptr<PlantDNA> d = nullptr, v3 sp = v3(0,0,0), v3 gd = v3(0,1,0), int bd = 0) 
         : PlantsimParticle(ParticleType::PLANT, 10.0f), part(p), dna(d), seedPos(sp), growthDir(gd), branchDepth(bd) {
@@ -566,6 +569,7 @@ struct PlantParticle : public PlantsimParticle {
         out.write(reinterpret_cast<const char*>(&baseColor.x()), sizeof(float) * 3);
         out.write(reinterpret_cast<const char*>(&age), sizeof(age));
         out.write(reinterpret_cast<const char*>(&water), sizeof(water));
+        out.write(reinterpret_cast<const char*>(&germinationProgress), sizeof(germinationProgress));
         out.write(reinterpret_cast<const char*>(&nitrogen), sizeof(nitrogen));
         out.write(reinterpret_cast<const char*>(&phosphorus), sizeof(phosphorus));
         out.write(reinterpret_cast<const char*>(&potassium), sizeof(potassium));
@@ -591,6 +595,7 @@ struct PlantParticle : public PlantsimParticle {
         in.read(reinterpret_cast<char*>(&baseColor.x()), sizeof(float) * 3);
         in.read(reinterpret_cast<char*>(&age), sizeof(age));
         in.read(reinterpret_cast<char*>(&water), sizeof(water));
+        in.read(reinterpret_cast<char*>(&germinationProgress), sizeof(germinationProgress));
         in.read(reinterpret_cast<char*>(&nitrogen), sizeof(nitrogen));
         in.read(reinterpret_cast<char*>(&phosphorus), sizeof(phosphorus));
         in.read(reinterpret_cast<char*>(&potassium), sizeof(potassium));
@@ -693,12 +698,39 @@ struct PlantConfig {
     v3 moonColor = v3(0.7f, 0.75f, 0.9f);
     float precipRate = 200.0f;
     
-    float growthSpeedMultiplier = 1.0f; 
+    // Climate / temperature model. Air temperature swings with season and time of
+    // day, scaled by latitude. Used by germination, tropisms, and cold/heat stress.
+    float baseTemperature   = 15.0f;   // mean annual temperature at the equator-ish
+    float seasonalAmplitude = 18.0f;   // peak summer-to-winter swing (half-range)
+    float diurnalAmplitude  = 8.0f;    // day-to-night swing (half-range)
+    float latitudeCooling   = 0.35f;   // deg C lost per deg |latitude|
+    float frostThreshold    = 0.0f;    // below this, snow falls instead of rain
+    
+    float growthSpeedMultiplier = 1.0f;
 
-    float baseMutationRate = 0.05f;  
+    float baseMutationRate = 0.05f;
     float somaticMutationRate = 0.005f;
-    float cosmicRayIntensity = 0.0f; 
-    float geneticCompatibilityThreshold = 1.2f; 
+    float cosmicRayIntensity = 0.0f;
+    float geneticCompatibilityThreshold = 1.2f;
+
+    // Germination & seedling tuning.
+    // A seed must accumulate this much "germination progress" (scaled by warmth,
+    // moisture and energy) before it sprouts. Stops instant full-size plants.
+    float germinationThreshold = 1.0f;
+    float germinationRate = 0.4f;        // progress per second under ideal conditions
+    // Fraction of an internode a seed must be from solid ground to be considered
+    // "planted". Seeds above this snap down to the soil surface instead of hovering.
+    float seedSnapDepth = 1.5f;          // in voxels
+    // New stem/root growth starts at this fraction of the genetic max girth and
+    // thickens toward 1.0 as the segment matures, so seedlings are thin.
+    float seedlingGirthFraction = 0.18f;
+    float girthMaturationHeight = 4.0f;  // height (world units) over which girth ramps to full
+
+    // Secondary (girth) growth: woody plants slowly thicken their trunk and main
+    // branches with age, adding outer rings. Scaled by form.secondaryGrowth.
+    float secondaryGrowthInterval = 3.0f;   // seconds between thickening passes
+    float secondaryGrowthRate     = 0.015f; // radius added per pass at full drive
+    float secondaryGrowthMaxMult  = 3.0f;   // cap: trunk can reach Nx its primary radius
 
     int   terrainSeed       = 42;
     float terrainScale      = 0.015f;
@@ -717,6 +749,19 @@ struct PlantState {
     float water = 100.0f;
     int leafCount = 0;
     int rootCount = 0;
+
+    // Skeleton of woody stem nodes for secondary (girth) growth. Each entry is a
+    // segment centre paired with the axis through it and the primary radius it was
+    // built at; periodically these thicken outward as the plant ages.
+    struct TrunkNode {
+        v3 pos;
+        v3 axis;
+        float baseRadius;
+        float currentRadius;
+    };
+    std::vector<TrunkNode> trunk;
+    float age = 0.0f;
+    float secondaryTimer = 0.0f;
 };
 
 class PlantSim {
@@ -734,7 +779,7 @@ public:
 
     std::vector<v3> activeRoots;
     std::vector<v3> activeLeaves;
-    std::vector<v3> activeMeristems; 
+    std::vector<v3> activeMeristems;
     std::vector<v3> activeFlowers;
     std::vector<v3> seeds;
     std::vector<v3> activeRainDrops;
@@ -790,6 +835,23 @@ public:
         PNoise2& gen = const_cast<PNoise2&>(rainNoise);
         return gen.normalizedNoise(p);
     }
+
+    float computeAirTemperature() const {
+        float latFrac = std::abs(config.latitude) / 90.0f;
+        float latBase = config.baseTemperature - latFrac * 90.0f * config.latitudeCooling;
+
+        // Seasonal term: northern hemisphere warmest near season ~0.5 (mid-year);
+        // southern hemisphere is inverted.
+        float seasonPhase = config.season * 2.0f * (float)M_PI;
+        float hemi = (config.latitude >= 0.0f) ? 1.0f : -1.0f;
+        float seasonal = -std::cos(seasonPhase) * config.seasonalAmplitude * hemi * latFrac;
+
+        // Diurnal term: coldest just before dawn (~0.0), warmest mid-afternoon (~0.6).
+        float dayPhase = (config.timeOfDay - 0.6f) * 2.0f * (float)M_PI;
+        float diurnal = std::cos(dayPhase) * config.diurnalAmplitude;
+
+        return latBase + seasonal + diurnal;
+    }
     
     v3 getCelestialDir(float timeOffset) const {
         float t = std::fmod(config.timeOfDay + timeOffset, 1.0f);
@@ -815,6 +877,7 @@ public:
     }
     
     void updateSkyBodies() {
+        TIME_FUNCTION;
         v3 sunDir = getCelestialDir(0.0f);
         v3 moonDir = getCelestialDir(0.5f);
         
@@ -830,6 +893,7 @@ public:
     }
 
     void initWorld(bool spawnDefaultSeed = true) {
+        TIME_FUNCTION;
         grid.clear(Vector3f::Constant(-gridsize), Vector3f::Constant(gridsize));
         plantStates.clear();
         nextPlantId = 1;
@@ -862,7 +926,7 @@ public:
                     float y = surfaceY - vSize * d - vSize;
                     
                     auto dirt = std::make_shared<DirtParticle>();
-                    dirt->hydration = 100.0f + d * 10.0f; 
+                    dirt->hydration = 100.0f + d * 10.0f;
                     grid.queuedset(dirt, v3(x, y, z), true, v3(0.4f - d*0.015f, 0.25f - d*0.01f, 0.1f), vSize, true, 0);
                 }
 
@@ -912,6 +976,23 @@ public:
         return config.plantVoxelSize * std::clamp(0.3f + dna.stem.maxGirth * 0.8f, 0.18f, 16.0f);
     }
 
+    // Radius scaled by how mature/tall a segment is. Seedlings start thin
+    // (seedlingGirthFraction of full) and thicken toward the genetic max as the
+    // growing tip climbs away from the seed. heightAboveSeed is in world units.
+    float stemRadiusAt(const PlantDNA& dna, float heightAboveSeed) const {
+        float full = stemRadius(dna);
+        float ramp = config.girthMaturationHeight > 1e-3f ? std::clamp(heightAboveSeed / config.girthMaturationHeight, 0.0f, 1.0f) : 1.0f;
+        float frac = mixFloat(config.seedlingGirthFraction, 1.0f, ramp);
+        return full * frac;
+    }
+
+    // World-space Y of the top of the solid dirt column at (x,z). initWorld places
+    // the first dirt voxel centred at surfaceY - voxelSize, so its top face is at
+    // surfaceY - voxelSize/2. Seeds rest there rather than a half-voxel in the air.
+    float solidGroundTop(float x, float z) const {
+        return getTerrainHeight(x, z) - config.voxelSize * 0.5f;
+    }
+
     struct RigidParams { float mass, stiffness, breakForce, damping; };
     RigidParams rigidParams(const PlantDNA& dna) const {
         float wood = std::clamp(dna.stem.woodiness, 0.0f, 1.0f);
@@ -933,6 +1014,7 @@ public:
 
     void buildDiscRing(const v3& center, const v3& u, const v3& w,
                        float radius, const PlantDNA& dna, int plantId, bool isRoot) {
+        TIME_FUNCTION;
         const float facet = config.stemFacetSize;
         int barkRings = isRoot ? 0 : (int)std::ceil(dna.stem.barkThickness * 3.0f);
         barkRings = std::clamp(barkRings, 0, 4);
@@ -971,15 +1053,18 @@ public:
 
     void buildCylinderSegment(const v3& from, const v3& to, float radius,
                               const PlantDNA& dna, int plantId, bool isRoot) {
+        TIME_FUNCTION;
         v3 axis = to - from;
         float len = axis.norm();
         if (len < 1e-5f) { 
-            v3 u, w; perpBasis(v3(0,1,0), u, w);
+            v3 u, w;
+            perpBasis(v3(0,1,0), u, w);
             buildDiscRing(from, u, w, radius, dna, plantId, isRoot);
             return;
         }
         axis /= len;
-        v3 u, w; perpBasis(axis, u, w);
+        v3 u, w;
+        perpBasis(axis, u, w);
         int rings = std::max(1, (int)std::round(len / config.stemFacetSize));
         for (int i = 0; i <= rings; ++i) {
             float t = (float)i / rings;
@@ -987,33 +1072,34 @@ public:
         }
     }
     
-    void buildBlob(const v3& center, float radius, const v3& color,
-                   int plantId, PlantPart part) {
+    void buildBlob(const v3& center, float radius, const v3& color, int plantId, PlantPart part) {
+        TIME_FUNCTION;
         const float facet = config.stemFacetSize;
         int n = std::max(1, (int)std::round(radius / facet));
         float r2 = radius * radius;
         for (int ix = -n; ix <= n; ++ix)
-        for (int iy = -n; iy <= n; ++iy)
-        for (int iz = -n; iz <= n; ++iz) {
-            v3 off(ix * facet, iy * facet, iz * facet);
-            if (off.squaredNorm() > r2) continue;        // carve a sphere
-            v3 vp = center + off;
-            if (grid.find(vp, facet * 0.5f)) continue;
-            auto bv = std::make_shared<PlantParticle>(part, nullptr, center, v3(0,1,0), 0);
-            bv->plantId = plantId;
-            bv->isMature = true;
-            grid.insert(bv, vp, true, color, facet, true, 1);
-        }
+            for (int iy = -n; iy <= n; ++iy)
+                for (int iz = -n; iz <= n; ++iz) {
+                    v3 off(ix * facet, iy * facet, iz * facet);
+                    if (off.squaredNorm() > r2) continue;
+                    v3 vp = center + off;
+                    if (grid.find(vp, facet * 0.5f)) continue;
+                    auto bv = std::make_shared<PlantParticle>(part, nullptr, center, v3(0,1,0), 0);
+                    bv->plantId = plantId;
+                    bv->isMature = true;
+                    grid.insert(bv, vp, true, color, facet, true, 1);
+                }
     }
 
-    void buildLeafBlade(const v3& base, const v3& dir, const PlantDNA& dna,
-                        int plantId, float lobing) {
+    void buildLeafBlade(const v3& base, const v3& dir, const PlantDNA& dna, int plantId, float lobing) {
+        TIME_FUNCTION;
         const float facet = config.stemFacetSize;
         float halfW = facet * std::clamp(2.0f * dna.leaf.widthMultiplier, 1.0f, 12.0f);
         float halfL = facet * std::clamp(3.0f * dna.leaf.lengthMultiplier, 1.5f, 18.0f);
 
-        v3 along = dir.normalized();          // leaf points away from the stem
-        v3 u, w; perpBasis(along, u, w);      // blade spans (along, u); w = normal
+        v3 along = dir.normalized();
+        v3 u, w;
+        perpBasis(along, u, w);
         int nL = std::max(1, (int)std::round(halfL / facet));
         int nW = std::max(1, (int)std::round(halfW / facet));
         int layers = (dna.leaf.thickness > 0.5f) ? 2 : 1;
@@ -1043,6 +1129,7 @@ public:
     }
     
     size_t getActiveWaterVoxelCount() {
+        TIME_FUNCTION;
         using GridT = std::decay_t<decltype(grid)>;
         std::vector<std::shared_ptr<GridT::NodeData>> nodes;
         grid.collectNodesByObjectId(WATER_OBJ, nodes);
@@ -1050,21 +1137,27 @@ public:
     }
 
     void update(float dt) {
-        simulateEnvironment(dt);
-        int substeps = 4;
-        float subDt = dt / substeps;
-        for (int i = 0; i < substeps; ++i) {
+        {
+            TIME_FUNCTION;
+            simulateEnvironment(dt);
+            int substeps = 4;
+            float subDt = dt * substeps;
             grid.stepPhysics(subDt);
+            processSoilAbsorption(dt);
+            processMetabolism(dt);
+            processGrowth(dt);
+            processSecondaryGrowth(dt);
+            processLeafDrop(dt);
+            processPollination();
+            processDeath();
+            grid.printStats();
         }
-        processSoilAbsorption(dt);
-        processMetabolism(dt);
-        processGrowth(dt);
-        processPollination();
-        processDeath();          
+        FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
     }
 
 private:
     void simulateEnvironment(float dt) {
+        TIME_FUNCTION;
         config.timeOfDay += dt / config.dayDuration;
         if (config.timeOfDay >= 1.0f) {
             config.timeOfDay -= 1.0f;
@@ -1075,9 +1168,21 @@ private:
             config.season = static_cast<float>(config.currentDay) / static_cast<float>(config.daysPerYear);
         }
 
+        // Smoothly ease the global air temperature toward its target so swings are
+        // gradual rather than snapping each frame.
+        float targetTemp = computeAirTemperature();
+        float blend = std::clamp(dt * 0.5f, 0.0f, 1.0f);
+        currentTemperature = mixFloat(currentTemperature, targetTemp, blend);
+
+        // Track sustained heat for heat-stress accounting elsewhere.
+        if (currentTemperature > 35.0f) extendedHeatTimer += dt;
+        else extendedHeatTimer = std::max(0.0f, extendedHeatTimer - dt * 2.0f);
+
+        bool freezing = currentTemperature <= config.frostThreshold;
+
         atmosphericMoisture += dt * 0.5f;
         if (atmosphericMoisture > 100.0f) {
-            currentWeather = WeatherState::RAIN;
+            currentWeather = freezing ? WeatherState::SNOW : WeatherState::RAIN;
             weatherTimer = 600.0f;
             atmosphericMoisture = 0.0f;
         }
@@ -1088,6 +1193,10 @@ private:
                 currentWeather = WeatherState::CLEAR;
             }
         }
+
+        // If the temperature crosses freezing mid-storm, switch precipitation type.
+        if (currentWeather == WeatherState::RAIN && freezing) currentWeather = WeatherState::SNOW;
+        else if (currentWeather == WeatherState::SNOW && !freezing) currentWeather = WeatherState::RAIN;
 
         if (currentWeather == WeatherState::RAIN) {
             rainAccumulator += config.precipRate * dt;
@@ -1102,6 +1211,29 @@ private:
                 
                 if (!grid.find(spawnPos, config.waterVoxelSize)) {
                     spawnWaterVoxel(spawnPos, v3(0, -10.0f, 0));
+                }
+            }
+        }
+
+        if (currentWeather == WeatherState::SNOW) {
+            rainAccumulator += config.precipRate * 0.4f * dt;   // snow accumulates slower
+            std::uniform_real_distribution<float> dist(-config.groundSize, config.groundSize);
+
+            while (rainAccumulator >= 1.0f) {
+                rainAccumulator -= 1.0f;
+                float rx = dist(rng);
+                float rz = dist(rng);
+                if (chanceDist(rng) > getRainfallDensity(rx, rz)) continue;
+                v3 spawnPos(rx, 50.0f, rz);
+
+                if (!grid.find(spawnPos, config.waterVoxelSize)) {
+                    auto s = std::make_shared<SnowParticle>();
+                    s->velocity = v3(0, -2.0f, 0);   // drifts down gently
+                    float mass = config.waterVoxelSize * config.waterVoxelSize *
+                                 config.waterVoxelSize * 300.0f;
+                    grid.insert(s, spawnPos, true, v3(0.92f, 0.94f, 0.98f),
+                             config.waterVoxelSize, true, WATER_OBJ, 0.0f, 0.0f, 0.0f,
+                             0.0f, 1.31f, v3(0,0,0), Grid::BodyType::FLUID, mass);
                 }
             }
         }
@@ -1190,10 +1322,30 @@ private:
     }
 
     void processSoilAbsorption(float dt) {
+        TIME_FUNCTION;
         using GridT = std::decay_t<decltype(grid)>;
         std::vector<std::shared_ptr<GridT::NodeData>> waterNodes;
         grid.collectNodesByObjectId(WATER_OBJ, waterNodes);
         if (waterNodes.empty()) return;
+
+        // Snow accumulates while freezing and melts back into liquid water once the
+        // air warms above the frost threshold, closing the precipitation cycle.
+        for (auto& node : waterNodes) {
+            if (!node || node->data->pt != ParticleType::SNOW) continue;
+            auto s = std::static_pointer_cast<SnowParticle>(node->data);
+            v3 pos = node->position;
+            if (currentTemperature > config.frostThreshold) {
+                float warmth = (currentTemperature - config.frostThreshold);
+                s->meltProgress += dt * warmth * 0.05f;
+                if (s->meltProgress >= 1.0f) {
+                    grid.remove(pos);
+                    spawnWaterVoxel(pos, v3(0, -0.5f, 0));
+                }
+            } else {
+                // Refreeze any partial melt during a cold snap.
+                s->meltProgress = std::max(0.0f, s->meltProgress - dt * 0.02f);
+            }
+        }
 
         for (auto& node : waterNodes) {
             if (!node || node->data->pt != ParticleType::WATER) continue;
@@ -1223,6 +1375,7 @@ private:
     }
 
     void processMetabolism(float dt) {
+        TIME_FUNCTION;
         for (const v3& rootPos : activeRoots) {
             auto rootData = grid.find(rootPos);
             if (rootData) {
@@ -1244,6 +1397,19 @@ private:
                             if (p->dna->special.fungalSaprotrophy > 0.0f) {
                                 state->energy += draw * p->dna->special.fungalSaprotrophy * 5.0f;
                             }
+
+                            // Nutrient uptake travels dissolved in the water draw.
+                            // Nitrogen is the main growth limiter; depletion is tracked
+                            // so over-dense planting exhausts the soil.
+                            float nUptake = std::min(d->nitrogen, draw * 0.5f);
+                            d->nitrogen -= nUptake;
+                            p->nitrogen += nUptake;
+                            float pUptake = std::min(d->phosphorus, draw * 0.2f);
+                            d->phosphorus -= pUptake;
+                            p->phosphorus += pUptake;
+                            float kUptake = std::min(d->potassium, draw * 0.2f);
+                            d->potassium -= kUptake;
+                            p->potassium += kUptake;
                         }
                     } else if (dirtData->data->pt == ParticleType::WATER) {
                         state->water += dt * p->dna->waterAbsorptionRate * 2.0f;
@@ -1257,6 +1423,19 @@ private:
             float maintenanceEnergy = static_cast<float>(state->leafCount + state->rootCount) * dt * 0.1f;
             float maintenanceWater = static_cast<float>(state->leafCount) * dt * 0.2f;
 
+            // Temperature stress raises upkeep: cold plants burn energy to survive,
+            // hot plants lose water faster. Severe stress is lethal over time.
+            auto pp = plantPrototype(pair.first);
+            if (pp && pp->dna) {
+                float stress = temperatureStress(*pp->dna);
+                if (stress > 0.0f) {
+                    bool cold = currentTemperature < pp->dna->optimalTemp;
+                    float drain = stress * dt * 4.0f * (1.0f + static_cast<float>(state->leafCount) * 0.05f);
+                    if (cold) state->energy -= drain;
+                    else      state->water  -= drain;
+                }
+            }
+
             state->energy -= maintenanceEnergy;
             state->water -= maintenanceWater;
 
@@ -1265,7 +1444,51 @@ private:
         }
     }
 
+    // Find any live particle for a plant so we can read its shared DNA.
+    // Forks a branch's genome and applies a small somatic mutation. Real plants
+    // accumulate cell-line mutations as they grow (sports/chimeras); a branch that
+    // mutates can later flower and pass its drifted genes into seeds. Cosmic-ray
+    // intensity amplifies the rate. Returns the original shared DNA if no mutation
+    // occurs, so unmutated branches keep sharing one genome (cheap).
+    std::shared_ptr<PlantDNA> maybeSomaticFork(const std::shared_ptr<PlantDNA>& parent) {
+        float rate = config.somaticMutationRate * (1.0f + config.cosmicRayIntensity * 10.0f);
+        if (rate <= 0.0f || chanceDist(rng) >= rate) return parent;
+        auto child = std::make_shared<PlantDNA>(*parent);
+        child->mutate(config.somaticMutationRate * 2.0f + config.cosmicRayIntensity, rng);
+        // Somatic drift shouldn't reset generation counting; tag it as a sport.
+        child->generation = parent->generation;
+        return child;
+    }
+
+    std::shared_ptr<PlantParticle> plantPrototype(int plantId) const {
+        for (const v3& pos : activeMeristems) {
+            auto n = const_cast<PlantSim*>(this)->grid.find(pos);
+            if (n && n->data->pt == ParticleType::PLANT) {
+                auto p = std::static_pointer_cast<PlantParticle>(n->data);
+                if (p && p->plantId == plantId && p->dna) return p;
+            }
+        }
+        for (const v3& pos : activeLeaves) {
+            auto n = const_cast<PlantSim*>(this)->grid.find(pos);
+            if (n && n->data->pt == ParticleType::PLANT) {
+                auto p = std::static_pointer_cast<PlantParticle>(n->data);
+                if (p && p->plantId == plantId && p->dna) return p;
+            }
+        }
+        return nullptr;
+    }
+
+    // How far outside the plant's comfort band the current temperature sits, 0..1+.
+    // 0 = within tolerance; grows past 1 as conditions become lethal.
+    float temperatureStress(const PlantDNA& dna) const {
+        float dev = std::abs(currentTemperature - dna.optimalTemp);
+        float over = dev - dna.tempTolerance;
+        if (over <= 0.0f) return 0.0f;
+        return over / std::max(1.0f, dna.tempTolerance);
+    }
+
     void processGrowth(float dt) {
+        TIME_FUNCTION;
         std::vector<v3> newMeristems;
         std::vector<v3> toRemove;
 
@@ -1294,6 +1517,82 @@ private:
             }
             auto& state = it->second;
 
+            p->age += dt;
+
+            // --- SEED handling: settle to ground, then germinate in place ---
+            if (p->part == PlantPart::SEED) {
+                // Snap a hovering seed down onto the solid soil surface so it
+                // doesn't float a half-voxel above the ground.
+                float groundY = solidGroundTop(pos.x(), pos.z());
+                if (groundY < config.waterLevel) groundY = config.waterLevel;
+                float restY = groundY + config.plantVoxelSize * 0.5f;
+                if (pos.y() - restY > config.plantVoxelSize * config.seedSnapDepth ||
+                    pos.y() < restY - config.plantVoxelSize * 0.25f) {
+                    v3 settled(pos.x(), restY, pos.z());
+                    if (!grid.find(settled, config.plantVoxelSize * 0.5f)) {
+                        grid.remove(pos);
+                        p->seedPos = settled;
+                        grid.insert(p, settled, true, v3(0.2f, 0.8f, 0.2f),
+                                 config.plantVoxelSize, true, 1);
+                        toRemove.push_back(pos);
+                        newMeristems.push_back(settled);
+                        continue;
+                    }
+                }
+
+                // Accumulate germination progress, modulated by warmth, soil
+                // moisture nearby, and the seed's stored energy.
+                float warmth = std::clamp(
+                    1.0f - std::abs(currentTemperature - p->dna->optimalTemp) /
+                               std::max(1.0f, p->dna->tempTolerance),
+                    0.0f, 1.0f);
+                float moisture = 0.0f;
+                {
+                    auto around = grid.findInRadius(pos, config.voxelSize * 1.5f, 0);
+                    for (auto& n : around) {
+                        if (n->data->pt == ParticleType::DIRT) {
+                            auto d = std::static_pointer_cast<DirtParticle>(n->data);
+                            moisture = std::max(moisture, std::clamp(d->hydration / 100.0f, 0.0f, 1.0f));
+                        } else if (n->data->pt == ParticleType::WATER) {
+                            moisture = std::max(moisture, 1.0f);
+                        }
+                    }
+                }
+                float energyFactor = std::clamp(state->energy / 20.0f, 0.2f, 1.0f);
+                float viability = (0.4f + 0.6f * warmth) * (0.3f + 0.7f * moisture) * energyFactor;
+                p->germinationProgress += dt * config.germinationRate * viability *
+                                          std::max(0.1f, config.growthSpeedMultiplier);
+
+                if (p->germinationProgress < config.germinationThreshold) {
+                    // Still dormant; keep the seed as an active site and wait.
+                    continue;
+                }
+
+                // Sprout: send a root straight down and convert the seed into the
+                // first (thin) stem node, both anchored at the seed position. This
+                // keeps the first growth AT the seed rather than a voxel above it.
+                v3 rootDir(0, -1, 0);
+                v3 rootPos = pos + rootDir * config.plantVoxelSize;
+                if (!grid.find(rootPos, config.stemFacetSize * 0.5f)) {
+                    auto root = std::make_shared<PlantParticle>(PlantPart::ROOT, p->dna, p->seedPos, rootDir, 0);
+                    root->plantId = p->plantId;
+                    if (grid.insert(root, rootPos, true, v3(0.45f, 0.34f, 0.26f), config.stemFacetSize, true, 1)) {
+                        activeRoots.push_back(rootPos);
+                        newMeristems.push_back(rootPos);
+                        state->rootCount += 1;
+                    }
+                }
+
+                // Re-tag the seed voxel as a STEM growing tip in place.
+                p->part = PlantPart::STEM;
+                p->growthDir = v3(0, 1, 0);
+                p->internodeProgress = 0.0f;
+                grid.remove(pos);
+                grid.insert(p, pos, true, p->dna->stem.barkColor, config.stemFacetSize, true, 1);
+                newMeristems.push_back(pos);
+                continue;
+            }
+
             if (p->part != PlantPart::ROOT) {
             if (pos.y() - p->seedPos.y() >= p->dna->stem.maxHeight) {
                 toRemove.push_back(pos);
@@ -1309,15 +1608,20 @@ private:
             float energyCost = p->dna->growthCostEnergy;
             float waterCost = p->dna->growthCostWater;
 
-            p->internodeProgress += progressRate * p->dna->photosynthesisEfficiency;
+            // Growth speed responds to stored nitrogen and how close the air is to
+            // the plant's optimum temperature. Starved or stressed plants crawl.
+            float nFactor = std::clamp(0.4f + p->nitrogen * 0.6f, 0.4f, 1.5f);
+            float tFactor = std::clamp(1.0f - temperatureStress(*p->dna), 0.1f, 1.0f);
+            p->internodeProgress += progressRate * p->dna->photosynthesisEfficiency * nFactor * tFactor;
 
             if (p->internodeProgress >= 1.0f) {
-                p->internodeProgress = 1.0f; 
+                p->internodeProgress = 1.0f;
                 
                 if (state->energy >= energyCost && state->water >= waterCost) {
                     p->internodeProgress = 0.0f;
                     state->energy -= energyCost;
                     state->water -= waterCost;
+                    p->nitrogen = std::max(0.0f, p->nitrogen - 0.2f);
                     v3 envForce(0, 0, 0);
 
                     if (p->part == PlantPart::STEM || p->part == PlantPart::LEAF) {
@@ -1326,7 +1630,8 @@ private:
                         envForce -= sunDir * p->dna->stem.skototropism;
                         envForce += v3(0, p->dna->stem.aerotropism, 0);
                         if (p->dna->stem.heliotropism > 0.0f && sunDir.y() > 0.0f) {
-                            v3 toSun = sunDir; toSun.y() = std::abs(toSun.y());
+                            v3 toSun = sunDir;
+                            toSun.y() = std::abs(toSun.y());
                             envForce += toSun.normalized() * p->dna->stem.heliotropism;
                         }
                         
@@ -1354,8 +1659,8 @@ private:
                             for(auto& n : neighbors) {
                                 if (n->data->pt == ParticleType::DIRT || 
                                    (n->data->pt == ParticleType::PLANT && std::static_pointer_cast<PlantParticle>(n->data)->plantId != p->plantId)) {
-                                    v3 diff = pos - n->position; 
-                                    touchForce += -diff.normalized() * 0.5f; 
+                                    v3 diff = pos - n->position;
+                                    touchForce += -diff.normalized() * 0.5f;
                                     touchForce.y() += 1.0f;
                                 }
                             }
@@ -1398,6 +1703,7 @@ private:
                     v3 nextPos = pos + p->growthDir * nodeSize;
                     auto newSegment = std::make_shared<PlantParticle>(nextPart, p->dna, p->seedPos, p->growthDir, p->branchDepth);
                     newSegment->plantId = p->plantId;
+                    newSegment->nitrogen = p->nitrogen * 0.5f;   // pass nutrients up the tip
                     
                     bool success = grid.insert(newSegment, nextPos, true,
                                             nextPart == PlantPart::ROOT ? v3(0.45f, 0.34f, 0.26f) : p->dna->stem.barkColor,
@@ -1405,9 +1711,19 @@ private:
                     
                     if (success) {
                         bool isRoot = (nextPart == PlantPart::ROOT);
-                        float segRadius = isRoot ? radius * 0.45f : radius;
+                        float heightAboveSeed = isRoot ? (p->seedPos.y() - nextPos.y())
+                                                       : (nextPos.y() - p->seedPos.y());
+                        float matRadius = stemRadiusAt(*p->dna, std::max(0.0f, heightAboveSeed));
+                        float segRadius = isRoot ? matRadius * 0.45f : matRadius;
                         buildCylinderSegment(pos, nextPos, segRadius, *p->dna, p->plantId, isRoot);
-                        
+
+                        // Record woody stem nodes so they can thicken with age. Only
+                        // worthwhile for plants with real secondary-growth drive, and
+                        // only main-axis/low branches (deep twigs stay thin).
+                        if (!isRoot && p->dna->form.secondaryGrowth > 0.05f && p->branchDepth <= 1) {
+                            state->trunk.push_back({ (pos + nextPos) * 0.5f, (nextPos - pos).normalized(), segRadius, segRadius });
+                        }
+
                         toRemove.push_back(pos);
                         newMeristems.push_back(nextPos);
 
@@ -1421,9 +1737,10 @@ private:
                                 if (p->branchDepth < p->dna->stem.maxBranchDepth) {
                                         v3 branchDir = v3(chance(rng) - 0.5f, chance(rng) + 0.2f, chance(rng) - 0.5f).normalized();
                                     v3 branchPos = pos + branchDir * nodeSize;
-                                    auto newBranch = std::make_shared<PlantParticle>(PlantPart::STEM, p->dna, p->seedPos, branchDir, p->branchDepth + 1);
+                                    auto branchDNA = maybeSomaticFork(p->dna);
+                                    auto newBranch = std::make_shared<PlantParticle>(PlantPart::STEM, branchDNA, p->seedPos, branchDir, p->branchDepth + 1);
                                         newBranch->plantId = p->plantId;
-                                    if (grid.insert(newBranch, branchPos, true, p->dna->stem.barkColor, config.stemFacetSize, true, 1)) {
+                                    if (grid.insert(newBranch, branchPos, true, branchDNA->stem.barkColor, config.stemFacetSize, true, 1)) {
                                         newMeristems.push_back(branchPos);
                                     }
                                 }
@@ -1516,13 +1833,99 @@ private:
         }
     }
 
+    void processSecondaryGrowth(float dt) {
+        TIME_FUNCTION;
+        for (auto& kv : plantStates) {
+            auto& state = kv.second;
+            if (state->trunk.empty()) continue;
+
+            state->age += dt;
+            state->secondaryTimer += dt;
+            if (state->secondaryTimer < config.secondaryGrowthInterval) continue;
+            state->secondaryTimer = 0.0f;
+
+            // Need a living particle to read DNA + energy gate: thickening costs energy.
+            auto proto = plantPrototype(kv.first);
+            if (!proto || !proto->dna) continue;
+            float drive = proto->dna->form.secondaryGrowth;
+            if (drive <= 0.05f) continue;
+            if (state->energy < 5.0f) continue;   // too weak to lay down wood
+
+            float increment = config.secondaryGrowthRate * drive;
+            float energyBudget = state->energy * 0.1f;   // spend up to 10% per pass
+            float spent = 0.0f;
+
+            for (auto& node : state->trunk) {
+                float cap = node.baseRadius * config.secondaryGrowthMaxMult;
+                if (node.currentRadius >= cap) continue;
+
+                float newRadius = std::min(cap, node.currentRadius + increment);
+                // Cost scales with the new shell area being laid down.
+                float ringCost = (newRadius - node.currentRadius) * node.baseRadius * 8.0f;
+                if (spent + ringCost > energyBudget) break;
+                spent += ringCost;
+
+                node.currentRadius = newRadius;
+                v3 u, w;
+                perpBasis(node.axis, u, w);
+                buildDiscRing(node.pos, u, w, node.currentRadius, *proto->dna, kv.first, false);
+            }
+
+            state->energy -= spent;
+        }
+    }
+
+    void processLeafDrop(float dt) {
+        TIME_FUNCTION;
+        if (activeLeaves.empty()) return;
+
+        // Deciduous, non-evergreen plants shed leaves once the air drops below their
+        // genetic drop temperature. Shed leaves become nitrogen-rich leaf litter so
+        // the nutrient cycle closes. Stochastic so a canopy thins gradually.
+        std::vector<v3> keep;
+        keep.reserve(activeLeaves.size());
+
+        for (const v3& pos : activeLeaves) {
+            auto node = grid.find(pos);
+            if (!node || node->data->pt != ParticleType::PLANT) continue;
+            auto p = std::static_pointer_cast<PlantParticle>(node->data);
+            if (!p || !p->dna) continue;
+
+            bool sheds = p->dna->leaf.isDeciduous && !p->dna->leaf.evergreen;
+            if (sheds && currentTemperature < p->dna->leaf.leafDropTemp) {
+                // colder = faster drop
+                float severity = std::clamp(
+                    (p->dna->leaf.leafDropTemp - currentTemperature) / 10.0f, 0.0f, 1.0f);
+                if (chanceDist(rng) < severity * dt * 0.5f) {
+                    grid.remove(pos);
+                    auto litter = std::make_shared<DirtParticle>();
+                    litter->hydration = 20.0f;
+                    litter->nitrogen += 15.0f;
+                    litter->carbon += 10.0f;
+                    grid.insert(litter, pos, true, v3(0.35f, 0.22f, 0.1f),
+                             config.stemFacetSize, true, 0);
+                    auto it = plantStates.find(p->plantId);
+                    if (it != plantStates.end() && it->second->leafCount > 0)
+                        it->second->leafCount -= 1;
+                    continue;
+                }
+            }
+            keep.push_back(pos);
+        }
+        activeLeaves = std::move(keep);
+    }
+
     void processPollination() {
+        TIME_FUNCTION;
         if (activeFlowers.size() < 1) return;
 
         std::vector<v3> survivingFlowers;
         std::vector<v3> newSeedSites;
 
-        struct FlowerRef { v3 pos; std::shared_ptr<PlantParticle> p; };
+        struct FlowerRef {
+            v3 pos;
+            std::shared_ptr<PlantParticle> p;
+        };
         std::vector<FlowerRef> flowers;
         flowers.reserve(activeFlowers.size());
         for (const v3& fp : activeFlowers) {
@@ -1548,7 +1951,8 @@ private:
                 if (flowers[j].p->plantId == A.p->plantId) continue;
                 float d = (flowers[j].pos - A.pos).norm();
                 if (d < config.voxelSize * 12.0f && d < bestDist) {
-                    bestDist = d; mate = (int)j;
+                    bestDist = d;
+                    mate = (int)j;
                 }
             }
 
@@ -1574,14 +1978,15 @@ private:
             float sx = A.pos.x() + off(rng);
             float sz = A.pos.z() + off(rng);
             if (std::abs(sx) > config.groundSize || std::abs(sz) > config.groundSize) continue;
-            float sy = getTerrainHeight(sx, sz);
+            float sy = solidGroundTop(sx, sz) + config.plantVoxelSize * 0.5f;
             if (sy < config.waterLevel) sy = config.waterLevel;
             v3 seedPos(sx, sy, sz);
 
             if (!grid.find(seedPos, config.voxelSize * 0.5f)) {
                 int pId = nextPlantId++;
                 auto st = std::make_shared<PlantState>();
-                st->energy = 40.0f; st->water = 40.0f;
+                st->energy = 40.0f;
+                st->water = 40.0f;
                 plantStates[pId] = st;
                 auto seed = std::make_shared<PlantParticle>(PlantPart::SEED, childDNA, seedPos, v3(0,1,0), 0);
                 seed->plantId = pId;
@@ -1602,6 +2007,7 @@ private:
     }
 
     void processDeath() {
+        TIME_FUNCTION;
         std::vector<int> deadIds;
         for (auto& kv : plantStates) {
             if (kv.second->energy <= 0.0f && kv.second->water <= 0.0f) {
@@ -1631,7 +2037,10 @@ private:
                 auto node = grid.find(pos);
                 if (node && node->data->pt == ParticleType::PLANT) {
                     auto p = std::static_pointer_cast<PlantParticle>(node->data);
-                    if (p && dead.count(p->plantId)) { decompose(pos); continue; }
+                    if (p && dead.count(p->plantId)) {
+                        decompose(pos);
+                        continue;
+                    }
                 }
                 keep.push_back(pos);
             }

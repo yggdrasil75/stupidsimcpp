@@ -49,19 +49,6 @@ namespace Grid {
     // same with physical materials, ie: have a "bone" material, "skin" "muscle" "blood" etc when simulating the physical body of a character. (well, maybe not that detailed. but something similar)
     // also need to store relative positions to the object center, both "resting" and "current". 
     // some rendering options: sgvf (temporal accumulation)
-    // also some more simplistic temporal model might be easier.
-    
-    // stratification: halton or sobol, cranley-patterson rotations (look into these)
-    // stochastic transparency (might be for fast version?)
-    // /*At half res (scale=0.5), you're searching 3 low-res pixels = 6 full-res pixels
-    //     The object ID matching fallback radius is 9 = 18 full-res pixels
-    //     This is likely causing excessive blurring at geometric edges. You need to adapt the radius to your scale:
-    // */
-
-// importance sampling: first hit finds objects that are more complex to render, less complex objects have less samples.
-// every 1/10th the samples per pixel, find regions with little variance, drop those in favor of focusing on the ones with large variance.
-// screen space path reuse for nearby pixels (I really need wavefront path tracing.)
-// first hit hitpoint and norm really need reuse.
 
     // a-trous wavelet denoising intead of bilateral filtering.
     // secondary pass of edge sharpening.
@@ -73,7 +60,6 @@ namespace Grid {
     /*
     insert list of voxels.
     get a vector of weak pointers to all voxels in an object
-    import an obj.
     change the current allow partial offload bit to be a flag so I can add more there later.
     changing a render material by its index
     getting a render material index from a voxel
@@ -83,7 +69,6 @@ namespace Grid {
     removing an object
     subdivide object (split each voxel into 8)
     smooth object? (subdivide and then remove corner?)
-
     */
 
 
