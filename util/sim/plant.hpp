@@ -506,6 +506,8 @@ struct DirtParticle : public PlantsimParticle {
     
     float hydration;
     float temperature;
+    bool impermeable = false;
+
 
     DirtParticle(float n = 100.0f, float p = 100.0f, float k = 100.0f, float c = 100.0f, float mg = 100.0f) 
         : PlantsimParticle(ParticleType::DIRT, 0.0f), nitrogen(n), phosphorus(p), potassium(k), 
@@ -520,6 +522,7 @@ struct DirtParticle : public PlantsimParticle {
         out.write(reinterpret_cast<const char*>(&magnesium), sizeof(magnesium));
         out.write(reinterpret_cast<const char*>(&hydration), sizeof(hydration));
         out.write(reinterpret_cast<const char*>(&temperature), sizeof(temperature));
+        out.write(reinterpret_cast<const char*>(&impermeable), sizeof(impermeable));
     }
     void deserializeDerived(std::ifstream& in) override {
         in.read(reinterpret_cast<char*>(&nitrogen), sizeof(nitrogen));
@@ -529,6 +532,7 @@ struct DirtParticle : public PlantsimParticle {
         in.read(reinterpret_cast<char*>(&magnesium), sizeof(magnesium));
         in.read(reinterpret_cast<char*>(&hydration), sizeof(hydration));
         in.read(reinterpret_cast<char*>(&temperature), sizeof(temperature));
+        in.read(reinterpret_cast<char*>(&impermeable), sizeof(impermeable));
     }
 };
 
@@ -624,10 +628,12 @@ struct WaterParticle : public PlantsimParticle {
     void serializeDerived(std::ofstream& out) const override {
         out.write(reinterpret_cast<const char*>(&splashCount), sizeof(splashCount));
         out.write(reinterpret_cast<const char*>(&size), sizeof(size));
+        out.write(reinterpret_cast<const char*>(&absorbCooldown), sizeof(absorbCooldown));
     }
     void deserializeDerived(std::ifstream& in) override {
         in.read(reinterpret_cast<char*>(&splashCount), sizeof(splashCount));
         in.read(reinterpret_cast<char*>(&size), sizeof(size));
+        in.read(reinterpret_cast<char*>(&absorbCooldown), sizeof(absorbCooldown));
     }
 };
 
@@ -740,6 +746,25 @@ struct PlantConfig {
     float soilMaxHydration     = 200.0f;
     float soilInitialHydration = 120.0f; // surface soil above the water line
     float soilAbsorbPerVoxel   = 30.0f;  // hydration gained when a water voxel soaks in
+
+    // When true, soil at or below the water line (and bedrock) is generated as an
+    // impermeable hydraulic wall: it never absorbs water and never loses hydration,
+    // so lakes cannot drain through their own bed and lake-side roots draw from an
+    // effectively infinite water table instead of emptying the visible lake.
+    bool  sealSubmergedSoil    = true;
+
+    // Absorption-check throttling. Settled water that soaked in / found unsaturated
+    // dirt retries soon (absorbRetryCooldown). Water sitting on impermeable/saturated
+    // dirt, or with no dirt at all (open pool / lake interior), is "sealed" for a long
+    // time so it stops running the radius query every frame — this is the dominant
+    // cost in processSoilAbsorption. Motion (velocity spike) always re-arms the check.
+    int   absorbRetryCooldown  = 3;
+    int   absorbSealedCooldown = 100000;
+
+    // Treat the simulation bounds as a solid wall so fluid can never leak out of the
+    // domain, and clamp world generation to stay inside the octree so no edge voxels
+    // are silently dropped (which would leave gaps in the wall).
+    bool  solidWorldBoundary   = true;
 
     // World generation depth. Columns are filled from the surface down to worldBottomY.
     // Above deepZoneTopY voxels use the normal voxelSize; below it they switch to
@@ -937,9 +962,17 @@ public:
         extendedHeatTimer = 0.0f;
         rainAccumulator = 0.0f;
 
-        float minGround = -config.groundSize;
-        float maxGround = config.groundSize;
         float vSize = config.voxelSize;
+
+        // Treat the domain edge as a solid wall so fluid is reflected, never lost.
+        grid.setPhysicsSolidBoundary(config.solidWorldBoundary);
+
+        // Keep generation strictly inside the octree. groundSize can exceed gridsize,
+        // and grid.insert() silently drops anything outside root bounds — that would
+        // punch holes in the boundary wall and leave the lake open at the edges.
+        float genLimit  = gridsize - vSize;   // one voxel of margin from the hard wall
+        float minGround = std::max(-config.groundSize, -genLimit);
+        float maxGround = std::min( config.groundSize,  genLimit);
 
         // Keep the fill inside the octree bounds. The deep zone is filled with coarse
         // voxels (config.deepVoxelSize) and the very bottom slab is static bedrock.
@@ -949,10 +982,16 @@ public:
 
         auto makeDirt = [&](const v3& c, float size, bool bedrock) {
             auto dirt = std::make_shared<DirtParticle>();
+            bool submerged = c.y() < config.waterLevel;
             // Submerged soil starts saturated so lake beds don't drink their own lake;
             // everything else starts damp but below the cap so it can still take rain.
-            dirt->hydration = (c.y() < config.waterLevel) ? config.soilMaxHydration
-                                                          : config.soilInitialHydration;
+            dirt->hydration = submerged ? config.soilMaxHydration
+                                        : config.soilInitialHydration;
+            // Lake beds and bedrock are permanent hydraulic walls: never absorb, never
+            // drain. This is what actually keeps the starting lake full — a saturated
+            // (hydration == max) voxel used to become absorbent again the moment a root
+            // sipped from it, silently re-opening the drain.
+            dirt->impermeable = config.sealSubmergedSoil && (bedrock || submerged);
             v3 col = bedrock ? v3(0.22f, 0.20f, 0.19f)                    // grey bedrock
                              : v3(0.40f, 0.26f, 0.12f);                   // brown soil
             grid.queuedset(dirt, c, true, col, size, true, 0);
@@ -1411,21 +1450,26 @@ private:
             if (w->absorbCooldown > 0) { w->absorbCooldown--; continue; }
 
             auto neigh = grid.findInRadius(pos, config.voxelSize * 0.9f, 0);
-            bool foundDirt = false;
-            bool absorbed = false;
+
+            // Single pass over neighbours. We classify the soil contact into exactly
+            // one of: absorbable (has headroom), or a hard wall (impermeable OR already
+            // saturated). Plants in range still sip passing water. Whether the voxel is
+            // ultimately sealed depends only on whether *any* absorbable dirt exists.
+            bool absorbed    = false;
+            bool sawDirt     = false;
+            bool absorbable  = false;   // at least one neighbouring dirt has real headroom
+            DirtParticle* target = nullptr;
+
             for (auto& n : neigh) {
                 if (n->data->pt == ParticleType::DIRT) {
                     auto d = std::static_pointer_cast<DirtParticle>(n->data);
-                    foundDirt = true;
-                    if (d->hydration < config.soilMaxHydration) {
-                        if (chanceDist(rng) < std::clamp(dt * 2.0f, 0.0f, 1.0f)) {
-                            d->hydration = std::min(config.soilMaxHydration,
-                                                    d->hydration + config.soilAbsorbPerVoxel);
-                            grid.remove(pos);
-                            absorbed = true;
-                        }
-                    }
-                    break;
+                    sawDirt = true;
+                    // Clean bypass: impermeable soil (lake bed / bedrock / water table)
+                    // and fully-saturated soil are walls. They never take water, so they
+                    // never keep this voxel "busy" — skip straight past them.
+                    if (d->impermeable || d->hydration >= config.soilMaxHydration) continue;
+                    // First genuinely thirsty dirt wins.
+                    if (!absorbable) { absorbable = true; target = d.get(); }
                 } else if (n->data->pt == ParticleType::PLANT) {
                     auto p = std::static_pointer_cast<PlantParticle>(n->data);
                     auto it = plantStates.find(p->plantId);
@@ -1433,25 +1477,25 @@ private:
                 }
             }
 
-            if (!absorbed) {
-                // No dirt nearby, or the dirt is saturated: this voxel is effectively
-                // pooled. Back off hard so lake water is only re-examined occasionally
-                // (roots drying nearby soil will free capacity again eventually). If
-                // there was unsaturated dirt but the random draw missed, retry soon.
-                bool absorbable = false;
-                if (foundDirt) {
-                    // cheap: we already broke on the first dirt neighbour above, so
-                    // approximate "absorbable" by whether that dirt had headroom.
-                    absorbable = true;
-                    for (auto& n : neigh) {
-                        if (n->data->pt == ParticleType::DIRT) {
-                            auto d = std::static_pointer_cast<DirtParticle>(n->data);
-                            absorbable = d->hydration < config.soilMaxHydration;
-                            break;
-                        }
-                    }
+            if (absorbable && target) {
+                if (chanceDist(rng) < std::clamp(dt * 2.0f, 0.0f, 1.0f)) {
+                    target->hydration = std::min(config.soilMaxHydration,
+                                                 target->hydration + config.soilAbsorbPerVoxel);
+                    grid.remove(pos);
+                    absorbed = true;
                 }
-                w->absorbCooldown = absorbable ? 3 : 30;
+            }
+
+            if (!absorbed) {
+                // Decide how long to stop re-querying. If there is thirsty dirt we just
+                // lost the random roll against, retry soon. Otherwise every dirt contact
+                // is a wall (impermeable/saturated) or there's no dirt at all (open lake
+                // interior): seal this voxel for a long time. It only ever re-arms when
+                // it physically moves (the velocity check at the top resets the cooldown),
+                // e.g. a root frees capacity in adjacent soil and the pool shifts.
+                w->absorbCooldown = absorbable ? config.absorbRetryCooldown
+                                               : config.absorbSealedCooldown;
+                (void)sawDirt;
             }
         }
     }
@@ -1473,7 +1517,10 @@ private:
                         auto d = std::static_pointer_cast<DirtParticle>(dirtData->data);
                         if (d && d->hydration > 0.0f) {
                             float draw = std::min(d->hydration, dt * p->dna->waterAbsorptionRate);
-                            d->hydration -= draw;
+                            // Impermeable soil is an infinite water table (lake bed): roots
+                            // drink from it but it never drops below the cap, so it never
+                            // becomes absorbent and the lake above it never drains.
+                            if (!d->impermeable) d->hydration -= draw;
                             state->water += draw;
                             
                             if (p->dna->special.fungalSaprotrophy > 0.0f) {

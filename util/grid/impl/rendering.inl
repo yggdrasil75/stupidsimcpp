@@ -254,6 +254,8 @@ struct VulkanContext {
                    wfExtendBMem = VK_NULL_HANDLE, wfShadeMem = VK_NULL_HANDLE,
                    wfShadowMem = VK_NULL_HANDLE, wfCounterMem = VK_NULL_HANDLE;
     size_t wfPathCap = 0;
+    VkCommandBuffer wfCmd[2]   = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkFence         wfFence[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
     VkDescriptorSet fastDescSet = VK_NULL_HANDLE;
     VkDescriptorSet pbrDescSet = VK_NULL_HANDLE;
@@ -1442,81 +1444,99 @@ void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel
 
     const int samplesPerSubmit = 1;
 
-    VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-    VkFence fence;
-    vkCreateFence(device, &fi, nullptr, &fence);
+    if (wfCmd[0] == VK_NULL_HANDLE) {
+        VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        cai.commandPool = commandPool;
+        cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cai.commandBufferCount = 2;
+        vkAllocateCommandBuffers(device, &cai, wfCmd);
+        VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        fi.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+        vkCreateFence(device, &fi, nullptr, &wfFence[0]);
+        vkCreateFence(device, &fi, nullptr, &wfFence[1]);
+    }
 
-    for (int s0 = 0; s0 < samplesPerPixel; s0 += samplesPerSubmit) {
+    int slot = 0;
+    for (int s0 = 0; s0 < samplesPerPixel; s0 += samplesPerSubmit, slot ^= 1) {
         int s1 = std::min(s0 + samplesPerSubmit, samplesPerPixel);
+        VkCommandBuffer cmd = wfCmd[slot];
+        {
+            ScopedFunctionTimer _sw("wf.waitSlot");
+            vkWaitForFences(device, 1, &wfFence[slot], VK_TRUE, UINT64_MAX);
+            vkResetFences(device, 1, &wfFence[slot]);
+        }
 
         ScopedFunctionTimer* _rec = new ScopedFunctionTimer("wf.recordCmd");
         VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-        vkBeginCommandBuffer(commandBuffer, &bi);
-        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(cmd, &bi);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                                 wfPipelineLayout, 0, 1, &wfDescSet, 0, nullptr);
 
         for (int s = s0; s < s1; ++s) {
-            wfBind(commandBuffer, wfArgsPipe);
-            wfPush(commandBuffer, 0, 4, s);
-            vkCmdDispatch(commandBuffer, 1, 1, 1);
-            wfBarrier(commandBuffer);
-            wfBind(commandBuffer, wfInitPipe);
-            wfPush(commandBuffer, 0, 0, s);
-            vkCmdDispatch(commandBuffer, pathGroups, 1, 1);
-            wfBarrier(commandBuffer);
+            // Clear all counters, then seed the primary-ray queue.
+            wfBind(cmd, wfArgsPipe);
+            wfPush(cmd, 0, 4, s);
+            vkCmdDispatch(cmd, 1, 1, 1);
+            wfBarrier(cmd);
+            wfBind(cmd, wfInitPipe);
+            wfPush(cmd, 0, 0, s);
+            vkCmdDispatch(cmd, pathGroups, 1, 1);
+            wfBarrier(cmd);
+            // Publish extend args for the first iteration (old stage 0).
+            wfBind(cmd, wfArgsPipe);
+            wfPush(cmd, 0, 0, s);
+            vkCmdDispatch(cmd, 1, 1, 1);
+            wfBarrier(cmd);
 
             int parity = 0;
             for (int it = 0; it < maxIters; ++it) {
-                wfBind(commandBuffer, wfArgsPipe);
-                wfPush(commandBuffer, parity, 0, s);
-                vkCmdDispatch(commandBuffer, 1, 1, 1);
-                wfBarrier(commandBuffer);
-                wfBind(commandBuffer, wfExtendPipe);
-                wfPush(commandBuffer, parity, 0, s);
-                vkCmdDispatchIndirect(commandBuffer, wfCounterBuf, WF_OFF_EXTEND_ARGS);
-                wfBarrier(commandBuffer);
-                wfBind(commandBuffer, wfArgsPipe);
-                wfPush(commandBuffer, parity, 1, s);
-                vkCmdDispatch(commandBuffer, 1, 1, 1);
-                wfBarrier(commandBuffer);
-                wfBind(commandBuffer, wfShadePipe);
-                wfPush(commandBuffer, parity, 0, s);
-                vkCmdDispatchIndirect(commandBuffer, wfCounterBuf, WF_OFF_SHADE_ARGS);
-                wfBarrier(commandBuffer);
-                wfBind(commandBuffer, wfArgsPipe);
-                wfPush(commandBuffer, parity, 2, s);
-                vkCmdDispatch(commandBuffer, 1, 1, 1);
-                wfBarrier(commandBuffer);
-                wfBind(commandBuffer, wfShadowPipe);
-                wfPush(commandBuffer, parity, 0, s);
-                vkCmdDispatchIndirect(commandBuffer, wfCounterBuf, WF_OFF_SHADOW_ARGS);
-                wfBarrier(commandBuffer);
-                wfBind(commandBuffer, wfArgsPipe);
-                wfPush(commandBuffer, parity, 3, s);
-                vkCmdDispatch(commandBuffer, 1, 1, 1);
-                wfBarrier(commandBuffer);
+                // extend: trace the current ray queue
+                wfBind(cmd, wfExtendPipe);
+                wfPush(cmd, parity, 0, s);
+                vkCmdDispatchIndirect(cmd, wfCounterBuf, WF_OFF_EXTEND_ARGS);
+                wfBarrier(cmd);
+                wfBind(cmd, wfArgsPipe);
+                wfPush(cmd, parity, 1, s);
+                vkCmdDispatch(cmd, 1, 1, 1);
+                wfBarrier(cmd);
+                wfBind(cmd, wfShadePipe);
+                wfPush(cmd, parity, 0, s);
+                vkCmdDispatchIndirect(cmd, wfCounterBuf, WF_OFF_SHADE_ARGS);
+                wfBarrier(cmd);
+                wfBind(cmd, wfArgsPipe);
+                wfPush(cmd, parity, 5, s);
+                vkCmdDispatch(cmd, 1, 1, 1);
+                wfBarrier(cmd);
+                wfBind(cmd, wfShadowPipe);
+                wfPush(cmd, parity, 0, s);
+                vkCmdDispatchIndirect(cmd, wfCounterBuf, WF_OFF_SHADOW_ARGS);
+                wfBarrier(cmd);
                 parity ^= 1;
             }
 
-            wfBind(commandBuffer, wfFinalizePipe);
-            wfPush(commandBuffer, parity, 0, s);
-            vkCmdDispatch(commandBuffer, pathGroups, 1, 1);
-            wfBarrier(commandBuffer);
+            wfBind(cmd, wfFinalizePipe);
+            wfPush(cmd, parity, 0, s);
+            vkCmdDispatch(cmd, pathGroups, 1, 1);
+            wfBarrier(cmd);
         }
 
-        vkEndCommandBuffer(commandBuffer);
+        vkEndCommandBuffer(cmd);
         delete _rec;
 
-        ScopedFunctionTimer _sw("wf.submitAndWait");
+        ScopedFunctionTimer _sw("wf.submit");
         VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
         si.commandBufferCount = 1;
-        si.pCommandBuffers = &commandBuffer;
-        vkResetFences(device, 1, &fence);
-        vkQueueSubmit(queue, 1, &si, fence);
-        vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
+        si.pCommandBuffers = &cmd;
+        vkQueueSubmit(queue, 1, &si, wfFence[slot]);
     }
 
-    vkDestroyFence(device, fence, nullptr);
+    // Drain both slots before returning: callers read back / reuse the
+    // output buffers immediately after this function.
+    {
+        ScopedFunctionTimer _sw("wf.submitAndWait");
+        vkWaitForFences(device, 2, wfFence, VK_TRUE, UINT64_MAX);
+    }
 }
 
 #include "vct_host.inl"

@@ -319,7 +319,7 @@ private:
     ///@brief Computes the combined bounding box of multiple points
     ///@param nodes List of node data pointers
     ///@return The overall bounding box enclosing all points
-    BoundingBox getNodesBounds(const std::vector<std::shared_ptr<NodeData>>& nodes) const {
+    inline BoundingBox getNodesBounds(const std::vector<std::shared_ptr<NodeData>>& nodes) const {
         if (nodes.empty()) return {Vec3::Zero(), Vec3::Zero()};
         BoundingBox bounds = nodes[0]->getCubeBounds();
         for (size_t i = 1; i < nodes.size(); ++i) {
@@ -336,7 +336,7 @@ private:
     ///@param current The current evaluation node
     ///@param depth Tracks the recursive depth offset output
     ///@return A pointer to the highest shared node
-    OctreeNode* getHighestCommonNodeRecursive(const Vec3& Min, const Vec3& Max, OctreeNode* current, int& depth) const {
+    inline OctreeNode* getHighestCommonNodeRecursive(const Vec3& Min, const Vec3& Max, OctreeNode* current, int& depth) const {
         depth++;
         s_lock lock(current->nodeMutex);
         uint8_t mcell = getOctant(Min, current->center);
@@ -407,7 +407,7 @@ private:
     ///@param node The starting search node
     ///@param objectId The internal ID to erase
     ///@return The number of erased points
-    size_t removeObjectBatchRecursive(OctreeNode* node, int objectId) {
+    inline size_t removeObjectBatchRecursive(OctreeNode* node, int objectId) {
         if (!node) return 0;
         ensureLoaded(node, false);
         size_t removed = 0;
@@ -656,7 +656,7 @@ private:
     ///@param node The active parent node
     ///@param octant Index ID mapping the 3D grid [0..7]
     ///@return Bounding min/max array for the child zone
-    BoundingBox createChildBounds(const OctreeNode* node, uint8_t octant) const {
+    inline BoundingBox createChildBounds(const OctreeNode* node, uint8_t octant) const {
         Vec3 childMin, childMax;
         const Vec3& center = node->center;
         const BoundingBox bounds = node->bounds();
@@ -677,7 +677,7 @@ private:
     ///@param a Reference box A
     ///@param b Reference box B
     ///@return True if their volumes intersect
-    bool boxIntersectsBox(const BoundingBox& a, const BoundingBox& b) const {
+    inline bool boxIntersectsBox(const BoundingBox& a, const BoundingBox& b) const {
         return ((a.first.array() <= b.second.array()) && (a.second.array() >= b.first.array())).all();
     }
 
@@ -685,7 +685,7 @@ private:
     ///@param outer Evaluation perimeter
     ///@param inner Geometry being enclosed
     ///@return True if the entire inner box resides inside the outer box limits
-    bool boxContainsBox(const BoundingBox& outer, const BoundingBox& inner) const {
+    inline bool boxContainsBox(const BoundingBox& outer, const BoundingBox& inner) const {
         return ((inner.first.array() >= outer.first.array()) && (inner.second.array() <= outer.second.array())).all();
     }
 
@@ -727,7 +727,7 @@ private:
     ///@param pointData Populated element to be stored
     ///@param depth Hierarchy loop tracker
     ///@return True if insertion successfully found an appropriate branch
-    bool insertRecursive(OctreeNode* node, const std::shared_ptr<NodeData>& pointData, int depth) {
+    inline bool insertRecursive(OctreeNode* node, const std::shared_ptr<NodeData>& pointData, int depth) {
         if (!node) return false;
         ensureLoaded(node);
         BoundingBox cubeBounds = pointData->getCubeBounds();
@@ -1248,7 +1248,7 @@ private:
     ///@param tMin Extracted entrance magnitude
     ///@param tMax Extracted exit magnitude
     ///@return True if a legitimate pass-through happened
-    bool rayBoxIntersect(const Ray& ray, const BoundingBox& box, float& tMin, float& tMax) const {
+    inline bool rayBoxIntersect(const Ray& ray, const BoundingBox& box, float& tMin, float& tMax) const {
         float tx1 = (box.first[0] - ray.origin[0]) * ray.invDir[0];
         float tx2 = (box.second[0] - ray.origin[0]) * ray.invDir[0];
 
@@ -1278,7 +1278,7 @@ private:
     ///@param hitPoint Output capturing physical absolute coordinates
     ///@param tExit Optionally extracts outgoing intersection bounds length
     ///@return True on functional penetration validation
-    bool rayCubeIntersect(const Ray& ray, const RenderData* cube, float& t, Vec3& normal, Vec3& hitPoint, float* tExit = nullptr) const {
+    inline bool rayCubeIntersect(const Ray& ray, const RenderData* cube, float& t, Vec3& normal, Vec3& hitPoint, float* tExit = nullptr) const {
         float t0x = (cube->boundsMin[0] - ray.origin[0]) * ray.invDir[0];
         float t1x = (cube->boundsMax[0] - ray.origin[0]) * ray.invDir[0];
         if (ray.invDir[0] < 0.0f) std::swap(t0x, t1x);

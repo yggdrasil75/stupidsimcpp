@@ -33,5 +33,12 @@ void main() {
         case 3:
             ctr.extendCount     = ctr.nextExtendCount;
             break;
+        case 5:
+            ctr.shadowArgs      = divUp(ctr.shadowCount);
+            ctr.extendCount     = ctr.nextExtendCount;
+            ctr.extendArgs      = divUp(ctr.extendCount);
+            ctr.shadeCount      = 0u;
+            ctr.nextExtendCount = 0u;
+            break;
     }
 }
