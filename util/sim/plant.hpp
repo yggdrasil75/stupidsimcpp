@@ -616,6 +616,7 @@ struct PlantParticle : public PlantsimParticle {
 struct WaterParticle : public PlantsimParticle {
     int splashCount = 0;
     float size = 0.2f;
+    int absorbCooldown = 0;
 
     WaterParticle() : PlantsimParticle(ParticleType::WATER, 5.0f) {
     }
@@ -732,6 +733,24 @@ struct PlantConfig {
     float secondaryGrowthRate     = 0.015f; // radius added per pass at full drive
     float secondaryGrowthMaxMult  = 3.0f;   // cap: trunk can reach Nx its primary radius
 
+    // Soil moisture. Soil now starts damp and can only hold up to soilMaxHydration.
+    // Once a patch is saturated it stops drinking, so settled water pools into lakes
+    // instead of vanishing the instant it comes to rest. Submerged soil (below the
+    // water line) starts fully saturated so lake beds don't drain their own lake.
+    float soilMaxHydration     = 200.0f;
+    float soilInitialHydration = 120.0f; // surface soil above the water line
+    float soilAbsorbPerVoxel   = 30.0f;  // hydration gained when a water voxel soaks in
+
+    // World generation depth. Columns are filled from the surface down to worldBottomY.
+    // Above deepZoneTopY voxels use the normal voxelSize; below it they switch to
+    // deepVoxelSize (larger, so far fewer are needed to fill the deep interior). The
+    // lowest bedrockThickness worth of the column is static bedrock that physics never
+    // moves; everything above it is free to settle.
+    float worldBottomY     = -14.0f;
+    float deepZoneTopY     = -4.0f;
+    float deepVoxelSize    = 2.0f;   // == 4x the default 0.5 voxelSize
+    float bedrockThickness = 2.0f;   // world units of static bedrock at the very bottom
+
     int   terrainSeed       = 42;
     float terrainScale      = 0.015f;
     float terrainAmplitude  = 2.0f;
@@ -795,6 +814,11 @@ public:
     PNoise2 terrainNoise;
     PNoise2 rainNoise;
     static constexpr int WATER_OBJ = 3;
+
+    // Live count of active water voxels, refreshed as a side effect of
+    // processSoilAbsorption (which already collects every water node). The UI reads
+    // this instead of forcing its own full water-object scan every frame.
+    size_t cachedWaterVoxelCount = 0;
 
     PlantSim(PlantConfig cfg = PlantConfig()) : config(cfg), terrainNoise((unsigned int)cfg.terrainSeed),
           rainNoise((unsigned int)(cfg.terrainSeed ^ 0x9E3779B9u)) {
@@ -917,17 +941,30 @@ public:
         float maxGround = config.groundSize;
         float vSize = config.voxelSize;
 
+        // Keep the fill inside the octree bounds. The deep zone is filled with coarse
+        // voxels (config.deepVoxelSize) and the very bottom slab is static bedrock.
+        float worldBottom = std::max(config.worldBottomY, -gridsize + vSize * 0.5f);
+        float shallowFloor = std::max(config.deepZoneTopY, worldBottom); // small voxels above here
+        float bedrockTop   = worldBottom + config.bedrockThickness;      // below here => bedrock
+
+        auto makeDirt = [&](const v3& c, float size, bool bedrock) {
+            auto dirt = std::make_shared<DirtParticle>();
+            // Submerged soil starts saturated so lake beds don't drink their own lake;
+            // everything else starts damp but below the cap so it can still take rain.
+            dirt->hydration = (c.y() < config.waterLevel) ? config.soilMaxHydration
+                                                          : config.soilInitialHydration;
+            v3 col = bedrock ? v3(0.22f, 0.20f, 0.19f)                    // grey bedrock
+                             : v3(0.40f, 0.26f, 0.12f);                   // brown soil
+            grid.queuedset(dirt, c, true, col, size, true, 0);
+        };
+
+        // 1) Fine surface soil, filled continuously from the terrain surface down to the
+        //    top of the deep zone (no more rainfall-based max depth guesswork).
         for (float x = minGround; x <= maxGround; x += vSize) {
             for (float z = minGround; z <= maxGround; z += vSize) {
                 float surfaceY = getTerrainHeight(x, z);
-                int depth = 10 + static_cast<int>(getRainfallDensity(x, z) * 8.0f);
-
-                for (int d = 0; d < depth; ++d) {
-                    float y = surfaceY - vSize * d - vSize;
-                    
-                    auto dirt = std::make_shared<DirtParticle>();
-                    dirt->hydration = 100.0f + d * 10.0f;
-                    grid.queuedset(dirt, v3(x, y, z), true, v3(0.4f - d*0.015f, 0.25f - d*0.01f, 0.1f), vSize, true, 0);
+                for (float cy = surfaceY - vSize * 0.5f; cy > shallowFloor; cy -= vSize) {
+                    makeDirt(v3(x, cy, z), vSize, false);
                 }
 
                 float wvs = config.waterVoxelSize;
@@ -946,14 +983,31 @@ public:
                 }
             }
         }
+
+        // 2) Deep interior: one big coarse voxel per deepVoxelSize cell fills the volume
+        //    from the deep-zone top down to the world bottom with far fewer voxels. The
+        //    lowest bedrockThickness worth is flagged as static bedrock.
+        float dv = std::max(vSize, config.deepVoxelSize);
+        for (float x = minGround; x <= maxGround; x += dv) {
+            for (float z = minGround; z <= maxGround; z += dv) {
+                for (float cy = shallowFloor - dv * 0.5f; cy > worldBottom; cy -= dv) {
+                    bool bedrock = (cy - dv * 0.5f) < bedrockTop;
+                    makeDirt(v3(x, cy, z), dv, bedrock);
+                }
+            }
+        }
         
         auto air = std::make_shared<AirParticle>();
         grid.queuedset(air, v3(0.0f, std::max(0.0f, config.waterLevel) + vSize / 2.0f, 0.0f), false, v3(0.0f, 0.0f, 0.0f), vSize, true, 2);
 
         if (spawnDefaultSeed) {
             auto seedDNA = std::make_shared<PlantDNA>();
-            v3 startPos = v3(0.0f, getTerrainHeight(0.0f, 0.0f), 0.0f);
-            if (startPos.y() < config.waterLevel) startPos.y() = config.waterLevel;
+            // Rest the seed on the solid soil surface (top face of the highest dirt
+            // voxel) rather than at the raw terrain height, which sat it a half-voxel
+            // in the air. This matches the runtime snap target so it never hovers.
+            float groundY = solidGroundTop(0.0f, 0.0f);
+            if (groundY < config.waterLevel) groundY = config.waterLevel;
+            v3 startPos = v3(0.0f, groundY + config.plantVoxelSize * 0.5f, 0.0f);
             
             int pId = nextPlantId++;
             auto state = std::make_shared<PlantState>();
@@ -1129,11 +1183,7 @@ public:
     }
     
     size_t getActiveWaterVoxelCount() {
-        TIME_FUNCTION;
-        using GridT = std::decay_t<decltype(grid)>;
-        std::vector<std::shared_ptr<GridT::NodeData>> nodes;
-        grid.collectNodesByObjectId(WATER_OBJ, nodes);
-        return nodes.size();
+        return cachedWaterVoxelCount;
     }
 
     void update(float dt) {
@@ -1325,6 +1375,7 @@ private:
         using GridT = std::decay_t<decltype(grid)>;
         std::vector<std::shared_ptr<GridT::NodeData>> waterNodes;
         grid.collectNodesByObjectId(WATER_OBJ, waterNodes);
+        cachedWaterVoxelCount = waterNodes.size();
         if (waterNodes.empty()) return;
 
         // Snow accumulates while freezing and melts back into liquid water once the
@@ -1351,16 +1402,27 @@ private:
             auto w = std::static_pointer_cast<WaterParticle>(node->data);
             v3 pos = node->position;
 
-            if (w->velocity.norm() > 0.5f) continue;
+            // Moving water is still in transit; let it settle and re-arm its check.
+            if (w->velocity.norm() > 0.5f) { w->absorbCooldown = 0; continue; }
+
+            // Settled water that recently found nothing to soak into skips the costly
+            // radius query for a while. This is the main win: lake/pooled water no
+            // longer pays for a spatial search on every single update.
+            if (w->absorbCooldown > 0) { w->absorbCooldown--; continue; }
 
             auto neigh = grid.findInRadius(pos, config.voxelSize * 0.9f, 0);
+            bool foundDirt = false;
+            bool absorbed = false;
             for (auto& n : neigh) {
                 if (n->data->pt == ParticleType::DIRT) {
                     auto d = std::static_pointer_cast<DirtParticle>(n->data);
-                    if (d->hydration < 200.0f) {
+                    foundDirt = true;
+                    if (d->hydration < config.soilMaxHydration) {
                         if (chanceDist(rng) < std::clamp(dt * 2.0f, 0.0f, 1.0f)) {
-                            d->hydration += 30.0f;
+                            d->hydration = std::min(config.soilMaxHydration,
+                                                    d->hydration + config.soilAbsorbPerVoxel);
                             grid.remove(pos);
+                            absorbed = true;
                         }
                     }
                     break;
@@ -1369,6 +1431,27 @@ private:
                     auto it = plantStates.find(p->plantId);
                     if (it != plantStates.end()) it->second->water += dt * 1.0f;
                 }
+            }
+
+            if (!absorbed) {
+                // No dirt nearby, or the dirt is saturated: this voxel is effectively
+                // pooled. Back off hard so lake water is only re-examined occasionally
+                // (roots drying nearby soil will free capacity again eventually). If
+                // there was unsaturated dirt but the random draw missed, retry soon.
+                bool absorbable = false;
+                if (foundDirt) {
+                    // cheap: we already broke on the first dirt neighbour above, so
+                    // approximate "absorbable" by whether that dirt had headroom.
+                    absorbable = true;
+                    for (auto& n : neigh) {
+                        if (n->data->pt == ParticleType::DIRT) {
+                            auto d = std::static_pointer_cast<DirtParticle>(n->data);
+                            absorbable = d->hydration < config.soilMaxHydration;
+                            break;
+                        }
+                    }
+                }
+                w->absorbCooldown = absorbable ? 3 : 30;
             }
         }
     }

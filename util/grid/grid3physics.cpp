@@ -169,6 +169,7 @@ void Octree<T>::stepPhysics(float dt) {
             for (const auto& pt : cur->points) {
                 if (!pt->isActive()) continue;
                 int oi = pt->objectId + 1;
+                if (pt->physMatIdx >= fastMats[oi].size()) continue;
                 if (oi < 0 || oi >= (int)fastMatsSize) continue;
                 if (fastMats[oi][pt->physMatIdx].type == BodyType::FLUID) continue;
                 const Vec3& pp = pt->position;
