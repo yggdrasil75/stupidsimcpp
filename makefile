@@ -52,7 +52,7 @@ EXE := $(BIN_DIR)/g2gradc
 
 GLSLC := glslc --target-env=vulkan1.3
 
-SHADER_SRCS := $(SHADER_DIR)/fast_raytrace.comp $(SHADER_DIR)/fast_raytrace_hw.comp $(SHADER_DIR)/smooth.comp $(SHADER_DIR)/blend.comp
+SHADER_SRCS := $(SHADER_DIR)/fast_raytrace_hw.comp $(SHADER_DIR)/smooth.comp $(SHADER_DIR)/blend.comp
 SHADER_SRCS += $(SHADER_DIR)/wf_init.comp $(SHADER_DIR)/wf_args.comp $(SHADER_DIR)/wf_extend.comp $(SHADER_DIR)/wf_shade.comp $(SHADER_DIR)/wf_shadow.comp $(SHADER_DIR)/wf_finalize.comp
 SHADER_SRCS += $(SHADER_DIR)/vct_mip.comp  $(SHADER_DIR)/vct_voxelize.comp 
 SHADER_SPVS := $(patsubst $(SHADER_DIR)/%.comp,$(BIN_DIR)/%.spv,$(SHADER_SRCS))

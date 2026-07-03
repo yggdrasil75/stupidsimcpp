@@ -10,15 +10,19 @@ struct RenderData {
     float size;
     Eigen::Vector4f color;
     uint32_t materialIdx;
-    Vec3 boundsMin;
-    Vec3 boundsMax;
     int objectId;
+
+    const Vec3 boundsMin() const {
+        return (position - Vec3::Constant(0.5 * size));
+    }
+
+    const Vec3 boundsMax() const {
+        return (position + Vec3::Constant(0.5 * size));
+    }
 };
 
 template<typename T>
 struct RenderNode_ {
-    Vec3 boundsMin;
-    Vec3 boundsMax;
     Vec3 center;
     float nodeSize;
     bool isLeaf;
@@ -31,6 +35,14 @@ struct RenderNode_ {
     uint32_t firstChild;
     
     OctreeNode_<T>* originalNode;
+
+    const Vec3 boundsMin() const {
+        return (center - Vec3::Constant(0.5 * nodeSize));
+    }
+
+    const Vec3 boundsMax() const {
+        return (center + Vec3::Constant(0.5 * nodeSize));
+    }
 };
 
 template<typename T>
@@ -50,76 +62,12 @@ struct RenderBuffer_ {
     }
 };
 
-static Vec3 sampleGGX(const Vec3& n, float roughness, uint32_t& state) {
-    float alpha = std::max(EPSILON, roughness * roughness);
-    float r1 = float(rand_r(&state)) / float(RAND_MAX);
-    float r2 = float(rand_r(&state)) / float(RAND_MAX);
-    
-    float phi = 2.0f * M_PI * r1;
-    float denom = 1.0f + (alpha * alpha - 1.0f) * r2;
-    denom = std::max(denom, EPSILON);
-    float cosTheta = std::sqrt(std::max(0.0f, (1.0f - r2) / denom));
-    float sinTheta = std::sqrt(std::max(0.0f, 1.0f - cosTheta * cosTheta));
-    
-    Vec3 h;
-    h[0] = sinTheta * std::cos(phi);
-    h[1] = sinTheta * std::sin(phi);
-    h[2] = cosTheta;
-    
-    Vec3 up = std::abs(n.z()) < 0.999f ? Vec3(0,0,1) : Vec3(1,0,0);
-    Vec3 tangent = up.cross(n).normalized();
-    Vec3 bitangent = n.cross(tangent);
-    
-    return (tangent * h[0] + bitangent * h[1] + n * h[2]).normalized();
-}
-
-static Vec3 sampleCosineHemisphere(const Vec3& n, uint32_t& state) {
-    float r1 = float(rand_r(&state)) / float(RAND_MAX);
-    float r2 = float(rand_r(&state)) / float(RAND_MAX);
-    float phi = 2.0f * M_PI * r1;
-    float r = std::sqrt(r2);
-    float x = r * std::cos(phi);
-    float y = r * std::sin(phi);
-    float z = std::sqrt(std::max(0.0f, 1.0f - x*x - y*y));
-    
-    Vec3 up = std::abs(n.z()) < 0.999f ? Vec3(0,0,1) : Vec3(1,0,0);
-    Vec3 tangent = up.cross(n).normalized();
-    Vec3 bitangent = n.cross(tangent);
-    
-    return (tangent * x + bitangent * y + n * z).normalized();
-}
-
-static inline float nextFloat(uint32_t& state) {
-    if (state == 0) state = 123456789;
-    state ^= state << 13;
-    state ^= state >> 17;
-    state ^= state << 5;
-    return (state & 0xFFFFFF) / 16777216.0f;
-}
-
 #ifdef VULKAN_SUPPORT
 static PFN_vkGetAccelerationStructureBuildSizesKHR pfn_vkGetAccelerationStructureBuildSizesKHR = nullptr;
 static PFN_vkCreateAccelerationStructureKHR pfn_vkCreateAccelerationStructureKHR = nullptr;
 static PFN_vkCmdBuildAccelerationStructuresKHR pfn_vkCmdBuildAccelerationStructuresKHR = nullptr;
 static PFN_vkDestroyAccelerationStructureKHR pfn_vkDestroyAccelerationStructureKHR = nullptr;
 static PFN_vkGetAccelerationStructureDeviceAddressKHR pfn_vkGetAccelerationStructureDeviceAddressKHR = nullptr;
-
-struct alignas(16) GPURenderNode {
-    Vec3 boundsMin;
-    float padding1;
-    Vec3 boundsMax;
-    float padding2;
-    Vec3 center;
-    float nodeSize;
-    uint32_t isLeaf;
-    uint32_t isLoaded;
-    uint32_t childMask;
-    uint32_t firstPoint;
-    uint32_t pointCount;
-    int32_t  lodPoint;
-    uint32_t firstChild;
-    uint32_t padding3;
-};
 
 struct alignas(16) GPUMaterial {
     uint32_t chromaticity;
@@ -178,35 +126,6 @@ struct alignas(16) GPUCameraData {
     int sellSecondary;
 };
 
-struct alignas(16) GPUParticle {
-    Eigen::Vector4f pos_mass;
-    Eigen::Vector4f vel_density;
-    Eigen::Vector4f force_press;
-    Eigen::Vector4i type_pad;
-};
-
-struct WavefrontRay {
-    Vec3 origin;
-    uint32_t pixelIndex;
-    Vec3 dir;
-    uint32_t rng_state;
-    Vec3 throughput;
-    uint32_t bounce;
-    int active;
-    float primaryDepth;
-    int primaryObjId;
-    float padding1, padding2, padding3;
-};
-
-struct WavefrontHit {
-    Vec3 normal;
-    float t;
-    int hitIndex;
-    int hitFound;
-    Vec3 hitPoint;
-    float padding1;
-};
-
 struct VulkanContext {
     VkInstance instance = VK_NULL_HANDLE;
     VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
@@ -234,7 +153,7 @@ struct VulkanContext {
     VkDescriptorSetLayout blendDescLayout = VK_NULL_HANDLE;
     VkBuffer fastGBuffer = VK_NULL_HANDLE;
     VkDeviceMemory fastGBufferMem = VK_NULL_HANDLE;
-    size_t currentFastGCap = 0;
+    uint32_t currentFastGCap = 0;
 
     VkDescriptorSetLayout wfDescLayout = VK_NULL_HANDLE;
     VkDescriptorSet       wfDescSet    = VK_NULL_HANDLE;
@@ -253,7 +172,7 @@ struct VulkanContext {
                    wfExtendAMem = VK_NULL_HANDLE,
                    wfExtendBMem = VK_NULL_HANDLE, wfShadeMem = VK_NULL_HANDLE,
                    wfShadowMem = VK_NULL_HANDLE, wfCounterMem = VK_NULL_HANDLE;
-    size_t wfPathCap = 0;
+    uint32_t wfPathCap = 0;
     VkCommandBuffer wfCmd[2]   = {VK_NULL_HANDLE, VK_NULL_HANDLE};
     VkFence         wfFence[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
@@ -287,19 +206,19 @@ struct VulkanContext {
     VkDeviceMemory materialMem = VK_NULL_HANDLE;
     VkDeviceMemory sellmeierMem = VK_NULL_HANDLE;
     
-    size_t currentNodesCap = 0;
-    size_t currentOutCap = 0;
-    size_t currentFastPointsCap = 0;
-    size_t currentPBRPointsCap = 0;
-    size_t currentSkyboxCap = 0;
-    size_t currentLightCap = 0;
-    size_t currentFinalOutCap = 0;
-    size_t currentLowResOutCap = 0;
-    size_t currentAdaptiveCap = 0;
-    size_t currentMaterialCap = 0;
-    size_t currentSellmeierCap = 0;
-    uint32_t sellmeierWidth = 0;   // wavelength samples per row
-    uint32_t sellmeierRows = 0;    // total rows (materials * secondary)
+    uint32_t currentNodesCap = 0;
+    uint32_t currentOutCap = 0;
+    uint32_t currentFastPointsCap = 0;
+    uint32_t currentPBRPointsCap = 0;
+    uint32_t currentSkyboxCap = 0;
+    uint32_t currentLightCap = 0;
+    uint32_t currentFinalOutCap = 0;
+    uint32_t currentLowResOutCap = 0;
+    uint32_t currentAdaptiveCap = 0;
+    uint32_t currentMaterialCap = 0;
+    uint32_t currentSellmeierCap = 0;
+    uint32_t sellmeierWidth = 0;
+    uint32_t sellmeierRows = 0;
 
     bool initialized = false;
     bool hasHardwareRT = false;
@@ -317,15 +236,16 @@ struct VulkanContext {
     VkBuffer tlasBuffer = VK_NULL_HANDLE;
     VkDeviceMemory tlasMem = VK_NULL_HANDLE;
 
-    size_t currentAabbCap = 0;
+    uint32_t currentAabbCap = 0;
     VkBuffer asScratchBuffer = VK_NULL_HANDLE;
     VkDeviceMemory asScratchMem = VK_NULL_HANDLE;
-    size_t currentScratchCap = 0;
+    uint32_t currentScratchCap = 0;
     uint32_t lastBlasPrimCount = 0;       // primitive count of the live BLAS topology
     uint32_t framesSinceFullBuild = 0;    // refit counter
     uint32_t refitInterval = 16;          // force a clean rebuild every N frames
     bool blasTopologyValid = false;       // is there a refit-able BLAS in place?
     int lastBlasOrderingTag = -1;         // which upload path (fast=1/pbr=2) built the topology
+    bool outMemCoherent = true;
 
     uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
         VkPhysicalDeviceMemoryProperties memProperties;
@@ -337,8 +257,7 @@ struct VulkanContext {
         return 0;
     }
 
-    uint32_t findMemoryTypePreferred(uint32_t typeFilter, VkMemoryPropertyFlags required,
-                                     VkMemoryPropertyFlags preferred, bool& gotPreferred) {
+    uint32_t findMemoryTypePreferred(uint32_t typeFilter, VkMemoryPropertyFlags required, VkMemoryPropertyFlags preferred, bool& gotPreferred) {
         VkPhysicalDeviceMemoryProperties memProperties;
         vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
         // First pass: required + preferred.
@@ -360,7 +279,6 @@ struct VulkanContext {
         gotPreferred = false;
         return 0;
     }
-    bool outMemCoherent = true;
 
     void createReadbackBuffer(VkDeviceSize size, VkBuffer& buffer, VkDeviceMemory& bufferMemory, bool& coherentOut) {
         VkBufferCreateInfo bufferInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
@@ -373,11 +291,8 @@ struct VulkanContext {
         vkGetBufferMemoryRequirements(device, buffer, &memRequirements);
 
         bool gotCached = false;
-        uint32_t typeIdx = findMemoryTypePreferred(
-            memRequirements.memoryTypeBits,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
-            VK_MEMORY_PROPERTY_HOST_CACHED_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-            gotCached);
+        uint32_t typeIdx = findMemoryTypePreferred(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+             VK_MEMORY_PROPERTY_HOST_CACHED_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, gotCached);
 
         // Determine coherence of the chosen type so we know whether to invalidate.
         VkPhysicalDeviceMemoryProperties memProps;
@@ -390,7 +305,6 @@ struct VulkanContext {
         vkAllocateMemory(device, &allocInfo, nullptr, &bufferMemory);
         vkBindBufferMemory(device, buffer, bufferMemory, 0);
     }
-
 
     void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties,
                         VkBuffer& buffer, VkDeviceMemory& bufferMemory) {
@@ -418,7 +332,7 @@ struct VulkanContext {
             std::cerr << "FAILED TO LOAD " << path << "!\n";
             return VK_NULL_HANDLE;
         }
-        size_t fileSize = (size_t) file.tellg();
+        uint32_t fileSize = (uint32_t) file.tellg();
         std::vector<char> buffer(fileSize);
         file.seekg(0);
         file.read(buffer.data(), fileSize);
@@ -630,13 +544,8 @@ struct VulkanContext {
         allocSetInfo.pSetLayouts = &blendDescLayout;
         vkAllocateDescriptorSets(device, &allocSetInfo, &blendDescSet);
 
-        if (hasHardwareRT) {
-            std::cout << "using _hw versions" << std::endl;
-            fastShader = createShaderModule("./bin/fast_raytrace_hw.spv");
-        } else {
-            std::cout << "using software versions" << std::endl;
-            fastShader = createShaderModule("./bin/fast_raytrace.spv");
-        }
+        fastShader = createShaderModule("./bin/fast_raytrace_hw.spv");
+        
         smoothShader = createShaderModule("./bin/smooth.spv");
         blendShader = createShaderModule("./bin/blend.spv");
         
@@ -725,7 +634,7 @@ struct VulkanContext {
         });
     }
 
-    void uploadToBuffer(VkBuffer dst, const void* src, size_t size) {
+    void uploadToBuffer(VkBuffer dst, const void* src, uint32_t size) {
         if (!src || size == 0) return;
         VkBuffer stagingBuffer;
         VkDeviceMemory stagingMem;
@@ -741,8 +650,8 @@ struct VulkanContext {
         vkFreeMemory(device, stagingMem, nullptr);
     }
 
-    void updateDeviceLocalBuffer(VkBuffer& buffer, VkDeviceMemory& memory, size_t& currentCap, 
-                                 const void* data, size_t dataSize, size_t allocSize, VkBufferUsageFlags usage) {
+    void updateDeviceLocalBuffer(VkBuffer& buffer, VkDeviceMemory& memory, uint32_t& currentCap, 
+                                 const void* data, uint32_t dataSize, uint32_t allocSize, VkBufferUsageFlags usage) {
         if (allocSize > currentCap) {
             if (buffer) {
                 vkDestroyBuffer(device, buffer, nullptr);
@@ -821,7 +730,7 @@ struct VulkanContext {
             aabbs[i].maxZ = points[i].position.z() + halfSize;
         }
 
-        size_t aabbSize = aabbs.size() * sizeof(VkAabbPositionsKHR);
+        uint32_t aabbSize = aabbs.size() * sizeof(VkAabbPositionsKHR);
         if (aabbSize > currentAabbCap) {
             if (aabbBuffer) {
                 vkDestroyBuffer(device, aabbBuffer, nullptr);
@@ -1170,7 +1079,7 @@ struct VulkanContext {
         }
     }
 
-    void ensureLowResBuffer(size_t size) {
+    void ensureLowResBuffer(uint32_t size) {
         if(size > currentLowResOutCap) {
             if(lowResOutBuffer) {
                 vkDestroyBuffer(device, lowResOutBuffer, nullptr);
@@ -1184,7 +1093,7 @@ struct VulkanContext {
         }
     }
 
-    void retainFastGBuffer(size_t fastOutSize) {
+    void retainFastGBuffer(uint32_t fastOutSize) {
         if (fastOutSize > currentFastGCap) {
             if (fastGBuffer) {
                 vkDestroyBuffer(device, fastGBuffer, nullptr);
@@ -1199,7 +1108,7 @@ struct VulkanContext {
     }
 
     void dispatchSmooth(int width, int height, int samples) {
-        size_t finalSize = width * height * 3 * sizeof(float);
+        uint32_t finalSize = width * height * 3 * sizeof(float);
         if(finalSize > currentFinalOutCap) {
             if(finalOutBuffer) {
                 vkDestroyBuffer(device, finalOutBuffer, nullptr);
@@ -1244,7 +1153,7 @@ struct VulkanContext {
     }
 
     void dispatchBlend(int width, int height, int lowW, int lowH, float pbrScale, int samples) {
-        size_t finalSize = width * height * 3 * sizeof(float);
+        uint32_t finalSize = width * height * 3 * sizeof(float);
         if(finalSize > currentFinalOutCap) {
             if(finalOutBuffer) { 
                 vkDestroyBuffer(device, finalOutBuffer, nullptr); 
@@ -1295,10 +1204,10 @@ struct WFPushConstants {
     int pad;
 };
 
-static constexpr size_t WF_PATH_STRIDE   = 6 * 4 * sizeof(float); // hot record (was 9*vec4)
-static constexpr size_t WF_PATHHIT_STRIDE= 1 * 4 * sizeof(float); // transient extend->shade hand-off
-static constexpr size_t WF_SHADOW_STRIDE = 4 * 4 * sizeof(float);
-static constexpr size_t WF_COUNTER_SIZE  = 16 * sizeof(uint32_t);
+static constexpr uint32_t WF_PATH_STRIDE   = 6 * 4 * sizeof(float); // hot record (was 9*vec4)
+static constexpr uint32_t WF_PATHHIT_STRIDE= 1 * 4 * sizeof(float); // transient extend->shade hand-off
+static constexpr uint32_t WF_SHADOW_STRIDE = 4 * 4 * sizeof(float);
+static constexpr uint32_t WF_COUNTER_SIZE  = 16 * sizeof(uint32_t);
 static constexpr VkDeviceSize WF_OFF_EXTEND_ARGS = 16;
 static constexpr VkDeviceSize WF_OFF_SHADE_ARGS  = 32;
 static constexpr VkDeviceSize WF_OFF_SHADOW_ARGS = 48;
@@ -1358,7 +1267,7 @@ void initWavefront() {
     makePipe(wfFinalizeShader, wfFinalizePipe);
 }
 
-void ensureWavefrontBuffers(size_t maxPaths) {
+void ensureWavefrontBuffers(uint32_t maxPaths) {
     if (maxPaths <= wfPathCap && wfPathBuf) return;
     auto destroy = [&](VkBuffer& bf, VkDeviceMemory& mm) {
         if (bf) {
@@ -1453,7 +1362,7 @@ void wfPush(VkCommandBuffer cmd, int parity, int stage, int sampleIndex) {
 }
 
 void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel) {
-    size_t maxPaths = size_t(tileW) * size_t(tileH);
+    uint32_t maxPaths = uint32_t(tileW) * uint32_t(tileH);
     if (maxPaths == 0) return;
     ensureWavefrontBuffers(maxPaths);
     writeWavefrontDescriptors();

@@ -32,8 +32,6 @@ void Octree<T>::buildRenderNodeAt(OctreeNode_<T>* node, RenderBuffer_<T>& buffer
     bool isLoaded = node->isLoaded();
     
     RenderNode_<T> rnode;
-    rnode.boundsMin = node->bounds().first;
-    rnode.boundsMax = node->bounds().second;
     rnode.center = node->center;
     rnode.nodeSize = node->nodeSize;
     rnode.isLeaf = node->isLeaf();
@@ -57,9 +55,6 @@ void Octree<T>::buildRenderNodeAt(OctreeNode_<T>* node, RenderBuffer_<T>& buffer
                 rd.materialIdx = it->second + pt->renderMatIdx;
             }
             
-            BoundingBox bb = pt->getCubeBounds();
-            rd.boundsMin = bb.first;
-            rd.boundsMax = bb.second;
             rd.objectId = pt->objectId;
             buffer.points.push_back(rd);
         }
@@ -81,9 +76,6 @@ void Octree<T>::buildRenderNodeAt(OctreeNode_<T>* node, RenderBuffer_<T>& buffer
             ld.materialIdx = it->second + node->lodData->renderMatIdx;
         }
         
-        BoundingBox bb = node->lodData->getCubeBounds();
-        ld.boundsMin = bb.first;
-        ld.boundsMax = bb.second;
         ld.objectId = node->lodData->objectId; 
         rnode.lodPoint = static_cast<int32_t>(buffer.points.size());
         buffer.points.push_back(ld);
@@ -124,7 +116,7 @@ std::vector<RenderData*> Octree<T>::fastVoxelTraverse(const RenderBuffer_<T>& bu
     if (buffer.nodes.empty()) return hits;
     std::vector<float> tv;
     float tMin, tMax;
-    BoundingBox rootBounds(buffer.nodes[0].boundsMin, buffer.nodes[0].boundsMax);
+    BoundingBox rootBounds(buffer.nodes[0].boundsMin(), buffer.nodes[0].boundsMax());
     if (rayBoxIntersect(ray, rootBounds, tMin, tMax)) {
         tMax = std::min(tMax, maxDist);
         float currentMaxDist = maxDist;

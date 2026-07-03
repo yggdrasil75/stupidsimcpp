@@ -17,23 +17,6 @@ const float EPS = 1e-8;
 const float LARGE = 1e30;
 #define MAX_HITS 16 
 
-struct GPURenderNode {
-    vec3 boundsMin;
-    float p1;
-    vec3 boundsMax;
-    float p2;
-    vec3 center;
-    float nodeSize;
-    uint isLeaf;
-    uint isLoaded;
-    uint childMask;
-    uint firstPoint;
-    uint pointCount;
-    int lodPoint;
-    uint firstChild;
-    uint p3;
-};
-
 struct GPUMaterial {
     uint chromaticity;
     uint materialProps;
@@ -50,7 +33,6 @@ struct GPUFastRenderData {
     uint padding2;
 };
 
-layout(std430, binding = 0) readonly buffer NodeBuffer { GPURenderNode nodes[]; };
 layout(std430, binding = 1) readonly buffer PointBuffer { GPUFastRenderData points[]; };
 layout(std430, binding = 2) writeonly buffer OutputBuffer { float pixels[]; };
 

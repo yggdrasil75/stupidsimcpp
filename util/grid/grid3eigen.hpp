@@ -1279,16 +1279,16 @@ private:
     ///@param tExit Optionally extracts outgoing intersection bounds length
     ///@return True on functional penetration validation
     inline bool rayCubeIntersect(const Ray& ray, const RenderData* cube, float& t, Vec3& normal, Vec3& hitPoint, float* tExit = nullptr) const {
-        float t0x = (cube->boundsMin[0] - ray.origin[0]) * ray.invDir[0];
-        float t1x = (cube->boundsMax[0] - ray.origin[0]) * ray.invDir[0];
+        float t0x = (cube->boundsMin()[0] - ray.origin[0]) * ray.invDir[0];
+        float t1x = (cube->boundsMax()[0] - ray.origin[0]) * ray.invDir[0];
         if (ray.invDir[0] < 0.0f) std::swap(t0x, t1x);
 
-        float t0y = (cube->boundsMin[1] - ray.origin[1]) * ray.invDir[1];
-        float t1y = (cube->boundsMax[1] - ray.origin[1]) * ray.invDir[1];
+        float t0y = (cube->boundsMin()[1] - ray.origin[1]) * ray.invDir[1];
+        float t1y = (cube->boundsMax()[1] - ray.origin[1]) * ray.invDir[1];
         if (ray.invDir[1] < 0.0f) std::swap(t0y, t1y);
 
-        float t0z = (cube->boundsMin[2] - ray.origin[2]) * ray.invDir[2];
-        float t1z = (cube->boundsMax[2] - ray.origin[2]) * ray.invDir[2];
+        float t0z = (cube->boundsMin()[2] - ray.origin[2]) * ray.invDir[2];
+        float t1z = (cube->boundsMax()[2] - ray.origin[2]) * ray.invDir[2];
         if (ray.invDir[2] < 0.0f) std::swap(t0z, t1z);
 
         float tMin = std::max({t0x, t0y, t0z});
@@ -1304,8 +1304,8 @@ private:
         
         hitPoint = ray.origin + ray.dir * t;
         
-        Vec3 dMin = (hitPoint - cube->boundsMin).cwiseAbs();
-        Vec3 dMax = (hitPoint - cube->boundsMax).cwiseAbs();
+        Vec3 dMin = (hitPoint - cube->boundsMin()).cwiseAbs();
+        Vec3 dMax = (hitPoint - cube->boundsMax()).cwiseAbs();
         
         float minDist = std::numeric_limits<float>::max();
         int minAxis = 0;
