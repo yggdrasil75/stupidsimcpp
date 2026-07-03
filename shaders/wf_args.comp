@@ -12,12 +12,6 @@ void main() {
     if (gl_GlobalInvocationID.x != 0u) return;
 
     switch (pc.stage) {
-        case 4:
-            ctr.extendCount     = 0u;
-            ctr.shadeCount      = 0u;
-            ctr.shadowCount     = 0u;
-            ctr.nextExtendCount = 0u;
-            break;
         case 0:
             ctr.extendArgs      = divUp(ctr.extendCount);
             ctr.shadeCount      = 0u;
@@ -32,6 +26,12 @@ void main() {
             break;
         case 3:
             ctr.extendCount     = ctr.nextExtendCount;
+            break;
+        case 4:
+            ctr.extendCount     = 0u;
+            ctr.shadeCount      = 0u;
+            ctr.shadowCount     = 0u;
+            ctr.nextExtendCount = 0u;
             break;
         case 5:
             ctr.shadowArgs      = divUp(ctr.shadowCount);

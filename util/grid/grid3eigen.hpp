@@ -830,7 +830,7 @@ private:
 
         Vec3 avgPos = Vec3::Zero();
         Eigen::Vector4f avgColor = Eigen::Vector4f::Zero();
-        Vec3 avgEmittance = Vec3::Zero();
+        Vec3 avgChromaticity = Vec3::Zero();
         float avgRoughness = 0.0;
         float avgMetallic = 0.0;
         float avgTransmission = 0.0;
@@ -851,7 +851,7 @@ private:
             auto obj = getObject(item->objectId);
             RenderMaterial mat = obj ? obj->getRenderMaterial(item->renderMatIdx) : RenderMaterial();
             
-            avgEmittance += mat.emittanceRGB() * v;
+            avgChromaticity += mat.emittanceRGB() * v;
             avgRoughness += mat.roughness * v;
             avgMetallic += mat.metallic * v;
             for (int j = 0; j < 3; ++j) {
@@ -880,7 +880,7 @@ private:
             lod->size = std::cbrt(totalVolume);
 
             lod->color = (avgColor * invVol);
-            Vec3 e = avgEmittance * float(invVol);
+            Vec3 e = avgChromaticity * float(invVol);
             Grid::v3half B = (avgSellB * invVol).cast<Eigen::half>();
             Grid::v3half C = (avgSellC * invVol).cast<Eigen::half>();
             RenderMaterial avgMat(packRGB9E5(e), float(avgRoughness * invVol),
@@ -2439,10 +2439,10 @@ public:
 
     ///@brief Sets glowing channel limits explicitly mapping bounds boundaries mapping mapped mapping mapped bounds mapped mapping
     ///@param pos Source vector coordinate target limits mapping
-    ///@param chromaticity Vector RGB emission parameters mapped
+    ///@param emittance Vector RGB emission parameters mapped
     ///@param tolerance Extent scaling bounds mapped mapping bounds
     ///@return Flag validating bounds configurations executed mapping limits
-    bool setChromaticity(const Vec3& pos, const Vec3& chromaticity, float tolerance = EPSILON) {
+    bool setEmittance(const Vec3& pos, const Vec3& chromaticity, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
         auto obj = getOrCreateObject(pointData->objectId);
@@ -2735,6 +2735,10 @@ public:
     frame blendedRenderFrameVulkan(const Camera& cam, int height, int width, float pbrScale = 0.5f,
                 frame::colormap colorformat = frame::colormap::RGB, int samplesPerPixel = 1,
                 int maxBounces = 4, bool globalIllumination = false, bool useLod = true);
+    frame superBlendedRenderFrameVulkan(const Camera& cam, int height, int width, float ptScale = 0.25f,
+                frame::colormap colorformat = frame::colormap::RGB, int samplesPerPixel = 100,
+                int maxBounces = 4, bool globalIllumination = true, bool useLod = false,
+                int minSamplesPerPixel = 4);
     frame fastRenderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB);
     frame renderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB,
         int samplesPerPixel = 2, int maxBounces = 4, bool globalIllumination = false, bool useLod = true);

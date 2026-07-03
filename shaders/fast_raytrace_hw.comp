@@ -82,8 +82,10 @@ layout(binding = 3) uniform CameraData {
     uint pointCount;
     int tileOffsetX;
     int tileOffsetY;
-    int padding;
+    int emissiveCount;
 } cam;
+
+layout(std430, binding = 5) readonly buffer LightBuffer { uint emissiveIndices[]; };
 
 layout(std430, binding = 4) readonly buffer SkyboxBuffer { vec4 skyPixels[]; };
 layout(binding = 6) uniform accelerationStructureEXT tlas;
@@ -308,6 +310,148 @@ int voxelTraverse(Ray ray, out HitData hits[MAX_HITS]) {
     return hitCount;
 }
 
+void unpackFastMaterial(uint m, out float roughness, out float metallic) {
+    roughness = float(m & 0xFF) / 255.0;
+    metallic  = float((m >> 8) & 0xFF) / 255.0;
+}
+
+bool pickLight(vec3 pos, int selfObjId, out vec3 ldir, out float ldist,
+               out vec3 emit, out int lightObjId, out float lightSize) {
+    float bestScore = 0.0;
+    bool found = false;
+    int n = min(3, cam.emissiveCount);
+    for (int i = 0; i < n; ++i) {
+        GPUFastRenderData lp = points[emissiveIndices[i]];
+        if (lp.objectId == selfObjId) continue;
+        vec3 toL = lp.position - pos;
+        float distSq = max(dot(toL, toL), EPS);
+        vec3 e = unpackRGBA8(lp.color).rgb * unpackRGB9E5(materials[lp.materialIdx].chromaticity);
+        float lum = dot(e, vec3(0.2126, 0.7152, 0.0722));
+        float score = lum * lp.size * lp.size / distSq;
+        if (score > bestScore) {
+            bestScore = score;
+            found = true;
+            float d = sqrt(distSq);
+            ldir = toL / d;
+            ldist = d;
+            emit = e;
+            lightObjId = lp.objectId;
+            lightSize = lp.size;
+        }
+    }
+    return found;
+}
+
+float lightVisibility(vec3 origin, vec3 dir, float maxT, int lightObjId) {
+    Ray sray = makeRay(origin, dir);
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, tlas, gl_RayFlagsNoneEXT, 0xFF, origin, 0.0, dir, maxT);
+    float vis = 1.0;
+    while (rayQueryProceedEXT(rq)) {
+        if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionAABBEXT) {
+            int ptIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
+            GPUFastRenderData pt = points[ptIdx];
+            if (pt.objectId == lightObjId) continue;               // the light itself
+            if (materials[pt.materialIdx].chromaticity != 0u) continue; // other emitters don't occlude
+            float t, tExit; vec3 n;
+            if (rayCubeIntersect(sray, pt, t, tExit, n) && t > 0.0 && t < maxT) {
+                vis *= 1.0 - unpackRGBA8(pt.color).a;              // alpha transmittance
+                if (vis < 0.02) return 0.0;
+            }
+        }
+    }
+    return vis;
+}
+
+// One NEE connection at a path vertex: cosine-weighted, inverse-square
+// attenuated, shadowed radiance from the best light. One shadow ray.
+vec3 lightSample(vec3 pos, vec3 normal, int selfObjId) {
+    vec3 ldir, emit; float ldist, lsize; int lobj;
+    if (!pickLight(pos, selfObjId, ldir, ldist, emit, lobj, lsize)) return vec3(0.0);
+    float ndotl = dot(normal, ldir);
+    if (ndotl <= 0.0) return vec3(0.0);
+    float area = lsize * lsize;
+    float atten = area / max(ldist * ldist, area);
+    vec3 o = pos + normal * max(lsize * 0.01, 1e-3);
+    float vis = lightVisibility(o, ldir, max(ldist - lsize, EPS), lobj);
+    return emit * (ndotl * atten * vis);
+}
+
+// Nearest solid-ish hit for a deterministic secondary ray (skips the object
+// the ray originated inside so refraction rays exit their own volume).
+bool nearestHit(vec3 origin, vec3 dir, float maxT, int skipObjId,
+                out float tOut, out vec3 nOut, out int idxOut) {
+    Ray ray = makeRay(origin, dir);
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, tlas, gl_RayFlagsNoneEXT, 0xFF, origin, 0.0, dir, maxT);
+    float best = maxT;
+    bool found = false;
+    while (rayQueryProceedEXT(rq)) {
+        if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionAABBEXT) {
+            int ptIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
+            GPUFastRenderData pt = points[ptIdx];
+            if (pt.objectId == skipObjId) continue;
+            if (unpackRGBA8(pt.color).a < 0.25) continue;          // ignore wispy volumes
+            float t, tExit; vec3 n;
+            if (rayCubeIntersect(ray, pt, t, tExit, n) && t > 1e-4 && t < best) {
+                best = t; nOut = n; idxOut = ptIdx; found = true;
+            }
+        }
+    }
+    tOut = best;
+    return found;
+}
+
+// Radiance arriving at a deterministic secondary hit: the hit's own emission
+// (so reflections show the lights) plus one NEE connection.
+vec3 secondaryRadiance(vec3 origin, vec3 dir, int skipObjId) {
+    float t; vec3 n; int idx;
+    if (!nearestHit(origin, dir, cam.maxDist, skipObjId, t, n, idx)) {
+        return sampleSkybox(dir);
+    }
+    GPUFastRenderData pt = points[idx];
+    vec4 alb = unpackRGBA8(pt.color);
+    GPUMaterial m = materials[pt.materialIdx];
+    if (m.chromaticity != 0u) {
+        return alb.rgb * unpackRGB9E5(m.chromaticity);             // hit a light directly
+    }
+    vec3 hp = origin + dir * t;
+    return alb.rgb * lightSample(hp, n, pt.objectId);
+}
+
+// The full "top samples" shade at the primary hit.
+const float GUIDE_IOR = 1.45;
+vec3 guideShade(vec3 hitPos, vec3 normal, vec3 viewDir, vec4 albedo, uint matProps, int selfObjId) {
+    float roughness, metallic;
+    unpackFastMaterial(matProps, roughness, metallic);
+    float transmission = 1.0 - albedo.a;
+
+    // sample 1: primary light path (always)
+    vec3 col = albedo.rgb * (1.0 - metallic) * albedo.a * lightSample(hitPos, normal, selfObjId);
+
+    // sample 2: refracted light path, only when the surface actually transmits
+    if (transmission > 0.05) {
+        float eta = 1.0 / GUIDE_IOR;
+        vec3 refr = refract(viewDir, normal, eta);
+        if (dot(refr, refr) < 1e-6) refr = reflect(viewDir, normal); // TIR fallback
+        vec3 o = hitPos - normal * 1e-3;
+        col += transmission * albedo.rgb * secondaryRadiance(o, normalize(refr), selfObjId);
+    }
+
+    // sample 3: mirror-reflection light path, only for smooth or metallic surfaces
+    float F0 = mix(0.04, 1.0, metallic);
+    float smoothness = 1.0 - roughness;
+    float wRefl = F0 * smoothness * smoothness;
+    if (wRefl > 0.02) {
+        vec3 refl = reflect(viewDir, normal);
+        vec3 o = hitPos + normal * 1e-3;
+        vec3 tint = mix(vec3(1.0), albedo.rgb, metallic);
+        col += wRefl * tint * secondaryRadiance(o, normalize(refl), -1);
+    }
+
+    return col;
+}
+
 void main() {
     ivec2 localCoord = ivec2(gl_GlobalInvocationID.xy);
     ivec2 coord = localCoord + ivec2(cam.tileOffsetX, cam.tileOffsetY);
@@ -346,8 +490,21 @@ void main() {
         } else {
             vec3 lightDir = normalize(-cam.dir);
             float diffuse = 0.0;
+            bool guideMode = (cam.globalIllumination == 2);
+            vec3 pathLight = vec3(0.0);
             if (!isInternalVoxel) {
                 diffuse = max(0.0, dot(hits[i].normal, lightDir));
+                if (guideMode) {
+                    vec3 hitPos = ray.origin + ray.dir * hits[i].t;
+                    if (i == 0) {
+                        pathLight = guideShade(hitPos, hits[i].normal, ray.dir,
+                                               albedo, mat.materialProps, hitData.objectId);
+                    } else {
+                        pathLight = albedo.rgb * albedo.a
+                                  * lightSample(hitPos, hits[i].normal, hitData.objectId);
+                    }
+                    pathLight += albedo.rgb * (0.1 * diffuse);
+                }
             }
 
             if (vp.vctEnabled > 0.5 && !isInternalVoxel) {
@@ -356,11 +513,13 @@ void main() {
                 float ao;
                 float coneMax = length(vp.volExtent) * 0.5;
                 vec3 indirect = coneTraceDiffuse(hitPos, hits[i].normal, coneMax, ao);
-                vec3 directTerm  = albedo.rgb * diffuse * ao;
+                vec3 directTerm  = guideMode ? pathLight * ao
+                                             : albedo.rgb * diffuse * ao;
                 vec3 ambientTerm = albedo.rgb * 0.15 * ao;
                 surfaceColor = directTerm + ambientTerm + albedo.rgb * indirect;
             } else {
-                surfaceColor = albedo.rgb * min(1.0, 0.35 + diffuse * 0.65);
+                surfaceColor = guideMode ? pathLight + albedo.rgb * 0.15
+                                         : albedo.rgb * min(1.0, 0.35 + diffuse * 0.65);
             }
         }
         

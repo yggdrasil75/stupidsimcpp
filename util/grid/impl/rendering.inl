@@ -325,6 +325,7 @@ struct VulkanContext {
     uint32_t framesSinceFullBuild = 0;    // refit counter
     uint32_t refitInterval = 16;          // force a clean rebuild every N frames
     bool blasTopologyValid = false;       // is there a refit-able BLAS in place?
+    int lastBlasOrderingTag = -1;         // which upload path (fast=1/pbr=2) built the topology
 
     uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
         VkPhysicalDeviceMemoryProperties memProperties;
@@ -445,7 +446,7 @@ struct VulkanContext {
         vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
         std::vector<VkPhysicalDevice> devices(deviceCount);
         vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data());
-        physicalDevice = devices[0]; //need to set a flag for this at some point.
+        physicalDevice = devices[1]; //need to set a flag for this at some point.
 
         uint32_t queueFamilyCount = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
@@ -724,6 +725,22 @@ struct VulkanContext {
         });
     }
 
+    void uploadToBuffer(VkBuffer dst, const void* src, size_t size) {
+        if (!src || size == 0) return;
+        VkBuffer stagingBuffer;
+        VkDeviceMemory stagingMem;
+        createBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                     stagingBuffer, stagingMem);
+        void* mapped;
+        vkMapMemory(device, stagingMem, 0, size, 0, &mapped);
+        memcpy(mapped, src, size);
+        vkUnmapMemory(device, stagingMem);
+        copyBuffer(stagingBuffer, dst, size);
+        vkDestroyBuffer(device, stagingBuffer, nullptr);
+        vkFreeMemory(device, stagingMem, nullptr);
+    }
+
     void updateDeviceLocalBuffer(VkBuffer& buffer, VkDeviceMemory& memory, size_t& currentCap, 
                                  const void* data, size_t dataSize, size_t allocSize, VkBufferUsageFlags usage) {
         if (allocSize > currentCap) {
@@ -785,12 +802,13 @@ struct VulkanContext {
     }
 
     template<typename RenderDataType>
-    void buildHardwareAccelerationStructures(const std::vector<RenderDataType>& points) {
+    void buildHardwareAccelerationStructures(const std::vector<RenderDataType>& points, int orderingTag = 0) {
         if (!hasHardwareRT || points.empty()) return;
 
         const uint32_t numPrimitives = static_cast<uint32_t>(points.size());
         bool doFullBuild = (!blasTopologyValid)
                         || (numPrimitives != lastBlasPrimCount)
+                        || (orderingTag != lastBlasOrderingTag)
                         || (framesSinceFullBuild >= refitInterval);
         std::vector<VkAabbPositionsKHR> aabbs(numPrimitives);
         for (uint32_t i = 0; i < numPrimitives; ++i) {
@@ -961,6 +979,7 @@ struct VulkanContext {
         // Refit bookkeeping.
         if (doFullBuild) {
             lastBlasPrimCount = numPrimitives;
+            lastBlasOrderingTag = orderingTag;
             blasTopologyValid = true;
             framesSinceFullBuild = 0;
         } else {
@@ -1078,7 +1097,7 @@ struct VulkanContext {
                                 points.empty() ? nullptr : points.data(), dataSize, allocSize, 
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
-        if (hasHardwareRT) buildHardwareAccelerationStructures(points);
+        if (hasHardwareRT) buildHardwareAccelerationStructures(points, 1);
 
         VkDescriptorBufferInfo bInfos[8] = { 
             {nodeBuffer, 0, VK_WHOLE_SIZE}, 
@@ -1113,7 +1132,7 @@ struct VulkanContext {
                                 points.empty() ? nullptr : points.data(), dataSize, allocSize, 
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
-        if (hasHardwareRT) buildHardwareAccelerationStructures(points);
+        if (hasHardwareRT) buildHardwareAccelerationStructures(points, 2);
 
         VkDescriptorBufferInfo bInfos[8] = { 
             {nodeBuffer, 0, VK_WHOLE_SIZE}, 
@@ -1285,8 +1304,9 @@ static constexpr VkDeviceSize WF_OFF_SHADE_ARGS  = 32;
 static constexpr VkDeviceSize WF_OFF_SHADOW_ARGS = 48;
 
 void initWavefront() {
-    VkDescriptorSetLayoutBinding b[18] = {};
-    for (int i = 0; i < 18; ++i) {
+
+    VkDescriptorSetLayoutBinding b[16] = {};
+    for (int i = 0; i < 16; ++i) {
         b[i].binding = i;
         b[i].descriptorCount = 1;
         b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -1296,7 +1316,7 @@ void initWavefront() {
     b[5].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
 
     VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    li.bindingCount = 18;
+    li.bindingCount = 16;
     li.pBindings = b;
     vkCreateDescriptorSetLayout(device, &li, nullptr, &wfDescLayout);
 
@@ -1369,7 +1389,7 @@ void ensureWavefrontBuffers(size_t maxPaths) {
 }
 
 void writeWavefrontDescriptors() {
-    VkDescriptorBufferInfo bi[18] = {};
+    VkDescriptorBufferInfo bi[16] = {};
     bi[0]  = {uboBuffer,      0, VK_WHOLE_SIZE};
     bi[1]  = {pbrPointBuffer, 0, VK_WHOLE_SIZE};
     bi[2]  = {materialBuffer, 0, VK_WHOLE_SIZE};
@@ -1386,9 +1406,9 @@ void writeWavefrontDescriptors() {
     bi[14] = {wfPathHitBuf,   0, VK_WHOLE_SIZE};
     bi[15] = {sellmeierBuffer ? sellmeierBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
 
-    VkWriteDescriptorSet w[18] = {};
+    VkWriteDescriptorSet w[16] = {};
     int n = 0;
-    for (int i = 0; i < 18; ++i) {
+    for (int i = 0; i < 16; ++i) {
         if (i == 5) continue;
         w[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         w[n].dstSet = wfDescSet;
@@ -1442,7 +1462,7 @@ void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel
     uint32_t pathGroups = uint32_t((maxPaths + WG - 1) / WG);
     int maxIters = maxBounces + 24;
 
-    const int samplesPerSubmit = 1;
+    const int samplesPerSubmit = 2;
 
     if (wfCmd[0] == VK_NULL_HANDLE) {
         VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
@@ -1525,6 +1545,7 @@ void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel
         delete _rec;
 
         ScopedFunctionTimer _sw("wf.submit");
+        vkWaitForFences(device, 1, &wfFence[slot ^ 1], VK_TRUE, UINT64_MAX);
         VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
         si.commandBufferCount = 1;
         si.pCommandBuffers = &cmd;

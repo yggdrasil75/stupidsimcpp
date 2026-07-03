@@ -23,6 +23,7 @@ struct GPUPBRRenderData {
     uint color;
     uint materialIdx;
     int  objectId;
+    uint padding;
 };
 
 struct PathHot {
@@ -292,7 +293,7 @@ bool rayCubeIntersect(vec3 ro, vec3 rd, vec3 invD, GPUPBRRenderData pt,
     if (key == slab.x)      mask = vec3(1.0, 0.0, 0.0);
     else if (key == slab.y) mask = vec3(0.0, 1.0, 0.0);
     else                    mask = vec3(0.0, 0.0, 1.0);
-    normal = -sgn * mask;
+    normal = (inside ? -sgn : sgn) * mask;
     return true;
 }
 
