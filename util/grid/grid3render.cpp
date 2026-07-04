@@ -893,7 +893,7 @@ frame Octree<T>::blendedRenderFrameVulkan(const Camera& cam, int height, int wid
         ctx.updatePBRBuffers(gpuPBRPoints);
     }
 
-    runWavefrontTilesMultiGPU(width, height, camData, samplesPerPixel, maxBounces, 0);
+    runWavefrontTilesMultiGPU(width, height, pbrCamData, samplesPerPixel, maxBounces, 0);
 
     vkCtx.dispatchSmoothPasses(lowW, lowH, samplesPerPixel, 2, false);
     vkCtx.ensureLowResBuffer(pbrOutSize);
@@ -1228,7 +1228,7 @@ frame Octree<T>::superBlendedRenderFrameVulkan(const Camera& cam, int height, in
         ctx.updatePBRBuffers(gpuPBRPoints);
     }
 
-    runWavefrontTilesMultiGPU(width, height, camData, samplesPerPixel, maxBounces, 0);
+    runWavefrontTilesMultiGPU(width, height, pbrCamData, samplesPerPixel, maxBounces, 0);
     vkCtx.dispatchSmoothPasses(lowW, lowH, samplesPerPixel, 2, false);
     vkCtx.ensureLowResBuffer(pbrOutSize);
     vkCtx.copyBuffer(vkCtx.outBuffer, vkCtx.lowResOutBuffer, pbrOutSize);
