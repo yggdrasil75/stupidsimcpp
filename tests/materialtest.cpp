@@ -49,7 +49,117 @@ void createBox(Grid::Octree<int>& octree, const Eigen::Vector3f& center, const E
                 
                 octree.insert(1, pos, true, albedo, step, true, oid, emission, roughness, metallic, transmission, ior, absorp, bType, mass);
                 if (useSell) {
-                    octree.setSellmeier(pos, sellB, sellC);
+                    octree.setSellmeier(pos, sellB.cast<Eigen::half>(), sellC.cast<Eigen::half>());
+                }
+            }
+        }
+    }
+}
+
+// --- NEW: Helper function to create a Brass box with oxidized/tarnished patches ---
+void createTarnishedBrassBox(Grid::Octree<int>& octree, const Eigen::Vector3f& center, const Eigen::Vector3f& size, float step, int oid, Grid::BodyType bType, float mass) {
+    Eigen::Vector3f halfSize = size / 2.0f;
+    Eigen::Vector3f minB = center - halfSize;
+    Eigen::Vector3f maxB = center + halfSize;
+    static std::mt19937 rng(1337);
+    std::uniform_real_distribution<float> jitter(-0.002f, 0.002f);
+    
+    Eigen::Vector3f cleanBrass(0.78f, 0.69f, 0.22f);
+    Eigen::Vector3f tarnishColor(0.25f, 0.30f, 0.15f); // Dark greenish-brown oxidization
+
+    for (float x = minB.x(); x <= maxB.x(); x += step) {
+        for (float y = minB.y(); y <= maxB.y(); y += step) {
+            for (float z = minB.z(); z <= maxB.z(); z += step) {
+                float noise = smoothNoise(x, y, z, 12.0f);
+                
+                // Blend values based on noise threshold
+                bool isTarnished = noise > 0.65f;
+                float blend = std::max(0.0f, (noise - 0.5f) * 2.0f); 
+                
+                Eigen::Vector3f albedo = isTarnished ? tarnishColor : cleanBrass * (1.0f - blend) + tarnishColor * blend;
+                float roughness = isTarnished ? 0.8f : (0.08f + blend * 0.4f);
+                float metallic = isTarnished ? 0.1f : (0.99f - blend * 0.5f);
+                
+                Eigen::Vector3f pos(x + jitter(rng), y + jitter(rng), z + jitter(rng));
+                octree.insert(1, pos, true, albedo, step, true, oid, 0.0f, roughness, metallic, 0.0f, 1.18f, Eigen::Vector3f::Zero(), bType, mass);
+            }
+        }
+    }
+}
+
+// --- NEW: Helper function to create a block with geometric pores and texture variations ---
+void createTexturedBox(Grid::Octree<int>& octree, const Eigen::Vector3f& center, const Eigen::Vector3f& size, const Eigen::Vector3f& baseColor, float step, int oid, Grid::BodyType bType, float mass) {
+    Eigen::Vector3f halfSize = size / 2.0f;
+    Eigen::Vector3f minB = center - halfSize;
+    Eigen::Vector3f maxB = center + halfSize;
+    static std::mt19937 rng(42);
+    std::uniform_real_distribution<float> jitter(-0.002f, 0.002f);
+    
+    for (float x = minB.x(); x <= maxB.x(); x += step) {
+        for (float y = minB.y(); y <= maxB.y(); y += step) {
+            for (float z = minB.z(); z <= maxB.z(); z += step) {
+                float n = smoothNoise(x, y, z, 25.0f);
+                
+                // Determine if this voxel is on the outer crust of the box
+                float edgeDist = std::min({x - minB.x(), maxB.x() - x,
+                                           y - minB.y(), maxB.y() - y,
+                                           z - minB.z(), maxB.z() - z});
+                
+                // Skip outer voxels to create geometric pitting/roughness
+                if (edgeDist < step * 1.5f && n > 0.65f) {
+                    continue; 
+                }
+                
+                // Slightly perturb the color of the remaining volume for visual texture
+                Eigen::Vector3f color = baseColor * (0.7f + 0.5f * n); 
+                color = color.cwiseMin(Eigen::Vector3f::Constant(1.0f)).cwiseMax(Eigen::Vector3f::Constant(0.0f));
+                
+                Eigen::Vector3f pos(x + jitter(rng), y + jitter(rng), z + jitter(rng));
+                octree.insert(1, pos, true, color, step, true, oid, 0.0f, 0.6f + 0.4f * n, 0.0f, 0.0f, 1.46f, Eigen::Vector3f::Zero(), bType, mass);
+            }
+        }
+    }
+}
+
+// --- NEW: Enum & Function for complex geometric Gem cuts ---
+enum class GemCut { OCTAHEDRON, HEXAGONAL_BIPYRAMID };
+
+void createGem(Grid::Octree<int>& octree, const Eigen::Vector3f& center, float radius, GemCut cut, 
+               const Eigen::Vector3f& albedo, float step, int oid, Grid::BodyType bType, float mass, 
+               float transmission, float ior, const Eigen::Vector3f& absorp, 
+               const Eigen::Vector3f& sellB = Eigen::Vector3f::Zero(), const Eigen::Vector3f& sellC = Eigen::Vector3f::Zero(), bool useSell = false) {
+    
+    static std::mt19937 rng(1337);
+    std::uniform_real_distribution<float> jitter(-0.002f, 0.002f);
+
+    float minX = center.x() - radius; float maxX = center.x() + radius;
+    float minY = center.y() - radius; float maxY = center.y() + radius;
+    float minZ = center.z() - radius; float maxZ = center.z() + radius;
+
+    for (float x = minX; x <= maxX; x += step) {
+        for (float y = minY; y <= maxY; y += step) {
+            for (float z = minZ; z <= maxZ; z += step) {
+                float dx = x - center.x();
+                float dy = y - center.y();
+                float dz = z - center.z();
+                
+                bool inside = false;
+                
+                if (cut == GemCut::OCTAHEDRON) {
+                    // Classic dual-pyramid diamond/ruby shape
+                    inside = (std::abs(dx) + std::abs(dy) + std::abs(dz)) <= radius;
+                } else if (cut == GemCut::HEXAGONAL_BIPYRAMID) {
+                    // Crystal cluster look (Hexagon that tapers off at the Z ends)
+                    float hexDist = std::max(std::abs(dx), (std::abs(dx) + std::abs(dy) * 1.732f) / 2.0f);
+                    inside = (hexDist + std::abs(dz) * 0.6f) <= (radius * 0.85f) && std::abs(dz) <= radius;
+                }
+
+                if (inside) {
+                    Eigen::Vector3f pos(x + jitter(rng), y + jitter(rng), z + jitter(rng));
+                    octree.insert(1, pos, true, albedo, step, true, oid, 0.0f, 0.01f, 0.0f, transmission, ior, absorp, bType, mass);
+                    if (useSell) {
+                        octree.setSellmeier(pos, sellB.cast<Eigen::half>(), sellC.cast<Eigen::half>());
+                    }
                 }
             }
         }
@@ -187,17 +297,17 @@ int main() {
     // LAYER 1: Metals
     createBox(octree, Eigen::Vector3f(-sp, -sp, 0.0f), size * 1.5, cGold,   0.0f, 0.08f, 0.99f, 0.0f, 0.47f, Eigen::Vector3f(0,0,0), 1, initType, mass);
     createBox(octree, Eigen::Vector3f(  0, -sp, 0.0f), size * 1.5, cSilver, 0.0f, 0.08f, 0.99f, 0.0f, 0.13f, Eigen::Vector3f(0,0,0), 2, initType, mass);
-    createBox(octree, Eigen::Vector3f( sp, -sp, 0.0f), size * 1.5, cBrass,  0.0f, 0.08f, 0.99f, 0.0f, 1.18f, Eigen::Vector3f(0,0,0), 3, initType, mass);
+    createTarnishedBrassBox(octree, Eigen::Vector3f( sp, -sp, 0.0f), size * 1.5, 0.1f, 3, initType, mass);
 
     // LAYER 2: Opaque
-    createBox(octree, Eigen::Vector3f(-sp,  0,  0.0f), size, cRed,    0.0f, 0.05f, 0.0f, 0.0f, 1.46f, Eigen::Vector3f(0,0,0), 4, initType, mass, 0.5);
-    createBox(octree, Eigen::Vector3f(  0,  0,  0.0f), size, cBlue,   0.0f, 0.05f, 0.0f, 0.0f, 2.4f, Eigen::Vector3f(0,0,0), 5, initType, mass, 0.1);
-    createBox(octree, Eigen::Vector3f( sp,  0,  0.0f), size, cPurple, 0.0f, 0.05f, 0.0f, 0.0f, 2.4f, Eigen::Vector3f(0,0,0), 6, initType, mass, 0.5);
+    createTexturedBox(octree, Eigen::Vector3f(-sp,  0,  0.0f), size, cRed,    0.1f, 4, initType, mass);
+    createTexturedBox(octree, Eigen::Vector3f(  0,  0,  0.0f), size, cBlue,   0.1f, 5, initType, mass);
+    createTexturedBox(octree, Eigen::Vector3f( sp,  0,  0.0f), size, cPurple, 0.1f, 6, initType, mass);
 
     // LAYER 3: Glass
-    createBox(octree, Eigen::Vector3f(-sp,  sp, 0.0f), size * 0.5, cRuby,    0.0f, 0.01f, 0.0f, 0.95f, 1.757f, Eigen::Vector3f(0.05f, 0.8f, 0.8f), 7, initType, mass, 0.5); //ruby
-    createBox(octree, Eigen::Vector3f(  0,  sp, 0.0f), size * 0.5, cBlue,   0.0f, 0.01f, 0.0f, 0.89f, 1.309f, Eigen::Vector3f(0.08f, 0.02f, 0.01f), 8, initType, mass, 0.5); //ice
-    createBox(octree, Eigen::Vector3f( sp,  sp, 0.0f), size * 0.5, cAmethyst, 0.0f, 0.01f, 0.0f, 0.97f, 1.534f, Eigen::Vector3f(0.8f, 0.6f, 0.05f), 9, initType, mass, 0.5, Eigen::Vector3f(0.696,0.407,0.897), Eigen::Vector3f(0.0046,0.013, 97.934), true); //sapphire
+    createGem(octree, Eigen::Vector3f(-sp,  sp, 0.0f), 0.45f, GemCut::OCTAHEDRON, cRuby, 0.1f, 7, initType, mass, 0.95f, 1.757f, Eigen::Vector3f(0.05f, 0.8f, 0.8f)); 
+    createBox(octree, Eigen::Vector3f(  0,  sp, 0.0f), size * 0.5, cBlue,   0.0f, 0.01f, 0.0f, 0.89f, 1.309f, Eigen::Vector3f(0.08f, 0.02f, 0.01f), 8, initType, mass, 0.5); 
+    createGem(octree, Eigen::Vector3f( sp,  sp, 0.0f), 0.45f, GemCut::HEXAGONAL_BIPYRAMID, cAmethyst, 0.1f, 9, initType, mass, 0.97f, 1.534f, Eigen::Vector3f(0.8f, 0.6f, 0.05f), Eigen::Vector3f(0.696,0.407,0.897), Eigen::Vector3f(0.0046,0.013, 97.934), true);
 
     std::cout << "Optimizing and Generating LODs..." << std::endl;
     // octree.generateLODs();
@@ -255,52 +365,52 @@ int main() {
 
     Eigen::Vector3f target(0.0f, 0.0f, 0.5f);
 
-    // for (const auto& view : views) {
-    //     ScopedFunctionTimer meh("Fast section");
-    //     std::cout << "\nRendering view from " << view.name << " direction (Fast Pass)..." << std::endl;
+    for (const auto& view : views) {
+        ScopedFunctionTimer meh("Fast section");
+        std::cout << "\nRendering view from " << view.name << " direction (Fast Pass)..." << std::endl;
         
-    //     Camera cam;
-    //     cam.origin = view.origin;
-    //     cam.direction = (target - view.origin).normalized();
-    //     cam.up = view.up;
+        Camera cam;
+        cam.origin = view.origin;
+        cam.direction = (target - view.origin).normalized();
+        cam.up = view.up;
         
-    //     // frame cpuout = octree.fastRenderFrame(cam, height, width, frame::colormap::RGB);
-    //     // std::string cpufilename = "output/fast_cpurender_" + view.name + ".bmp";
-    //     // BMPWriter::saveBMP(cpufilename, cpuout);
+        // frame cpuout = octree.fastRenderFrame(cam, height, width, frame::colormap::RGB);
+        // std::string cpufilename = "output/fast_cpurender_" + view.name + ".bmp";
+        // BMPWriter::saveBMP(cpufilename, cpuout);
         
-    //     frame out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
-    //     std::string filename = "output/fast_vulkanrender_" + view.name + ".bmp";
-    //     // out.compressFrameLZ78();
-    //     // out.decompress();
-    //     BMPWriter::saveBMP(filename, out);
-    // }
-    // FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
+        frame out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
+        std::string filename = "output/fast_vulkanrender_" + view.name + ".bmp";
+        // out.compressFrameLZ78();
+        // out.decompress();
+        BMPWriter::saveBMP(filename, out);
+    }
+    FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
 
-    // for (const auto& view : views) {
-    //     ScopedFunctionTimer meh("Slow Section");
-    //     std::cout << "\nRendering view from " << view.name << " direction (Slow "<< samples <<" Samples Pass)..." << std::endl;
+    for (const auto& view : views) {
+        ScopedFunctionTimer meh("Slow Section");
+        std::cout << "\nRendering view from " << view.name << " direction (Slow "<< samples <<" Samples Pass)..." << std::endl;
         
-    //     Camera cam;
-    //     cam.origin = view.origin;
-    //     cam.direction = (target - view.origin).normalized();
-    //     cam.up = view.up;
+        Camera cam;
+        cam.origin = view.origin;
+        cam.direction = (target - view.origin).normalized();
+        cam.up = view.up;
         
-    //     frame out = octree.renderFrameVulkan(cam, height, width, frame::colormap::RGB, samples, bounces, false, true);
-    //     std::string filename = "output/slow_vulkanrender_" + view.name + ".bmp";
-    //     BMPWriter::saveBMP(filename, out);
-    //     std::cout << "slow done" << std::endl;
+        frame out = octree.renderFrameVulkan(cam, height, width, frame::colormap::RGB, samples, bounces, false, true);
+        std::string filename = "output/slow_vulkanrender_" + view.name + ".bmp";
+        BMPWriter::saveBMP(filename, out);
+        std::cout << "slow done" << std::endl;
 
-    //     out = octree.superBlendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, blendedsamples, bounces, false, true);
-    //     filename = "output/slow_superblendrender_" + view.name + ".bmp";
-    //     BMPWriter::saveBMP(filename, out);
-    //     std::cout << "super blended done" << std::endl;
+        out = octree.superBlendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, blendedsamples, bounces, false, true);
+        filename = "output/slow_superblendrender_" + view.name + ".bmp";
+        BMPWriter::saveBMP(filename, out);
+        std::cout << "super blended done" << std::endl;
 
-    //     out = octree.blendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, blendedsamples, bounces, false, true);
-    //     filename = "output/slow_blendrender_" + view.name + ".bmp";
-    //     BMPWriter::saveBMP(filename, out);
-    //     std::cout << "blended done" << std::endl;
-    // }
-    // FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
+        out = octree.blendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, blendedsamples, bounces, false, true);
+        filename = "output/slow_blendrender_" + view.name + ".bmp";
+        BMPWriter::saveBMP(filename, out);
+        std::cout << "blended done" << std::endl;
+    }
+    FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
 
     std::vector<frame> videoFrames;
     const int totalFrames = framesPerSegment * views.size();
@@ -336,7 +446,7 @@ int main() {
             
             std::cout << "Rendering video frame " << frameCounter << "/" << totalFrames << "..." << std::endl;
             // frame out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
-            frame out = octree.superBlendedRenderFrameVulkan(cam, height * 2, width * 2, blendedfactor, frame::colormap::RGB, videosamples, bounces, false);
+            frame out = octree.superBlendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, videosamples, bounces, false);
             // frame out = octree.renderFrameVulkan(cam, height, width, frame::colormap::RGB, videosamples, bounces, false, true);
             // videoFrames.push_back(std::move(out));
             std::string debugFilename = "output/materialframes/debug_material_" + std::to_string(frameCounter) + ".bmp";
