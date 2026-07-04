@@ -890,7 +890,7 @@ frame Octree<T>::blendedRenderFrameVulkan(const Camera& cam, int height, int wid
         ctx.updateCommonBuffers(pbrOutSize, pbrCamData);
         ctx.updateSkyboxBuffer(skyData);
         ctx.updateLightBuffer(gpuLights);
-        ctx.updatePBRBuffers(gpuPoints);
+        ctx.updatePBRBuffers(gpuPBRPoints);
     }
 
     runWavefrontTilesMultiGPU(width, height, camData, samplesPerPixel, maxBounces, 0);
@@ -1225,7 +1225,7 @@ frame Octree<T>::superBlendedRenderFrameVulkan(const Camera& cam, int height, in
         ctx.updateCommonBuffers(pbrOutSize, pbrCamData);
         ctx.updateSkyboxBuffer(skyData);
         ctx.updateLightBuffer(gpuLights);
-        ctx.updatePBRBuffers(gpuPoints);
+        ctx.updatePBRBuffers(gpuPBRPoints);
     }
 
     runWavefrontTilesMultiGPU(width, height, camData, samplesPerPixel, maxBounces, 0);
