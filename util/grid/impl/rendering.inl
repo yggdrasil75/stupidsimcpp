@@ -1,6 +1,7 @@
 #pragma once
 #ifdef VULKAN_SUPPORT
 #include <vulkan/vulkan.h>
+#include <cstdlib>
 #endif
 
 namespace Grid {
@@ -244,6 +245,9 @@ struct VulkanContext {
 
     bool initialized = false;
     bool hasHardwareRT = false;
+    bool ownsInstance = true;
+    std::string deviceName;
+    VkPhysicalDeviceType deviceType = VK_PHYSICAL_DEVICE_TYPE_OTHER;
     
     VkBuffer aabbBuffer = VK_NULL_HANDLE;
     VkDeviceMemory aabbMem = VK_NULL_HANDLE;
@@ -367,22 +371,75 @@ struct VulkanContext {
         return shaderModule;
     }
 
-    void init() {
-        if (initialized) return;
-        VkApplicationInfo appInfo{VK_STRUCTURE_TYPE_APPLICATION_INFO};
-        appInfo.apiVersion = VK_API_VERSION_1_2;
+    // Ranks a physical device for compute rendering. Returns -1 when the
+    // device has no compute-capable queue (unusable for us).
+    static int scorePhysicalDevice(VkPhysicalDevice pd) {
+        uint32_t qCount = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(pd, &qCount, nullptr);
+        std::vector<VkQueueFamilyProperties> qProps(qCount);
+        vkGetPhysicalDeviceQueueFamilyProperties(pd, &qCount, qProps.data());
+        bool hasCompute = false;
+        for (const auto& q : qProps) {
+            if (q.queueFlags & VK_QUEUE_COMPUTE_BIT) { hasCompute = true; break; }
+        }
+        if (!hasCompute) return -1;
 
+        VkPhysicalDeviceProperties props;
+        vkGetPhysicalDeviceProperties(pd, &props);
+        switch (props.deviceType) {
+            case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:   return 4;
+            case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return 3;
+            case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:    return 2;
+            case VK_PHYSICAL_DEVICE_TYPE_CPU:            return 1; // lavapipe etc: last resort
+            default:                                     return 1;
+        }
+    }
+
+    // init() can be called three ways:
+    //   init()                       - legacy path: create an instance, pick the best device.
+    //   init(instance, device)       - multi-GPU path: adopt a shared instance and an
+    //                                  explicitly chosen physical device (see GPUManager).
+    void init(VkInstance externalInstance = VK_NULL_HANDLE, VkPhysicalDevice pickedDevice = VK_NULL_HANDLE) {
         uint32_t extCount;
-        vkEnumerateInstanceExtensionProperties(nullptr, &extCount, nullptr);
-        VkInstanceCreateInfo createInfo{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
-        createInfo.pApplicationInfo = &appInfo;
-        vkCreateInstance(&createInfo, nullptr, &instance);
+        if (initialized) return;
+        if (externalInstance != VK_NULL_HANDLE) {
+            instance = externalInstance;
+            ownsInstance = false;
+        } else {
+            VkApplicationInfo appInfo{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+            appInfo.apiVersion = VK_API_VERSION_1_2;
 
-        uint32_t deviceCount = 0;
-        vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
-        std::vector<VkPhysicalDevice> devices(deviceCount);
-        vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data());
-        physicalDevice = devices[0]; //need to set a flag for this at some point.
+            vkEnumerateInstanceExtensionProperties(nullptr, &extCount, nullptr);
+            VkInstanceCreateInfo createInfo{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+            createInfo.pApplicationInfo = &appInfo;
+            vkCreateInstance(&createInfo, nullptr, &instance);
+            ownsInstance = true;
+        }
+
+        if (pickedDevice != VK_NULL_HANDLE) {
+            physicalDevice = pickedDevice;
+        } else {
+            uint32_t deviceCount = 0;
+            vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
+            std::vector<VkPhysicalDevice> devices(deviceCount);
+            vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data());
+            // Pick the best-scoring device (discrete GPU > integrated > virtual > cpu)
+            // instead of blindly taking devices[0].
+            int bestScore = -1;
+            for (auto d : devices) {
+                int s = scorePhysicalDevice(d);
+                if (s > bestScore) { bestScore = s; physicalDevice = d; }
+            }
+            if (physicalDevice == VK_NULL_HANDLE && deviceCount > 0) physicalDevice = devices[0];
+        }
+
+        {
+            VkPhysicalDeviceProperties props;
+            vkGetPhysicalDeviceProperties(physicalDevice, &props);
+            deviceName = props.deviceName;
+            deviceType = props.deviceType;
+            std::cout << "Vulkan device: " << deviceName << std::endl;
+        }
 
         uint32_t queueFamilyCount = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
@@ -1594,5 +1651,109 @@ void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel
 
 };
 inline VulkanContext vkCtx;
+
+// -----------------------------------------------------------------------------
+// GPUManager: enumerates every usable Vulkan device and owns one VulkanContext
+// per GPU. contexts[0] is always the global vkCtx (the "primary" GPU), so all
+// existing single-GPU code paths keep working untouched; multi-GPU render
+// paths iterate over all contexts.
+//
+// Environment overrides:
+//   SSC_MULTIGPU=0      disable multi-GPU (primary device only)
+//   SSC_GPUS=0,2        use only these physical-device indices (enumeration order)
+//   SSC_MAX_GPUS=N      cap the number of GPUs used
+// -----------------------------------------------------------------------------
+struct GPUManager {
+    std::vector<VulkanContext*> contexts;              // [0] == &vkCtx
+    std::vector<std::unique_ptr<VulkanContext>> extras; // owned secondary contexts
+    bool initialized = false;
+
+    size_t count() const { return contexts.size(); }
+    VulkanContext& ctx(size_t i) { return *contexts[i]; }
+
+    void init() {
+        if (initialized) return;
+        initialized = true;
+
+        const char* multiEnv = std::getenv("SSC_MULTIGPU");
+        bool multiEnabled = !(multiEnv && multiEnv[0] == '0');
+
+        // If something already initialized vkCtx (e.g. a fast-path render ran
+        // first), adopt its instance; otherwise create one via vkCtx below.
+        VkInstance instance = vkCtx.initialized ? vkCtx.instance : VK_NULL_HANDLE;
+        if (instance == VK_NULL_HANDLE) {
+            VkApplicationInfo appInfo{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+            appInfo.apiVersion = VK_API_VERSION_1_2;
+            VkInstanceCreateInfo createInfo{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+            createInfo.pApplicationInfo = &appInfo;
+            vkCreateInstance(&createInfo, nullptr, &instance);
+        }
+
+        uint32_t deviceCount = 0;
+        vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
+        std::vector<VkPhysicalDevice> all(deviceCount);
+        vkEnumeratePhysicalDevices(instance, &deviceCount, all.data());
+
+        struct Cand { VkPhysicalDevice dev; int score; uint32_t idx; };
+        std::vector<Cand> cands;
+        for (uint32_t i = 0; i < deviceCount; ++i) {
+            int s = VulkanContext::scorePhysicalDevice(all[i]);
+            if (s < 0) continue;
+            cands.push_back({all[i], s, i});
+        }
+
+        // Explicit device list wins over scoring.
+        if (const char* gpusEnv = std::getenv("SSC_GPUS")) {
+            std::vector<Cand> filtered;
+            std::stringstream ss(gpusEnv);
+            std::string tok;
+            while (std::getline(ss, tok, ',')) {
+                uint32_t want = (uint32_t)std::stoul(tok);
+                for (const auto& c : cands)
+                    if (c.idx == want) filtered.push_back(c);
+            }
+            if (!filtered.empty()) cands = std::move(filtered);
+        } else {
+            // Best devices first; drop CPU implementations (lavapipe) when a
+            // real GPU is present so it never steals tiles from actual GPUs.
+            std::stable_sort(cands.begin(), cands.end(),
+                             [](const Cand& a, const Cand& b) { return a.score > b.score; });
+            bool haveGPU = !cands.empty() && cands.front().score >= 2;
+            if (haveGPU) {
+                cands.erase(std::remove_if(cands.begin(), cands.end(),
+                            [](const Cand& c) { return c.score <= 1; }), cands.end());
+            }
+        }
+
+        if (!multiEnabled && cands.size() > 1) cands.resize(1);
+        if (const char* maxEnv = std::getenv("SSC_MAX_GPUS")) {
+            size_t maxN = (size_t)std::stoul(maxEnv);
+            if (maxN >= 1 && cands.size() > maxN) cands.resize(maxN);
+        }
+
+        // Primary context. If vkCtx was already initialized before the manager
+        // ran, keep whatever device it has; otherwise give it the best device.
+        if (!vkCtx.initialized) {
+            vkCtx.init(instance, cands.empty() ? VK_NULL_HANDLE : cands.front().dev);
+        }
+        contexts.push_back(&vkCtx);
+
+        // Secondary contexts for the remaining devices.
+        for (size_t i = 0; i < cands.size(); ++i) {
+            if (cands[i].dev == vkCtx.physicalDevice) continue;
+            if (contexts.size() == 1 && i == 0 && vkCtx.initialized && vkCtx.physicalDevice == cands[i].dev) continue;
+            auto c = std::make_unique<VulkanContext>();
+            c->init(instance, cands[i].dev);
+            contexts.push_back(c.get());
+            extras.push_back(std::move(c));
+        }
+
+        std::cout << "GPUManager: using " << contexts.size() << " device(s):" << std::endl;
+        for (size_t i = 0; i < contexts.size(); ++i)
+            std::cout << "  [" << i << "] " << contexts[i]->deviceName
+                      << (i == 0 ? " (primary)" : "") << std::endl;
+    }
+};
+inline GPUManager gpuMgr;
 #endif
 }

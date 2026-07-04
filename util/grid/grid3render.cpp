@@ -411,6 +411,109 @@ void Octree<T>::buildGPUMaterials(const RenderBuffer_<T>& buf, std::vector<GPUMa
 }
 
 
+#ifdef VULKAN_SUPPORT
+// -----------------------------------------------------------------------------
+// Multi-GPU wavefront tile scheduler.
+//
+// Splits the frame into tiles and distributes them over every context in
+// gpuMgr via a work-stealing queue: each GPU runs a host thread that grabs the
+// next unclaimed tile, renders it synchronously, and comes back for more.
+// Load balancing is therefore dynamic and automatic - a faster GPU simply
+// completes more tiles per second, so heterogeneous setups (e.g. 2x RTX 3090 +
+// 1x R9700) stay saturated without any static work split or tuning.
+//
+// Every context must already hold the full scene (points, materials, lights,
+// skybox, fog, common buffers) - callers upload to each context first.
+// After this returns, the merged accumulation image (width*height*5 floats)
+// is resident in the PRIMARY context's outBuffer, so the existing smooth /
+// blend / readback passes run on vkCtx exactly as before.
+// -----------------------------------------------------------------------------
+static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData& camTemplate,
+                                      int samplesPerPixel, int maxBounces, int sampleOffset) {
+    TIME_FUNCTION;
+    constexpr int tileW = 512, tileH = 512;
+
+    struct Tile { int x, y, w, h; int owner; };
+    std::vector<Tile> tiles;
+    for (int y = 0; y < height; y += tileH)
+        for (int x = 0; x < width; x += tileW)
+            tiles.push_back({x, y, std::min(tileW, width - x), std::min(tileH, height - y), -1});
+
+    auto renderOn = [&](VulkanContext& ctx, Tile& t) {
+        GPUCameraData cd = camTemplate;
+        cd.tileOffsetX = t.x;
+        cd.tileOffsetY = t.y;
+        cd.currentSampleOffset = sampleOffset;
+        cd.dispatchSamples = samplesPerPixel;
+        ctx.updateCameraData(cd);
+        ctx.dispatchWavefront(t.w, t.h, maxBounces, samplesPerPixel);
+    };
+
+    const size_t nGPU = gpuMgr.count();
+    if (nGPU <= 1) {
+        for (auto& t : tiles) renderOn(vkCtx, t);
+        return;
+    }
+
+    // Work-stealing dispatch: one host thread per GPU. Vulkan calls target
+    // disjoint VkDevices, so no cross-thread synchronization is needed beyond
+    // the tile counter.
+    std::atomic<size_t> next{0};
+    std::vector<int> tilesDone(nGPU, 0);
+    std::vector<double> msSpent(nGPU, 0.0);
+    std::vector<std::thread> workers;
+    workers.reserve(nGPU);
+    for (size_t g = 0; g < nGPU; ++g) {
+        workers.emplace_back([&, g] {
+            auto& ctx = gpuMgr.ctx(g);
+            for (;;) {
+                size_t i = next.fetch_add(1, std::memory_order_relaxed);
+                if (i >= tiles.size()) break;
+                tiles[i].owner = (int)g;
+                auto t0 = std::chrono::steady_clock::now();
+                renderOn(ctx, tiles[i]);
+                msSpent[g] += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                ++tilesDone[g];
+            }
+        });
+    }
+    for (auto& w : workers) w.join();
+
+    if (std::getenv("SSC_GPU_VERBOSE")) {
+        for (size_t g = 0; g < nGPU; ++g)
+            std::cout << "  gpu[" << g << "] " << gpuMgr.ctx(g).deviceName << ": "
+                      << tilesDone[g] << " tiles, " << (int)msSpent[g] << " ms" << std::endl;
+    }
+
+    // Merge: pull each GPU's tiles out of its own accumulation buffer into a
+    // host image, then push the stitched image into the primary context.
+    const size_t floatsPerPixel = 5;
+    std::vector<float> merged(size_t(width) * size_t(height) * floatsPerPixel);
+    for (size_t g = 0; g < nGPU; ++g) {
+        auto& ctx = gpuMgr.ctx(g);
+        void* mapped = nullptr;
+        vkMapMemory(ctx.device, ctx.outMem, 0, merged.size() * sizeof(float), 0, &mapped);
+        if (!ctx.outMemCoherent) {
+            VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+            range.memory = ctx.outMem;
+            range.offset = 0;
+            range.size = VK_WHOLE_SIZE;
+            vkInvalidateMappedMemoryRanges(ctx.device, 1, &range);
+        }
+        const float* src = static_cast<const float*>(mapped);
+        for (const auto& t : tiles) {
+            if (t.owner != (int)g) continue;
+            for (int row = t.y; row < t.y + t.h; ++row) {
+                size_t off = (size_t(row) * width + t.x) * floatsPerPixel;
+                memcpy(merged.data() + off, src + off, size_t(t.w) * floatsPerPixel * sizeof(float));
+            }
+        }
+        vkUnmapMemory(ctx.device, ctx.outMem);
+    }
+    vkCtx.uploadToBuffer(vkCtx.outBuffer, merged.data(), (uint32_t)(merged.size() * sizeof(float)));
+}
+#endif
+
 // Uploads the octree's fog volumes to the GPU and stamps the count into camData.
 template<typename T>
 static void uploadFogVolumes(VulkanContext& vkCtx, GPUCameraData& camData,
@@ -438,14 +541,18 @@ frame Octree<T>::renderFrameVulkan(const Camera& cam, int height, int width, fra
     thread_local RenderBuffer tl_buffer;
     buildRender(tl_buffer);
     
-    vkCtx.init();
+    gpuMgr.init();
 
     std::vector<GPUMaterial> gpuMaterials;
     buildGPUMaterials(tl_buffer, gpuMaterials);
-    vkCtx.updateMaterialBuffer(gpuMaterials);
-    vkCtx.updateSellmeierBuffer(buildSellmeierLUT(tl_buffer.materials),
-                                SELL_LUT_WAVELENGTHS,
-                                std::max<size_t>(1, tl_buffer.materials.size()) * SELL_LUT_SECONDARY);
+    std::vector<float> sellLUT = buildSellmeierLUT(tl_buffer.materials);
+    for (size_t g = 0; g < gpuMgr.count(); ++g) {
+        auto& ctx = gpuMgr.ctx(g);
+        ctx.updateMaterialBuffer(gpuMaterials);
+        ctx.updateSellmeierBuffer(sellLUT,
+                                  SELL_LUT_WAVELENGTHS,
+                                  std::max<size_t>(1, tl_buffer.materials.size()) * SELL_LUT_SECONDARY);
+    }
 
     std::vector<bool> isLodPoint(tl_buffer.points.size(), false);
     for(const auto& n : tl_buffer.nodes) {
@@ -528,30 +635,19 @@ frame Octree<T>::renderFrameVulkan(const Camera& cam, int height, int width, fra
     camData.sellSecondary = SELL_LUT_SECONDARY;
 
     size_t outSize = width * height * 5 * sizeof(float);
-    uploadFogVolumes(vkCtx, camData, fogVolumes_);
-    vkCtx.updateCommonBuffers(outSize, camData);
-    vkCtx.updateSkyboxBuffer(skyData);
-    vkCtx.updateLightBuffer(gpuLights);
-    vkCtx.updatePBRBuffers(gpuPoints);
-    {
-        int tileW = 512;
-        int tileH = 512;
-
-        for (int y = 0; y < height; y += tileH) {
-            for (int x = 0; x < width; x += tileW) {
-                int drawW = std::min(tileW, width - x);
-                int drawH = std::min(tileH, height - y);
-
-                camData.tileOffsetX = x;
-                camData.tileOffsetY = y;
-                camData.currentSampleOffset = 0;
-                camData.dispatchSamples = samplesPerPixel;
-
-                vkCtx.updateCameraData(camData);
-                vkCtx.dispatchWavefront(drawW, drawH, maxBounces, samplesPerPixel);
-            }
-        }
+    // Upload the full scene to every GPU; tiles are then distributed across
+    // all of them by runWavefrontTilesMultiGPU (work stealing = dynamic load
+    // balancing across heterogeneous GPUs).
+    for (size_t g = 0; g < gpuMgr.count(); ++g) {
+        auto& ctx = gpuMgr.ctx(g);
+        uploadFogVolumes(ctx, camData, fogVolumes_);
+        ctx.updateCommonBuffers(outSize, camData);
+        ctx.updateSkyboxBuffer(skyData);
+        ctx.updateLightBuffer(gpuLights);
+        ctx.updatePBRBuffers(gpuPoints);
     }
+
+    runWavefrontTilesMultiGPU(width, height, camData, samplesPerPixel, maxBounces, /*sampleOffset=*/0);
 
     frameCounter_++;
 
