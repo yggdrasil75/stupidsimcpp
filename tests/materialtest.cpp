@@ -19,7 +19,6 @@
 #include "../util/timing_decorator.hpp"
 #include "../util/timing_decorator.cpp"
 
-// --- NEW: Helper function for organic 3D procedural noise ---
 float smoothNoise(float x, float y, float z, float scale) {
     float nx = x * scale;
     float ny = y * scale;
@@ -56,7 +55,6 @@ void createBox(Grid::Octree<int>& octree, const Eigen::Vector3f& center, const E
     }
 }
 
-// --- NEW: Helper function to create a Brass box with oxidized/tarnished patches ---
 void createTarnishedBrassBox(Grid::Octree<int>& octree, const Eigen::Vector3f& center, const Eigen::Vector3f& size, float step, int oid, Grid::BodyType bType, float mass) {
     Eigen::Vector3f halfSize = size / 2.0f;
     Eigen::Vector3f minB = center - halfSize;
@@ -70,15 +68,16 @@ void createTarnishedBrassBox(Grid::Octree<int>& octree, const Eigen::Vector3f& c
     for (float x = minB.x(); x <= maxB.x(); x += step) {
         for (float y = minB.y(); y <= maxB.y(); y += step) {
             for (float z = minB.z(); z <= maxB.z(); z += step) {
-                float noise = smoothNoise(x, y, z, 12.0f);
+                // Lower frequency noise for more gradual sweeps of tarnish
+                float noise = smoothNoise(x, y, z, 4.0f);
                 
-                // Blend values based on noise threshold
-                bool isTarnished = noise > 0.65f;
-                float blend = std::max(0.0f, (noise - 0.5f) * 2.0f); 
+                // Smooth interpolation (smoothstep equivalent) between noise 0.3 and 0.7
+                float t = std::max(0.0f, std::min(1.0f, (noise - 0.3f) / 0.4f));
+                float blend = t * t * (3.0f - 2.0f * t); // cubic ease-in ease-out
                 
-                Eigen::Vector3f albedo = isTarnished ? tarnishColor : cleanBrass * (1.0f - blend) + tarnishColor * blend;
-                float roughness = isTarnished ? 0.8f : (0.08f + blend * 0.4f);
-                float metallic = isTarnished ? 0.1f : (0.99f - blend * 0.5f);
+                Eigen::Vector3f albedo = cleanBrass * (1.0f - blend) + tarnishColor * blend;
+                float roughness = 0.08f * (1.0f - blend) + 0.8f * blend;
+                float metallic = 0.99f * (1.0f - blend) + 0.1f * blend;
                 
                 Eigen::Vector3f pos(x + jitter(rng), y + jitter(rng), z + jitter(rng));
                 octree.insert(1, pos, true, albedo, step, true, oid, 0.0f, roughness, metallic, 0.0f, 1.18f, Eigen::Vector3f::Zero(), bType, mass);
@@ -87,7 +86,6 @@ void createTarnishedBrassBox(Grid::Octree<int>& octree, const Eigen::Vector3f& c
     }
 }
 
-// --- NEW: Helper function to create a block with geometric pores and texture variations ---
 void createTexturedBox(Grid::Octree<int>& octree, const Eigen::Vector3f& center, const Eigen::Vector3f& size, const Eigen::Vector3f& baseColor, float step, int oid, Grid::BodyType bType, float mass) {
     Eigen::Vector3f halfSize = size / 2.0f;
     Eigen::Vector3f minB = center - halfSize;
@@ -251,6 +249,7 @@ int main() {
         Eigen::Vector3f ceilingSize(14.4f, 14.4f, 0.2f);
         Eigen::Vector3f lightSize(8.0f, 8.0f, 0.2f);
         float step = 0.5f;
+        float lightStep = 0.1f;
 
         Eigen::Vector3f minCeiling = ceilingCenter - ceilingSize / 2.0f;
         Eigen::Vector3f maxCeiling = ceilingCenter + ceilingSize / 2.0f;
@@ -263,16 +262,63 @@ int main() {
         for (float x = minCeiling.x(); x <= maxCeiling.x(); x += step) {
             for (float y = minCeiling.y(); y <= maxCeiling.y(); y += step) {
                 for (float z = minCeiling.z(); z <= maxCeiling.z(); z += step) {
-                    Eigen::Vector3f pos(x, y, z);
-                    
                     bool isLightArea = (x >= minLight.x() && x <= maxLight.x() &&
                                         y >= minLight.y() && y <= maxLight.y());
-                    bool isExposedLightLayer = isLightArea && (z < minCeiling.z() + step);
+                    
+                    if (!isLightArea) {
+                        Eigen::Vector3f pos(x, y, z);
+                        octree.insert(1, pos, true, cBlack, step, true, 100, 0.0f, 0.8f, 0.2f, 1.0f, 1.45f, Eigen::Vector3f::Zero(), Grid::BodyType::STATIC, 1.0f);
+                    }
+                }
+            }
+        }
+     
+        for (float z = minCeiling.z(); z <= maxCeiling.z(); z += lightStep) {
+            for (float x = minLight.x(); x <= maxLight.x(); x += lightStep) {
+                for (float y = minLight.y(); y <= maxLight.y(); y += lightStep) {
+                    Eigen::Vector3f pos(x, y, z);
+                    
+                    bool isExposedLightLayer = (z < minCeiling.z() + lightStep);
 
                     if (isExposedLightLayer) {
-                        octree.insert(1, pos, true, cWhite, step, true, 10, 1.0f, 0.8f, 0.0f, 1.0f, 1.45f, Eigen::Vector3f::Zero(), Grid::BodyType::STATIC, 1.0f);
+                        float u = (x - minLight.x()) / lightSize.x();
+                        float v = (y - minLight.y()) / lightSize.y();
+                        
+                        bool inCanton = (u <= 0.4f) && (v >= (1.0f - 7.0f / 13.0f));
+                        Eigen::Vector3f flagColor;
+                        
+                        if (inCanton) {
+                            float starU = u / 0.4f; 
+                            float cantonVStart = 1.0f - 7.0f / 13.0f;
+                            float starV = (v - cantonVStart) / (7.0f / 13.0f);
+                            int cx = static_cast<int>(starU * 11.0f);
+                            int cy = static_cast<int>(starV * 9.0f);
+                            
+                            // Simple alternating pattern to represent stars
+                            if ((cx + cy) % 2 == 0) {
+                                flagColor = Eigen::Vector3f(1.0f, 1.0f, 1.0f);
+                            } else {
+                                flagColor = Eigen::Vector3f(0.05f, 0.05f, 0.8f);
+                            }
+                        } else {
+                            // 13 Stripes
+                            int stripeIndex = static_cast<int>((1.0f - v) * 13.0f);
+                            if (stripeIndex >= 13) stripeIndex = 12; // Safety clamp
+                            
+                            if (stripeIndex % 2 == 0) {
+                                flagColor = Eigen::Vector3f(1.0f, 0.05f, 0.1f); // Red
+                            } else {
+                                flagColor = Eigen::Vector3f(1.0f, 1.0f, 1.0f); // White
+                            }
+                        }
+
+                        // Insert the glowing voxel
+                        octree.insert(1, pos, true, flagColor, lightStep, true, 10, 2.0f, 0.8f, 0.0f, 1.0f, 1.45f, Eigen::Vector3f::Zero(), Grid::BodyType::STATIC, 1.0f);
+                        // Add explicit chromaticity for colored glowing 
+                        octree.setEmittance(pos, flagColor, 0.01f);
                     } else {
-                        octree.insert(1, pos, true, cBlack, step, true, 100, 0.0f, 0.8f, 0.2f, 1.0f, 1.45f, Eigen::Vector3f::Zero(), Grid::BodyType::STATIC, 1.0f);
+                        // Fill backing layers with dark static voxels so it has a ceiling body above the light
+                        octree.insert(1, pos, true, cBlack, lightStep, true, 100, 0.0f, 0.8f, 0.2f, 1.0f, 1.45f, Eigen::Vector3f::Zero(), Grid::BodyType::STATIC, 1.0f);
                     }
                 }
             }
@@ -326,8 +372,8 @@ int main() {
     const int samples = 1000;
     const int blendedsamples = 3000;
     const float blendedfactor = 0.5;
-    const int videosamples = 1000;
-    const int bounces = 16;
+    const int videosamples = 500;
+    const int bounces = 8;
     const int physicsSubsteps = 10;
     const float physicsDt = 1.0f / fps;
     const float subDt = physicsDt / physicsSubsteps;
