@@ -10,9 +10,16 @@ layout(push_constant) uniform Push {
     int samples;
 } pc;
 
-layout(std430, binding = 0) readonly buffer FastBuf { float fastData[]; };
-layout(std430, binding = 1) readonly buffer PBRBuf { float pbrData[]; };
-layout(std430, binding = 2) writeonly buffer OutBuf { float outData[]; };
+layout(std430, binding = 0) readonly buffer FastBuf { float fastData[]; };  // full res, 5-stride
+layout(std430, binding = 1) readonly buffer PBRBuf  { float pbrData[]; };   // low res, 5-stride
+layout(std430, binding = 2) writeonly buffer OutBuf { float outData[]; };   // full res, 3-stride
+layout(std430, binding = 3) readonly buffer CoeffBuf { float coeff[]; };    // low res, 6-stride
+
+void fetchCoeff(int lx, int ly, out vec3 a, out vec3 b) {
+    int i = (ly * pc.lowW + lx) * 6;
+    a = vec3(coeff[i], coeff[i + 1], coeff[i + 2]);
+    b = vec3(coeff[i + 3], coeff[i + 4], coeff[i + 5]);
+}
 
 void main() {
     int x = int(gl_GlobalInvocationID.x);
@@ -20,83 +27,71 @@ void main() {
     if (x >= pc.width || y >= pc.height) return;
 
     int fastIdx = (y * pc.width + x) * 5;
-    // Fast render is exactly 1 sample, no accumulation division needed
-    float fastR = fastData[fastIdx];
-    float fastG = fastData[fastIdx + 1];
-    float fastB = fastData[fastIdx + 2];
+    vec3  guideC    = vec3(fastData[fastIdx], fastData[fastIdx + 1], fastData[fastIdx + 2]);
     float fastDepth = fastData[fastIdx + 3];
-    int fastObj = int(fastData[fastIdx + 4]);
+    int   fastObj   = int(fastData[fastIdx + 4]);
 
-    int center_lx = int(round(float(x) * pc.pbrScale));
-    int center_ly = int(round(float(y) * pc.pbrScale));
-
-    float sumWeights = 0.0;
-    float sumR = 0.0, sumG = 0.0, sumB = 0.0;
-
-    int radius = 3;
-    float spatialSigma = 1.5;
-    float relativeDepthSigma = 0.05;
     float invSamples = 1.0 / max(1.0, float(pc.samples));
 
-    for (int dy = -radius; dy <= radius; ++dy) {
-        for (int dx = -radius; dx <= radius; ++dx) {
-            int nx = clamp(center_lx + dx, 0, pc.lowW - 1);
-            int ny = clamp(center_ly + dy, 0, pc.lowH - 1);
-            int pbrIdx = (ny * pc.lowW + nx) * 5;
+    // Continuous low-res coordinate of this full-res pixel.
+    float flx = (float(x) + 0.5) * pc.pbrScale - 0.5;
+    float fly = (float(y) + 0.5) * pc.pbrScale - 0.5;
+    int lx0 = int(floor(flx));
+    int ly0 = int(floor(fly));
+    float fx = flx - float(lx0);
+    float fy = fly - float(ly0);
 
-            int pbrObj = int(pbrData[pbrIdx + 4]);
-            if (fastObj != pbrObj) continue;
+    float sumW = 0.0;
+    vec3 sumA = vec3(0.0), sumB = vec3(0.0);
 
-            float pbrDepth = pbrData[pbrIdx + 3] * invSamples;
+    // 2x2 edge-aware bilinear taps.
+    for (int j = 0; j <= 1; ++j)
+    for (int i = 0; i <= 1; ++i) {
+        int nx = clamp(lx0 + i, 0, pc.lowW - 1);
+        int ny = clamp(ly0 + j, 0, pc.lowH - 1);
+        int pIdx = (ny * pc.lowW + nx) * 5;
+        if (int(pbrData[pIdx + 4]) != fastObj) continue;
 
-            float sDistSq = float(dx*dx + dy*dy);
-            float spatialWeight = exp(-sDistSq / (2.0 * spatialSigma * spatialSigma));
+        float pDepth = pbrData[pIdx + 3] * invSamples;
+        float dz = abs(fastDepth - pDepth) / max(fastDepth, 0.1);
+        if (fastDepth > 999000.0 && pDepth > 999000.0) dz = 0.0;
+        float wZ = exp(-(dz * dz) / (2.0 * 0.05 * 0.05));
+        float wB = (i == 0 ? 1.0 - fx : fx) * (j == 0 ? 1.0 - fy : fy);
+        float w = max(wB, 1e-4) * wZ;
 
-            float depthDiff = abs(fastDepth - pbrDepth) / max(fastDepth, 0.1);
-            if (fastDepth > 999000.0 && pbrDepth > 999000.0) depthDiff = 0.0;
-            
-            float depthWeight = exp(-(depthDiff * depthDiff) / (2.0 * relativeDepthSigma * relativeDepthSigma));
-
-            float weight = spatialWeight * depthWeight;
-            sumWeights += weight;
-            sumR += pbrData[pbrIdx] * invSamples * weight;
-            sumG += pbrData[pbrIdx + 1] * invSamples * weight;
-            sumB += pbrData[pbrIdx + 2] * invSamples * weight;
-        }
+        vec3 a, b;
+        fetchCoeff(nx, ny, a, b);
+        sumW += w; sumA += a * w; sumB += b * w;
     }
-    
-    if (sumWeights == 0.0 && fastObj != -1) {
-        int searchRadius = radius * 3;
-        float nearestDist = 99999.0;
-        
-        for (int dy = -searchRadius; dy <= searchRadius; ++dy) {
-            for (int dx = -searchRadius; dx <= searchRadius; ++dx) {
-                int nx = clamp(center_lx + dx, 0, pc.lowW - 1);
-                int ny = clamp(center_ly + dy, 0, pc.lowH - 1);
-                int pbrIdx = (ny * pc.lowW + nx) * 5;
 
-                if (int(pbrData[pbrIdx + 4]) == fastObj) {
-                    float dist = float(dx*dx + dy*dy);
-                    if (dist < nearestDist) {
-                        nearestDist = dist;
-                        sumR = pbrData[pbrIdx] * invSamples;
-                        sumG = pbrData[pbrIdx + 1] * invSamples;
-                        sumB = pbrData[pbrIdx + 2] * invSamples;
-                        sumWeights = 1.0;
-                    }
-                }
-            }
+    // Fallback 1: widen the search with a Gaussian window, same-object only.
+    if (sumW == 0.0 && fastObj != -1) {
+        int clx = int(round(float(x) * pc.pbrScale));
+        int cly = int(round(float(y) * pc.pbrScale));
+        for (int dy = -3; dy <= 3; ++dy)
+        for (int dx = -3; dx <= 3; ++dx) {
+            int nx = clamp(clx + dx, 0, pc.lowW - 1);
+            int ny = clamp(cly + dy, 0, pc.lowH - 1);
+            int pIdx = (ny * pc.lowW + nx) * 5;
+            if (int(pbrData[pIdx + 4]) != fastObj) continue;
+            float w = exp(-float(dx * dx + dy * dy) / (2.0 * 1.5 * 1.5));
+            vec3 a, b;
+            fetchCoeff(nx, ny, a, b);
+            sumW += w; sumA += a * w; sumB += b * w;
         }
     }
     
     int outIdx = (y * pc.width + x) * 3;
-    if (sumWeights > 0.0) { 
-        outData[outIdx]     = clamp(sumR / sumWeights, 0.0, 1.0);
-        outData[outIdx + 1] = clamp(sumG / sumWeights, 0.0, 1.0);
-        outData[outIdx + 2] = clamp(sumB / sumWeights, 0.0, 1.0);
-    } else { 
-        outData[outIdx]     = clamp(fastR, 0.0, 1.0);
-        outData[outIdx + 1] = clamp(fastG, 0.0, 1.0);
-        outData[outIdx + 2] = clamp(fastB, 0.0, 1.0);
+    vec3 result;
+    if (sumW > 0.0) {
+        vec3 a = sumA / sumW;
+        vec3 b = sumB / sumW;
+        result = a * guideC + b;
+    } else {
+        // Nothing of this object in the path trace at all: keep the guide.
+        result = guideC;
     }
+    outData[outIdx]     = clamp(result.r, 0.0, 1.0);
+    outData[outIdx + 1] = clamp(result.g, 0.0, 1.0);
+    outData[outIdx + 2] = clamp(result.b, 0.0, 1.0);
 }

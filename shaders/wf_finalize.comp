@@ -73,8 +73,18 @@ void main() {
             float sampleVar = max(0.0, (lumSqSum / n) - mean * mean);
             float stdErr = sqrt(sampleVar / n);
             float relErr = stdErr / (mean + 1e-4);
-            if (relErr < 0.01) {
-                adaptiveData[ad + 2u] = n;
+            float relThresh = clamp(0.16 * inversesqrt(float(cam.targetSamples)), 0.0005, 0.02);
+            if (relErr < relThresh) {
+                float passes = adaptiveData[ad + 3u] + 1.0;
+                adaptiveData[ad + 3u] = passes;
+                if (passes >= 2.0) {
+                    adaptiveData[ad + 2u] = n;
+                }
+            } else {
+                adaptiveData[ad + 3u] = 0.0;
+                if (reqSamples < float(cam.targetSamples)) {
+                    adaptiveData[ad + 2u] = float(cam.targetSamples);
+                }
             }
         }
     }

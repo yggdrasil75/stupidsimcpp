@@ -102,7 +102,12 @@ void main() {
                 float lightPdfW = 1.0 / max(1e-6, solidAngle * float(cam.emissiveCount));
                 wB = misWeight(prevPdf, lightPdfW);
             }
-            radiance += throughput * emitted * wB;
+            vec3 addE = throughput * emitted * wB;
+            if (bounce > 0) {
+                float addLum = dot(addE, vec3(0.2126, 0.7152, 0.0722));
+                if (addLum > 64.0) addE *= 64.0 / addLum;
+            }
+            radiance += addE;
         }
 
         vec3 F0 = mix(vec3(0.04), albedo.rgb, metallic);

@@ -196,11 +196,11 @@ int main() {
     const float fps = 60.0f;
     const float durationPerSegment = 10.0f;
     const int framesPerSegment = static_cast<int>(fps * durationPerSegment);
-    const int samples = 32768;
+    const int samples = 1000;
     const int blendedsamples = 3000;
     const float blendedfactor = 0.5;
-    const int videosamples = 500;
-    const int bounces = 4;
+    const int videosamples = 1000;
+    const int bounces = 16;
     const int physicsSubsteps = 10;
     const float physicsDt = 1.0f / fps;
     const float subDt = physicsDt / physicsSubsteps;
@@ -319,7 +319,7 @@ int main() {
             
             std::cout << "Rendering video frame " << frameCounter << "/" << totalFrames << "..." << std::endl;
             // frame out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
-            frame out = octree.superBlendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, videosamples, bounces, false);
+            frame out = octree.superBlendedRenderFrameVulkan(cam, height * 2, width * 2, blendedfactor, frame::colormap::RGB, videosamples, bounces, false);
             // frame out = octree.renderFrameVulkan(cam, height, width, frame::colormap::RGB, videosamples, bounces, false, true);
             // videoFrames.push_back(std::move(out));
             std::string debugFilename = "output/materialframes/debug_material_" + std::to_string(frameCounter) + ".bmp";

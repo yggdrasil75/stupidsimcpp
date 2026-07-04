@@ -5,14 +5,18 @@ layout(push_constant) uniform Push {
     int width;
     int height;
     int samples;
+    int stepSize;   // a-trous hole size: 1, 2, 4, 8
+    int finalPass;  // 1 -> write 3-stride clamped output, else 5-stride
 } pc;
 
 layout(std430, binding = 0) readonly buffer InBuf { float inData[]; };
 layout(std430, binding = 1) writeonly buffer OutBuf { float outData[]; };
+layout(std430, binding = 2) readonly buffer VarBuf { float varData[]; };
 
-float getLuminance(vec3 c) {
-    return dot(c, vec3(0.2126, 0.7152, 0.0722));
-}
+float lum(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+
+// B3-spline 5-tap weights
+const float H[5] = float[5](0.0625, 0.25, 0.375, 0.25, 0.0625);
 
 void main() {
     int x = int(gl_GlobalInvocationID.x);
@@ -20,76 +24,96 @@ void main() {
     if (x >= pc.width || y >= pc.height) return;
 
     int centerIdx = (y * pc.width + x) * 5;
-    float invSamples = 1.0 / max(1.0, float(pc.samples));
-    
-    vec3 centerColor = vec3(inData[centerIdx], inData[centerIdx + 1], inData[centerIdx + 2]) * invSamples;
-    float centerDepth = inData[centerIdx + 3] * invSamples;
-    int centerObj = int(inData[centerIdx + 4]);
+    // Only the first iteration (stepSize 1) sees raw accumulated sums; later
+    // iterations run on already-normalized data. pc.samples always carries the
+    // true per-pixel default count so the variance estimate stays correct.
+    float invSamples = (pc.stepSize == 1) ? 1.0 / max(1.0, float(pc.samples)) : 1.0;
 
-    vec3 localAvg = vec3(0.0);
-    float localW = 0.0;
-    for (int dy = -1; dy <= 1; ++dy) {
+    vec3  cColor = vec3(inData[centerIdx], inData[centerIdx + 1], inData[centerIdx + 2]) * invSamples;
+    float cDepth = inData[centerIdx + 3] * invSamples;
+    float cObj   = inData[centerIdx + 4];
+
+    // Measured standard error of this pixel's mean, from the sampler itself.
+    int vIdx = (y * pc.width + x) * 5;
+    float req  = varData[vIdx + 2];
+    float n    = (req < 0.0) ? -req : max(1.0, float(pc.samples));
+    float mean = varData[vIdx] / n;
+    float var  = max(0.0, varData[vIdx + 1] / n - mean * mean);
+    float stdErr = sqrt(var / n);
+    // Later (wider) iterations operate on already-filtered data: shrink the
+    // tolerance so detail recovered early is not re-blurred.
+    stdErr /= sqrt(float(pc.stepSize));
+
+    // First iteration: hard firefly rejection against the same-object 3x3 mean.
+    if (pc.stepSize == 1) {
+        vec3 localAvg = vec3(0.0);
+        float localW = 0.0;
+        for (int dy = -1; dy <= 1; ++dy)
         for (int dx = -1; dx <= 1; ++dx) {
             int nx = clamp(x + dx, 0, pc.width - 1);
             int ny = clamp(y + dy, 0, pc.height - 1);
             int nIdx = (ny * pc.width + nx) * 5;
-            
-            // Only aggregate same-object pixels for accurate background color
-            if (int(inData[nIdx + 4]) == centerObj) {
+            if (inData[nIdx + 4] == cObj && !(dx == 0 && dy == 0)) {
                 localAvg += vec3(inData[nIdx], inData[nIdx + 1], inData[nIdx + 2]) * invSamples;
                 localW += 1.0;
             }
         }
-    }
-    localAvg /= max(1.0, localW);
-    
-    float lLum = getLuminance(localAvg);
-    float cLum = getLuminance(centerColor);
-    
-    float maxAllowedLum = lLum * 3.0 + 0.1;
-    if (cLum > maxAllowedLum) {
-        centerColor = localAvg; // Override the center firefly entirely
-    }
-    float sumWeights = 0.0;
-    vec3 sumColor = vec3(0.0);
-
-    int radius = 2;
-    float spatialSigma = 2.0;
-    float depthSigma = 1.0;
-
-    for (int dy = -radius; dy <= radius; ++dy) {
-        for (int dx = -radius; dx <= radius; ++dx) {
-            int nx = clamp(x + dx, 0, pc.width - 1);
-            int ny = clamp(y + dy, 0, pc.height - 1);
-            int nIdx = (ny * pc.width + nx) * 5;
-            
-            vec3 nColor = vec3(inData[nIdx], inData[nIdx + 1], inData[nIdx + 2]) * invSamples;
-            float nDepth = inData[nIdx + 3] * invSamples;
-            int nObj = int(inData[nIdx + 4]);
-            
-            float spatialDistSq = float(dx*dx + dy*dy);
-            float spatialWeight = exp(-spatialDistSq / (2.0 * spatialSigma * spatialSigma));
-            
-            float depthDiff = nDepth - centerDepth;
-            float depthWeight = exp(-(depthDiff * depthDiff) / (2.0 * depthSigma * depthSigma));
-            
-            float objWeight = (centerObj == nObj) ? 1.0 : 0.05;
-            float nLum = getLuminance(nColor);
-            if (dx == 0 && dy == 0) {
-                nColor = centerColor; // Use clamped center
-            } else if (nLum > maxAllowedLum && nObj == centerObj) {
-                // If the neighbor is a firefly, forcibly dim it down to local tolerance bounds
-                nColor *= maxAllowedLum / max(nLum, 0.001);
-            }
-
-            float weight = spatialWeight * depthWeight * objWeight;
-            sumWeights += weight;
-            sumColor += nColor * weight;
+        if (localW > 0.0) {
+            localAvg /= localW;
+            float maxLum = lum(localAvg) * 3.0 + 0.1;
+            float cl = lum(cColor);
+            if (cl > maxLum) cColor *= maxLum / max(cl, 1e-4);
         }
     }
-    
-    int outIdx = (y * pc.width + x) * 3;
-    outData[outIdx]     = clamp(sumColor.r / sumWeights, 0.0, 1.0);
-    outData[outIdx + 1] = clamp(sumColor.g / sumWeights, 0.0, 1.0);
-    outData[outIdx + 2] = clamp(sumColor.b / sumWeights, 0.0, 1.0);
+
+    float cLum = lum(cColor);
+    // Edge-stopping tolerance: 4 standard errors of luminance, floored so
+    // fully-converged pixels still accept numerically-identical neighbors.
+    float lumSigma = 4.0 * stdErr + 1e-3;
+
+    vec3 sumC = vec3(0.0);
+    float sumW = 0.0;
+
+    for (int j = -2; j <= 2; ++j)
+    for (int i = -2; i <= 2; ++i) {
+        int nx = clamp(x + i * pc.stepSize, 0, pc.width - 1);
+        int ny = clamp(y + j * pc.stepSize, 0, pc.height - 1);
+        int nIdx = (ny * pc.width + nx) * 5;
+
+        vec3  nColor = vec3(inData[nIdx], inData[nIdx + 1], inData[nIdx + 2]) * invSamples;
+        float nDepth = inData[nIdx + 3] * invSamples;
+        float nObj   = inData[nIdx + 4];
+
+        float wKernel = H[i + 2] * H[j + 2];
+        float wObj = (nObj == cObj) ? 1.0 : 0.0;
+
+        float dz = abs(nDepth - cDepth) / max(cDepth, 0.1);
+        if (cDepth > 999000.0 && nDepth > 999000.0) dz = 0.0;
+        float wZ = exp(-(dz * dz) / (2.0 * 0.05 * 0.05));
+
+        float dl = abs(lum(nColor) - cLum);
+        float wL = exp(-dl / lumSigma);
+
+        float w = wKernel * wObj * wZ * wL;
+        if (i == 0 && j == 0) { nColor = cColor; w = wKernel; }
+
+        sumC += nColor * w;
+        sumW += w;
+    }
+
+    vec3 result = sumC / max(sumW, 1e-6);
+
+    if (pc.finalPass == 1) {
+        int outIdx = (y * pc.width + x) * 3;
+        outData[outIdx]     = clamp(result.r, 0.0, 1.0);
+        outData[outIdx + 1] = clamp(result.g, 0.0, 1.0);
+        outData[outIdx + 2] = clamp(result.b, 0.0, 1.0);
+    } else {
+        int outIdx = (y * pc.width + x) * 5;
+        outData[outIdx]     = result.r;
+        outData[outIdx + 1] = result.g;
+        outData[outIdx + 2] = result.b;
+        outData[outIdx + 3] = cDepth;
+        outData[outIdx + 4] = cObj;
+    }
 }

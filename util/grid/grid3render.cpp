@@ -800,6 +800,7 @@ frame Octree<T>::blendedRenderFrameVulkan(const Camera& cam, int height, int wid
         }
     }
 
+    vkCtx.dispatchSmoothPasses(lowW, lowH, samplesPerPixel, 2, false);
     vkCtx.ensureLowResBuffer(pbrOutSize);
     vkCtx.copyBuffer(vkCtx.outBuffer, vkCtx.lowResOutBuffer, pbrOutSize);
 
@@ -854,7 +855,7 @@ frame Octree<T>::blendedRenderFrameVulkan(const Camera& cam, int height, int wid
     frame outFrame(width, height, colorformat);
     std::vector<float> colorBuffer(width * height * 3);
     
-    vkCtx.dispatchBlend(width, height, lowW, lowH, pbrScale, samplesPerPixel);
+    vkCtx.dispatchBlend(width, height, lowW, lowH, pbrScale, 1);
     
     void* mappedData;
     vkMapMemory(vkCtx.device, vkCtx.finalOutMem, 0, colorBuffer.size() * sizeof(float), 0, &mappedData);
@@ -1142,6 +1143,7 @@ frame Octree<T>::superBlendedRenderFrameVulkan(const Camera& cam, int height, in
         }
     }
 
+    vkCtx.dispatchSmoothPasses(lowW, lowH, samplesPerPixel, 2, false);
     vkCtx.ensureLowResBuffer(pbrOutSize);
     vkCtx.copyBuffer(vkCtx.outBuffer, vkCtx.lowResOutBuffer, pbrOutSize);
 
@@ -1154,7 +1156,7 @@ frame Octree<T>::superBlendedRenderFrameVulkan(const Camera& cam, int height, in
     frame outFrame(width, height, colorformat);
     std::vector<float> colorBuffer(size_t(width) * size_t(height) * 3);
 
-    vkCtx.dispatchBlend(width, height, lowW, lowH, ptScale, samplesPerPixel);
+    vkCtx.dispatchBlend(width, height, lowW, lowH, ptScale, 1);
 
     void* mappedData;
     vkMapMemory(vkCtx.device, vkCtx.finalOutMem, 0, colorBuffer.size() * sizeof(float), 0, &mappedData);

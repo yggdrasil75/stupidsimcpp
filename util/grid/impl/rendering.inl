@@ -139,6 +139,7 @@ struct VulkanContext {
     VkShaderModule fastShader = VK_NULL_HANDLE;
     VkShaderModule smoothShader = VK_NULL_HANDLE;
     VkShaderModule blendShader = VK_NULL_HANDLE;
+    VkShaderModule guidedCoeffShader = VK_NULL_HANDLE;
     VkPipelineLayout fastPipelineLayout = VK_NULL_HANDLE;
     VkPipelineLayout pbrPipelineLayout = VK_NULL_HANDLE;
     VkPipelineLayout smoothPipelineLayout = VK_NULL_HANDLE;
@@ -147,10 +148,13 @@ struct VulkanContext {
     VkPipeline pbrPipeline = VK_NULL_HANDLE;
     VkPipeline smoothPipeline = VK_NULL_HANDLE;
     VkPipeline blendPipeline = VK_NULL_HANDLE;
+    VkPipeline guidedCoeffPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout guidedCoeffPipelineLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout fastDescLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout pbrDescLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout smoothDescLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout blendDescLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout guidedCoeffDescLayout = VK_NULL_HANDLE;
     VkBuffer fastGBuffer = VK_NULL_HANDLE;
     VkDeviceMemory fastGBufferMem = VK_NULL_HANDLE;
     uint32_t currentFastGCap = 0;
@@ -180,6 +184,10 @@ struct VulkanContext {
     VkDescriptorSet pbrDescSet = VK_NULL_HANDLE;
     VkDescriptorSet smoothDescSet = VK_NULL_HANDLE;
     VkDescriptorSet blendDescSet = VK_NULL_HANDLE;
+    VkDescriptorSet guidedCoeffDescSet = VK_NULL_HANDLE;
+    VkBuffer guidedCoeffBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory guidedCoeffMem = VK_NULL_HANDLE;
+    uint32_t currentGuidedCoeffCap = 0;
 
     VkBuffer nodeBuffer = VK_NULL_HANDLE;
     VkBuffer outBuffer = VK_NULL_HANDLE;
@@ -512,25 +520,29 @@ struct VulkanContext {
         vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &fastDescLayout);
         vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &pbrDescLayout);
 
-        VkDescriptorSetLayoutBinding smBindings[2] = {};
-        for(int i=0; i<2; i++) {
+        VkDescriptorSetLayoutBinding smBindings[3] = {};
+        for(int i=0; i<3; i++) {
             smBindings[i].binding = i;
             smBindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             smBindings[i].descriptorCount = 1;
             smBindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         }
-        VkDescriptorSetLayoutCreateInfo smLayoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 2, smBindings};
+        VkDescriptorSetLayoutCreateInfo smLayoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 3, smBindings};
         vkCreateDescriptorSetLayout(device, &smLayoutInfo, nullptr, &smoothDescLayout);
 
-        VkDescriptorSetLayoutBinding blBindings[3] = {};
-        for(int i=0; i<3; i++) {
+        VkDescriptorSetLayoutBinding blBindings[4] = {};
+        for(int i=0; i<4; i++) {
             blBindings[i].binding = i;
             blBindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             blBindings[i].descriptorCount = 1;
             blBindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         }
-        VkDescriptorSetLayoutCreateInfo blLayoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 3, blBindings};
+        VkDescriptorSetLayoutCreateInfo blLayoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 4, blBindings};
         vkCreateDescriptorSetLayout(device, &blLayoutInfo, nullptr, &blendDescLayout);
+
+        // Guided-filter coefficient pass: guide (full), PT (low), coeff out.
+        VkDescriptorSetLayoutCreateInfo gcLayoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 3, blBindings};
+        vkCreateDescriptorSetLayout(device, &gcLayoutInfo, nullptr, &guidedCoeffDescLayout);
 
         VkDescriptorSetAllocateInfo allocSetInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
         allocSetInfo.descriptorPool = descriptorPool;
@@ -543,11 +555,14 @@ struct VulkanContext {
         vkAllocateDescriptorSets(device, &allocSetInfo, &smoothDescSet);
         allocSetInfo.pSetLayouts = &blendDescLayout;
         vkAllocateDescriptorSets(device, &allocSetInfo, &blendDescSet);
+        allocSetInfo.pSetLayouts = &guidedCoeffDescLayout;
+        vkAllocateDescriptorSets(device, &allocSetInfo, &guidedCoeffDescSet);
 
         fastShader = createShaderModule("./bin/fast_raytrace_hw.spv");
         
         smoothShader = createShaderModule("./bin/smooth.spv");
         blendShader = createShaderModule("./bin/blend.spv");
+        guidedCoeffShader = createShaderModule("./bin/guided_coeff.spv");
         
 
         VkPipelineLayoutCreateInfo pipelineLayoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
@@ -557,7 +572,7 @@ struct VulkanContext {
         pipelineLayoutInfo.pSetLayouts = &pbrDescLayout;
         vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pbrPipelineLayout);
 
-        VkPushConstantRange smPush{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(int) * 3};
+        VkPushConstantRange smPush{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(int) * 5};
         pipelineLayoutInfo.pSetLayouts = &smoothDescLayout;
         pipelineLayoutInfo.pushConstantRangeCount = 1;
         pipelineLayoutInfo.pPushConstantRanges = &smPush;
@@ -568,6 +583,11 @@ struct VulkanContext {
         pipelineLayoutInfo.pushConstantRangeCount = 1;
         pipelineLayoutInfo.pPushConstantRanges = &blPush;
         vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &blendPipelineLayout);
+
+        VkPushConstantRange gcPush{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(int) * 5};
+        pipelineLayoutInfo.pSetLayouts = &guidedCoeffDescLayout;
+        pipelineLayoutInfo.pPushConstantRanges = &gcPush;
+        vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &guidedCoeffPipelineLayout);
 
         VkComputePipelineCreateInfo computePipelineInfo{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
         computePipelineInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -588,6 +608,11 @@ struct VulkanContext {
             computePipelineInfo.layout = blendPipelineLayout;
             computePipelineInfo.stage.module = blendShader;
             vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &computePipelineInfo, nullptr, &blendPipeline);
+        }
+        if (guidedCoeffShader) {
+            computePipelineInfo.layout = guidedCoeffPipelineLayout;
+            computePipelineInfo.stage.module = guidedCoeffShader;
+            vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &computePipelineInfo, nullptr, &guidedCoeffPipeline);
         }
 
         if (hasHardwareRT) {
@@ -1107,7 +1132,11 @@ struct VulkanContext {
         copyBuffer(outBuffer, fastGBuffer, fastOutSize);
     }
 
-    void dispatchSmooth(int width, int height, int samples) {
+    VkBuffer smoothScratchBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory smoothScratchMem = VK_NULL_HANDLE;
+    uint32_t currentSmoothScratchCap = 0;
+
+    void dispatchSmoothPasses(int width, int height, int samples, int iters, bool toFinal) {
         uint32_t finalSize = width * height * 3 * sizeof(float);
         if(finalSize > currentFinalOutCap) {
             if(finalOutBuffer) {
@@ -1118,38 +1147,71 @@ struct VulkanContext {
             currentFinalOutCap = finalSize;
         }
 
-        VkDescriptorBufferInfo bInfos[2] = { {outBuffer, 0, VK_WHOLE_SIZE}, {finalOutBuffer, 0, VK_WHOLE_SIZE} };
-        VkWriteDescriptorSet writes[2] = {};
-        for(int i=0; i<2; i++) {
-            writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[i].dstSet = smoothDescSet;
-            writes[i].dstBinding = i;
-            writes[i].descriptorCount = 1;
-            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            writes[i].pBufferInfo = &bInfos[i];
+        // Ping-pong scratch for the a-trous iterations (5 floats per pixel).
+        uint32_t scratchSize = width * height * 5 * sizeof(float);
+        if (scratchSize > currentSmoothScratchCap) {
+            if (smoothScratchBuffer) {
+                vkDestroyBuffer(device, smoothScratchBuffer, nullptr);
+                vkFreeMemory(device, smoothScratchMem, nullptr);
+            }
+            createBuffer(scratchSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, smoothScratchBuffer, smoothScratchMem);
+            currentSmoothScratchCap = scratchSize;
         }
-        vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
 
-        VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-        vkBeginCommandBuffer(commandBuffer, &beginInfo);
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, smoothPipeline);
-        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, smoothPipelineLayout, 0, 1, &smoothDescSet, 0, nullptr);
-        
-        struct { int w, h, s; } pc = {width, height, samples};
-        vkCmdPushConstants(commandBuffer, smoothPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-        vkCmdDispatch(commandBuffer, (width + 15) / 16, (height + 15) / 16, 1);
-        vkEndCommandBuffer(commandBuffer);
+        VkBuffer src = outBuffer;
+        VkBuffer dst = smoothScratchBuffer;
 
-        VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-        submitInfo.commandBufferCount = 1;
-        submitInfo.pCommandBuffers = &commandBuffer;
+        for (int it = 0; it < iters; ++it) {
+            bool finalPass = toFinal && (it == iters - 1);
+            int step = 1 << it;
+            VkBuffer outBuf = finalPass ? finalOutBuffer : dst;
 
-        VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-        VkFence fence;
-        vkCreateFence(device, &fenceInfo, nullptr, &fence);
-        vkQueueSubmit(queue, 1, &submitInfo, fence);
-        vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
-        vkDestroyFence(device, fence, nullptr);
+            VkDescriptorBufferInfo bInfos[3] = {
+                {src, 0, VK_WHOLE_SIZE},
+                {outBuf, 0, VK_WHOLE_SIZE},
+                {adaptiveBuffer, 0, VK_WHOLE_SIZE}
+            };
+            VkWriteDescriptorSet writes[3] = {};
+            for(int i=0; i<3; i++) {
+                writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                writes[i].dstSet = smoothDescSet;
+                writes[i].dstBinding = i;
+                writes[i].descriptorCount = 1;
+                writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                writes[i].pBufferInfo = &bInfos[i];
+            }
+            vkUpdateDescriptorSets(device, 3, writes, 0, nullptr);
+
+            VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+            vkBeginCommandBuffer(commandBuffer, &beginInfo);
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, smoothPipeline);
+            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, smoothPipelineLayout, 0, 1, &smoothDescSet, 0, nullptr);
+
+            struct { int w, h, s, step, finalPass; } pc = {
+                width, height, samples, step, finalPass ? 1 : 0
+            };
+            vkCmdPushConstants(commandBuffer, smoothPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+            vkCmdDispatch(commandBuffer, (width + 15) / 16, (height + 15) / 16, 1);
+            vkEndCommandBuffer(commandBuffer);
+
+            VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+            submitInfo.commandBufferCount = 1;
+            submitInfo.pCommandBuffers = &commandBuffer;
+
+            VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+            VkFence fence;
+            vkCreateFence(device, &fenceInfo, nullptr, &fence);
+            vkQueueSubmit(queue, 1, &submitInfo, fence);
+            vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
+            vkDestroyFence(device, fence, nullptr);
+
+            if (!finalPass) { VkBuffer tmp = src; src = dst; dst = tmp; }
+        }
+    }
+
+    void dispatchSmooth(int width, int height, int samples) {
+        dispatchSmoothPasses(width, height, samples, 4, true);
     }
 
     void dispatchBlend(int width, int height, int lowW, int lowH, float pbrScale, int samples) {
@@ -1163,20 +1225,56 @@ struct VulkanContext {
             currentFinalOutCap = finalSize;
         }
 
-        VkDescriptorBufferInfo bInfos[3] = { {outBuffer, 0, VK_WHOLE_SIZE}, {lowResOutBuffer, 0, VK_WHOLE_SIZE}, {finalOutBuffer, 0, VK_WHOLE_SIZE} };
-        VkWriteDescriptorSet writes[3] = {};
+        // Per-low-pixel guided-filter coefficients (a.rgb, b.rgb).
+        uint32_t coeffSize = uint32_t(lowW) * uint32_t(lowH) * 6 * sizeof(float);
+        if (coeffSize > currentGuidedCoeffCap) {
+            if (guidedCoeffBuffer) {
+                vkDestroyBuffer(device, guidedCoeffBuffer, nullptr);
+                vkFreeMemory(device, guidedCoeffMem, nullptr);
+            }
+            createBuffer(coeffSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, guidedCoeffBuffer, guidedCoeffMem);
+            currentGuidedCoeffCap = coeffSize;
+        }
+
+        VkDescriptorBufferInfo gcInfos[3] = { {outBuffer, 0, VK_WHOLE_SIZE}, {lowResOutBuffer, 0, VK_WHOLE_SIZE}, {guidedCoeffBuffer, 0, VK_WHOLE_SIZE} };
+        VkDescriptorBufferInfo bInfos[4]  = { {outBuffer, 0, VK_WHOLE_SIZE}, {lowResOutBuffer, 0, VK_WHOLE_SIZE}, {finalOutBuffer, 0, VK_WHOLE_SIZE}, {guidedCoeffBuffer, 0, VK_WHOLE_SIZE} };
+        VkWriteDescriptorSet writes[7] = {};
         for(int i=0; i<3; i++) {
             writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[i].dstSet = blendDescSet;
+            writes[i].dstSet = guidedCoeffDescSet;
             writes[i].dstBinding = i;
             writes[i].descriptorCount = 1;
             writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            writes[i].pBufferInfo = &bInfos[i];
+            writes[i].pBufferInfo = &gcInfos[i];
         }
-        vkUpdateDescriptorSets(device, 3, writes, 0, nullptr);
+        for(int i=0; i<4; i++) {
+            writes[3 + i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[3 + i].dstSet = blendDescSet;
+            writes[3 + i].dstBinding = i;
+            writes[3 + i].descriptorCount = 1;
+            writes[3 + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[3 + i].pBufferInfo = &bInfos[i];
+        }
+        vkUpdateDescriptorSets(device, 7, writes, 0, nullptr);
 
         VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         vkBeginCommandBuffer(commandBuffer, &beginInfo);
+
+        // Pass 1: fit PT ~= a*guide + b per low-res pixel.
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, guidedCoeffPipeline);
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, guidedCoeffPipelineLayout, 0, 1, &guidedCoeffDescSet, 0, nullptr);
+        struct { int lw, lh, fw, fh, s; } gpc = {lowW, lowH, width, height, samples};
+        vkCmdPushConstants(commandBuffer, guidedCoeffPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(gpc), &gpc);
+        vkCmdDispatch(commandBuffer, (lowW + 15) / 16, (lowH + 15) / 16, 1);
+
+        VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             0, 1, &barrier, 0, nullptr, 0, nullptr);
+
+        // Pass 2: out_full = a * guide_full + b.
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, blendPipeline);
         vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, blendPipelineLayout, 0, 1, &blendDescSet, 0, nullptr);
         
