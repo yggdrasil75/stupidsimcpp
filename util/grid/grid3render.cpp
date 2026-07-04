@@ -412,22 +412,6 @@ void Octree<T>::buildGPUMaterials(const RenderBuffer_<T>& buf, std::vector<GPUMa
 
 
 #ifdef VULKAN_SUPPORT
-// -----------------------------------------------------------------------------
-// Multi-GPU wavefront tile scheduler.
-//
-// Splits the frame into tiles and distributes them over every context in
-// gpuMgr via a work-stealing queue: each GPU runs a host thread that grabs the
-// next unclaimed tile, renders it synchronously, and comes back for more.
-// Load balancing is therefore dynamic and automatic - a faster GPU simply
-// completes more tiles per second, so heterogeneous setups (e.g. 2x RTX 3090 +
-// 1x R9700) stay saturated without any static work split or tuning.
-//
-// Every context must already hold the full scene (points, materials, lights,
-// skybox, fog, common buffers) - callers upload to each context first.
-// After this returns, the merged accumulation image (width*height*5 floats)
-// is resident in the PRIMARY context's outBuffer, so the existing smooth /
-// blend / readback passes run on vkCtx exactly as before.
-// -----------------------------------------------------------------------------
 static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData& camTemplate,
                                       int samplesPerPixel, int maxBounces, int sampleOffset) {
     TIME_FUNCTION;
@@ -809,7 +793,7 @@ frame Octree<T>::blendedRenderFrameVulkan(const Camera& cam, int height, int wid
                                   SELL_LUT_WAVELENGTHS,
                                   std::max<size_t>(1, tl_buffer.materials.size()) * SELL_LUT_SECONDARY);
     }
-    
+
     std::vector<bool> isLodPoint(tl_buffer.points.size(), false);
     for(const auto& n : tl_buffer.nodes) {
         if(n.lodPoint != -1) isLodPoint[n.lodPoint] = true;
@@ -902,8 +886,8 @@ frame Octree<T>::blendedRenderFrameVulkan(const Camera& cam, int height, int wid
     size_t pbrOutSize = lowW * lowH * 5 * sizeof(float);
     for (size_t g = 0; g < gpuMgr.count(); ++g) {
         auto& ctx = gpuMgr.ctx(g);
-        uploadFogVolumes(ctx, camData, fogVolumes_);
-        ctx.updateCommonBuffers(outSize, camData);
+        uploadFogVolumes(ctx, pbrCamData, fogVolumes_);
+        ctx.updateCommonBuffers(outSize, pbrCamData);
         ctx.updateSkyboxBuffer(skyData);
         ctx.updateLightBuffer(gpuLights);
         ctx.updatePBRBuffers(gpuPoints);
@@ -1237,8 +1221,8 @@ frame Octree<T>::superBlendedRenderFrameVulkan(const Camera& cam, int height, in
     size_t pbrOutSize = size_t(lowW) * size_t(lowH) * 5 * sizeof(float);
     for (size_t g = 0; g < gpuMgr.count(); ++g) {
         auto& ctx = gpuMgr.ctx(g);
-        uploadFogVolumes(ctx, camData, fogVolumes_);
-        ctx.updateCommonBuffers(outSize, camData);
+        uploadFogVolumes(ctx, pbrCamData, fogVolumes_);
+        ctx.updateCommonBuffers(outSize, pbrCamData);
         ctx.updateSkyboxBuffer(skyData);
         ctx.updateLightBuffer(gpuLights);
         ctx.updatePBRBuffers(gpuPoints);
