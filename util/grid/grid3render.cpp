@@ -887,7 +887,7 @@ frame Octree<T>::blendedRenderFrameVulkan(const Camera& cam, int height, int wid
     for (size_t g = 0; g < gpuMgr.count(); ++g) {
         auto& ctx = gpuMgr.ctx(g);
         uploadFogVolumes(ctx, pbrCamData, fogVolumes_);
-        ctx.updateCommonBuffers(outSize, pbrCamData);
+        ctx.updateCommonBuffers(pbrOutSize, pbrCamData);
         ctx.updateSkyboxBuffer(skyData);
         ctx.updateLightBuffer(gpuLights);
         ctx.updatePBRBuffers(gpuPoints);
@@ -1222,7 +1222,7 @@ frame Octree<T>::superBlendedRenderFrameVulkan(const Camera& cam, int height, in
     for (size_t g = 0; g < gpuMgr.count(); ++g) {
         auto& ctx = gpuMgr.ctx(g);
         uploadFogVolumes(ctx, pbrCamData, fogVolumes_);
-        ctx.updateCommonBuffers(outSize, pbrCamData);
+        ctx.updateCommonBuffers(pbrOutSize, pbrCamData);
         ctx.updateSkyboxBuffer(skyData);
         ctx.updateLightBuffer(gpuLights);
         ctx.updatePBRBuffers(gpuPoints);
