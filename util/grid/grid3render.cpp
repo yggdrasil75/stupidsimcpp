@@ -797,14 +797,19 @@ frame Octree<T>::blendedRenderFrameVulkan(const Camera& cam, int height, int wid
     thread_local RenderBuffer tl_buffer;
     buildRender(tl_buffer);
     
-    vkCtx.init();
-    
+    gpuMgr.init();
+
     std::vector<GPUMaterial> gpuMaterials;
     buildGPUMaterials(tl_buffer, gpuMaterials);
-    vkCtx.updateMaterialBuffer(gpuMaterials);
-    vkCtx.updateSellmeierBuffer(buildSellmeierLUT(tl_buffer.materials), SELL_LUT_WAVELENGTHS,
-                                std::max<size_t>(1, tl_buffer.materials.size()) * SELL_LUT_SECONDARY);
-
+    std::vector<float> sellLUT = buildSellmeierLUT(tl_buffer.materials);
+    for (size_t g = 0; g < gpuMgr.count(); ++g) {
+        auto& ctx = gpuMgr.ctx(g);
+        ctx.updateMaterialBuffer(gpuMaterials);
+        ctx.updateSellmeierBuffer(sellLUT,
+                                  SELL_LUT_WAVELENGTHS,
+                                  std::max<size_t>(1, tl_buffer.materials.size()) * SELL_LUT_SECONDARY);
+    }
+    
     std::vector<bool> isLodPoint(tl_buffer.points.size(), false);
     for(const auto& n : tl_buffer.nodes) {
         if(n.lodPoint != -1) isLodPoint[n.lodPoint] = true;
@@ -895,27 +900,16 @@ frame Octree<T>::blendedRenderFrameVulkan(const Camera& cam, int height, int wid
     };
 
     size_t pbrOutSize = lowW * lowH * 5 * sizeof(float);
-    uploadFogVolumes(vkCtx, pbrCamData, fogVolumes_);
-    vkCtx.updateCommonBuffers(pbrOutSize, pbrCamData);
-    vkCtx.updateLightBuffer(gpuLights);
-    vkCtx.updatePBRBuffers(gpuPBRPoints);
-
-    {
-        int tileW = 512;
-        int tileH = 512;
-        for (int y = 0; y < lowH; y += tileH) {
-            for (int x = 0; x < lowW; x += tileW) {
-                int drawW = std::min(tileW, lowW - x);
-                int drawH = std::min(tileH, lowH - y);
-                pbrCamData.tileOffsetX = x;
-                pbrCamData.tileOffsetY = y;
-                pbrCamData.currentSampleOffset = 0;
-                pbrCamData.dispatchSamples = samplesPerPixel;
-                vkCtx.updateCameraData(pbrCamData);
-                vkCtx.dispatchWavefront(drawW, drawH, maxBounces, samplesPerPixel);
-            }
-        }
+    for (size_t g = 0; g < gpuMgr.count(); ++g) {
+        auto& ctx = gpuMgr.ctx(g);
+        uploadFogVolumes(ctx, camData, fogVolumes_);
+        ctx.updateCommonBuffers(outSize, camData);
+        ctx.updateSkyboxBuffer(skyData);
+        ctx.updateLightBuffer(gpuLights);
+        ctx.updatePBRBuffers(gpuPoints);
     }
+
+    runWavefrontTilesMultiGPU(width, height, camData, samplesPerPixel, maxBounces, 0);
 
     vkCtx.dispatchSmoothPasses(lowW, lowH, samplesPerPixel, 2, false);
     vkCtx.ensureLowResBuffer(pbrOutSize);
@@ -993,13 +987,18 @@ frame Octree<T>::superBlendedRenderFrameVulkan(const Camera& cam, int height, in
     thread_local RenderBuffer tl_buffer;
     buildRender(tl_buffer);
 
-    vkCtx.init();
+    gpuMgr.init();
 
     std::vector<GPUMaterial> gpuMaterials;
     buildGPUMaterials(tl_buffer, gpuMaterials);
-    vkCtx.updateMaterialBuffer(gpuMaterials);
-    vkCtx.updateSellmeierBuffer(buildSellmeierLUT(tl_buffer.materials), SELL_LUT_WAVELENGTHS,
-                                std::max<size_t>(1, tl_buffer.materials.size()) * SELL_LUT_SECONDARY);
+    std::vector<float> sellLUT = buildSellmeierLUT(tl_buffer.materials);
+    for (size_t g = 0; g < gpuMgr.count(); ++g) {
+        auto& ctx = gpuMgr.ctx(g);
+        ctx.updateMaterialBuffer(gpuMaterials);
+        ctx.updateSellmeierBuffer(sellLUT,
+                                  SELL_LUT_WAVELENGTHS,
+                                  std::max<size_t>(1, tl_buffer.materials.size()) * SELL_LUT_SECONDARY);
+    }
 
     std::vector<bool> isLodPoint(tl_buffer.points.size(), false);
     for(const auto& n : tl_buffer.nodes) {
@@ -1236,31 +1235,16 @@ frame Octree<T>::superBlendedRenderFrameVulkan(const Camera& cam, int height, in
     };
 
     size_t pbrOutSize = size_t(lowW) * size_t(lowH) * 5 * sizeof(float);
-    uploadFogVolumes(vkCtx, pbrCamData, fogVolumes_);
-    vkCtx.updateCommonBuffers(pbrOutSize, pbrCamData);
-    vkCtx.updatePBRBuffers(gpuPBRPoints);
-    // Seed the sample-budget map and zeroed accumulation buffer, then run with
-    // currentSampleOffset = 1 so wf_init/wf_finalize consume the budgets
-    // instead of deriving them from first-sample complexity.
-    vkCtx.uploadToBuffer(vkCtx.adaptiveBuffer, adaptiveSeed.data(), adaptiveSeed.size() * sizeof(float));
-    vkCtx.uploadToBuffer(vkCtx.outBuffer, pixelSeed.data(), pixelSeed.size() * sizeof(float));
-
-    {
-        int tileW = 512, tileH = 512;
-        for (int y = 0; y < lowH; y += tileH) {
-            for (int x = 0; x < lowW; x += tileW) {
-                int drawW = std::min(tileW, lowW - x);
-                int drawH = std::min(tileH, lowH - y);
-                pbrCamData.tileOffsetX = x;
-                pbrCamData.tileOffsetY = y;
-                pbrCamData.currentSampleOffset = 1;
-                pbrCamData.dispatchSamples = samplesPerPixel;
-                vkCtx.updateCameraData(pbrCamData);
-                vkCtx.dispatchWavefront(drawW, drawH, maxBounces, samplesPerPixel);
-            }
-        }
+    for (size_t g = 0; g < gpuMgr.count(); ++g) {
+        auto& ctx = gpuMgr.ctx(g);
+        uploadFogVolumes(ctx, camData, fogVolumes_);
+        ctx.updateCommonBuffers(outSize, camData);
+        ctx.updateSkyboxBuffer(skyData);
+        ctx.updateLightBuffer(gpuLights);
+        ctx.updatePBRBuffers(gpuPoints);
     }
 
+    runWavefrontTilesMultiGPU(width, height, camData, samplesPerPixel, maxBounces, 0);
     vkCtx.dispatchSmoothPasses(lowW, lowH, samplesPerPixel, 2, false);
     vkCtx.ensureLowResBuffer(pbrOutSize);
     vkCtx.copyBuffer(vkCtx.outBuffer, vkCtx.lowResOutBuffer, pbrOutSize);
