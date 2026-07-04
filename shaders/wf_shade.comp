@@ -28,11 +28,12 @@ void main() {
     int mediumVoxelIdx = p.i1.y;
     bool lastBounceSpecular = (p.i1.w & FLAG_SPECULAR) != 0;
 
-    vec4 hitRec = pathsHit[slot].hit;
-    float t = hitRec.x;
-    int hitIndex = floatBitsToInt(hitRec.y);
-    float prevPdf = hitRec.z;
+    float t = pathsHit[slot].t;
+    uint hitIndexU = pathsHit[slot].hitIndex;
+    float prevPdf = pathsHit[slot].misc;
     float outMisc = -1.0;
+    if (hitIndexU == WF_NO_HIT) return;
+    int hitIndex = int(hitIndexU);
 
     remainingMaxDist -= t;
     
@@ -121,7 +122,7 @@ void main() {
                 p.u0.z = grng;
                 p.i1.w &= ~FLAG_ALIVE;
                 pathsHot[slot] = p;
-                pathsHit[slot].hit.z = -1.0;
+                pathsHit[slot].misc = -1.0;
                 return;
             }
             throughput /= continueProb;
@@ -193,9 +194,12 @@ void main() {
 
                     ShadowRay sr;
                     sr.o_tmax   = vec4(shadowOrigin, shadowMaxDist);
-                    sr.dir_slot = vec4(L, intBitsToFloat(int(slot)));
-                    sr.contrib  = vec4(contrib, intBitsToFloat(int(emissivePtIdx)));
-                    sr.thp      = vec4(throughput, 0.0);
+                    sr.dir      = L;
+                    sr.slot     = slot;
+                    sr.contrib  = contrib;
+                    sr.lightIdx = emissivePtIdx;
+                    sr.thp      = throughput;
+                    sr.pad      = 0u;
                     uint si = atomicAdd(ctr.shadowCount, 1u);
                     shadowQueue[si] = sr;
                 }
@@ -315,7 +319,7 @@ void main() {
             p.u0.z = grng;
             p.i1.w &= ~FLAG_ALIVE;
             pathsHot[slot] = p;
-            pathsHit[slot].hit.z = -1.0;
+            pathsHit[slot].misc = -1.0;
             return;
         }
         origin = newOrigin;
@@ -344,7 +348,7 @@ void main() {
 
     if (!continuePath) p.i1.w &= ~FLAG_ALIVE;
     pathsHot[slot] = p;
-    pathsHit[slot].hit.z = outMisc;
+    pathsHit[slot].misc = outMisc;
 
     if (continuePath) {
         if (!isTransmissionInteraction) {

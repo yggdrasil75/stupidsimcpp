@@ -36,8 +36,12 @@ struct PathHot {
 };
 
 struct PathHit {
-    vec4 hit;
+    float t;        // hit distance
+    uint  hitIndex; // point index (WF_NO_HIT when none)
+    float misc;     // carried MIS pdf (-1.0 when unset)
+    float pad;
 };
+const uint WF_NO_HIT = 0xFFFFFFFFu;
 
 #define PC_GET_BOUNCE(p)  (int((p) & 0xFFu))
 #define PC_GET_TRANS(p)   (int(((p) >> 8u) & 0xFFu))
@@ -54,10 +58,13 @@ struct PathHit {
 
 
 struct ShadowRay {
-    vec4 o_tmax;
-    vec4 dir_slot;
-    vec4 contrib;
-    vec4 thp;
+    vec4 o_tmax;   // xyz origin, w maxDist
+    vec3 dir;      // shadow ray direction
+    uint slot;     // path slot to credit
+    vec3 contrib;  // unshadowed contribution
+    uint lightIdx; // emissive point index (skipped as occluder)
+    vec3 thp;      // path throughput
+    uint pad;
 };
 
 struct Counters {
@@ -338,6 +345,7 @@ int voxelTraverse(vec3 ro, vec3 rd, vec3 invD, float maxDist,
                   out int hitIndex, out float outT, out vec3 outNormal, out vec3 outHitPoint) {
     rayQueryEXT rq;
     rayQueryInitializeEXT(rq, tlas, gl_RayFlagsNoneEXT, 0xFF, ro, 0.0, rd, maxDist);
+    float tBest = maxDist;
     while (rayQueryProceedEXT(rq)) {
         if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionAABBEXT) {
             int ptIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
@@ -345,8 +353,9 @@ int voxelTraverse(vec3 ro, vec3 rd, vec3 invD, float maxDist,
             vec3 n;
             vec3 hp;
             float tEx;
-            if (rayCubeIntersect(ro, rd, invD, points[ptIdx], t, n, hp, tEx) && t >= 0.0 && t <= maxDist) {
+            if (rayCubeIntersect(ro, rd, invD, points[ptIdx], t, n, hp, tEx) && t >= 0.0 && t < tBest) {
                 rayQueryGenerateIntersectionEXT(rq, t);
+                tBest = t;
             }
         }
     }
@@ -384,6 +393,7 @@ int getMediumVoxelAt(vec3 hitPoint, vec3 normal, int targetObjectId, int ignoreI
 vec3 shadowTransmit(vec3 ro, vec3 rd, vec3 invD, float maxDist, int lightPtIdx) {
     rayQueryEXT rq;
     rayQueryInitializeEXT(rq, tlas, gl_RayFlagsTerminateOnFirstHitEXT, 0xFF, ro, 0.0, rd, maxDist);
+    float tBest = maxDist;   // shrinking committed-hit bound (see voxelTraverse)
     vec3 transmittance = vec3(1.0);
     if (cam.invFogRange > 0.0) transmittance *= exp(-vec3(cam.invFogRange) * maxDist);
 
@@ -416,7 +426,10 @@ vec3 shadowTransmit(vec3 ro, vec3 rd, vec3 invD, float maxDist, int lightPtIdx) 
                     transmittance *= exp(-absColor * thickness);
                 } else {
                     float tHit = tEntry < 0.0 ? tExit : tEntry;
-                    if (tHit >= 0.0 && tHit <= maxDist) rayQueryGenerateIntersectionEXT(rq, tHit);
+                    if (tHit >= 0.0 && tHit < tBest) {
+                        rayQueryGenerateIntersectionEXT(rq, tHit);
+                        tBest = tHit;
+                    }
                 }
             }
         }

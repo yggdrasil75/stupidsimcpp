@@ -25,7 +25,7 @@ void main() {
     int volum  = PC_GET_VOLUM(p.u0.w);
     int mediumObjId   = p.i1.x;
     int mediumVoxelIdx= p.i1.y;
-    float carriedMisc = pathsHit[slot].hit.z;
+    float carriedMisc = pathsHit[slot].misc;
 
     if (isInvalid(origin) || isInvalid(dir) || isInvalid(throughput) || remainingMaxDist <= 0.0) {
         p.i1.w &= ~FLAG_ALIVE;
@@ -209,7 +209,10 @@ void main() {
     p.i1.w |= FLAG_HITFOUND;
     pathsHot[slot] = p;
 
-    pathsHit[slot].hit = vec4(t, intBitsToFloat(hitIndex), carriedMisc, -1.0);
+    pathsHit[slot].t        = t;
+    pathsHit[slot].hitIndex = uint(hitIndex);
+    pathsHit[slot].misc     = carriedMisc;
+    pathsHit[slot].pad      = 0.0;
 
     uint sq = atomicAdd(ctr.shadeCount, 1u);
     shadeQueue[sq] = slot;

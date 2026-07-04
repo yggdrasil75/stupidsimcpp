@@ -45,7 +45,10 @@ void main() {
     p.i1        = ivec4(-1, -1, -1, FLAG_SPECULAR | FLAG_ALIVE);
     pathsHot[gid] = p;
 
-    pathsHit[gid].hit = vec4(0.0, intBitsToFloat(-1), -1.0, 0.0);
+    pathsHit[gid].t        = 0.0;
+    pathsHit[gid].hitIndex = WF_NO_HIT;
+    pathsHit[gid].misc     = -1.0;
+    pathsHit[gid].pad      = 0.0;
 
     uint slot = atomicAdd(ctr.extendCount, 1u);
     if (pc.parity == 0) extendA[slot] = gid;
