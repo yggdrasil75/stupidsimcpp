@@ -124,6 +124,17 @@ struct alignas(16) GPUCameraData {
     int targetSamples;
     int sellWidth;
     int sellSecondary;
+    int fogVolumeCount;
+    int pad0;
+};
+
+// World-space participating-media box for the wavefront tracer (binding 16).
+// std430 layout: each vec3 pads to 16 bytes, so pack a float behind each.
+struct alignas(16) GPUFogVolume {
+    Vec3 minB;    float density;   // extinction sigma_t scale per world unit
+    Vec3 maxB;    float pad0;
+    Vec3 scatter; float pad1;      // scattering albedo tint
+    Vec3 absorb;  float pad2;      // absorption tint
 };
 
 struct VulkanContext {
@@ -196,6 +207,9 @@ struct VulkanContext {
     VkBuffer pbrPointBuffer = VK_NULL_HANDLE;
     VkBuffer skyboxBuffer = VK_NULL_HANDLE;
     VkBuffer lightBuffer = VK_NULL_HANDLE;
+    VkBuffer fogBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory fogMem = VK_NULL_HANDLE;
+    uint32_t currentFogCap = 0;
     VkBuffer finalOutBuffer = VK_NULL_HANDLE;
     VkBuffer lowResOutBuffer = VK_NULL_HANDLE;
     VkBuffer adaptiveBuffer = VK_NULL_HANDLE;
@@ -368,7 +382,7 @@ struct VulkanContext {
         vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
         std::vector<VkPhysicalDevice> devices(deviceCount);
         vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data());
-        physicalDevice = devices[1]; //need to set a flag for this at some point.
+        physicalDevice = devices[0]; //need to set a flag for this at some point.
 
         uint32_t queueFamilyCount = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
@@ -941,6 +955,14 @@ struct VulkanContext {
         }
     }
 
+    void updateFogBuffer(const std::vector<GPUFogVolume>& vols) {
+        size_t allocSize = std::max((size_t)256, vols.size() * sizeof(GPUFogVolume));
+        size_t dataSize = vols.size() * sizeof(GPUFogVolume);
+        updateDeviceLocalBuffer(fogBuffer, fogMem, currentFogCap,
+                                vols.empty() ? nullptr : vols.data(), dataSize, allocSize,
+                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    }
+
     void updateLightBuffer(const std::vector<uint32_t>& lights) {
         size_t allocSize = std::max((size_t)256, lights.size() * sizeof(uint32_t));
         size_t dataSize = lights.size() * sizeof(uint32_t);
@@ -1312,8 +1334,8 @@ static constexpr VkDeviceSize WF_OFF_SHADOW_ARGS = 48;
 
 void initWavefront() {
 
-    VkDescriptorSetLayoutBinding b[16] = {};
-    for (int i = 0; i < 16; ++i) {
+    VkDescriptorSetLayoutBinding b[17] = {};
+    for (int i = 0; i < 17; ++i) {
         b[i].binding = i;
         b[i].descriptorCount = 1;
         b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -1323,7 +1345,7 @@ void initWavefront() {
     b[5].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
 
     VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    li.bindingCount = 16;
+    li.bindingCount = 17;
     li.pBindings = b;
     vkCreateDescriptorSetLayout(device, &li, nullptr, &wfDescLayout);
 
@@ -1396,7 +1418,7 @@ void ensureWavefrontBuffers(uint32_t maxPaths) {
 }
 
 void writeWavefrontDescriptors() {
-    VkDescriptorBufferInfo bi[16] = {};
+    VkDescriptorBufferInfo bi[17] = {};
     bi[0]  = {uboBuffer,      0, VK_WHOLE_SIZE};
     bi[1]  = {pbrPointBuffer, 0, VK_WHOLE_SIZE};
     bi[2]  = {materialBuffer, 0, VK_WHOLE_SIZE};
@@ -1412,10 +1434,11 @@ void writeWavefrontDescriptors() {
     bi[13] = {wfCounterBuf,   0, VK_WHOLE_SIZE};
     bi[14] = {wfPathHitBuf,   0, VK_WHOLE_SIZE};
     bi[15] = {sellmeierBuffer ? sellmeierBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
+    bi[16] = {fogBuffer ? fogBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
 
-    VkWriteDescriptorSet w[16] = {};
+    VkWriteDescriptorSet w[17] = {};
     int n = 0;
-    for (int i = 0; i < 16; ++i) {
+    for (int i = 0; i < 17; ++i) {
         if (i == 5) continue;
         w[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         w[n].dstSet = wfDescSet;

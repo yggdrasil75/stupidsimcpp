@@ -104,6 +104,8 @@ layout(binding = 0) uniform CameraData {
     int targetSamples;
     int sellWidth;
     int sellSecondary;
+    int fogVolumeCount;
+    int camPad0;
 } cam;
 
 layout(std430, binding = 1) readonly buffer PointBuffer    { GPUPBRRenderData points[]; };
@@ -121,6 +123,41 @@ layout(std430, binding = 12) buffer ShadowQ   { ShadowRay shadowQueue[]; };
 layout(std430, binding = 13) buffer CounterBuf{ Counters ctr; };
 layout(std430, binding = 14) buffer PathHitBuffer { PathHit pathsHit[]; };
 layout(std430, binding = 15) readonly buffer SellmeierBuffer { float sellmeierLUT[]; };
+
+// World-space participating-media boxes (dust/haze/mist). Constant density
+// inside each box; stack boxes for gradients. See Octree::addFogVolume.
+struct FogVolume {
+    vec4 minB;    // xyz min corner, w = extinction sigma_t per world unit
+    vec4 maxB;    // xyz max corner
+    vec4 scatter; // rgb scattering albedo tint
+    vec4 absorb;  // rgb absorption tint
+};
+layout(std430, binding = 16) readonly buffer FogVolumeBuffer { FogVolume fogVolumes[]; };
+
+// Ray/AABB overlap clipped to [0, tMax]. Returns entry/exit in t0/t1.
+bool fogClip(vec3 ro, vec3 invD, float tMax, vec4 minB, vec4 maxB, out float t0, out float t1) {
+    vec3 tA = (minB.xyz - ro) * invD;
+    vec3 tB = (maxB.xyz - ro) * invD;
+    vec3 tMin3 = min(tA, tB);
+    vec3 tMax3 = max(tA, tB);
+    t0 = max(0.0, max(tMin3.x, max(tMin3.y, tMin3.z)));
+    t1 = min(tMax, min(tMax3.x, min(tMax3.y, tMax3.z)));
+    return t1 > t0;
+}
+
+// Beer-Lambert transmittance through all fog volumes along [0, dist].
+// Used to attenuate shadow rays so light shafts have correct edges.
+vec3 fogTransmittance(vec3 ro, vec3 rd, vec3 invD, float dist) {
+    vec3 tau = vec3(0.0);
+    for (int i = 0; i < cam.fogVolumeCount; ++i) {
+        FogVolume fv = fogVolumes[i];
+        float t0, t1;
+        if (!fogClip(ro, invD, dist, fv.minB, fv.maxB, t0, t1)) continue;
+        vec3 sigma_t = fv.minB.w * (fv.scatter.rgb + fv.absorb.rgb);
+        tau += sigma_t * (t1 - t0);
+    }
+    return exp(-tau);
+}
 
 layout(push_constant) uniform PC {
     int parity;

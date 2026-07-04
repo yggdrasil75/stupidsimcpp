@@ -410,6 +410,25 @@ void Octree<T>::buildGPUMaterials(const RenderBuffer_<T>& buf, std::vector<GPUMa
     if (out.empty()) out.push_back(GPUMaterial{});
 }
 
+
+// Uploads the octree's fog volumes to the GPU and stamps the count into camData.
+template<typename T>
+static void uploadFogVolumes(VulkanContext& vkCtx, GPUCameraData& camData,
+                             const std::vector<T>& fogVolumes) {
+    std::vector<GPUFogVolume> gpuFog;
+    gpuFog.reserve(fogVolumes.size());
+    for (const auto& fv : fogVolumes) {
+        GPUFogVolume g{};
+        g.minB = fv.minB;  g.density = fv.density;
+        g.maxB = fv.maxB;
+        g.scatter = fv.scatterColor;
+        g.absorb = fv.absorption;
+        gpuFog.push_back(g);
+    }
+    vkCtx.updateFogBuffer(gpuFog);
+    camData.fogVolumeCount = static_cast<int>(gpuFog.size());
+}
+
 template<typename T>
 frame Octree<T>::renderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat, int samplesPerPixel,
                 int maxBounces, bool globalIllumination, bool useLod) {
@@ -509,6 +528,7 @@ frame Octree<T>::renderFrameVulkan(const Camera& cam, int height, int width, fra
     camData.sellSecondary = SELL_LUT_SECONDARY;
 
     size_t outSize = width * height * 5 * sizeof(float);
+    uploadFogVolumes(vkCtx, camData, fogVolumes_);
     vkCtx.updateCommonBuffers(outSize, camData);
     vkCtx.updateSkyboxBuffer(skyData);
     vkCtx.updateLightBuffer(gpuLights);
@@ -779,6 +799,7 @@ frame Octree<T>::blendedRenderFrameVulkan(const Camera& cam, int height, int wid
     };
 
     size_t pbrOutSize = lowW * lowH * 5 * sizeof(float);
+    uploadFogVolumes(vkCtx, pbrCamData, fogVolumes_);
     vkCtx.updateCommonBuffers(pbrOutSize, pbrCamData);
     vkCtx.updateLightBuffer(gpuLights);
     vkCtx.updatePBRBuffers(gpuPBRPoints);
@@ -1119,6 +1140,7 @@ frame Octree<T>::superBlendedRenderFrameVulkan(const Camera& cam, int height, in
     };
 
     size_t pbrOutSize = size_t(lowW) * size_t(lowH) * 5 * sizeof(float);
+    uploadFogVolumes(vkCtx, pbrCamData, fogVolumes_);
     vkCtx.updateCommonBuffers(pbrOutSize, pbrCamData);
     vkCtx.updatePBRBuffers(gpuPBRPoints);
     // Seed the sample-budget map and zeroed accumulation buffer, then run with

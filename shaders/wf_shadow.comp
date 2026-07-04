@@ -19,6 +19,7 @@ void main() {
     vec3 invD = safe_invDir(rd);
     vec3 transmittance = shadowTransmit(ro, rd, invD, maxDist, lightPtIdx);
     if (all(lessThanEqual(transmittance, vec3(0.0)))) return;
+    if (cam.fogVolumeCount > 0) transmittance *= fogTransmittance(ro, rd, invD, maxDist);
 
     vec3 directLight = contrib * transmittance;
     float lum = dot(directLight, vec3(0.2126, 0.7152, 0.0722));

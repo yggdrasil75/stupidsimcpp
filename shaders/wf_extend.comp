@@ -111,6 +111,54 @@ void main() {
         }
     }
 
+    if (!scattered && cam.fogVolumeCount > 0) {
+        float tScatter = LARGE;
+        int fogIdx = -1;
+        for (int i = 0; i < cam.fogVolumeCount; ++i) {
+            FogVolume fv = fogVolumes[i];
+            float ft0, ft1;
+            if (!fogClip(origin, invD, t, fv.minB, fv.maxB, ft0, ft1)) continue;
+            vec3 sigma_t = fv.minB.w * (fv.scatter.rgb + fv.absorb.rgb);
+            float maxS = max(sigma_t.x, max(sigma_t.y, sigma_t.z));
+            if (maxS <= 1e-6) continue;
+            float cand = ft0 - log(max(1e-7, 1.0 - nextFloat(rng))) / maxS;
+            if (cand < ft1 && cand < tScatter) { tScatter = cand; fogIdx = i; }
+        }
+
+        float travelEnd = (fogIdx >= 0) ? tScatter : t;
+        for (int i = 0; i < cam.fogVolumeCount; ++i) {
+            FogVolume fv = fogVolumes[i];
+            float ft0, ft1;
+            if (!fogClip(origin, invD, travelEnd, fv.minB, fv.maxB, ft0, ft1)) continue;
+            vec3 sigma_t = fv.minB.w * (fv.scatter.rgb + fv.absorb.rgb);
+            float maxS = max(sigma_t.x, max(sigma_t.y, sigma_t.z));
+            if (maxS <= 1e-6) continue;
+            float len = ft1 - ft0;
+            if (i == fogIdx) {
+                vec3 sigma_s = fv.minB.w * fv.scatter.rgb;
+                throughput *= (sigma_s / maxS) * exp((vec3(maxS) - sigma_t) * len);
+            } else {
+                throughput *= exp((vec3(maxS) - sigma_t) * len);
+            }
+        }
+
+        if (fogIdx >= 0) {
+            scattered = true;
+            origin = origin + dir * tScatter;
+            float z = 1.0 - 2.0 * nextFloat(rng);
+            float radius = sqrt(max(0.0, 1.0 - z * z));
+            float phi = 2.0 * PI * nextFloat(rng);
+            dir = vec3(radius * cos(phi), radius * sin(phi), z);
+            volum++;
+        }
+        if (max(max(throughput.x, throughput.y), throughput.z) < 0.01) {
+            p.rad.xyz = radiance;
+            p.i1.w &= ~FLAG_ALIVE;
+            pathsHot[slot] = p;
+            return;
+        }
+    }
+
     // Persist mutated state common to all exits.
     p.o_tmax  = vec4(origin, remainingMaxDist);
     p.dir_rough.xyz = dir;

@@ -4,6 +4,7 @@
 #include <fstream>
 #include <cmath>
 #include <random>
+#include <algorithm>
 
 // Include Eigen and project headers
 #include "../eigen/Eigen/Dense" 
@@ -18,10 +19,23 @@
 #include "../util/timing_decorator.hpp"
 #include "../util/timing_decorator.cpp"
 
+// --- NEW: Helper function for organic 3D procedural noise ---
+float smoothNoise(float x, float y, float z, float scale) {
+    float nx = x * scale;
+    float ny = y * scale;
+    float nz = z * scale;
+    // Basic non-repeating trig combinations for pseudo-random organic variance
+    float val = std::sin(nx + std::cos(ny)) + 
+                std::sin(ny + std::cos(nz)) + 
+                std::sin(nz + std::cos(nx));
+    // Normalize roughly to 0.0 - 1.0
+    return (val + 3.0f) / 6.0f;
+}
+
 // Helper function to create a solid volume of voxels with material properties
 void createBox(Grid::Octree<int>& octree, const Eigen::Vector3f& center, const Eigen::Vector3f& size, const Eigen::Vector3f& albedo, float emission = 0.0f,
-               float roughness = 0.8f, float metallic = 0.0f, float transmission = 0.0f, float ior = 1.45f,const Eigen::Vector3f& absorp = Eigen::Vector3f::Zero(), 
-               int oid = 0, Grid::BodyType bType = Grid::BodyType::STATIC, float mass = 1.0f, float step = 0.1) {
+               float roughness = 0.8f, float metallic = 0.0f, float transmission = 0.0f, float ior = 1.45f, const Eigen::Vector3f& absorp = Eigen::Vector3f::Zero(), 
+               int oid = 0, Grid::BodyType bType = Grid::BodyType::STATIC, float mass = 1.0f, float step = 0.1, const Eigen::Vector3f& sellB = Eigen::Vector3f::Zero(), const Eigen::Vector3f& sellC = Eigen::Vector3f::Zero(), bool useSell = false) {
     Eigen::Vector3f halfSize = size / 2.0f;
     Eigen::Vector3f minB = center - halfSize;
     Eigen::Vector3f maxB = center + halfSize;
@@ -34,6 +48,9 @@ void createBox(Grid::Octree<int>& octree, const Eigen::Vector3f& center, const E
                 Eigen::Vector3f pos(x + jitter(rng), y + jitter(rng), z + jitter(rng));
                 
                 octree.insert(1, pos, true, albedo, step, true, oid, emission, roughness, metallic, transmission, ior, absorp, bType, mass);
+                if (useSell) {
+                    octree.setSellmeier(pos, sellB, sellC);
+                }
             }
         }
     }
@@ -157,7 +174,7 @@ int main() {
     Eigen::Vector3f cRuby(0.878, 0.066, 0.3725);
     Eigen::Vector3f cBlue(0.1f, 0.1f, 1.0f);
     Eigen::Vector3f cPurple(0.6f, 0.1f, 0.8f);
-    Eigen::Vector3f cSapphire(0.03, 0.14, 0.403);
+    Eigen::Vector3f cAmethyst(0.6,0.4,0.8);
     Eigen::Vector3f size(1.0f, 1.0f, 1.0f);
     Eigen::Vector3f cGold(1.00f, 0.80f, 0.30f);
     Eigen::Vector3f cSilver(0.90f, 0.90f, 0.95f);
@@ -180,7 +197,7 @@ int main() {
     // LAYER 3: Glass
     createBox(octree, Eigen::Vector3f(-sp,  sp, 0.0f), size * 0.5, cRuby,    0.0f, 0.01f, 0.0f, 0.95f, 1.757f, Eigen::Vector3f(0.05f, 0.8f, 0.8f), 7, initType, mass, 0.5); //ruby
     createBox(octree, Eigen::Vector3f(  0,  sp, 0.0f), size * 0.5, cBlue,   0.0f, 0.01f, 0.0f, 0.89f, 1.309f, Eigen::Vector3f(0.08f, 0.02f, 0.01f), 8, initType, mass, 0.5); //ice
-    createBox(octree, Eigen::Vector3f( sp,  sp, 0.0f), size * 0.5, cSapphire, 0.0f, 0.01f, 0.0f, 0.97f, 1.757f, Eigen::Vector3f(0.8f, 0.6f, 0.05f), 9, initType, mass, 0.5); //sapphire
+    createBox(octree, Eigen::Vector3f( sp,  sp, 0.0f), size * 0.5, cAmethyst, 0.0f, 0.01f, 0.0f, 0.97f, 1.534f, Eigen::Vector3f(0.8f, 0.6f, 0.05f), 9, initType, mass, 0.5, Eigen::Vector3f(0.696,0.407,0.897), Eigen::Vector3f(0.0046,0.013, 97.934), true); //sapphire
 
     std::cout << "Optimizing and Generating LODs..." << std::endl;
     // octree.generateLODs();
@@ -238,52 +255,52 @@ int main() {
 
     Eigen::Vector3f target(0.0f, 0.0f, 0.5f);
 
-    for (const auto& view : views) {
-        ScopedFunctionTimer meh("Fast section");
-        std::cout << "\nRendering view from " << view.name << " direction (Fast Pass)..." << std::endl;
+    // for (const auto& view : views) {
+    //     ScopedFunctionTimer meh("Fast section");
+    //     std::cout << "\nRendering view from " << view.name << " direction (Fast Pass)..." << std::endl;
         
-        Camera cam;
-        cam.origin = view.origin;
-        cam.direction = (target - view.origin).normalized();
-        cam.up = view.up;
+    //     Camera cam;
+    //     cam.origin = view.origin;
+    //     cam.direction = (target - view.origin).normalized();
+    //     cam.up = view.up;
         
-        // frame cpuout = octree.fastRenderFrame(cam, height, width, frame::colormap::RGB);
-        // std::string cpufilename = "output/fast_cpurender_" + view.name + ".bmp";
-        // BMPWriter::saveBMP(cpufilename, cpuout);
+    //     // frame cpuout = octree.fastRenderFrame(cam, height, width, frame::colormap::RGB);
+    //     // std::string cpufilename = "output/fast_cpurender_" + view.name + ".bmp";
+    //     // BMPWriter::saveBMP(cpufilename, cpuout);
         
-        frame out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
-        std::string filename = "output/fast_vulkanrender_" + view.name + ".bmp";
-        // out.compressFrameLZ78();
-        // out.decompress();
-        BMPWriter::saveBMP(filename, out);
-    }
-    FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
+    //     frame out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
+    //     std::string filename = "output/fast_vulkanrender_" + view.name + ".bmp";
+    //     // out.compressFrameLZ78();
+    //     // out.decompress();
+    //     BMPWriter::saveBMP(filename, out);
+    // }
+    // FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
 
-    for (const auto& view : views) {
-        ScopedFunctionTimer meh("Slow Section");
-        std::cout << "\nRendering view from " << view.name << " direction (Slow "<< samples <<" Samples Pass)..." << std::endl;
+    // for (const auto& view : views) {
+    //     ScopedFunctionTimer meh("Slow Section");
+    //     std::cout << "\nRendering view from " << view.name << " direction (Slow "<< samples <<" Samples Pass)..." << std::endl;
         
-        Camera cam;
-        cam.origin = view.origin;
-        cam.direction = (target - view.origin).normalized();
-        cam.up = view.up;
+    //     Camera cam;
+    //     cam.origin = view.origin;
+    //     cam.direction = (target - view.origin).normalized();
+    //     cam.up = view.up;
         
-        frame out = octree.renderFrameVulkan(cam, height, width, frame::colormap::RGB, samples, bounces, false, true);
-        std::string filename = "output/slow_vulkanrender_" + view.name + ".bmp";
-        BMPWriter::saveBMP(filename, out);
-        std::cout << "slow done" << std::endl;
+    //     frame out = octree.renderFrameVulkan(cam, height, width, frame::colormap::RGB, samples, bounces, false, true);
+    //     std::string filename = "output/slow_vulkanrender_" + view.name + ".bmp";
+    //     BMPWriter::saveBMP(filename, out);
+    //     std::cout << "slow done" << std::endl;
 
-        out = octree.superBlendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, blendedsamples, bounces, false, true);
-        filename = "output/slow_superblendrender_" + view.name + ".bmp";
-        BMPWriter::saveBMP(filename, out);
-        std::cout << "super blended done" << std::endl;
+    //     out = octree.superBlendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, blendedsamples, bounces, false, true);
+    //     filename = "output/slow_superblendrender_" + view.name + ".bmp";
+    //     BMPWriter::saveBMP(filename, out);
+    //     std::cout << "super blended done" << std::endl;
 
-        out = octree.blendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, blendedsamples, bounces, false, true);
-        filename = "output/slow_blendrender_" + view.name + ".bmp";
-        BMPWriter::saveBMP(filename, out);
-        std::cout << "blended done" << std::endl;
-    }
-    FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
+    //     out = octree.blendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, blendedsamples, bounces, false, true);
+    //     filename = "output/slow_blendrender_" + view.name + ".bmp";
+    //     BMPWriter::saveBMP(filename, out);
+    //     std::cout << "blended done" << std::endl;
+    // }
+    // FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
 
     std::vector<frame> videoFrames;
     const int totalFrames = framesPerSegment * views.size();

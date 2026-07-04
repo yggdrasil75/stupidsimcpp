@@ -124,6 +124,17 @@ private:
     Skybox skybox_;
     Vec3 skylight_ = {0.1f, 0.1f, 0.1f};
     Vec3 backgroundColor_ = {0.53f, 0.81f, 0.92f};
+
+    ///@brief World-space participating-media boxes (dust/haze/mist), consumed
+    ///       by the GPU wavefront path tracer. See addFogVolume().
+    struct FogVolume {
+        Vec3 minB, maxB;      // axis-aligned bounds
+        float density;        // extinction scale sigma_t (per world unit)
+        Vec3 scatterColor;    // scattering albedo tint (what the dust reflects)
+        Vec3 absorption;      // absorption tint (what the dust eats)
+    };
+    std::vector<FogVolume> fogVolumes_;
+
     mutable std::vector<Eigen::Vector4f> skyDataCache_;
     mutable size_t skyDataCacheW_ = 0;
     mutable size_t skyDataCacheH_ = 0;
@@ -1524,6 +1535,42 @@ public:
     void setAutoOptimize(bool v) { 
         autoOptimize_.store(v); 
     }
+
+
+    ///@brief Adds a world-space fog volume (an AABB of participating medium)
+    ///       for atmospheric dust/haze/mist. Evaluated ON THE GPU inside the
+    ///       wavefront path tracer's existing medium machinery: camera and
+    ///       bounce rays can scatter inside the box (real light shafts, since
+    ///       scattered rays are shadow-tested like everything else) and shadow
+    ///       rays are attenuated passing through it. Costs zero voxels.
+    ///       Density is constant inside the box; layer several boxes of
+    ///       decreasing density to fake a height gradient, and place small
+    ///       dense boxes exactly where you want visible haze.
+    ///@param minB          Minimum corner of the box
+    ///@param maxB          Maximum corner of the box
+    ///@param density       Extinction per world unit (try 0.02-0.15; mean free
+    ///                     path is 1/density world units)
+    ///@param scatterColor  Scattering albedo tint, 0..1 (dust ~ (0.9,0.85,0.75))
+    ///@param absorption    Absorption tint, 0..1 (usually small or zero)
+    ///@return Index of the volume (for removeFogVolume)
+    size_t addFogVolume(const Vec3& minB, const Vec3& maxB, float density,
+                        const Vec3& scatterColor = Vec3(0.9f, 0.86f, 0.78f),
+                        const Vec3& absorption = Vec3::Zero()) {
+        fogVolumes_.push_back({minB.cwiseMin(maxB), minB.cwiseMax(maxB),
+                               std::max(0.0f, density), scatterColor, absorption});
+        return fogVolumes_.size() - 1;
+    }
+
+    ///@brief Removes a fog volume by index (indices above shift down)
+    void removeFogVolume(size_t index) {
+        if (index < fogVolumes_.size()) fogVolumes_.erase(fogVolumes_.begin() + index);
+    }
+
+    ///@brief Removes all fog volumes
+    void clearFogVolumes() { fogVolumes_.clear(); }
+
+    ///@brief Number of active fog volumes
+    size_t fogVolumeCount() const { return fogVolumes_.size(); }
 
     ///@brief Applies raw directional lighting data for simplistic fallback illumination mappings
     ///@param skylight Light intensity and hue mapping block

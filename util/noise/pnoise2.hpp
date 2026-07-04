@@ -270,12 +270,15 @@ public:
         float y = point.y();
         float z = point.z();
         
-        int X = (int)floor(x) & 255;
-        int Y = (int)floor(y) & 255;
-        int Z = (int)floor(z) & 255;
+        int X = (int)floor(x);
+        int Y = (int)floor(y);
+        int Z = (int)floor(z);
         float xf = x - X;
         float yf = y - Y;
         float zf = z - Z;
+        X &= 255;
+        Y &= 255;
+        Z &= 255;
 
         // Distance vectors from corners
         Vector3f FBL(xf-0, yf-0, zf-0);
