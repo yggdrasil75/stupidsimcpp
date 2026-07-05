@@ -22,13 +22,14 @@ void main() {
 
     int s = pc.sampleIndex;
     bool firstEver = (cam.currentSampleOffset == 0) && (s == 0);
+    bool adaptiveOn = adaptiveEnabled();
 
     float storedReq = firstEver ? float(cam.targetSamples) : adaptiveData[ad + 2u];
     bool done = (!firstEver) && (storedReq < 0.0);
     float reqSamples = abs(storedReq);
-    if (done) return;
+    if (adaptiveOn && done) return;
 
-    if (float(s) >= reqSamples) {
+    if (adaptiveOn && float(s) >= reqSamples) {
         float scale = float(cam.targetSamples) / max(1.0, reqSamples);
         pixels[idx]      *= scale;
         pixels[idx + 1u] *= scale;
@@ -67,7 +68,7 @@ void main() {
         adaptiveData[ad + 1u] = lumSqSum;
 
         int checkInterval = max(1, cam.targetSamples / 10);
-        if (s > 0 && (s % checkInterval == 0)) {
+        if (adaptiveOn && s > 0 && (s % checkInterval == 0)) {
             float n = float(s + 1);
             float mean = lumSum / n;
             float sampleVar = max(0.0, (lumSqSum / n) - mean * mean);

@@ -114,6 +114,7 @@ layout(binding = 0) uniform CameraData {
     int fogVolumeCount;
     int camPad0;
 } cam;
+bool adaptiveEnabled() { return cam.dispatchSamples >= cam.targetSamples; }
 
 layout(std430, binding = 1) readonly buffer PointBuffer    { GPUPBRRenderData points[]; };
 layout(std430, binding = 2) readonly buffer MaterialBuffer { GPUMaterial materials[]; };

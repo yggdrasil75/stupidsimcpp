@@ -410,104 +410,153 @@ void Octree<T>::buildGPUMaterials(const RenderBuffer_<T>& buf, std::vector<GPUMa
     if (out.empty()) out.push_back(GPUMaterial{});
 }
 
-
 #ifdef VULKAN_SUPPORT
 static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData& camTemplate,
-                                      int samplesPerPixel, int maxBounces, int sampleOffset) {
+                                      int samplesPerPixel, int maxBounces, int sampleOffset,
+                                      bool buffersPreSeeded = false) {
     // TIME_FUNCTION;
     constexpr int tileW = 512, tileH = 512;
 
-    struct Tile { int x, y, w, h; int owner; };
+    struct Tile { int x, y, w, h; };
     std::vector<Tile> tiles;
     for (int y = 0; y < height; y += tileH)
         for (int x = 0; x < width; x += tileW)
-            tiles.push_back({x, y, std::min(tileW, width - x), std::min(tileH, height - y), -1});
+            tiles.push_back({x, y, std::min(tileW, width - x), std::min(tileH, height - y)});
 
-    auto renderOn = [&](VulkanContext& ctx, Tile& t) {
-        GPUCameraData cd = camTemplate;
-        cd.tileOffsetX = t.x;
-        cd.tileOffsetY = t.y;
-        cd.currentSampleOffset = sampleOffset;
-        cd.dispatchSamples = samplesPerPixel;
-        ctx.updateCameraData(cd);
-        ctx.dispatchWavefront(t.w, t.h, maxBounces, samplesPerPixel);
+    // Render `count` samples of the whole frame on one GPU, starting at global
+    // sample index `start`. Tiles are only an internal capacity limit of the
+    // wavefront queues here, not a scheduling unit.
+    auto renderRange = [&](VulkanContext& ctx, int start, int count) {
+        for (const auto& t : tiles) {
+            GPUCameraData cd = camTemplate;
+            cd.tileOffsetX = t.x;
+            cd.tileOffsetY = t.y;
+            cd.currentSampleOffset = sampleOffset;
+            cd.dispatchSamples = count;
+            ctx.updateCameraData(cd);
+            ctx.dispatchWavefront(t.w, t.h, maxBounces, count, start);
+        }
     };
 
     const size_t nGPU = gpuMgr.count();
     if (nGPU <= 1) {
-        for (auto& t : tiles) renderOn(vkCtx, t);
+        renderRange(vkCtx, 0, samplesPerPixel);
         return;
     }
 
-    // Work-stealing dispatch: one host thread per GPU. Vulkan calls target
-    // disjoint VkDevices, so no cross-thread synchronization is needed beyond
-    // the tile counter.
-    std::atomic<size_t> next{0};
-    std::vector<std::atomic<uint64_t>> usPerTile(nGPU); // avg microseconds, 0 = unknown
-    for (auto& a : usPerTile) a.store(0);
-    std::vector<int> tilesDone(nGPU, 0);
+    // ---- Multi-GPU: split the SAMPLE range across devices, not the image ----
+    // Radiance accumulation and the adaptive lumSum/lumSqSum statistics are
+    // linear, so each GPU can render the full frame with a disjoint slice of
+    // the sample indices and the per-GPU buffers merge by simple summation.
+    // This keeps every GPU busy for the entire wall time (no spatial tail on
+    // heterogeneous devices), adds no extra submits versus a single GPU, and
+    // eliminates tile-to-tile noise differences since every pixel receives
+    // contributions from every device.
+    const size_t pixFloats = size_t(width) * size_t(height) * 5;
+    const uint32_t bufBytes = (uint32_t)(pixFloats * sizeof(float));
+    std::vector<float> zeros(pixFloats, 0.0f);
+
+    // Preserve caller-provided seeds (temporal accumulation) on the primary;
+    // they must be counted exactly once in the sum.
+    std::vector<float> seedPix, seedAd;
+    if (buffersPreSeeded) {
+        seedPix.resize(pixFloats);
+        seedAd.resize(pixFloats);
+        vkCtx.downloadFromBuffer(vkCtx.outBuffer, seedPix.data(), bufBytes);
+        vkCtx.downloadFromBuffer(vkCtx.adaptiveBuffer, seedAd.data(), bufBytes);
+    }
+
+    // Per-device speed estimate (samples/ms), EMA-refined by every real
+    // render. First call calibrates with one concurrent 1-sample tile per GPU.
+    static std::vector<double> speedEMA;
+    if (speedEMA.size() != nGPU) speedEMA.assign(nGPU, 0.0);
+    bool needCalib = false;
+    for (size_t g = 0; g < nGPU; ++g) needCalib |= (speedEMA[g] <= 0.0);
+    if (needCalib) {
+        const Tile& ct = tiles[tiles.size() / 2];
+        std::vector<std::thread> calib;
+        for (size_t g = 0; g < nGPU; ++g) {
+            calib.emplace_back([&, g] {
+                auto& ctx = gpuMgr.ctx(g);
+                GPUCameraData cd = camTemplate;
+                cd.tileOffsetX = ct.x;
+                cd.tileOffsetY = ct.y;
+                cd.currentSampleOffset = 1; // never firstEver during calibration
+                cd.dispatchSamples = 1;
+                ctx.updateCameraData(cd);
+                auto t0 = std::chrono::steady_clock::now();
+                ctx.dispatchWavefront(ct.w, ct.h, maxBounces, 1, 0);
+                double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                speedEMA[g] = 1.0 / std::max(ms, 1e-3);
+            });
+        }
+        for (auto& t : calib) t.join();
+    }
+
+    // Proportional sample split (floor + remainder to the fastest device). A
+    // device whose fair share rounds to zero simply sits out this frame
+    // instead of gating it.
+    double speedSum = 0.0;
+    for (size_t g = 0; g < nGPU; ++g) speedSum += speedEMA[g];
+    std::vector<int> counts(nGPU, 0);
+    int assigned = 0;
+    size_t fastest = 0;
+    for (size_t g = 0; g < nGPU; ++g) {
+        counts[g] = (int)std::floor(samplesPerPixel * speedEMA[g] / speedSum);
+        assigned += counts[g];
+        if (speedEMA[g] > speedEMA[fastest]) fastest = g;
+    }
+    counts[fastest] += samplesPerPixel - assigned;
+
+    // Seed accumulation buffers: zeros everywhere, except the primary keeps
+    // the caller's seed (calibration scribbled on the buffers, so this also
+    // cleans that up).
+    for (size_t g = 0; g < nGPU; ++g) {
+        auto& ctx = gpuMgr.ctx(g);
+        const float* pix = (g == 0 && buffersPreSeeded) ? seedPix.data() : zeros.data();
+        const float* ad  = (g == 0 && buffersPreSeeded) ? seedAd.data()  : zeros.data();
+        ctx.uploadToBuffer(ctx.outBuffer, pix, bufBytes);
+        ctx.uploadToBuffer(ctx.adaptiveBuffer, ad, bufBytes);
+    }
+
+    // Concurrent render: one host thread per participating GPU, each covering
+    // the full frame with its own disjoint sample range.
     std::vector<double> msSpent(nGPU, 0.0);
     std::vector<std::thread> workers;
-    workers.reserve(nGPU);
+    int start = 0;
     for (size_t g = 0; g < nGPU; ++g) {
-        workers.emplace_back([&, g] {
-            auto& ctx = gpuMgr.ctx(g);
-            for (;;) {
-                uint64_t myAvg = usPerTile[g].load(std::memory_order_relaxed);
-                if (myAvg > 0) {
-                    uint64_t bestOther = UINT64_MAX;
-                    for (size_t o = 0; o < nGPU; ++o) {
-                        if (o == g) continue;
-                        uint64_t a = usPerTile[o].load(std::memory_order_relaxed);
-                        if (a > 0 && a < bestOther) bestOther = a;
-                    }
-                    size_t claimed = next.load(std::memory_order_relaxed);
-                    size_t remaining = claimed < tiles.size() ? tiles.size() - claimed : 0;
-                    if (bestOther != UINT64_MAX &&
-                        myAvg > (uint64_t)(remaining + 1) * bestOther) {
-                        break; // faster GPUs will drain the queue sooner without me
-                    }
-                }
-                size_t i = next.fetch_add(1, std::memory_order_relaxed);
-                if (i >= tiles.size()) break;
-                tiles[i].owner = (int)g;
-                auto t0 = std::chrono::steady_clock::now();
-                renderOn(ctx, tiles[i]);
-                double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-                msSpent[g] += ms;
-                ++tilesDone[g];
-                usPerTile[g].store((uint64_t)(msSpent[g] * 1000.0 / tilesDone[g]),
-                                   std::memory_order_relaxed);
-            }
+        int myStart = start, myCount = counts[g];
+        start += myCount;
+        if (myCount <= 0) continue;
+        workers.emplace_back([&, g, myStart, myCount] {
+            auto t0 = std::chrono::steady_clock::now();
+            renderRange(gpuMgr.ctx(g), myStart, myCount);
+            msSpent[g] = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         });
     }
     for (auto& w : workers) w.join();
 
-    // Straggler guard can retire slow GPUs before the counter is exhausted;
-    // the primary GPU sweeps up anything left unowned.
-    for (auto& t : tiles) {
-        if (t.owner < 0) {
-            t.owner = 0;
-            renderOn(gpuMgr.ctx(0), t);
+    for (size_t g = 0; g < nGPU; ++g) {
+        if (counts[g] > 0 && msSpent[g] > 0.0) {
+            double measured = double(counts[g]) / msSpent[g];
+            speedEMA[g] = 0.5 * speedEMA[g] + 0.5 * measured;
         }
     }
-
     if (std::getenv("SSC_GPU_VERBOSE")) {
         for (size_t g = 0; g < nGPU; ++g)
             std::cout << "  gpu[" << g << "] " << gpuMgr.ctx(g).deviceName << ": "
-                      << tilesDone[g] << " tiles, " << (int)msSpent[g] << " ms" << std::endl;
+                      << counts[g] << "/" << samplesPerPixel << " samples, "
+                      << (int)msSpent[g] << " ms" << std::endl;
     }
 
-    // Merge: pull each GPU's tiles out of its own accumulation buffer into a
-    // host image, then push the stitched image into the primary context.
-    const size_t floatsPerPixel = 5;
-    std::vector<float> merged(size_t(width) * size_t(height) * floatsPerPixel);
-    std::vector<float> mergedAdaptive(merged.size());
-    std::vector<float> gpuAdaptive(merged.size());
+    // Merge by summation, then push the result into the primary context so
+    // the downstream smooth/blend passes see every GPU's contribution.
+    std::vector<float> merged(pixFloats, 0.0f), mergedAd(pixFloats, 0.0f), tmp(pixFloats);
     for (size_t g = 0; g < nGPU; ++g) {
         auto& ctx = gpuMgr.ctx(g);
+        if (g != 0 && counts[g] <= 0) continue; // untouched zeros
         void* mapped = nullptr;
-        vkMapMemory(ctx.device, ctx.outMem, 0, merged.size() * sizeof(float), 0, &mapped);
+        vkMapMemory(ctx.device, ctx.outMem, 0, bufBytes, 0, &mapped);
         if (!ctx.outMemCoherent) {
             VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
             range.memory = ctx.outMem;
@@ -516,22 +565,14 @@ static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData
             vkInvalidateMappedMemoryRanges(ctx.device, 1, &range);
         }
         const float* src = static_cast<const float*>(mapped);
-        ctx.downloadFromBuffer(ctx.adaptiveBuffer, gpuAdaptive.data(),
-                               (uint32_t)(gpuAdaptive.size() * sizeof(float)));
-        for (const auto& t : tiles) {
-            if (t.owner != (int)g) continue;
-            for (int row = t.y; row < t.y + t.h; ++row) {
-                size_t off = (size_t(row) * width + t.x) * floatsPerPixel;
-                size_t bytes = size_t(t.w) * floatsPerPixel * sizeof(float);
-                memcpy(merged.data() + off, src + off, bytes);
-                memcpy(mergedAdaptive.data() + off, gpuAdaptive.data() + off, bytes);
-            }
-        }
+        for (size_t i = 0; i < pixFloats; ++i) merged[i] += src[i];
         vkUnmapMemory(ctx.device, ctx.outMem);
+
+        ctx.downloadFromBuffer(ctx.adaptiveBuffer, tmp.data(), bufBytes);
+        for (size_t i = 0; i < pixFloats; ++i) mergedAd[i] += tmp[i];
     }
-    vkCtx.uploadToBuffer(vkCtx.outBuffer, merged.data(), (uint32_t)(merged.size() * sizeof(float)));
-    vkCtx.uploadToBuffer(vkCtx.adaptiveBuffer, mergedAdaptive.data(),
-                         (uint32_t)(mergedAdaptive.size() * sizeof(float)));
+    vkCtx.uploadToBuffer(vkCtx.outBuffer, merged.data(), bufBytes);
+    vkCtx.uploadToBuffer(vkCtx.adaptiveBuffer, mergedAd.data(), bufBytes);
 }
 #endif
 
@@ -1269,7 +1310,7 @@ frame Octree<T>::superBlendedRenderFrameVulkan(const Camera& cam, int height, in
         ctx.uploadToBuffer(ctx.outBuffer, pixelSeed.data(), pixelSeed.size() * sizeof(float));
     }
 
-    runWavefrontTilesMultiGPU(lowW, lowH, pbrCamData, samplesPerPixel, maxBounces, 1);
+    runWavefrontTilesMultiGPU(lowW, lowH, pbrCamData, samplesPerPixel, maxBounces, 1, true);
     vkCtx.dispatchSmoothPasses(lowW, lowH, samplesPerPixel, 2, false);
     vkCtx.ensureLowResBuffer(pbrOutSize);
     vkCtx.copyBuffer(vkCtx.outBuffer, vkCtx.lowResOutBuffer, pbrOutSize);

@@ -23,11 +23,12 @@ void main() {
 
     int globalS = pc.sampleIndex;
     bool firstEver = (cam.currentSampleOffset == 0) && (globalS == 0);
+    bool adaptiveOn = adaptiveEnabled();
     float reqSamples = firstEver ? float(cam.targetSamples) : adaptiveData[adIdx + 2u];
     bool done = (!firstEver) && (reqSamples < 0.0);
     reqSamples = abs(reqSamples);
 
-    if (done || globalS >= int(reqSamples)) return;
+    if (adaptiveOn && (done || globalS >= int(reqSamples))) return;
 
     uint rng = pcg_hash(uint(coord.x) + uint(coord.y) * uint(cam.width) + pcg_hash(uint(globalS)));
     uint grng = pcg_hash(pixelIndex * 9781u + pcg_hash(uint(globalS)) + 2654435761u);

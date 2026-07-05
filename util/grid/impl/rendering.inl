@@ -1557,9 +1557,9 @@ void wfPush(VkCommandBuffer cmd, int parity, int stage, int sampleIndex) {
     vkCmdPushConstants(cmd, wfPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
 }
 
-void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel) {
+void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel, int sampleStart = 0) {
     uint32_t maxPaths = uint32_t(tileW) * uint32_t(tileH);
-    if (maxPaths == 0) return;
+    if (maxPaths == 0 || samplesPerPixel <= 0) return;
     ensureWavefrontBuffers(maxPaths);
     writeWavefrontDescriptors();
 
@@ -1582,8 +1582,9 @@ void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel
     }
 
     int slot = 0;
-    for (int s0 = 0; s0 < samplesPerPixel; s0 += samplesPerSubmit, slot ^= 1) {
-        int s1 = std::min(s0 + samplesPerSubmit, samplesPerPixel);
+    int sampleEnd = sampleStart + samplesPerPixel;
+    for (int s0 = sampleStart; s0 < sampleEnd; s0 += samplesPerSubmit, slot ^= 1) {
+        int s1 = std::min(s0 + samplesPerSubmit, sampleEnd);
         VkCommandBuffer cmd = wfCmd[slot];
         {
             ScopedFunctionTimer _sw("wf.waitSlot");
