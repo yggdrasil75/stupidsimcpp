@@ -414,7 +414,7 @@ void Octree<T>::buildGPUMaterials(const RenderBuffer_<T>& buf, std::vector<GPUMa
 #ifdef VULKAN_SUPPORT
 static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData& camTemplate,
                                       int samplesPerPixel, int maxBounces, int sampleOffset) {
-    TIME_FUNCTION;
+    // TIME_FUNCTION;
     constexpr int tileW = 512, tileH = 512;
 
     struct Tile { int x, y, w, h; int owner; };
@@ -443,6 +443,8 @@ static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData
     // disjoint VkDevices, so no cross-thread synchronization is needed beyond
     // the tile counter.
     std::atomic<size_t> next{0};
+    std::vector<std::atomic<uint64_t>> usPerTile(nGPU); // avg microseconds, 0 = unknown
+    for (auto& a : usPerTile) a.store(0);
     std::vector<int> tilesDone(nGPU, 0);
     std::vector<double> msSpent(nGPU, 0.0);
     std::vector<std::thread> workers;
@@ -451,17 +453,44 @@ static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData
         workers.emplace_back([&, g] {
             auto& ctx = gpuMgr.ctx(g);
             for (;;) {
+                uint64_t myAvg = usPerTile[g].load(std::memory_order_relaxed);
+                if (myAvg > 0) {
+                    uint64_t bestOther = UINT64_MAX;
+                    for (size_t o = 0; o < nGPU; ++o) {
+                        if (o == g) continue;
+                        uint64_t a = usPerTile[o].load(std::memory_order_relaxed);
+                        if (a > 0 && a < bestOther) bestOther = a;
+                    }
+                    size_t claimed = next.load(std::memory_order_relaxed);
+                    size_t remaining = claimed < tiles.size() ? tiles.size() - claimed : 0;
+                    if (bestOther != UINT64_MAX &&
+                        myAvg > (uint64_t)(remaining + 1) * bestOther) {
+                        break; // faster GPUs will drain the queue sooner without me
+                    }
+                }
                 size_t i = next.fetch_add(1, std::memory_order_relaxed);
                 if (i >= tiles.size()) break;
                 tiles[i].owner = (int)g;
                 auto t0 = std::chrono::steady_clock::now();
                 renderOn(ctx, tiles[i]);
-                msSpent[g] += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                msSpent[g] += ms;
                 ++tilesDone[g];
+                usPerTile[g].store((uint64_t)(msSpent[g] * 1000.0 / tilesDone[g]),
+                                   std::memory_order_relaxed);
             }
         });
     }
     for (auto& w : workers) w.join();
+
+    // Straggler guard can retire slow GPUs before the counter is exhausted;
+    // the primary GPU sweeps up anything left unowned.
+    for (auto& t : tiles) {
+        if (t.owner < 0) {
+            t.owner = 0;
+            renderOn(gpuMgr.ctx(0), t);
+        }
+    }
 
     if (std::getenv("SSC_GPU_VERBOSE")) {
         for (size_t g = 0; g < nGPU; ++g)
@@ -473,6 +502,8 @@ static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData
     // host image, then push the stitched image into the primary context.
     const size_t floatsPerPixel = 5;
     std::vector<float> merged(size_t(width) * size_t(height) * floatsPerPixel);
+    std::vector<float> mergedAdaptive(merged.size());
+    std::vector<float> gpuAdaptive(merged.size());
     for (size_t g = 0; g < nGPU; ++g) {
         auto& ctx = gpuMgr.ctx(g);
         void* mapped = nullptr;
@@ -485,16 +516,22 @@ static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData
             vkInvalidateMappedMemoryRanges(ctx.device, 1, &range);
         }
         const float* src = static_cast<const float*>(mapped);
+        ctx.downloadFromBuffer(ctx.adaptiveBuffer, gpuAdaptive.data(),
+                               (uint32_t)(gpuAdaptive.size() * sizeof(float)));
         for (const auto& t : tiles) {
             if (t.owner != (int)g) continue;
             for (int row = t.y; row < t.y + t.h; ++row) {
                 size_t off = (size_t(row) * width + t.x) * floatsPerPixel;
-                memcpy(merged.data() + off, src + off, size_t(t.w) * floatsPerPixel * sizeof(float));
+                size_t bytes = size_t(t.w) * floatsPerPixel * sizeof(float);
+                memcpy(merged.data() + off, src + off, bytes);
+                memcpy(mergedAdaptive.data() + off, gpuAdaptive.data() + off, bytes);
             }
         }
         vkUnmapMemory(ctx.device, ctx.outMem);
     }
     vkCtx.uploadToBuffer(vkCtx.outBuffer, merged.data(), (uint32_t)(merged.size() * sizeof(float)));
+    vkCtx.uploadToBuffer(vkCtx.adaptiveBuffer, mergedAdaptive.data(),
+                         (uint32_t)(mergedAdaptive.size() * sizeof(float)));
 }
 #endif
 
@@ -893,7 +930,7 @@ frame Octree<T>::blendedRenderFrameVulkan(const Camera& cam, int height, int wid
         ctx.updatePBRBuffers(gpuPBRPoints);
     }
 
-    runWavefrontTilesMultiGPU(width, height, pbrCamData, samplesPerPixel, maxBounces, 0);
+    runWavefrontTilesMultiGPU(lowW, lowH, pbrCamData, samplesPerPixel, maxBounces, 0);
 
     vkCtx.dispatchSmoothPasses(lowW, lowH, samplesPerPixel, 2, false);
     vkCtx.ensureLowResBuffer(pbrOutSize);

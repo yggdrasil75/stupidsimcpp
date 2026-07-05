@@ -746,6 +746,24 @@ struct VulkanContext {
         vkFreeMemory(device, stagingMem, nullptr);
     }
 
+    // Read back a (possibly device-local) buffer into host memory via a
+    // host-visible staging buffer. src must have TRANSFER_SRC usage.
+    void downloadFromBuffer(VkBuffer src, void* dst, uint32_t size) {
+        if (!dst || size == 0) return;
+        VkBuffer stagingBuffer;
+        VkDeviceMemory stagingMem;
+        createBuffer(size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                     stagingBuffer, stagingMem);
+        copyBuffer(src, stagingBuffer, size);
+        void* mapped;
+        vkMapMemory(device, stagingMem, 0, size, 0, &mapped);
+        memcpy(dst, mapped, size);
+        vkUnmapMemory(device, stagingMem);
+        vkDestroyBuffer(device, stagingBuffer, nullptr);
+        vkFreeMemory(device, stagingMem, nullptr);
+    }
+
     void updateDeviceLocalBuffer(VkBuffer& buffer, VkDeviceMemory& memory, uint32_t& currentCap, 
                                  const void* data, uint32_t dataSize, uint32_t allocSize, VkBufferUsageFlags usage) {
         if (allocSize > currentCap) {
@@ -1070,7 +1088,7 @@ struct VulkanContext {
                 vkDestroyBuffer(device, adaptiveBuffer, nullptr);
                 vkFreeMemory(device, adaptiveMem, nullptr);
             }
-            createBuffer(adaptiveSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, 
+            createBuffer(adaptiveSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, 
                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, adaptiveBuffer, adaptiveMem);
             currentAdaptiveCap = adaptiveSize;
         }

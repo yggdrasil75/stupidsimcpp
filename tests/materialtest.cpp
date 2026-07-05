@@ -492,7 +492,7 @@ int main() {
             
             std::cout << "Rendering video frame " << frameCounter << "/" << totalFrames << "..." << std::endl;
             // frame out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
-            frame out = octree.superBlendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, videosamples, bounces, false);
+            frame out = octree.superBlendedRenderFrameVulkan(cam, height * 2, width * 2, blendedfactor, frame::colormap::RGB, videosamples, bounces, false);
             // frame out = octree.renderFrameVulkan(cam, height, width, frame::colormap::RGB, videosamples, bounces, false, true);
             // videoFrames.push_back(std::move(out));
             std::string debugFilename = "output/materialframes/debug_material_" + std::to_string(frameCounter) + ".bmp";
