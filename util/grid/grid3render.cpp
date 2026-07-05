@@ -1223,12 +1223,16 @@ frame Octree<T>::superBlendedRenderFrameVulkan(const Camera& cam, int height, in
         auto& ctx = gpuMgr.ctx(g);
         uploadFogVolumes(ctx, pbrCamData, fogVolumes_);
         ctx.updateCommonBuffers(pbrOutSize, pbrCamData);
-        ctx.updateSkyboxBuffer(skyData);
-        ctx.updateLightBuffer(gpuLights);
+        if (g > 0) {
+            ctx.updateSkyboxBuffer(skyData);
+            ctx.updateLightBuffer(gpuLights);
+        }
         ctx.updatePBRBuffers(gpuPBRPoints);
+        ctx.uploadToBuffer(ctx.adaptiveBuffer, adaptiveSeed.data(), adaptiveSeed.size() * sizeof(float));
+        ctx.uploadToBuffer(ctx.outBuffer, pixelSeed.data(), pixelSeed.size() * sizeof(float));
     }
 
-    runWavefrontTilesMultiGPU(width, height, pbrCamData, samplesPerPixel, maxBounces, 0);
+    runWavefrontTilesMultiGPU(lowW, lowH, pbrCamData, samplesPerPixel, maxBounces, 1);
     vkCtx.dispatchSmoothPasses(lowW, lowH, samplesPerPixel, 2, false);
     vkCtx.ensureLowResBuffer(pbrOutSize);
     vkCtx.copyBuffer(vkCtx.outBuffer, vkCtx.lowResOutBuffer, pbrOutSize);
