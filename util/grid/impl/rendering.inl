@@ -2,6 +2,7 @@
 #ifdef VULKAN_SUPPORT
 #include <vulkan/vulkan.h>
 #include <cstdlib>
+#include <chrono>
 #endif
 
 namespace Grid {
@@ -273,6 +274,23 @@ struct VulkanContext {
     int lastBlasOrderingTag = -1;         // which upload path (fast=1/pbr=2) built the topology
     bool outMemCoherent = true;
 
+    // Persistent host-cached readback staging for outBuffer (outBuffer itself
+    // is DEVICE_LOCAL now). Kept mapped for the lifetime of the context so a
+    // readback is a single GPU->staging copy plus a pointer return.
+    VkBuffer outStagingBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory outStagingMem = VK_NULL_HANDLE;
+    void* outStagingMapped = nullptr;
+    bool outStagingCoherent = true;
+    uint32_t currentOutStagingCap = 0;
+
+    // Persistent, grow-only staging buffer shared by uploadToBuffer /
+    // downloadFromBuffer, replacing the create/copy/waitIdle/destroy cycle.
+    VkBuffer xferStagingBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory xferStagingMem = VK_NULL_HANDLE;
+    void* xferStagingMapped = nullptr;
+    bool xferStagingCoherent = true;
+    uint32_t currentXferStagingCap = 0;
+
     uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
         VkPhysicalDeviceMemoryProperties memProperties;
         vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
@@ -450,6 +468,11 @@ struct VulkanContext {
                 queueFamilyIndex = i;
                 break;
             }
+        }
+
+        {
+            VkPhysicalDeviceProperties props;
+            vkGetPhysicalDeviceProperties(physicalDevice, &props);
         }
 
         float queuePriority = 1.0f;
@@ -730,38 +753,55 @@ struct VulkanContext {
         });
     }
 
-    void uploadToBuffer(VkBuffer dst, const void* src, uint32_t size) {
-        if (!src || size == 0) return;
-        VkBuffer stagingBuffer;
-        VkDeviceMemory stagingMem;
-        createBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                     stagingBuffer, stagingMem);
-        void* mapped;
-        vkMapMemory(device, stagingMem, 0, size, 0, &mapped);
-        memcpy(mapped, src, size);
-        vkUnmapMemory(device, stagingMem);
-        copyBuffer(stagingBuffer, dst, size);
-        vkDestroyBuffer(device, stagingBuffer, nullptr);
-        vkFreeMemory(device, stagingMem, nullptr);
+    // Grow-only persistent staging used by uploadToBuffer/downloadFromBuffer.
+    // HOST_CACHED preferred (fast host reads for downloads), kept mapped.
+    void ensureXferStaging(uint32_t size) {
+        if (size <= currentXferStagingCap) return;
+        if (xferStagingBuffer) {
+            vkUnmapMemory(device, xferStagingMem);
+            vkDestroyBuffer(device, xferStagingBuffer, nullptr);
+            vkFreeMemory(device, xferStagingMem, nullptr);
+            xferStagingMapped = nullptr;
+        }
+        createReadbackBuffer(size, xferStagingBuffer, xferStagingMem, xferStagingCoherent);
+        vkMapMemory(device, xferStagingMem, 0, VK_WHOLE_SIZE, 0, &xferStagingMapped);
+        currentXferStagingCap = size;
     }
 
-    // Read back a (possibly device-local) buffer into host memory via a
-    // host-visible staging buffer. src must have TRANSFER_SRC usage.
+    void flushXferStaging(uint32_t size) {
+        if (xferStagingCoherent) return;
+        VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+        range.memory = xferStagingMem;
+        range.offset = 0;
+        range.size = VK_WHOLE_SIZE;
+        vkFlushMappedMemoryRanges(device, 1, &range);
+    }
+
+    void invalidateXferStaging() {
+        if (xferStagingCoherent) return;
+        VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+        range.memory = xferStagingMem;
+        range.offset = 0;
+        range.size = VK_WHOLE_SIZE;
+        vkInvalidateMappedMemoryRanges(device, 1, &range);
+    }
+
+    void uploadToBuffer(VkBuffer dst, const void* src, uint32_t size) {
+        if (!src || size == 0) return;
+        ensureXferStaging(size);
+        memcpy(xferStagingMapped, src, size);
+        flushXferStaging(size);
+        copyBuffer(xferStagingBuffer, dst, size);
+    }
+
+    // Read back a (possibly device-local) buffer into host memory via the
+    // persistent staging buffer. src must have TRANSFER_SRC usage.
     void downloadFromBuffer(VkBuffer src, void* dst, uint32_t size) {
         if (!dst || size == 0) return;
-        VkBuffer stagingBuffer;
-        VkDeviceMemory stagingMem;
-        createBuffer(size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                     stagingBuffer, stagingMem);
-        copyBuffer(src, stagingBuffer, size);
-        void* mapped;
-        vkMapMemory(device, stagingMem, 0, size, 0, &mapped);
-        memcpy(dst, mapped, size);
-        vkUnmapMemory(device, stagingMem);
-        vkDestroyBuffer(device, stagingBuffer, nullptr);
-        vkFreeMemory(device, stagingMem, nullptr);
+        ensureXferStaging(size);
+        copyBuffer(src, xferStagingBuffer, size);
+        invalidateXferStaging();
+        memcpy(dst, xferStagingMapped, size);
     }
 
     void updateDeviceLocalBuffer(VkBuffer& buffer, VkDeviceMemory& memory, uint32_t& currentCap, 
@@ -1078,8 +1118,21 @@ struct VulkanContext {
                 vkDestroyBuffer(device, outBuffer, nullptr);
                 vkFreeMemory(device, outMem, nullptr);
             }
-            createReadbackBuffer(outSize, outBuffer, outMem, outMemCoherent);
+            createBuffer(outSize,
+                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, outBuffer, outMem);
+            outMemCoherent = true; // no host mapping of outMem anymore
             currentOutCap = outSize;
+
+            if (outStagingBuffer) {
+                vkUnmapMemory(device, outStagingMem);
+                vkDestroyBuffer(device, outStagingBuffer, nullptr);
+                vkFreeMemory(device, outStagingMem, nullptr);
+                outStagingMapped = nullptr;
+            }
+            createReadbackBuffer(outSize, outStagingBuffer, outStagingMem, outStagingCoherent);
+            vkMapMemory(device, outStagingMem, 0, VK_WHOLE_SIZE, 0, &outStagingMapped);
+            currentOutStagingCap = outSize;
         }
 
         size_t adaptiveSize = outSize; 
@@ -1103,6 +1156,23 @@ struct VulkanContext {
         vkMapMemory(device, uboMem, 0, uboSize, 0, &data);
         memcpy(data, &camData, uboSize);
         vkUnmapMemory(device, uboMem);
+    }
+
+    // Snapshot the first `size` bytes of the (device-local) outBuffer into the
+    // persistent host-cached staging buffer and return a read pointer. The
+    // pointer stays valid until the next readbackOut()/buffer resize; no unmap
+    // is needed. Callers must ensure all GPU writes to outBuffer have been
+    // fenced before calling (every existing call site already does).
+    const float* readbackOut(VkDeviceSize size) {
+        copyBuffer(outBuffer, outStagingBuffer, size);
+        if (!outStagingCoherent) {
+            VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+            range.memory = outStagingMem;
+            range.offset = 0;
+            range.size = VK_WHOLE_SIZE;
+            vkInvalidateMappedMemoryRanges(device, 1, &range);
+        }
+        return static_cast<const float*>(outStagingMapped);
     }
 
     void updateCameraData(const GPUCameraData& camData) {
@@ -1664,6 +1734,7 @@ void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel
         ScopedFunctionTimer _sw("wf.submitAndWait");
         vkWaitForFences(device, 2, wfFence, VK_TRUE, UINT64_MAX);
     }
+
 }
 
 #include "vct_host.inl"

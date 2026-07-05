@@ -555,18 +555,10 @@ static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData
     for (size_t g = 0; g < nGPU; ++g) {
         auto& ctx = gpuMgr.ctx(g);
         if (g != 0 && counts[g] <= 0) continue; // untouched zeros
-        void* mapped = nullptr;
-        vkMapMemory(ctx.device, ctx.outMem, 0, bufBytes, 0, &mapped);
-        if (!ctx.outMemCoherent) {
-            VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
-            range.memory = ctx.outMem;
-            range.offset = 0;
-            range.size = VK_WHOLE_SIZE;
-            vkInvalidateMappedMemoryRanges(ctx.device, 1, &range);
-        }
-        const float* src = static_cast<const float*>(mapped);
+        // outBuffer is device-local now: snapshot it into the context's
+        // persistent host-cached staging buffer and read from there.
+        const float* src = ctx.readbackOut(bufBytes);
         for (size_t i = 0; i < pixFloats; ++i) merged[i] += src[i];
-        vkUnmapMemory(ctx.device, ctx.outMem);
 
         ctx.downloadFromBuffer(ctx.adaptiveBuffer, tmp.data(), bufBytes);
         for (size_t i = 0; i < pixFloats; ++i) mergedAd[i] += tmp[i];
@@ -826,16 +818,7 @@ frame Octree<T>::fastRenderFrameVulkan(const Camera& cam, int height, int width,
     frame outFrame(width, height, colorformat);
     std::vector<float> colorBuffer(width * height * 3);
 
-    void* mappedData;
-    vkMapMemory(vkCtx.device, vkCtx.outMem, 0, outSize, 0, &mappedData);
-    if (!vkCtx.outMemCoherent) {
-        VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
-        range.memory = vkCtx.outMem;
-        range.offset = 0;
-        range.size = VK_WHOLE_SIZE;
-        vkInvalidateMappedMemoryRanges(vkCtx.device, 1, &range);
-    }
-    const float* raw = static_cast<const float*>(mappedData);
+    const float* raw = vkCtx.readbackOut(outSize);
     const int pixelCount = width * height;
     for (int i = 0; i < pixelCount; ++i) {
         int outIdx = i * 3;
@@ -844,7 +827,6 @@ frame Octree<T>::fastRenderFrameVulkan(const Camera& cam, int height, int width,
         colorBuffer[outIdx + 1] = std::clamp(raw[inIdx + 1], 0.0f, 1.0f);
         colorBuffer[outIdx + 2] = std::clamp(raw[inIdx + 2], 0.0f, 1.0f);
     }
-    vkUnmapMemory(vkCtx.device, vkCtx.outMem);
 
     outFrame.setData(colorBuffer, frame::colormap::RGB);
     return outFrame;
@@ -1209,17 +1191,8 @@ frame Octree<T>::superBlendedRenderFrameVulkan(const Camera& cam, int height, in
     // Read the guide image back (rgb, depth, objId per pixel).
     std::vector<float> guide(size_t(width) * size_t(height) * 5);
     {
-        void* mappedData;
-        vkMapMemory(vkCtx.device, vkCtx.outMem, 0, fastOutSize, 0, &mappedData);
-        if (!vkCtx.outMemCoherent) {
-            VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
-            range.memory = vkCtx.outMem;
-            range.offset = 0;
-            range.size = VK_WHOLE_SIZE;
-            vkInvalidateMappedMemoryRanges(vkCtx.device, 1, &range);
-        }
-        memcpy(guide.data(), mappedData, fastOutSize);
-        vkUnmapMemory(vkCtx.device, vkCtx.outMem);
+        const float* raw = vkCtx.readbackOut(fastOutSize);
+        memcpy(guide.data(), raw, fastOutSize);
     }
 
     // ------------- Stage 2: importance map from the guide -------------
