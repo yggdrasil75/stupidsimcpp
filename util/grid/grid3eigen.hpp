@@ -1537,14 +1537,10 @@ public:
     }
 
 
-    ///@brief Adds a world-space fog volume (an AABB of participating medium)
-    ///       for atmospheric dust/haze/mist. Evaluated ON THE GPU inside the
-    ///       wavefront path tracer's existing medium machinery: camera and
-    ///       bounce rays can scatter inside the box (real light shafts, since
-    ///       scattered rays are shadow-tested like everything else) and shadow
-    ///       rays are attenuated passing through it. Costs zero voxels.
-    ///       Density is constant inside the box; layer several boxes of
-    ///       decreasing density to fake a height gradient, and place small
+    ///@brief Adds a world-space fog volume (an AABB of participating medium) for atmospheric dust/haze/mist. Evaluated ON THE GPU inside the
+    ///       wavefront path tracer's existing medium machinery: camera and bounce rays can scatter inside the box (real light shafts, since
+    ///       scattered rays are shadow-tested like everything else) and shadow rays are attenuated passing through it. Costs zero voxels.
+    ///       Density is constant inside the box; layer several boxes of decreasing density to fake a height gradient, and place small
     ///       dense boxes exactly where you want visible haze.
     ///@param minB          Minimum corner of the box
     ///@param maxB          Maximum corner of the box
@@ -2040,39 +2036,39 @@ public:
         if (!out) return false;
 
         uint32_t magic = 0x79676733;
-        OctreeNode::writeVal(out, magic);
-        OctreeNode::writeVal(out, maxPointsPerNode);
-        OctreeNode::writeVal(out, size);
-        OctreeNode::writeVal(out, regionTargetPoints_);
+        writeVal(out, magic);
+        writeVal(out, maxPointsPerNode);
+        writeVal(out, size);
+        writeVal(out, regionTargetPoints_);
         
-        OctreeNode::writeVec3(out, skylight_);
-        OctreeNode::writeVec3(out, backgroundColor_);
+        writeVec3(out, skylight_);
+        writeVec3(out, backgroundColor_);
         
-        OctreeNode::writeVec3(out, root_->bounds().first);
-        OctreeNode::writeVec3(out, root_->bounds().second);
+        writeVec3(out, root_->bounds().first);
+        writeVec3(out, root_->bounds().second);
 
         {
             s_lock lock(objectsMutex_);
             uint32_t numObjects = objects_.size();
-            OctreeNode::writeVal(out, numObjects);
+            writeVal(out, numObjects);
             for (const auto& pair : objects_) {
-                OctreeNode::writeVal(out, pair.first);
+                writeVal(out, pair.first);
                 auto obj = pair.second;
                 
                 s_lock objLock(obj->objMutex);
-                OctreeNode::writeVal(out, obj->objectFlags);
-                OctreeNode::writeVec3(out, obj->centerPosition);
+                writeVal(out, obj->objectFlags);
+                writeVec3(out, obj->centerPosition);
                 
                 uint32_t numRMat = obj->renderMaterials.size();
-                OctreeNode::writeVal(out, numRMat);
+                writeVal(out, numRMat);
                 for (const auto& mat : obj->renderMaterials) {
-                    OctreeNode::writeVal(out, mat);
+                    writeVal(out, mat);
                 }
                 
                 uint32_t numPMat = obj->physicsMaterials.size();
-                OctreeNode::writeVal(out, numPMat);
+                writeVal(out, numPMat);
                 for (const auto& pmat : obj->physicsMaterials) {
-                    OctreeNode::writeVal(out, pmat);
+                    writeVal(out, pmat);
                 }
             }
         }
@@ -2093,47 +2089,47 @@ public:
         if (!in) return false;
 
         uint32_t magic;
-        OctreeNode::readVal(in, magic);
+        readVal(in, magic);
         if (magic != 0x79676733) {
             std::cerr << "Invalid Octree file format" << std::endl;
             return false;
         }
 
-        OctreeNode::readVal(in, maxPointsPerNode);
-        OctreeNode::readVal(in, size);
-        OctreeNode::readVal(in, regionTargetPoints_);
+        readVal(in, maxPointsPerNode);
+        readVal(in, size);
+        readVal(in, regionTargetPoints_);
         
-        OctreeNode::readVec3(in, skylight_);
-        OctreeNode::readVec3(in, backgroundColor_);
+        readVec3(in, skylight_);
+        readVec3(in, backgroundColor_);
 
         Vec3 minBound, maxBound;
-        OctreeNode::readVec3(in, minBound);
-        OctreeNode::readVec3(in, maxBound);
+        readVec3(in, minBound);
+        readVec3(in, maxBound);
 
         {
             u_lock lock(objectsMutex_);
             objects_.clear();
             uint32_t numObjects = 0;
-            OctreeNode::readVal(in, numObjects);
+            readVal(in, numObjects);
             for (uint32_t i = 0; i < numObjects; ++i) {
                 int id;
-                OctreeNode::readVal(in, id);
+                readVal(in, id);
                 auto obj = std::make_shared<GridObject>(id);
-                OctreeNode::readVal(in, obj->objectFlags);
-                OctreeNode::readVec3(in, obj->centerPosition);
+                readVal(in, obj->objectFlags);
+                readVec3(in, obj->centerPosition);
                 
                 uint32_t numRMat;
-                OctreeNode::readVal(in, numRMat);
+                readVal(in, numRMat);
                 obj->renderMaterials.resize(numRMat);
                 for (uint32_t j = 0; j < numRMat; ++j) {
-                    OctreeNode::readVal(in, obj->renderMaterials[j]);
+                    readVal(in, obj->renderMaterials[j]);
                 }
                 
                 uint32_t numPMat;
-                OctreeNode::readVal(in, numPMat);
+                readVal(in, numPMat);
                 obj->physicsMaterials.resize(numPMat);
                 for (uint32_t j = 0; j < numPMat; ++j) {
-                    OctreeNode::readVal(in, obj->physicsMaterials[j]);
+                    readVal(in, obj->physicsMaterials[j]);
                 }
                 objects_[id] = obj;
             }

@@ -43,6 +43,12 @@ enum class BodyType : uint8_t {
     FLUID = 4
 };
 
+struct Vec3i64Hash {
+    std::size_t operator()(const std::array<int64_t, 3>& v) const {
+        return (std::size_t)((v[0] * 73856093) ^ (v[1] * 19349663) ^ (v[2] * 83492791));
+    }
+};
+
 static inline uint32_t packRGB9E5(const Vec3& c) {
     float rc = std::max(0.0f, c.x());
     float gc = std::max(0.0f, c.y());
@@ -71,6 +77,46 @@ static inline Vec3 unpackRGB9E5(uint32_t c) {
     float g = static_cast<float>((c >> 9) & 0x1FF) * scale;
     float b = static_cast<float>((c >> 18) & 0x1FF) * scale;
     return Vec3(r, g, b);
+}
+
+template<typename V>
+static void writeVal(std::ofstream& out, const V& val) {
+    out.write(reinterpret_cast<const char*>(&val), sizeof(V));
+}
+
+template<typename V>
+static void readVal(std::ifstream& in, V& val) {
+    in.read(reinterpret_cast<char*>(&val), sizeof(V));
+}
+
+static inline void writeVec3(std::ofstream& out, const Vec3& vec) {
+    writeVal(out, vec.x());
+    writeVal(out, vec.y());
+    writeVal(out, vec.z());
+}
+
+static inline void readVec3(std::ifstream& in, Vec3& vec) {
+    float x, y, z;
+    readVal(in, x);
+    readVal(in, y);
+    readVal(in, z);
+    vec = Vec3(x, y, z);
+}
+
+static inline void writeVec4(std::ofstream& out, const Eigen::Vector4f& vec) {
+    writeVal(out, vec.x());
+    writeVal(out, vec.y());
+    writeVal(out, vec.z());
+    writeVal(out, vec.w());
+}
+
+static inline void readVec4(std::ifstream& in, Eigen::Vector4f& vec) {
+    float x, y, z, w;
+    readVal(in, x);
+    readVal(in, y);
+    readVal(in, z);
+    readVal(in, w);
+    vec = Eigen::Vector4f(x, y, z, w);
 }
 
 template<typename T>
@@ -261,8 +307,12 @@ struct RenderMaterial {
     v3half sellB;
     v3half sellC;
     Vec3 absorption;
-    //bandwidth?
-    //dispersion?
+    //vec3 scattering? // sigma_s (The "diffuse color" of the leaf/wood)
+    //float phase_g? // Forward/backward scattering bias (-1.0 to 1.0)
+    //float sheen? // Peach fuzz / moss hair rim lighting
+    //float anistropy? // Wood grain highlight stretching
+    //float translucency? // Thin geometry sss and transparency
+    //float porosity? // Rain simulation without rain voxels?
 
     RenderMaterial(uint32_t e, float r, float m, const v3half& B, const v3half& C,
               Vec3 a = Eigen::Vector3f::Zero())
@@ -300,6 +350,23 @@ struct RenderMaterial {
     }
 };
 
+struct RMatHash {
+    size_t operator()(const RenderMaterial& m) const {
+        std::hash<float> hf;
+        size_t h = std::hash<uint32_t>()(m.chromaticity);
+        h ^= hf(m.roughness) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= hf(m.metallic) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        for (int j = 0; j < 3; ++j)
+            h ^= hf(static_cast<float>(m.sellB[j])) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        for (int j = 0; j < 3; ++j)
+            h ^= hf(static_cast<float>(m.sellC[j])) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= hf(m.absorption.x()) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= hf(m.absorption.y()) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= hf(m.absorption.z()) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        return h;
+    }
+};
+
 struct PhysicsMaterial_ {
     BodyType type = BodyType::STATIC;
     float mass = 1.0f;
@@ -322,24 +389,7 @@ struct PhysicsMaterial_ {
     }
 };
 
-struct materialHash {
-    size_t operator()(const RenderMaterial& m) const {
-        std::hash<float> hf;
-        size_t h = std::hash<uint32_t>()(m.chromaticity);
-        h ^= hf(m.roughness) + 0x9e3779b9 + (h << 6) + (h >> 2);
-        h ^= hf(m.metallic) + 0x9e3779b9 + (h << 6) + (h >> 2);
-        for (int j = 0; j < 3; ++j)
-            h ^= hf(static_cast<float>(m.sellB[j])) + 0x9e3779b9 + (h << 6) + (h >> 2);
-        for (int j = 0; j < 3; ++j)
-            h ^= hf(static_cast<float>(m.sellC[j])) + 0x9e3779b9 + (h << 6) + (h >> 2);
-        h ^= hf(m.absorption.x()) + 0x9e3779b9 + (h << 6) + (h >> 2);
-        h ^= hf(m.absorption.y()) + 0x9e3779b9 + (h << 6) + (h >> 2);
-        h ^= hf(m.absorption.z()) + 0x9e3779b9 + (h << 6) + (h >> 2);
-        return h;
-    }
-};
-
-struct physicsMatHash {
+struct PMatHash {
     size_t operator()(const PhysicsMaterial_& m) const {
         std::hash<float> hf;
         size_t h = std::hash<uint8_t>()(static_cast<uint8_t>(m.type));
@@ -354,12 +404,6 @@ struct VoxelRel {
     Vec3 relPos;
 };
 
-struct Vec3i64Hash {
-    std::size_t operator()(const std::array<int64_t, 3>& v) const {
-        return (std::size_t)((v[0] * 73856093) ^ (v[1] * 19349663) ^ (v[2] * 83492791));
-    }
-};
-
 template<typename T>
 struct GridObject_ {
     int id;
@@ -367,9 +411,9 @@ struct GridObject_ {
     Vec3 centerPosition = Vec3::Zero();
 
     std::vector<RenderMaterial> renderMaterials;
-    std::unordered_map<RenderMaterial, uint16_t, materialHash> renderMatMap;
+    std::unordered_map<RenderMaterial, uint16_t, RMatHash> renderMatMap;
     std::vector<PhysicsMaterial_> physicsMaterials;
-    std::unordered_map<PhysicsMaterial_, uint16_t, physicsMatHash> physicsMatMap;
+    std::unordered_map<PhysicsMaterial_, uint16_t, PMatHash> physicsMatMap;
 
     std::vector<VoxelRel> relativeVoxels;
 
@@ -645,9 +689,7 @@ struct OctreeNode_ {
 
     bool contains(const Vec3& point) const {
         BoundingBox b = bounds();
-        return (point[0] >= b.first[0] && point[0] <= b.second[0] &&
-                point[1] >= b.first[1] && point[1] <= b.second[1] &&
-                point[2] >= b.first[2] && point[2] <= b.second[2]);
+        return ((point.array() >= b.first.array()) && (point.array() <= b.second.array())).all();
     }
 
     bool isEmpty() const {
@@ -658,14 +700,6 @@ struct OctreeNode_ {
             }
         }
         return true;
-    }
-
-    std::string getRegionName() const {
-        std::ostringstream oss;
-        oss << static_cast<int>(std::floor(center.x())) << "." 
-            << static_cast<int>(std::floor(center.y())) << "." 
-            << static_cast<int>(std::floor(center.z()));
-        return oss.str();
     }
 
     std::string getRegionPath(const std::string storagepath) const {
@@ -685,46 +719,6 @@ struct OctreeNode_ {
         
         p /= "data.region";
         return p.string();
-    }
-
-    template<typename V>
-    static void writeVal(std::ofstream& out, const V& val) {
-        out.write(reinterpret_cast<const char*>(&val), sizeof(V));
-    }
-
-    template<typename V>
-    static void readVal(std::ifstream& in, V& val) {
-        in.read(reinterpret_cast<char*>(&val), sizeof(V));
-    }
-
-    static void writeVec3(std::ofstream& out, const Vec3& vec) {
-        writeVal(out, vec.x());
-        writeVal(out, vec.y());
-        writeVal(out, vec.z());
-    }
-
-    static void readVec3(std::ifstream& in, Vec3& vec) {
-        float x, y, z;
-        readVal(in, x);
-        readVal(in, y);
-        readVal(in, z);
-        vec = Vec3(x, y, z);
-    }
-
-    static void writeVec4(std::ofstream& out, const Eigen::Vector4f& vec) {
-        writeVal(out, vec.x());
-        writeVal(out, vec.y());
-        writeVal(out, vec.z());
-        writeVal(out, vec.w());
-    }
-
-    static void readVec4(std::ifstream& in, Eigen::Vector4f& vec) {
-        float x, y, z, w;
-        readVal(in, x);
-        readVal(in, y);
-        readVal(in, z);
-        readVal(in, w);
-        vec = Eigen::Vector4f(x, y, z, w);
     }
 
     static void serializeData(std::ofstream& out, const T& data) {
@@ -773,9 +767,9 @@ struct OctreeNode_ {
         if (!isLoaded()) return 0;
         size_t count = points.size();
         if (!isLeaf()) {
-            for (int i = 0; i < 8; ++i) {
-                if (children[i]) {
-                    count += children[i]->getSubtreePointCount();
+            for (auto& child : children) {
+                if (child) {
+                    count += child->getSubtreePointCount();
                 }
             }
         }
@@ -785,8 +779,8 @@ struct OctreeNode_ {
     bool isSubtreeFullyLoaded() const {
         if (!isLoaded()) return false;
         if (!isLeaf()) {
-            for (int i = 0; i < 8; ++i) {
-                if (children[i] && !children[i]->isSubtreeFullyLoaded()) return false;
+            for (auto& child : children) {
+                if (child && !child->isSubtreeFullyLoaded()) return false;
             }
         }
         return true;
@@ -810,8 +804,8 @@ struct OctreeNode_ {
             uint8_t childMask = 0;
             for (int i = 0; i < 8; ++i) if (children[i]) childMask |= (1 << i);
             writeVal(out, childMask);
-            for (int i = 0; i < 8; ++i) {
-                if (children[i]) children[i]->serializeSubtree(out);
+            for (auto& child : children) {
+                if (child) child->serializeSubtree(out);
             }
         }
     }
@@ -891,7 +885,7 @@ struct OctreeNode_ {
 
     void offload() {
         std::lock_guard<std::shared_mutex> lock(nodeMutex);
-        if (isDirty()) return;
+        if (isKeepLoaded() || isDirty()) return;
         setLoaded(false);
         for (int i = 0; i < 8; ++i) {
             children[i].reset();
@@ -930,8 +924,8 @@ struct OctreeNode_ {
             uint8_t childMask = 0;
             for (int i = 0; i < 8; ++i) if (children[i]) childMask |= (1 << i);
             writeVal(out, childMask);
-            for (int i = 0; i < 8; ++i) {
-                if (children[i]) children[i]->serialize(out, regionTargetPoints, storagepath);
+            for (auto& child : children) {
+                if (child) child->serialize(out, regionTargetPoints, storagepath);
             }
         }
     }
@@ -1001,7 +995,7 @@ struct OctreeNode_ {
 template<typename T>
 struct RayHit_ {
     std::shared_ptr<NodeData_<T>> node;
-    float distance;
+    float distance = 0;
     Vec3 normal;
     Vec3 hitPoint;
 };

@@ -55,7 +55,6 @@ struct RenderBuffer_ {
     std::unordered_map<int, uint32_t> objMaterialOffsets;
     uint32_t defaultMatIdx;
 
-    
     void clear() {
         nodes.clear();
         points.clear();
@@ -76,6 +75,15 @@ struct alignas(16) GPUMaterial {
     uint32_t materialProps;
     uint32_t absorption;
     uint32_t albedo;
+};
+
+struct alignas(16) GPUFullMaterial {
+    uint32_t chromaticity; //RBG9E5
+    uint32_t materialProps; //8 bits for roughness. 8 for metallicity. leaves 16 for ???
+    uint32_t sellB; //RBG9E5
+    uint32_t sellC; //R11G11B10
+    uint32_t absorption; //RBG9E5
+    uint32_t albedo; //rgb9e5
 };
 
 struct alignas(16) GPUFastRenderData {
@@ -133,10 +141,14 @@ struct alignas(16) GPUCameraData {
 // World-space participating-media box for the wavefront tracer (binding 16).
 // std430 layout: each vec3 pads to 16 bytes, so pack a float behind each.
 struct alignas(16) GPUFogVolume {
-    Vec3 minB;    float density;   // extinction sigma_t scale per world unit
-    Vec3 maxB;    float pad0;
-    Vec3 scatter; float pad1;      // scattering albedo tint
-    Vec3 absorb;  float pad2;      // absorption tint
+    Vec3 minB;
+    float density;
+    Vec3 maxB;
+    float pad0;
+    Vec3 scatter;
+    float pad1;
+    Vec3 absorb;
+    float pad2;
 };
 
 struct VulkanContext {
