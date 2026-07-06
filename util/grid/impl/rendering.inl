@@ -412,22 +412,16 @@ struct VulkanContext {
         }
     }
 
-    void init(VkInstance externalInstance = VK_NULL_HANDLE, VkPhysicalDevice PhDevice = VK_NULL_HANDLE) {
+    void init(VkPhysicalDevice PhDevice = VK_NULL_HANDLE) {
         uint32_t extCount;
         if (initialized) return;
-        if (externalInstance != VK_NULL_HANDLE) {
-            instance = externalInstance;
-            ownsInstance = false;
-        } else {
-            VkApplicationInfo appInfo{VK_STRUCTURE_TYPE_APPLICATION_INFO};
-            appInfo.apiVersion = VK_API_VERSION_1_2;
+        VkApplicationInfo appInfo{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+        appInfo.apiVersion = VK_API_VERSION_1_2;
 
-            vkEnumerateInstanceExtensionProperties(nullptr, &extCount, nullptr);
-            VkInstanceCreateInfo createInfo{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
-            createInfo.pApplicationInfo = &appInfo;
-            vkCreateInstance(&createInfo, nullptr, &instance);
-            ownsInstance = true;
-        }
+        vkEnumerateInstanceExtensionProperties(nullptr, &extCount, nullptr);
+        VkInstanceCreateInfo createInfo{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+        createInfo.pApplicationInfo = &appInfo;
+        vkCreateInstance(&createInfo, nullptr, &instance);
 
         if (PhDevice != VK_NULL_HANDLE) {
             primaryDevice = PhDevice;
@@ -441,16 +435,17 @@ struct VulkanContext {
             int bestScore = -1;
             for (auto d : devices) {
                 int s = scorePhysicalDevice(d);
-                if (s > bestScore) { bestScore = s; primaryDevice = d; }
+                if (s > bestScore) {
+                    bestScore = s;
+                    primaryDevice = d;
+                }
             }
             if (primaryDevice == VK_NULL_HANDLE && deviceCount > 0) primaryDevice = devices[0];
         }
 
-        {
-            VkPhysicalDeviceProperties props;
-            vkGetPhysicalDeviceProperties(primaryDevice, &props);
-            deviceType = props.deviceType;
-        }
+        VkPhysicalDeviceProperties props;
+        vkGetPhysicalDeviceProperties(primaryDevice, &props);
+        deviceType = props.deviceType;
 
         uint32_t queueFamilyCount = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(primaryDevice, &queueFamilyCount, nullptr);
@@ -461,11 +456,6 @@ struct VulkanContext {
                 queueFamilyIndex = i;
                 break;
             }
-        }
-
-        {
-            VkPhysicalDeviceProperties props;
-            vkGetPhysicalDeviceProperties(primaryDevice, &props);
         }
 
         float queuePriority = 1.0f;
@@ -631,11 +621,11 @@ struct VulkanContext {
         allocSetInfo.pSetLayouts = &guidedCoeffDescLayout;
         vkAllocateDescriptorSets(device, &allocSetInfo, &guidedCoeffDescSet);
 
-        fastShader = createShaderModule("./bin/fast_raytrace_hw.spv");
+        fastShader = createShaderModule(device, "./bin/fast_raytrace_hw.spv");
         
-        smoothShader = createShaderModule("./bin/smooth.spv");
-        blendShader = createShaderModule("./bin/blend.spv");
-        guidedCoeffShader = createShaderModule("./bin/guided_coeff.spv");
+        smoothShader = createShaderModule(device, "./bin/smooth.spv");
+        blendShader = createShaderModule(device, "./bin/blend.spv");
+        guidedCoeffShader = createShaderModule(device, "./bin/guided_coeff.spv");
         
 
         VkPipelineLayoutCreateInfo pipelineLayoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
@@ -1760,7 +1750,7 @@ struct GPUManager {
         // Primary context. If vkCtx was already initialized before the manager
         // ran, keep whatever device it has; otherwise give it the best device.
         if (!vkCtx.initialized) {
-            vkCtx.init(instance, cands.empty() ? VK_NULL_HANDLE : cands.front().dev);
+            vkCtx.init(cands.empty() ? VK_NULL_HANDLE : cands.front().dev);
         }
         contexts.push_back(&vkCtx);
 
@@ -1769,7 +1759,7 @@ struct GPUManager {
             if (cands[i].dev == vkCtx.primaryDevice) continue;
             if (contexts.size() == 1 && i == 0 && vkCtx.initialized && vkCtx.primaryDevice == cands[i].dev) continue;
             auto c = std::make_unique<VulkanContext>();
-            c->init(instance, cands[i].dev);
+            c->init(cands[i].dev);
             contexts.push_back(c.get());
             extras.push_back(std::move(c));
         }
