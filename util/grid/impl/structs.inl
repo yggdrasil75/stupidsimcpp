@@ -79,6 +79,28 @@ static inline Vec3 unpackRGB9E5(uint32_t c) {
     return Vec3(r, g, b);
 }
 
+static inline uint32_t f32ToUF11(float f) {
+    if (!(f > 0.0f)) return 0u;
+    uint32_t bits; std::memcpy(&bits, &f, sizeof(bits));
+    int e = static_cast<int>((bits >> 23) & 0xFFu) - 127;
+    if (e < -14) return 0u;
+    if (e > 15)  return 0x7BFu;
+    return (static_cast<uint32_t>(e + 15) << 6) | ((bits & 0x7FFFFFu) >> 17);
+}
+
+static inline uint32_t f32ToUF10(float f) {
+    if (!(f > 0.0f)) return 0u;
+    uint32_t bits; std::memcpy(&bits, &f, sizeof(bits));
+    int e = static_cast<int>((bits >> 23) & 0xFFu) - 127;
+    if (e < -14) return 0u;
+    if (e > 15)  return 0x3DFu;
+    return (static_cast<uint32_t>(e + 15) << 5) | ((bits & 0x7FFFFFu) >> 18);
+}
+
+static inline uint32_t packR11G11B10(const Vec3& c) {
+    return f32ToUF11(c.x()) | (f32ToUF11(c.y()) << 11) | (f32ToUF10(c.z()) << 22);
+}
+
 template<typename V>
 static void writeVal(std::ofstream& out, const V& val) {
     out.write(reinterpret_cast<const char*>(&val), sizeof(V));
@@ -578,7 +600,8 @@ struct NodeData_ {
     }
     
     Vec3 getHalfSize() const {
-        return Vec3(size * 0.5f, size * 0.5f, size * 0.5f);
+        float sizeh = size * 0.5f;
+        return Vec3(sizeh, sizeh, sizeh);
     }
     
     BoundingBox getCubeBounds() const {

@@ -11,13 +11,15 @@ const int MAX_TRANSPARENT_BOUNCES = 12;
 const int MAX_VOLUMETRIC_BOUNCES  = 8;
 
 struct GPUMaterial {
-    uint chromaticity;
-    uint  materialProps;
-    uint  absorption;
-    uint  albedo;
+    uint chromaticity;   // RGB9E5
+    uint materialProps;  // roughness (8) | metallic (8) | 16 spare
+    uint sellB;          // RGB9E5   - Sellmeier B coefficients
+    uint sellC;          // R11G11B10 - Sellmeier C coefficients (um^2)
+    uint absorption;     // RGB9E5
+    uint albedo;         // RGB9E5
 };
 
-struct GPUPBRRenderData {
+struct GPURenderData {
     vec3 position;
     float size;
     uint color;
@@ -109,14 +111,14 @@ layout(binding = 0) uniform CameraData {
     int tileOffsetY;
     int emissiveCount;
     int targetSamples;
-    int sellWidth;
-    int sellSecondary;
+    int pad1;
+    int pad2;
     int fogVolumeCount;
     int camPad0;
 } cam;
 bool adaptiveEnabled() { return cam.dispatchSamples >= cam.targetSamples; }
 
-layout(std430, binding = 1) readonly buffer PointBuffer    { GPUPBRRenderData points[]; };
+layout(std430, binding = 1) readonly buffer PointBuffer    { GPURenderData points[]; };
 layout(std430, binding = 2) readonly buffer MaterialBuffer { GPUMaterial materials[]; };
 layout(std430, binding = 3) readonly buffer SkyboxBuffer   { vec4 skyPixels[]; };
 layout(std430, binding = 4) readonly buffer LightBuffer    { uint emissiveIndices[]; };
@@ -130,7 +132,6 @@ layout(std430, binding = 11) buffer ShadeQ    { uint shadeQueue[]; };
 layout(std430, binding = 12) buffer ShadowQ   { ShadowRay shadowQueue[]; };
 layout(std430, binding = 13) buffer CounterBuf{ Counters ctr; };
 layout(std430, binding = 14) buffer PathHitBuffer { PathHit pathsHit[]; };
-layout(std430, binding = 15) readonly buffer SellmeierBuffer { float sellmeierLUT[]; };
 
 // World-space participating-media boxes (dust/haze/mist). Constant density
 // inside each box; stack boxes for gradients. See Octree::addFogVolume.
@@ -192,33 +193,42 @@ vec3 unpackRGB9E5(uint c) {
     return vec3(r, g, b);
 }
 
-const float SELL_LMIN = 0.380; // um
-const float SELL_LMAX = 0.720; // um
 const float HERO_LAMBDA_R = 0.610;
 const float HERO_LAMBDA_G = 0.550;
 const float HERO_LAMBDA_B = 0.465;
 
-float lambdaToU(float lambdaUm) {
-    return clamp((lambdaUm - SELL_LMIN) / (SELL_LMAX - SELL_LMIN), 0.0, 1.0);
+// Unsigned small floats used by R11G11B10: E5M6 (11-bit) / E5M5 (10-bit), bias 15.
+float uf11ToFloat(uint v) {
+    uint E = (v >> 6) & 0x1Fu;
+    uint M = v & 0x3Fu;
+    if (E == 0u) return (M == 0u) ? 0.0 : exp2(-14.0) * (float(M) / 64.0);
+    return exp2(float(E) - 15.0) * (1.0 + float(M) / 64.0);
+}
+float uf10ToFloat(uint v) {
+    uint E = (v >> 5) & 0x1Fu;
+    uint M = v & 0x1Fu;
+    if (E == 0u) return (M == 0u) ? 0.0 : exp2(-14.0) * (float(M) / 32.0);
+    return exp2(float(E) - 15.0) * (1.0 + float(M) / 32.0);
+}
+vec3 unpackR11G11B10(uint c) {
+    return vec3(uf11ToFloat(c & 0x7FFu),
+                uf11ToFloat((c >> 11) & 0x7FFu),
+                uf10ToFloat((c >> 22) & 0x3FFu));
 }
 
-float sampleIor(uint row, float lambdaUm) {
-    int w = cam.sellWidth;
-    if (w <= 0) return 1.45;
-    float u = lambdaToU(lambdaUm) * float(w - 1);
-    int i0 = int(floor(u));
-    int i1 = min(i0 + 1, w - 1);
-    float f = u - float(i0);
-    uint base = row * uint(w);
-    float a = sellmeierLUT[base + uint(i0)];
-    float b = sellmeierLUT[base + uint(i1)];
-    return mix(a, b, f);
+float sellmeierIor(uint sellBPacked, uint sellCPacked, float lambdaUm) {
+    vec3 B = unpackRGB9E5(sellBPacked);
+    vec3 C = unpackR11G11B10(sellCPacked);
+    float l2 = lambdaUm * lambdaUm;
+    vec3 denom = vec3(l2) - C;
+    vec3 safe = mix(vec3(0.0), B * l2 / denom, vec3(greaterThan(abs(denom), vec3(1e-8))));
+    float n2 = 1.0 + safe.x + safe.y + safe.z;
+    return sqrt(max(1.0, n2));
 }
 
-void unpackMaterial(uint m, out float roughness, out float metallic, out uint sellRow) {
+void unpackMaterial(uint m, out float roughness, out float metallic) {
     roughness = float(m & 0xFF) / 255.0;
     metallic  = float((m >> 8) & 0xFF) / 255.0;
-    sellRow   = (m >> 16) & 0xFFFFu;
 }
 
 float heroLambda(int hero) {
@@ -308,7 +318,7 @@ vec3 sampleCosHemisphere(vec3 N, float r1, float r2, out float pdfW) {
     return normalize(d);
 }
 
-bool rayCubeIntersect(vec3 ro, vec3 rd, vec3 invD, GPUPBRRenderData pt,
+bool rayCubeIntersect(vec3 ro, vec3 rd, vec3 invD, GPURenderData pt,
                       out float t, out vec3 normal, out vec3 hitPoint, out float tExit) {
     vec3 bMin = pt.position - pt.size * 0.5;
     vec3 bMax = pt.position + pt.size * 0.5;
@@ -402,7 +412,7 @@ vec3 shadowTransmit(vec3 ro, vec3 rd, vec3 invD, float maxDist, int lightPtIdx) 
         if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionAABBEXT) {
             int ptIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
             if (ptIdx == lightPtIdx) continue;
-            GPUPBRRenderData pt = points[ptIdx];
+            GPURenderData pt = points[ptIdx];
             vec3 bMin = pt.position - pt.size * 0.5;
             vec3 bMax = pt.position + pt.size * 0.5;
             vec3 t0 = (bMin - ro) * invD;
@@ -414,13 +424,12 @@ vec3 shadowTransmit(vec3 ro, vec3 rd, vec3 invD, float maxDist, int lightPtIdx) 
             if (tExit >= max(0.0, tEntry) && tEntry <= maxDist) {
                 GPUMaterial tMat = materials[pt.materialIdx];
                 float r, m;
-                uint sellRow;
-                unpackMaterial(tMat.materialProps, r, m, sellRow);
+                unpackMaterial(tMat.materialProps, r, m);
                 vec4 albColor = unpackRGBA8(pt.color);
                 float ptOpacity = albColor.a;
                 float ptTransmission = 1.0 - ptOpacity;
                 if (ptTransmission > 0.01) {
-                    vec3 absColor = unpackRGB8(tMat.absorption);
+                    vec3 absColor = unpackRGB9E5(tMat.absorption);
                     float actualTEntry = max(0.0, tEntry);
                     float actualTExit  = min(maxDist, tExit);
                     float thickness = max(0.0, actualTExit - actualTEntry);

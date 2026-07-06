@@ -18,13 +18,17 @@ const float LARGE = 1e30;
 #define MAX_HITS 16 
 
 struct GPUMaterial {
-    uint chromaticity;
-    uint materialProps;
-    uint absorption;
-    uint padding;
+    uint chromaticity;   // RGB9E5
+    uint materialProps;  // roughness (8) | metallic (8) | 16 spare
+    uint sellB;          // RGB9E5   - Sellmeier B coefficients
+    uint sellC;          // R11G11B10 - Sellmeier C coefficients (um^2)
+    uint absorption;     // RGB9E5
+    uint albedo;         // RGB9E5
+    uint pad0;
+    uint pad1;
 };
 
-struct GPUFastRenderData {
+struct GPURenderData {
     vec3 position;
     float size;
     uint color;
@@ -33,7 +37,7 @@ struct GPUFastRenderData {
     uint padding2;
 };
 
-layout(std430, binding = 1) readonly buffer PointBuffer { GPUFastRenderData points[]; };
+layout(std430, binding = 1) readonly buffer PointBuffer { GPURenderData points[]; };
 layout(std430, binding = 2) writeonly buffer OutputBuffer { float pixels[]; };
 
 layout(binding = 3) uniform CameraData {
@@ -170,7 +174,7 @@ bool rayBoxIntersect(Ray ray, vec3 bMin, vec3 bMax, out float tMin, out float tM
     return tMax >= max(0.0, tMin);
 }
 
-bool rayCubeIntersect(Ray ray, GPUFastRenderData pt, out float t, out float tExitOut, out vec3 normal) {
+bool rayCubeIntersect(Ray ray, GPURenderData pt, out float t, out float tExitOut, out vec3 normal) {
     vec3 bMin = pt.position - pt.size * 0.5;
     vec3 bMax = pt.position + pt.size * 0.5;
 
@@ -292,6 +296,35 @@ int voxelTraverse(Ray ray, out HitData hits[MAX_HITS]) {
     return hitCount;
 }
 
+float uf11ToFloat(uint v) {
+    uint E = (v >> 6) & 0x1Fu;
+    uint M = v & 0x3Fu;
+    if (E == 0u) return (M == 0u) ? 0.0 : exp2(-14.0) * (float(M) / 64.0);
+    return exp2(float(E) - 15.0) * (1.0 + float(M) / 64.0);
+}
+
+float uf10ToFloat(uint v) {
+    uint E = (v >> 5) & 0x1Fu;
+    uint M = v & 0x1Fu;
+    if (E == 0u) return (M == 0u) ? 0.0 : exp2(-14.0) * (float(M) / 32.0);
+    return exp2(float(E) - 15.0) * (1.0 + float(M) / 32.0);
+}
+
+vec3 unpackR11G11B10(uint c) {
+    return vec3(uf11ToFloat(c & 0x7FFu), uf11ToFloat((c >> 11) & 0x7FFu), uf10ToFloat((c >> 22) & 0x3FFu));
+}
+
+// n^2 = 1 + sum_j Bj*l^2/(l^2 - Cj); mirrors Grid::sellmeierN (structs.inl).
+float sellmeierIor(uint sellBPacked, uint sellCPacked, float lambdaUm) {
+    vec3 B = unpackRGB9E5(sellBPacked);
+    vec3 C = unpackR11G11B10(sellCPacked);
+    float l2 = lambdaUm * lambdaUm;
+    vec3 denom = vec3(l2) - C;
+    vec3 safe = mix(vec3(0.0), B * l2 / denom, vec3(greaterThan(abs(denom), vec3(1e-8))));
+    float n2 = 1.0 + safe.x + safe.y + safe.z;
+    return sqrt(max(1.0, n2));
+}
+
 void unpackFastMaterial(uint m, out float roughness, out float metallic) {
     roughness = float(m & 0xFF) / 255.0;
     metallic  = float((m >> 8) & 0xFF) / 255.0;
@@ -303,7 +336,7 @@ bool pickLight(vec3 pos, int selfObjId, out vec3 ldir, out float ldist,
     bool found = false;
     int n = min(3, cam.emissiveCount);
     for (int i = 0; i < n; ++i) {
-        GPUFastRenderData lp = points[emissiveIndices[i]];
+        GPURenderData lp = points[emissiveIndices[i]];
         if (lp.objectId == selfObjId) continue;
         vec3 toL = lp.position - pos;
         float distSq = max(dot(toL, toL), EPS);
@@ -332,7 +365,7 @@ float lightVisibility(vec3 origin, vec3 dir, float maxT, int lightObjId) {
     while (rayQueryProceedEXT(rq)) {
         if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionAABBEXT) {
             int ptIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
-            GPUFastRenderData pt = points[ptIdx];
+            GPURenderData pt = points[ptIdx];
             if (pt.objectId == lightObjId) continue;               // the light itself
             if (materials[pt.materialIdx].chromaticity != 0u) continue; // other emitters don't occlude
             float t, tExit; vec3 n;
@@ -371,7 +404,7 @@ bool nearestHit(vec3 origin, vec3 dir, float maxT, int skipObjId,
     while (rayQueryProceedEXT(rq)) {
         if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionAABBEXT) {
             int ptIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
-            GPUFastRenderData pt = points[ptIdx];
+            GPURenderData pt = points[ptIdx];
             if (pt.objectId == skipObjId) continue;
             if (unpackRGBA8(pt.color).a < 0.25) continue;          // ignore wispy volumes
             float t, tExit; vec3 n;
@@ -391,7 +424,7 @@ vec3 secondaryRadiance(vec3 origin, vec3 dir, int skipObjId) {
     if (!nearestHit(origin, dir, cam.maxDist, skipObjId, t, n, idx)) {
         return sampleSkybox(dir);
     }
-    GPUFastRenderData pt = points[idx];
+    GPURenderData pt = points[idx];
     vec4 alb = unpackRGBA8(pt.color);
     GPUMaterial m = materials[pt.materialIdx];
     if (m.chromaticity != 0u) {
@@ -401,9 +434,8 @@ vec3 secondaryRadiance(vec3 origin, vec3 dir, int skipObjId) {
     return alb.rgb * lightSample(hp, n, pt.objectId);
 }
 
-// The full "top samples" shade at the primary hit.
-const float GUIDE_IOR = 1.45;
-vec3 guideShade(vec3 hitPos, vec3 normal, vec3 viewDir, vec4 albedo, uint matProps, int selfObjId) {
+const float HERO_LAMBDA_G = 0.550;
+vec3 guideShade(vec3 hitPos, vec3 normal, vec3 viewDir, vec4 albedo, uint matProps, float ior, int selfObjId) {
     float roughness, metallic;
     unpackFastMaterial(matProps, roughness, metallic);
     float transmission = 1.0 - albedo.a;
@@ -413,7 +445,7 @@ vec3 guideShade(vec3 hitPos, vec3 normal, vec3 viewDir, vec4 albedo, uint matPro
 
     // sample 2: refracted light path, only when the surface actually transmits
     if (transmission > 0.05) {
-        float eta = 1.0 / GUIDE_IOR;
+        float eta = 1.0 / ior;
         vec3 refr = refract(viewDir, normal, eta);
         if (dot(refr, refr) < 1e-6) refr = reflect(viewDir, normal); // TIR fallback
         vec3 o = hitPos - normal * 1e-3;
@@ -458,7 +490,7 @@ void main() {
     for (int i = 0; i < hitCount; i++) {
         if (accumAlpha >= 0.99) break;
         
-        GPUFastRenderData hitData = points[hits[i].id];
+        GPURenderData hitData = points[hits[i].id];
         
         vec4 albedo = unpackRGBA8(hitData.color);
         float alpha = albedo.a;
@@ -479,8 +511,9 @@ void main() {
                 if (guideMode) {
                     vec3 hitPos = ray.origin + ray.dir * hits[i].t;
                     if (i == 0) {
+                        float guideIor = sellmeierIor(mat.sellB, mat.sellC, HERO_LAMBDA_G);
                         pathLight = guideShade(hitPos, hits[i].normal, ray.dir,
-                                               albedo, mat.materialProps, hitData.objectId);
+                                               albedo, mat.materialProps, guideIor, hitData.objectId);
                     } else {
                         pathLight = albedo.rgb * albedo.a
                                   * lightSample(hitPos, hits[i].normal, hitData.objectId);

@@ -37,7 +37,7 @@ void main() {
 
     remainingMaxDist -= t;
     
-    GPUPBRRenderData hitData = points[hitIndex];
+    GPURenderData hitData = points[hitIndex];
     vec3 invD = safe_invDir(dir);
     float tExit;
     vec3 normal;
@@ -50,7 +50,7 @@ void main() {
     bool isTransmissionInteraction = false;
 
     if (mediumObjId != -1) {
-        vec3 segAbs = unpackRGB8(materials[hitData.materialIdx].absorption);
+        vec3 segAbs = unpackRGB9E5(materials[hitData.materialIdx].absorption);
         throughput *= exp(-segAbs * t);   // tune scale to match shadowTransmit
     }
 
@@ -80,12 +80,11 @@ void main() {
         float opacity = albedo.a;
         float transmission = 1.0 - opacity;
         float roughness, metallic;
-        uint sellRow;
-        unpackMaterial(surfaceMat.materialProps, roughness, metallic, sellRow);
+        unpackMaterial(surfaceMat.materialProps, roughness, metallic);
 
         int hero = GET_HERO(p.i1.w);
         float lambda = heroLambda(hero == 0 ? 2 : hero);
-        float ior = sampleIor(sellRow, lambda);
+        float ior = sellmeierIor(surfaceMat.sellB, surfaceMat.sellC, lambda);
         vec3 emittanceRGB = unpackRGB9E5(surfaceMat.chromaticity);
         bool isEmissive = surfaceMat.chromaticity != 0u;
 
@@ -159,7 +158,7 @@ void main() {
             int lightIdx = clamp(int(nextFloat(grng) * float(cam.emissiveCount)), 0, cam.emissiveCount - 1);
             uint emissivePtIdx = emissiveIndices[lightIdx];
             if (emissivePtIdx != uint(hitIndex)) {
-                GPUPBRRenderData lightPt = points[emissivePtIdx];
+                GPURenderData lightPt = points[emissivePtIdx];
                 GPUMaterial lightMat = materials[lightPt.materialIdx];
                 vec3 jitter = vec3(nextFloat(rng), nextFloat(rng), nextFloat(rng)) - 0.5;
                 vec3 lightPos = lightPt.position + jitter * (lightPt.size * 0.8);
@@ -257,7 +256,7 @@ void main() {
             
             {
                 float lh = heroLambda(curHero);
-                float iorH = sampleIor(sellRow, lh);
+                float iorH = sellmeierIor(surfaceMat.sellB, surfaceMat.sellC, lh);
                 eta = (entering == 1) ? (1.0 / iorH) : iorH;
             }
 

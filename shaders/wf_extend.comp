@@ -45,11 +45,10 @@ void main() {
     bool isPrimary = (bounce == 0 && transp == 0 && volum == 0);
     if (isPrimary) {
         if (hitResult == 1 && hitIndex >= 0 && hitIndex < points.length()) {
-            GPUPBRRenderData hd = points[hitIndex];
+            GPURenderData hd = points[hitIndex];
             GPUMaterial mData = materials[hd.materialIdx];
             float r, m;
-            uint sellRow;
-            unpackMaterial(mData.materialProps, r, m, sellRow);
+            unpackMaterial(mData.materialProps, r, m);
             float comp = 0.3;
             if (m > 0.0) comp += 0.2;
             if (r > 0.0 && r < 0.9) comp += 0.3;
@@ -67,12 +66,11 @@ void main() {
     // ---- participating medium (scatter / absorption) ----
     bool scattered = false;
     if (mediumVoxelIdx != -1) {
-        GPUPBRRenderData medData = points[mediumVoxelIdx];
+        GPURenderData medData = points[mediumVoxelIdx];
         GPUMaterial mData = materials[medData.materialIdx];
         float r, m;
-        uint sellRow;
-        unpackMaterial(mData.materialProps, r, m, sellRow);
-        vec3 medAbsorption = unpackRGB8(mData.absorption);
+        unpackMaterial(mData.materialProps, r, m);
+        vec3 medAbsorption = unpackRGB9E5(mData.absorption);
         vec4 medAlbedo = unpackRGBA8(medData.color);
         float medOpacity = medAlbedo.a;
 

@@ -356,35 +356,12 @@ static inline uint32_t packRGBA8(const Eigen::Vector4f& c) {
     return r | (g << 8) | (b << 16) | (a << 24);
 }
 
-static inline uint32_t packMaterialProps(float roughness, float metallic, uint32_t sellmeierRow) {
+static inline uint32_t packMaterialProps(float roughness, float metallic) {
     uint32_t r8 = static_cast<uint32_t>(std::clamp(roughness, 0.0f, 1.0f) * 255.0f);
     uint32_t m8 = static_cast<uint32_t>(std::clamp(metallic, 0.0f, 1.0f) * 255.0f);
-    uint32_t row16 = sellmeierRow & 0xFFFFu;
-    return r8 | (m8 << 8) | (row16 << 16);
+    return r8 | (m8 << 8);
 }
-static constexpr int SELL_LUT_WAVELENGTHS = 32;
-static constexpr int SELL_LUT_SECONDARY   = 8;
-static constexpr float SELL_LMIN = 0.380f; // um
-static constexpr float SELL_LMAX = 0.720f; // um
 
-static inline std::vector<float> buildSellmeierLUT(const std::vector<Grid::RenderMaterial>& mats) {
-    int rows = std::max<size_t>(1, mats.size()) * SELL_LUT_SECONDARY;
-    std::vector<float> lut(static_cast<size_t>(rows) * SELL_LUT_WAVELENGTHS, 1.0f);
-    for (size_t mi = 0; mi < mats.size(); ++mi) {
-        const auto& m = mats[mi];
-        for (int s = 0; s < SELL_LUT_SECONDARY; ++s) {
-            int row = static_cast<int>(mi) * SELL_LUT_SECONDARY + s;
-            for (int w = 0; w < SELL_LUT_WAVELENGTHS; ++w) {
-                float f = (SELL_LUT_WAVELENGTHS == 1) ? 0.0f
-                          : float(w) / float(SELL_LUT_WAVELENGTHS - 1);
-                float lambda = SELL_LMIN + f * (SELL_LMAX - SELL_LMIN);
-                lut[static_cast<size_t>(row) * SELL_LUT_WAVELENGTHS + w] =
-                    Grid::sellmeierN(m.sellB, m.sellC, lambda);
-            }
-        }
-    }
-    return lut;
-}
 
 struct PointSort {
     uint64_t morton;
@@ -398,11 +375,12 @@ void Octree<T>::buildGPUMaterials(const RenderBuffer_<T>& buf, std::vector<GPUMa
     out.reserve(buf.materials.size());
     for (size_t mi = 0; mi < buf.materials.size(); ++mi) {
         const auto& m = buf.materials[mi];
-        uint32_t sellRow = static_cast<uint32_t>(mi) * SELL_LUT_SECONDARY;
         uint32_t albedoPacked = 0;
         out.push_back({
             m.chromaticity,
-            packMaterialProps(m.roughness, m.metallic, sellRow),
+            packMaterialProps(m.roughness, m.metallic),
+            packRGB9E5((m.sellB).template cast<float>()),
+            packR11G11B10((m.sellC).template cast<float>()),
             packRGB8(m.absorption),
             albedoPacked
         });
@@ -444,14 +422,6 @@ static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData
         return;
     }
 
-    // ---- Multi-GPU: split the SAMPLE range across devices, not the image ----
-    // Radiance accumulation and the adaptive lumSum/lumSqSum statistics are
-    // linear, so each GPU can render the full frame with a disjoint slice of
-    // the sample indices and the per-GPU buffers merge by simple summation.
-    // This keeps every GPU busy for the entire wall time (no spatial tail on
-    // heterogeneous devices), adds no extra submits versus a single GPU, and
-    // eliminates tile-to-tile noise differences since every pixel receives
-    // contributions from every device.
     const size_t pixFloats = size_t(width) * size_t(height) * 5;
     const uint32_t bufBytes = (uint32_t)(pixFloats * sizeof(float));
     std::vector<float> zeros(pixFloats, 0.0f);
@@ -542,12 +512,6 @@ static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData
             speedEMA[g] = 0.5 * speedEMA[g] + 0.5 * measured;
         }
     }
-    if (std::getenv("SSC_GPU_VERBOSE")) {
-        for (size_t g = 0; g < nGPU; ++g)
-            std::cout << "  gpu[" << g << "] " << gpuMgr.ctx(g).deviceName << ": "
-                      << counts[g] << "/" << samplesPerPixel << " samples, "
-                      << (int)msSpent[g] << " ms" << std::endl;
-    }
 
     // Merge by summation, then push the result into the primary context so
     // the downstream smooth/blend passes see every GPU's contribution.
@@ -576,7 +540,8 @@ static void uploadFogVolumes(VulkanContext& vkCtx, GPUCameraData& camData,
     gpuFog.reserve(fogVolumes.size());
     for (const auto& fv : fogVolumes) {
         GPUFogVolume g{};
-        g.minB = fv.minB;  g.density = fv.density;
+        g.minB = fv.minB;
+        g.density = fv.density;
         g.maxB = fv.maxB;
         g.scatter = fv.scatterColor;
         g.absorb = fv.absorption;
@@ -599,13 +564,9 @@ frame Octree<T>::renderFrameVulkan(const Camera& cam, int height, int width, fra
 
     std::vector<GPUMaterial> gpuMaterials;
     buildGPUMaterials(tl_buffer, gpuMaterials);
-    std::vector<float> sellLUT = buildSellmeierLUT(tl_buffer.materials);
     for (size_t g = 0; g < gpuMgr.count(); ++g) {
         auto& ctx = gpuMgr.ctx(g);
         ctx.updateMaterialBuffer(gpuMaterials);
-        ctx.updateSellmeierBuffer(sellLUT,
-                                  SELL_LUT_WAVELENGTHS,
-                                  std::max<size_t>(1, tl_buffer.materials.size()) * SELL_LUT_SECONDARY);
     }
 
     std::vector<bool> isLodPoint(tl_buffer.points.size(), false);
@@ -650,7 +611,7 @@ frame Octree<T>::renderFrameVulkan(const Camera& cam, int height, int width, fra
     
     std::sort(sortedPoints.begin(), sortedPoints.end());
 
-    std::vector<GPUPBRRenderData> gpuPoints;
+    std::vector<GPURenderData> gpuPoints;
     std::vector<uint32_t> gpuLights;
     gpuPoints.reserve(sortedPoints.size());
     
@@ -667,7 +628,7 @@ frame Octree<T>::renderFrameVulkan(const Camera& cam, int height, int width, fra
     }
 
     int emissiveCount = gpuLights.size();
-    if(gpuPoints.empty()) gpuPoints.push_back(GPUPBRRenderData{});
+    if(gpuPoints.empty()) gpuPoints.push_back(GPURenderData{});
     if(gpuLights.empty()) gpuLights.push_back(0);
 
     float aspect = static_cast<float>(width) / height;
@@ -685,8 +646,6 @@ frame Octree<T>::renderFrameVulkan(const Camera& cam, int height, int width, fra
         (int)skyW, (int)skyH, 0, 0, globalIllumination ? 1 : 0, 
         0, (uint32_t)gpuPoints.size(), 0, 0, emissiveCount, samplesPerPixel
     };
-    camData.sellWidth = SELL_LUT_WAVELENGTHS;
-    camData.sellSecondary = SELL_LUT_SECONDARY;
 
     size_t outSize = width * height * 5 * sizeof(float);
     // Upload the full scene to every GPU; tiles are then distributed across
@@ -731,15 +690,13 @@ frame Octree<T>::fastRenderFrameVulkan(const Camera& cam, int height, int width,
     std::vector<GPUMaterial> gpuMaterials;
     buildGPUMaterials(tl_buffer, gpuMaterials);
     vkCtx.updateMaterialBuffer(gpuMaterials);
-    vkCtx.updateSellmeierBuffer(buildSellmeierLUT(tl_buffer.materials), SELL_LUT_WAVELENGTHS,
-                                std::max<size_t>(1, tl_buffer.materials.size()) * SELL_LUT_SECONDARY);
 
     std::vector<bool> isLodPoint(tl_buffer.points.size(), false);
     for(const auto& n : tl_buffer.nodes) {
         if(n.lodPoint != -1) isLodPoint[n.lodPoint] = true;
     }
 
-    std::vector<GPUFastRenderData> gpuPoints;
+    std::vector<GPURenderData> gpuPoints;
     std::vector<uint32_t> gpuLights;
     gpuPoints.reserve(tl_buffer.points.size());
     Vec3 vctMin = Vec3::Constant(std::numeric_limits<float>::max());
@@ -761,7 +718,7 @@ frame Octree<T>::fastRenderFrameVulkan(const Camera& cam, int height, int width,
     if (vctMin.x() > vctMax.x()) { vctMin.setZero(); vctMax.setOnes(); } // empty scene guard
 
     int emissiveCount = gpuLights.size();
-    if(gpuPoints.empty()) gpuPoints.push_back(GPUFastRenderData{});
+    if(gpuPoints.empty()) gpuPoints.push_back(GPURenderData{});
     if(gpuLights.empty()) gpuLights.push_back(0);
 
     size_t skyW, skyH;
@@ -845,13 +802,9 @@ frame Octree<T>::blendedRenderFrameVulkan(const Camera& cam, int height, int wid
 
     std::vector<GPUMaterial> gpuMaterials;
     buildGPUMaterials(tl_buffer, gpuMaterials);
-    std::vector<float> sellLUT = buildSellmeierLUT(tl_buffer.materials);
     for (size_t g = 0; g < gpuMgr.count(); ++g) {
         auto& ctx = gpuMgr.ctx(g);
         ctx.updateMaterialBuffer(gpuMaterials);
-        ctx.updateSellmeierBuffer(sellLUT,
-                                  SELL_LUT_WAVELENGTHS,
-                                  std::max<size_t>(1, tl_buffer.materials.size()) * SELL_LUT_SECONDARY);
     }
 
     std::vector<bool> isLodPoint(tl_buffer.points.size(), false);
@@ -896,9 +849,9 @@ frame Octree<T>::blendedRenderFrameVulkan(const Camera& cam, int height, int wid
     
     std::sort(sortedPoints.begin(), sortedPoints.end());
 
-    std::vector<GPUPBRRenderData> gpuPBRPoints;
+    std::vector<GPURenderData> gpuPBRPoints;
     gpuPBRPoints.reserve(sortedPoints.size());
-    std::vector<GPUFastRenderData> gpuFastPoints;
+    std::vector<GPURenderData> gpuFastPoints;
     gpuFastPoints.reserve(sortedPoints.size());
     std::vector<uint32_t> gpuLights;
 
@@ -918,8 +871,8 @@ frame Octree<T>::blendedRenderFrameVulkan(const Camera& cam, int height, int wid
     }
 
     int emissiveCount = gpuLights.size();
-    if(gpuPBRPoints.empty()) gpuPBRPoints.push_back(GPUPBRRenderData{});
-    if(gpuFastPoints.empty()) gpuFastPoints.push_back(GPUFastRenderData{});
+    if(gpuPBRPoints.empty()) gpuPBRPoints.push_back(GPURenderData{});
+    if(gpuFastPoints.empty()) gpuFastPoints.push_back(GPURenderData{});
     if(gpuLights.empty()) gpuLights.push_back(0);
 
     float aspect = static_cast<float>(width) / height;
@@ -939,8 +892,7 @@ frame Octree<T>::blendedRenderFrameVulkan(const Camera& cam, int height, int wid
         skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
         lowW, lowH, maxBounces, useLod ? 1 : 0, invFogRange, frameCounter_,
         (int)skyW, (int)skyH, 0, 0, globalIllumination ? 1 : 0, 
-        0, (uint32_t)gpuPBRPoints.size(), 0, 0, emissiveCount, samplesPerPixel,
-        SELL_LUT_WAVELENGTHS, SELL_LUT_SECONDARY
+        0, (uint32_t)gpuPBRPoints.size(), 0, 0, emissiveCount, samplesPerPixel
     };
 
     size_t pbrOutSize = lowW * lowH * 5 * sizeof(float);
@@ -1035,13 +987,9 @@ frame Octree<T>::superBlendedRenderFrameVulkan(const Camera& cam, int height, in
 
     std::vector<GPUMaterial> gpuMaterials;
     buildGPUMaterials(tl_buffer, gpuMaterials);
-    std::vector<float> sellLUT = buildSellmeierLUT(tl_buffer.materials);
     for (size_t g = 0; g < gpuMgr.count(); ++g) {
         auto& ctx = gpuMgr.ctx(g);
         ctx.updateMaterialBuffer(gpuMaterials);
-        ctx.updateSellmeierBuffer(sellLUT,
-                                  SELL_LUT_WAVELENGTHS,
-                                  std::max<size_t>(1, tl_buffer.materials.size()) * SELL_LUT_SECONDARY);
     }
 
     std::vector<bool> isLodPoint(tl_buffer.points.size(), false);
@@ -1085,9 +1033,9 @@ frame Octree<T>::superBlendedRenderFrameVulkan(const Camera& cam, int height, in
     }
     std::sort(sortedPoints.begin(), sortedPoints.end());
 
-    std::vector<GPUPBRRenderData> gpuPBRPoints;
+    std::vector<GPURenderData> gpuPBRPoints;
     gpuPBRPoints.reserve(sortedPoints.size());
-    std::vector<GPUFastRenderData> gpuFastPoints;
+    std::vector<GPURenderData> gpuFastPoints;
     gpuFastPoints.reserve(sortedPoints.size());
 
     // Lights sorted by emissive power (emittance * albedo luminance * area) so
@@ -1121,8 +1069,8 @@ frame Octree<T>::superBlendedRenderFrameVulkan(const Camera& cam, int height, in
     for (const auto& lr : lightRefs) gpuLights.push_back(lr.idx);
 
     int emissiveCount = (int)gpuLights.size();
-    if(gpuPBRPoints.empty()) gpuPBRPoints.push_back(GPUPBRRenderData{});
-    if(gpuFastPoints.empty()) gpuFastPoints.push_back(GPUFastRenderData{});
+    if(gpuPBRPoints.empty()) gpuPBRPoints.push_back(GPURenderData{});
+    if(gpuFastPoints.empty()) gpuFastPoints.push_back(GPURenderData{});
     if(gpuLights.empty()) gpuLights.push_back(0);
 
     float aspect = static_cast<float>(width) / height;
@@ -1265,8 +1213,7 @@ frame Octree<T>::superBlendedRenderFrameVulkan(const Camera& cam, int height, in
         skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
         lowW, lowH, maxBounces, useLod ? 1 : 0, invFogRange, frameCounter_++,
         (int)skyW, (int)skyH, 0, 0, globalIllumination ? 1 : 0,
-        0, (uint32_t)gpuPBRPoints.size(), 0, 0, emissiveCount, samplesPerPixel,
-        SELL_LUT_WAVELENGTHS, SELL_LUT_SECONDARY
+        0, (uint32_t)gpuPBRPoints.size(), 0, 0, emissiveCount, samplesPerPixel
     };
 
     size_t pbrOutSize = size_t(lowW) * size_t(lowH) * 5 * sizeof(float);

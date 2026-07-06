@@ -67,7 +67,7 @@ void vctCreateImage() {
     vkGetImageMemoryRequirements(device, vctImage, &mr);
     VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     ai.allocationSize = mr.size;
-    ai.memoryTypeIndex = findMemoryType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    ai.memoryTypeIndex = findMemoryType(primaryDevice, mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     vkAllocateMemory(device, &ai, nullptr, &vctImageMem);
     vkBindImageMemory(device, vctImage, vctImageMem, 0);
 
@@ -106,7 +106,7 @@ void vctCreateImage() {
 void vctInit() {
     vctCreateImage();
 
-    createBuffer(sizeof(VCTParams), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+    createBuffer(device, primaryDevice, sizeof(VCTParams), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                  vctParamBuf, vctParamMem);
 
@@ -124,7 +124,7 @@ void vctInit() {
         pl.pSetLayouts = &vctVoxLayout;
         vkCreatePipelineLayout(device, &pl, nullptr, &vctVoxPipeLayout);
 
-        vctVoxShader = createShaderModule("./bin/vct_voxelize.spv");
+        vctVoxShader = createShaderModule(device, "./bin/vct_voxelize.spv");
         VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
         ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
         ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -155,7 +155,7 @@ void vctInit() {
         pl.pPushConstantRanges = &pcr;
         vkCreatePipelineLayout(device, &pl, nullptr, &vctMipPipeLayout);
 
-        vctMipShader = createShaderModule("./bin/vct_mip.spv");
+        vctMipShader = createShaderModule(device, "./bin/vct_mip.spv");
         VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
         ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
         ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;

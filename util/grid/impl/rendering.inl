@@ -71,13 +71,6 @@ static PFN_vkDestroyAccelerationStructureKHR pfn_vkDestroyAccelerationStructureK
 static PFN_vkGetAccelerationStructureDeviceAddressKHR pfn_vkGetAccelerationStructureDeviceAddressKHR = nullptr;
 
 struct alignas(16) GPUMaterial {
-    uint32_t chromaticity;
-    uint32_t materialProps;
-    uint32_t absorption;
-    uint32_t albedo;
-};
-
-struct alignas(16) GPUFullMaterial {
     uint32_t chromaticity; //RBG9E5
     uint32_t materialProps; //8 bits for roughness. 8 for metallicity. leaves 16 for ???
     uint32_t sellB; //RBG9E5
@@ -86,15 +79,7 @@ struct alignas(16) GPUFullMaterial {
     uint32_t albedo; //rgb9e5
 };
 
-struct alignas(16) GPUFastRenderData {
-    Vec3 position;
-    float size;
-    uint32_t color;
-    uint32_t materialIdx;
-    int objectId;
-};
-
-struct alignas(16) GPUPBRRenderData {
+struct alignas(16) GPURenderData {
     Vec3 position;
     float size;
     uint32_t color;
@@ -132,14 +117,16 @@ struct alignas(16) GPUCameraData {
     int tileOffsetY;
     int emissiveCount;
     int targetSamples;
-    int sellWidth;
-    int sellSecondary;
+    int padn2;
+    int padn1;
     int fogVolumeCount;
     int pad0;
 };
 
-// World-space participating-media box for the wavefront tracer (binding 16).
-// std430 layout: each vec3 pads to 16 bytes, so pack a float behind each.
+//change:
+//remove minb/maxb.
+//set position and radius.
+//make fog spherical volume?
 struct alignas(16) GPUFogVolume {
     Vec3 minB;
     float density;
@@ -153,67 +140,65 @@ struct alignas(16) GPUFogVolume {
 
 struct VulkanContext {
     VkInstance instance = VK_NULL_HANDLE;
-    VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+    std::vector<VkDevice> activeDevices;
     VkDevice device = VK_NULL_HANDLE;
+    VkPhysicalDevice primaryDevice = VK_NULL_HANDLE;
+    VkPhysicalDeviceType deviceType = VK_PHYSICAL_DEVICE_TYPE_OTHER;
     VkQueue queue = VK_NULL_HANDLE;
     uint32_t queueFamilyIndex = 0;
     VkCommandPool commandPool = VK_NULL_HANDLE;
     VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
     VkFence renderFence = VK_NULL_HANDLE;
+    VkCommandBuffer wfCmd[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkFence wfFence[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
     
     VkShaderModule fastShader = VK_NULL_HANDLE;
     VkShaderModule smoothShader = VK_NULL_HANDLE;
     VkShaderModule blendShader = VK_NULL_HANDLE;
     VkShaderModule guidedCoeffShader = VK_NULL_HANDLE;
+    VkShaderModule wfInitShader = VK_NULL_HANDLE;
+    VkShaderModule wfArgsShader = VK_NULL_HANDLE;
+    VkShaderModule wfExtendShader = VK_NULL_HANDLE;
+    VkShaderModule wfShadeShader = VK_NULL_HANDLE;
+    VkShaderModule wfShadowShader = VK_NULL_HANDLE;
+    VkShaderModule wfFinalizeShader = VK_NULL_HANDLE;
+
     VkPipelineLayout fastPipelineLayout = VK_NULL_HANDLE;
     VkPipelineLayout pbrPipelineLayout = VK_NULL_HANDLE;
     VkPipelineLayout smoothPipelineLayout = VK_NULL_HANDLE;
     VkPipelineLayout blendPipelineLayout = VK_NULL_HANDLE;
+
     VkPipeline fastPipeline = VK_NULL_HANDLE;
     VkPipeline pbrPipeline = VK_NULL_HANDLE;
     VkPipeline smoothPipeline = VK_NULL_HANDLE;
     VkPipeline blendPipeline = VK_NULL_HANDLE;
     VkPipeline guidedCoeffPipeline = VK_NULL_HANDLE;
+    VkPipeline wfInitPipe = VK_NULL_HANDLE;
+    VkPipeline wfArgsPipe = VK_NULL_HANDLE;
+    VkPipeline wfExtendPipe = VK_NULL_HANDLE;
+    VkPipeline wfShadePipe = VK_NULL_HANDLE;
+    VkPipeline wfShadowPipe = VK_NULL_HANDLE;
+    VkPipeline wfFinalizePipe = VK_NULL_HANDLE;
+
     VkPipelineLayout guidedCoeffPipelineLayout = VK_NULL_HANDLE;
+    VkPipelineLayout wfPipelineLayout = VK_NULL_HANDLE;
+
     VkDescriptorSetLayout fastDescLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout pbrDescLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout smoothDescLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout blendDescLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout guidedCoeffDescLayout = VK_NULL_HANDLE;
-    VkBuffer fastGBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory fastGBufferMem = VK_NULL_HANDLE;
-    uint32_t currentFastGCap = 0;
-
     VkDescriptorSetLayout wfDescLayout = VK_NULL_HANDLE;
-    VkDescriptorSet       wfDescSet    = VK_NULL_HANDLE;
-    VkPipelineLayout      wfPipelineLayout = VK_NULL_HANDLE;
-    VkShaderModule wfInitShader = VK_NULL_HANDLE, wfArgsShader = VK_NULL_HANDLE,
-                   wfExtendShader = VK_NULL_HANDLE, wfShadeShader = VK_NULL_HANDLE,
-                   wfShadowShader = VK_NULL_HANDLE, wfFinalizeShader = VK_NULL_HANDLE;
-    VkPipeline wfInitPipe = VK_NULL_HANDLE, wfArgsPipe = VK_NULL_HANDLE,
-               wfExtendPipe = VK_NULL_HANDLE, wfShadePipe = VK_NULL_HANDLE,
-               wfShadowPipe = VK_NULL_HANDLE, wfFinalizePipe = VK_NULL_HANDLE;
-    VkBuffer wfPathBuf = VK_NULL_HANDLE, wfPathHitBuf = VK_NULL_HANDLE,
-             wfExtendABuf = VK_NULL_HANDLE,
-             wfExtendBBuf = VK_NULL_HANDLE, wfShadeBuf = VK_NULL_HANDLE,
-             wfShadowBuf = VK_NULL_HANDLE, wfCounterBuf = VK_NULL_HANDLE;
-    VkDeviceMemory wfPathMem = VK_NULL_HANDLE, wfPathHitMem = VK_NULL_HANDLE,
-                   wfExtendAMem = VK_NULL_HANDLE,
-                   wfExtendBMem = VK_NULL_HANDLE, wfShadeMem = VK_NULL_HANDLE,
-                   wfShadowMem = VK_NULL_HANDLE, wfCounterMem = VK_NULL_HANDLE;
-    uint32_t wfPathCap = 0;
-    VkCommandBuffer wfCmd[2]   = {VK_NULL_HANDLE, VK_NULL_HANDLE};
-    VkFence         wfFence[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
-    VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
-    VkDescriptorSet fastDescSet = VK_NULL_HANDLE;
-    VkDescriptorSet pbrDescSet = VK_NULL_HANDLE;
-    VkDescriptorSet smoothDescSet = VK_NULL_HANDLE;
-    VkDescriptorSet blendDescSet = VK_NULL_HANDLE;
-    VkDescriptorSet guidedCoeffDescSet = VK_NULL_HANDLE;
-    VkBuffer guidedCoeffBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory guidedCoeffMem = VK_NULL_HANDLE;
-    uint32_t currentGuidedCoeffCap = 0;
 
+    VkBuffer fastGBuffer = VK_NULL_HANDLE;
+    VkBuffer wfPathBuf = VK_NULL_HANDLE;
+    VkBuffer wfPathHitBuf = VK_NULL_HANDLE;
+    VkBuffer wfExtendABuf = VK_NULL_HANDLE;
+    VkBuffer wfExtendBBuf = VK_NULL_HANDLE;
+    VkBuffer wfShadeBuf = VK_NULL_HANDLE;
+    VkBuffer wfShadowBuf = VK_NULL_HANDLE;
+    VkBuffer wfCounterBuf = VK_NULL_HANDLE;
+    VkBuffer guidedCoeffBuffer = VK_NULL_HANDLE;
     VkBuffer nodeBuffer = VK_NULL_HANDLE;
     VkBuffer outBuffer = VK_NULL_HANDLE;
     VkBuffer uboBuffer = VK_NULL_HANDLE;
@@ -222,14 +207,35 @@ struct VulkanContext {
     VkBuffer skyboxBuffer = VK_NULL_HANDLE;
     VkBuffer lightBuffer = VK_NULL_HANDLE;
     VkBuffer fogBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory fogMem = VK_NULL_HANDLE;
-    uint32_t currentFogCap = 0;
     VkBuffer finalOutBuffer = VK_NULL_HANDLE;
     VkBuffer lowResOutBuffer = VK_NULL_HANDLE;
     VkBuffer adaptiveBuffer = VK_NULL_HANDLE;
     VkBuffer materialBuffer = VK_NULL_HANDLE;
+    VkBuffer asScratchBuffer = VK_NULL_HANDLE;
+    VkBuffer outStagingBuffer = VK_NULL_HANDLE;
+    VkBuffer xferStagingBuffer = VK_NULL_HANDLE;
+    VkBuffer aabbBuffer = VK_NULL_HANDLE;
+    VkBuffer asInstanceBuffer = VK_NULL_HANDLE;
+    VkBuffer blasBuffer = VK_NULL_HANDLE;
+    VkBuffer tlasBuffer = VK_NULL_HANDLE;
+
+    VkDescriptorSet wfDescSet    = VK_NULL_HANDLE;
+    VkDescriptorSet fastDescSet = VK_NULL_HANDLE;
+    VkDescriptorSet pbrDescSet = VK_NULL_HANDLE;
+    VkDescriptorSet smoothDescSet = VK_NULL_HANDLE;
+    VkDescriptorSet blendDescSet = VK_NULL_HANDLE;
+    VkDescriptorSet guidedCoeffDescSet = VK_NULL_HANDLE;
+
+    VkDeviceMemory fastGBufferMem = VK_NULL_HANDLE;
+    VkDeviceMemory wfPathMem = VK_NULL_HANDLE;
+    VkDeviceMemory wfPathHitMem = VK_NULL_HANDLE;
+    VkDeviceMemory wfExtendAMem = VK_NULL_HANDLE;
+    VkDeviceMemory wfExtendBMem = VK_NULL_HANDLE;
+    VkDeviceMemory wfShadeMem = VK_NULL_HANDLE;
+    VkDeviceMemory wfShadowMem = VK_NULL_HANDLE;
+    VkDeviceMemory wfCounterMem = VK_NULL_HANDLE;
+    VkDeviceMemory guidedCoeffMem = VK_NULL_HANDLE;
     VkDeviceMemory nodeMem = VK_NULL_HANDLE;
-    VkBuffer sellmeierBuffer = VK_NULL_HANDLE;
     VkDeviceMemory outMem = VK_NULL_HANDLE;
     VkDeviceMemory uboMem = VK_NULL_HANDLE;
     VkDeviceMemory fastPointMem = VK_NULL_HANDLE;
@@ -240,8 +246,24 @@ struct VulkanContext {
     VkDeviceMemory lowResOutMem = VK_NULL_HANDLE;
     VkDeviceMemory adaptiveMem = VK_NULL_HANDLE;
     VkDeviceMemory materialMem = VK_NULL_HANDLE;
-    VkDeviceMemory sellmeierMem = VK_NULL_HANDLE;
+    VkDeviceMemory fogMem = VK_NULL_HANDLE;
+    VkDeviceMemory asScratchMem = VK_NULL_HANDLE;
+    VkDeviceMemory outStagingMem = VK_NULL_HANDLE;
+    VkDeviceMemory xferStagingMem = VK_NULL_HANDLE;
+    VkDeviceMemory aabbMem = VK_NULL_HANDLE;
+    VkDeviceMemory asInstanceMem = VK_NULL_HANDLE;
+    VkDeviceMemory blasMem = VK_NULL_HANDLE;
+    VkDeviceMemory tlasMem = VK_NULL_HANDLE;
     
+    VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
+    
+    VkAccelerationStructureKHR blas = VK_NULL_HANDLE;
+    VkAccelerationStructureKHR tlas = VK_NULL_HANDLE;
+
+    uint32_t currentFastGCap = 0;
+    uint32_t wfPathCap = 0;
+    uint32_t currentGuidedCoeffCap = 0;
+    uint32_t currentFogCap = 0;
     uint32_t currentNodesCap = 0;
     uint32_t currentOutCap = 0;
     uint32_t currentFastPointsCap = 0;
@@ -252,60 +274,26 @@ struct VulkanContext {
     uint32_t currentLowResOutCap = 0;
     uint32_t currentAdaptiveCap = 0;
     uint32_t currentMaterialCap = 0;
-    uint32_t currentSellmeierCap = 0;
-    uint32_t sellmeierWidth = 0;
-    uint32_t sellmeierRows = 0;
-
     bool initialized = false;
-    bool hasHardwareRT = false;
     bool ownsInstance = true;
-    std::string deviceName;
-    VkPhysicalDeviceType deviceType = VK_PHYSICAL_DEVICE_TYPE_OTHER;
-    
-    VkBuffer aabbBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory aabbMem = VK_NULL_HANDLE;
-    VkBuffer asInstanceBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory asInstanceMem = VK_NULL_HANDLE;
-    
-    VkAccelerationStructureKHR blas = VK_NULL_HANDLE;
-    VkBuffer blasBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory blasMem = VK_NULL_HANDLE;
-    
-    VkAccelerationStructureKHR tlas = VK_NULL_HANDLE;
-    VkBuffer tlasBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory tlasMem = VK_NULL_HANDLE;
-
     uint32_t currentAabbCap = 0;
-    VkBuffer asScratchBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory asScratchMem = VK_NULL_HANDLE;
     uint32_t currentScratchCap = 0;
-    uint32_t lastBlasPrimCount = 0;       // primitive count of the live BLAS topology
-    uint32_t framesSinceFullBuild = 0;    // refit counter
-    uint32_t refitInterval = 16;          // force a clean rebuild every N frames
-    bool blasTopologyValid = false;       // is there a refit-able BLAS in place?
-    int lastBlasOrderingTag = -1;         // which upload path (fast=1/pbr=2) built the topology
+    uint32_t lastBlasPrimCount = 0;
+    uint32_t framesSinceFullBuild = 0;
+    uint32_t refitInterval = 16;
+    bool blasTopologyValid = false;
+    int lastBlasOrderingTag = -1;
     bool outMemCoherent = true;
-
-    // Persistent host-cached readback staging for outBuffer (outBuffer itself
-    // is DEVICE_LOCAL now). Kept mapped for the lifetime of the context so a
-    // readback is a single GPU->staging copy plus a pointer return.
-    VkBuffer outStagingBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory outStagingMem = VK_NULL_HANDLE;
     void* outStagingMapped = nullptr;
     bool outStagingCoherent = true;
     uint32_t currentOutStagingCap = 0;
-
-    // Persistent, grow-only staging buffer shared by uploadToBuffer /
-    // downloadFromBuffer, replacing the create/copy/waitIdle/destroy cycle.
-    VkBuffer xferStagingBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory xferStagingMem = VK_NULL_HANDLE;
     void* xferStagingMapped = nullptr;
     bool xferStagingCoherent = true;
     uint32_t currentXferStagingCap = 0;
 
-    uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
+    uint32_t findMemoryType(VkPhysicalDevice& phDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties) {
         VkPhysicalDeviceMemoryProperties memProperties;
-        vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
+        vkGetPhysicalDeviceMemoryProperties(phDevice, &memProperties);
         for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
             if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties)
                 return i;
@@ -313,10 +301,9 @@ struct VulkanContext {
         return 0;
     }
 
-    uint32_t findMemoryTypePreferred(uint32_t typeFilter, VkMemoryPropertyFlags required, VkMemoryPropertyFlags preferred, bool& gotPreferred) {
+    uint32_t findMemoryTypePreferred(VkPhysicalDevice& phDevice, uint32_t typeFilter, VkMemoryPropertyFlags required, VkMemoryPropertyFlags preferred, bool& gotPreferred) {
         VkPhysicalDeviceMemoryProperties memProperties;
-        vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
-        // First pass: required + preferred.
+        vkGetPhysicalDeviceMemoryProperties(phDevice, &memProperties);
         for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
             VkMemoryPropertyFlags f = memProperties.memoryTypes[i].propertyFlags;
             if ((typeFilter & (1 << i)) && ((f & (required | preferred)) == (required | preferred))) {
@@ -324,7 +311,6 @@ struct VulkanContext {
                 return i;
             }
         }
-        // Second pass: required only.
         for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
             VkMemoryPropertyFlags f = memProperties.memoryTypes[i].propertyFlags;
             if ((typeFilter & (1 << i)) && ((f & required) == required)) {
@@ -336,7 +322,7 @@ struct VulkanContext {
         return 0;
     }
 
-    void createReadbackBuffer(VkDeviceSize size, VkBuffer& buffer, VkDeviceMemory& bufferMemory, bool& coherentOut) {
+    void createReadbackBuffer(VkDevice& device, VkPhysicalDevice& PhDevice, VkDeviceSize size, VkBuffer& buffer, VkDeviceMemory& bufferMemory, bool& coherentOut) {
         VkBufferCreateInfo bufferInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
         bufferInfo.size = size;
         bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -347,12 +333,12 @@ struct VulkanContext {
         vkGetBufferMemoryRequirements(device, buffer, &memRequirements);
 
         bool gotCached = false;
-        uint32_t typeIdx = findMemoryTypePreferred(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+        uint32_t typeIdx = findMemoryTypePreferred(PhDevice, memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
              VK_MEMORY_PROPERTY_HOST_CACHED_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, gotCached);
 
         // Determine coherence of the chosen type so we know whether to invalidate.
         VkPhysicalDeviceMemoryProperties memProps;
-        vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProps);
+        vkGetPhysicalDeviceMemoryProperties(PhDevice, &memProps);
         coherentOut = (memProps.memoryTypes[typeIdx].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
 
         VkMemoryAllocateInfo allocInfo{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
@@ -362,7 +348,7 @@ struct VulkanContext {
         vkBindBufferMemory(device, buffer, bufferMemory, 0);
     }
 
-    void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties,
+    void createBuffer(VkDevice& device, VkPhysicalDevice& PhDevice, VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties,
                         VkBuffer& buffer, VkDeviceMemory& bufferMemory) {
         VkBufferCreateInfo bufferInfo{};
         bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -377,12 +363,12 @@ struct VulkanContext {
         VkMemoryAllocateInfo allocInfo{};
         allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
         allocInfo.allocationSize = memRequirements.size;
-        allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties);
+        allocInfo.memoryTypeIndex = findMemoryType(PhDevice, memRequirements.memoryTypeBits, properties);
         vkAllocateMemory(device, &allocInfo, nullptr, &bufferMemory);
         vkBindBufferMemory(device, buffer, bufferMemory, 0);
     }
 
-    VkShaderModule createShaderModule(const std::string& path) {
+    VkShaderModule createShaderModule(VkDevice& device, const std::string& path) {
         std::ifstream file(path, std::ios::ate | std::ios::binary);
         if (!file.is_open()) {
             std::cerr << "FAILED TO LOAD " << path << "!\n";
@@ -401,8 +387,6 @@ struct VulkanContext {
         return shaderModule;
     }
 
-    // Ranks a physical device for compute rendering. Returns -1 when the
-    // device has no compute-capable queue (unusable for us).
     static int scorePhysicalDevice(VkPhysicalDevice pd) {
         uint32_t qCount = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(pd, &qCount, nullptr);
@@ -410,26 +394,25 @@ struct VulkanContext {
         vkGetPhysicalDeviceQueueFamilyProperties(pd, &qCount, qProps.data());
         bool hasCompute = false;
         for (const auto& q : qProps) {
-            if (q.queueFlags & VK_QUEUE_COMPUTE_BIT) { hasCompute = true; break; }
+            if (q.queueFlags & VK_QUEUE_COMPUTE_BIT) {
+                hasCompute = true;
+                break;
+            }
         }
         if (!hasCompute) return -1;
 
         VkPhysicalDeviceProperties props;
         vkGetPhysicalDeviceProperties(pd, &props);
         switch (props.deviceType) {
-            case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:   return 4;
+            case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: return 4;
             case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return 3;
-            case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:    return 2;
-            case VK_PHYSICAL_DEVICE_TYPE_CPU:            return 1; // lavapipe etc: last resort
-            default:                                     return 1;
+            case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU: return 2;
+            case VK_PHYSICAL_DEVICE_TYPE_CPU: return 1;
+            default: return 1;
         }
     }
 
-    // init() can be called three ways:
-    //   init()                       - legacy path: create an instance, pick the best device.
-    //   init(instance, device)       - multi-GPU path: adopt a shared instance and an
-    //                                  explicitly chosen physical device (see GPUManager).
-    void init(VkInstance externalInstance = VK_NULL_HANDLE, VkPhysicalDevice pickedDevice = VK_NULL_HANDLE) {
+    void init(VkInstance externalInstance = VK_NULL_HANDLE, VkPhysicalDevice PhDevice = VK_NULL_HANDLE) {
         uint32_t extCount;
         if (initialized) return;
         if (externalInstance != VK_NULL_HANDLE) {
@@ -446,8 +429,8 @@ struct VulkanContext {
             ownsInstance = true;
         }
 
-        if (pickedDevice != VK_NULL_HANDLE) {
-            physicalDevice = pickedDevice;
+        if (PhDevice != VK_NULL_HANDLE) {
+            primaryDevice = PhDevice;
         } else {
             uint32_t deviceCount = 0;
             vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
@@ -458,23 +441,21 @@ struct VulkanContext {
             int bestScore = -1;
             for (auto d : devices) {
                 int s = scorePhysicalDevice(d);
-                if (s > bestScore) { bestScore = s; physicalDevice = d; }
+                if (s > bestScore) { bestScore = s; primaryDevice = d; }
             }
-            if (physicalDevice == VK_NULL_HANDLE && deviceCount > 0) physicalDevice = devices[0];
+            if (primaryDevice == VK_NULL_HANDLE && deviceCount > 0) primaryDevice = devices[0];
         }
 
         {
             VkPhysicalDeviceProperties props;
-            vkGetPhysicalDeviceProperties(physicalDevice, &props);
-            deviceName = props.deviceName;
+            vkGetPhysicalDeviceProperties(primaryDevice, &props);
             deviceType = props.deviceType;
-            std::cout << "Vulkan device: " << deviceName << std::endl;
         }
 
         uint32_t queueFamilyCount = 0;
-        vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
+        vkGetPhysicalDeviceQueueFamilyProperties(primaryDevice, &queueFamilyCount, nullptr);
         std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
-        vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, queueFamilies.data());
+        vkGetPhysicalDeviceQueueFamilyProperties(primaryDevice, &queueFamilyCount, queueFamilies.data());
         for (uint32_t i = 0; i < queueFamilies.size(); i++) {
             if (queueFamilies[i].queueFlags & VK_QUEUE_COMPUTE_BIT) {
                 queueFamilyIndex = i;
@@ -484,7 +465,7 @@ struct VulkanContext {
 
         {
             VkPhysicalDeviceProperties props;
-            vkGetPhysicalDeviceProperties(physicalDevice, &props);
+            vkGetPhysicalDeviceProperties(primaryDevice, &props);
         }
 
         float queuePriority = 1.0f;
@@ -493,9 +474,9 @@ struct VulkanContext {
         queueCreateInfo.queueCount = 1;
         queueCreateInfo.pQueuePriorities = &queuePriority;
         
-        vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extCount, nullptr);
+        vkEnumerateDeviceExtensionProperties(primaryDevice, nullptr, &extCount, nullptr);
         std::vector<VkExtensionProperties> availableExts(extCount);
-        vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extCount, availableExts.data());
+        vkEnumerateDeviceExtensionProperties(primaryDevice, nullptr, &extCount, availableExts.data());
 
         bool supportsRaytracingExtensions = false;
         bool supportRQ = false;
@@ -513,36 +494,24 @@ struct VulkanContext {
         VkPhysicalDeviceVulkan12Features features12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, &asFeatures};
         VkPhysicalDeviceFeatures2 deviceFeatures2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &features12};
 
-        hasHardwareRT = false;
         if (supportsRaytracingExtensions) {
-            vkGetPhysicalDeviceFeatures2(physicalDevice, &deviceFeatures2);
+            vkGetPhysicalDeviceFeatures2(primaryDevice, &deviceFeatures2);
             if (asFeatures.accelerationStructure && rqFeatures.rayQuery && features12.bufferDeviceAddress) {
-                hasHardwareRT = true;
                 std::cout << "Hardware Ray Tracing is supported and will be enabled." << std::endl;
             }
         }
         
-        if (!hasHardwareRT) {
-            std::cout << "Hardware Ray Tracing not supported. Falling back to software." << std::endl;
-            memset(&rqFeatures, 0, sizeof(rqFeatures));
-            rqFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
-            memset(&asFeatures, 0, sizeof(asFeatures));
-            asFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
-            asFeatures.pNext = &rqFeatures;
-        }
         std::vector<const char*> deviceExtensions;
 
         deviceFeatures2.pNext = &features12;
-        if (hasHardwareRT) {
-            deviceExtensions.push_back(VK_KHR_RAY_QUERY_EXTENSION_NAME);
-            deviceExtensions.push_back(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
-            deviceExtensions.push_back(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
-            features12.pNext = &asFeatures;
-            asFeatures.pNext = &rqFeatures;
-            asFeatures.accelerationStructure = VK_TRUE;
-            rqFeatures.rayQuery = VK_TRUE;
-            features12.bufferDeviceAddress = VK_TRUE;
-        }
+        deviceExtensions.push_back(VK_KHR_RAY_QUERY_EXTENSION_NAME);
+        deviceExtensions.push_back(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
+        deviceExtensions.push_back(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
+        features12.pNext = &asFeatures;
+        asFeatures.pNext = &rqFeatures;
+        asFeatures.accelerationStructure = VK_TRUE;
+        rqFeatures.rayQuery = VK_TRUE;
+        features12.bufferDeviceAddress = VK_TRUE;
 
         VkDeviceCreateInfo deviceCreateInfo{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
         deviceCreateInfo.pNext = &deviceFeatures2;
@@ -550,16 +519,14 @@ struct VulkanContext {
         deviceCreateInfo.pQueueCreateInfos = &queueCreateInfo;
         deviceCreateInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
         deviceCreateInfo.ppEnabledExtensionNames = deviceExtensions.data();
-        vkCreateDevice(physicalDevice, &deviceCreateInfo, nullptr, &device);
+        vkCreateDevice(primaryDevice, &deviceCreateInfo, nullptr, &device);
         vkGetDeviceQueue(device, queueFamilyIndex, 0, &queue);
 
-        if (hasHardwareRT) {
-            pfn_vkGetAccelerationStructureBuildSizesKHR = (PFN_vkGetAccelerationStructureBuildSizesKHR)vkGetDeviceProcAddr(device, "vkGetAccelerationStructureBuildSizesKHR");
-            pfn_vkCreateAccelerationStructureKHR = (PFN_vkCreateAccelerationStructureKHR)vkGetDeviceProcAddr(device, "vkCreateAccelerationStructureKHR");
-            pfn_vkCmdBuildAccelerationStructuresKHR = (PFN_vkCmdBuildAccelerationStructuresKHR)vkGetDeviceProcAddr(device, "vkCmdBuildAccelerationStructuresKHR");
-            pfn_vkDestroyAccelerationStructureKHR = (PFN_vkDestroyAccelerationStructureKHR)vkGetDeviceProcAddr(device, "vkDestroyAccelerationStructureKHR");
-            pfn_vkGetAccelerationStructureDeviceAddressKHR = (PFN_vkGetAccelerationStructureDeviceAddressKHR)vkGetDeviceProcAddr(device, "vkGetAccelerationStructureDeviceAddressKHR");
-        }
+        pfn_vkGetAccelerationStructureBuildSizesKHR = (PFN_vkGetAccelerationStructureBuildSizesKHR)vkGetDeviceProcAddr(device, "vkGetAccelerationStructureBuildSizesKHR");
+        pfn_vkCreateAccelerationStructureKHR = (PFN_vkCreateAccelerationStructureKHR)vkGetDeviceProcAddr(device, "vkCreateAccelerationStructureKHR");
+        pfn_vkCmdBuildAccelerationStructuresKHR = (PFN_vkCmdBuildAccelerationStructuresKHR)vkGetDeviceProcAddr(device, "vkCmdBuildAccelerationStructuresKHR");
+        pfn_vkDestroyAccelerationStructureKHR = (PFN_vkDestroyAccelerationStructureKHR)vkGetDeviceProcAddr(device, "vkDestroyAccelerationStructureKHR");
+        pfn_vkGetAccelerationStructureDeviceAddressKHR = (PFN_vkGetAccelerationStructureDeviceAddressKHR)vkGetDeviceProcAddr(device, "vkGetAccelerationStructureDeviceAddressKHR");
 
         VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
         poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -721,9 +688,7 @@ struct VulkanContext {
             vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &computePipelineInfo, nullptr, &guidedCoeffPipeline);
         }
 
-        if (hasHardwareRT) {
-            initWavefront();
-        }
+        initWavefront();
 
         vctInit();
 
@@ -775,7 +740,7 @@ struct VulkanContext {
             vkFreeMemory(device, xferStagingMem, nullptr);
             xferStagingMapped = nullptr;
         }
-        createReadbackBuffer(size, xferStagingBuffer, xferStagingMem, xferStagingCoherent);
+        createReadbackBuffer(device, primaryDevice, size, xferStagingBuffer, xferStagingMem, xferStagingCoherent);
         vkMapMemory(device, xferStagingMem, 0, VK_WHOLE_SIZE, 0, &xferStagingMapped);
         currentXferStagingCap = size;
     }
@@ -823,7 +788,7 @@ struct VulkanContext {
                 vkDestroyBuffer(device, buffer, nullptr);
                 vkFreeMemory(device, memory, nullptr);
             }
-            createBuffer(allocSize, usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT, 
+            createBuffer(device, primaryDevice, allocSize, usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT, 
                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, buffer, memory);
             currentCap = allocSize;
         }
@@ -831,7 +796,7 @@ struct VulkanContext {
         if (data && dataSize > 0) {
             VkBuffer stagingBuffer;
             VkDeviceMemory stagingMem;
-            createBuffer(dataSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, 
+            createBuffer(device, primaryDevice, dataSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, 
                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 
                          stagingBuffer, stagingMem);
 
@@ -864,7 +829,7 @@ struct VulkanContext {
         VkMemoryAllocateInfo allocInfo{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
         allocInfo.pNext = &allocFlagsInfo;
         allocInfo.allocationSize = memReqs.size;
-        allocInfo.memoryTypeIndex = findMemoryType(memReqs.memoryTypeBits, properties);
+        allocInfo.memoryTypeIndex = findMemoryType(primaryDevice, memReqs.memoryTypeBits, properties);
         
         vkAllocateMemory(device, &allocInfo, nullptr, &bufferMemory);
         vkBindBufferMemory(device, buffer, bufferMemory, 0);
@@ -878,7 +843,7 @@ struct VulkanContext {
 
     template<typename RenderDataType>
     void buildHardwareAccelerationStructures(const std::vector<RenderDataType>& points, int orderingTag = 0) {
-        if (!hasHardwareRT || points.empty()) return;
+        if (points.empty()) return;
 
         const uint32_t numPrimitives = static_cast<uint32_t>(points.size());
         bool doFullBuild = (!blasTopologyValid)
@@ -1106,16 +1071,6 @@ struct VulkanContext {
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     }
 
-    void updateSellmeierBuffer(const std::vector<float>& lut, uint32_t width, uint32_t rows) {
-        sellmeierWidth = width;
-        sellmeierRows = rows;
-        size_t dataSize = lut.size() * sizeof(float);
-        size_t allocSize = std::max((size_t)256, dataSize);
-        updateDeviceLocalBuffer(sellmeierBuffer, sellmeierMem, currentSellmeierCap,
-                                lut.empty() ? nullptr : lut.data(), dataSize, allocSize,
-                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    }
-
     void updateCommonBuffers(size_t outSize, GPUCameraData& camData) {
         size_t allocSize = (size_t)256;
         
@@ -1130,7 +1085,7 @@ struct VulkanContext {
                 vkDestroyBuffer(device, outBuffer, nullptr);
                 vkFreeMemory(device, outMem, nullptr);
             }
-            createBuffer(outSize,
+            createBuffer(device, primaryDevice, outSize,
                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, outBuffer, outMem);
             outMemCoherent = true; // no host mapping of outMem anymore
@@ -1142,7 +1097,7 @@ struct VulkanContext {
                 vkFreeMemory(device, outStagingMem, nullptr);
                 outStagingMapped = nullptr;
             }
-            createReadbackBuffer(outSize, outStagingBuffer, outStagingMem, outStagingCoherent);
+            createReadbackBuffer(device, primaryDevice, outSize, outStagingBuffer, outStagingMem, outStagingCoherent);
             vkMapMemory(device, outStagingMem, 0, VK_WHOLE_SIZE, 0, &outStagingMapped);
             currentOutStagingCap = outSize;
         }
@@ -1153,14 +1108,14 @@ struct VulkanContext {
                 vkDestroyBuffer(device, adaptiveBuffer, nullptr);
                 vkFreeMemory(device, adaptiveMem, nullptr);
             }
-            createBuffer(adaptiveSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, 
+            createBuffer(device, primaryDevice, adaptiveSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, 
                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, adaptiveBuffer, adaptiveMem);
             currentAdaptiveCap = adaptiveSize;
         }
 
         size_t uboSize = sizeof(GPUCameraData);
         if(!uboBuffer) {
-            createBuffer(uboSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, 
+            createBuffer(device, primaryDevice, uboSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, 
                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, uboBuffer, uboMem);
         }
 
@@ -1202,15 +1157,15 @@ struct VulkanContext {
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     }
 
-    void updateFastBuffers(const std::vector<GPUFastRenderData>& points) {
-        size_t allocSize = std::max((size_t)256, points.size() * sizeof(GPUFastRenderData));
-        size_t dataSize = points.size() * sizeof(GPUFastRenderData);
+    void updateFastBuffers(const std::vector<GPURenderData>& points) {
+        size_t allocSize = std::max((size_t)256, points.size() * sizeof(GPURenderData));
+        size_t dataSize = points.size() * sizeof(GPURenderData);
         
         updateDeviceLocalBuffer(fastPointBuffer, fastPointMem, currentFastPointsCap, 
                                 points.empty() ? nullptr : points.data(), dataSize, allocSize, 
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
-        if (hasHardwareRT) buildHardwareAccelerationStructures(points, 1);
+        buildHardwareAccelerationStructures(points, 1);
 
         VkDescriptorBufferInfo bInfos[8] = { 
             {nodeBuffer, 0, VK_WHOLE_SIZE}, 
@@ -1237,15 +1192,15 @@ struct VulkanContext {
         vctWriteFastDescriptors();
     }
 
-    void updatePBRBuffers(const std::vector<GPUPBRRenderData>& points) {
-        size_t allocSize = std::max((size_t)256, points.size() * sizeof(GPUPBRRenderData));
-        size_t dataSize = points.size() * sizeof(GPUPBRRenderData);
+    void updatePBRBuffers(const std::vector<GPURenderData>& points) {
+        size_t allocSize = std::max((size_t)256, points.size() * sizeof(GPURenderData));
+        size_t dataSize = points.size() * sizeof(GPURenderData);
         
         updateDeviceLocalBuffer(pbrPointBuffer, pbrPointMem, currentPBRPointsCap, 
                                 points.empty() ? nullptr : points.data(), dataSize, allocSize, 
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
-        if (hasHardwareRT) buildHardwareAccelerationStructures(points, 2);
+        buildHardwareAccelerationStructures(points, 2);
 
         VkDescriptorBufferInfo bInfos[8] = { 
             {nodeBuffer, 0, VK_WHOLE_SIZE}, 
@@ -1290,7 +1245,7 @@ struct VulkanContext {
                 vkFreeMemory(device, lowResOutMem, nullptr);
             }
             // Retained HOST_VISIBLE so it can be mapped later if necessary
-            createBuffer(size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, 
+            createBuffer(device, primaryDevice, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, 
                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 
                          lowResOutBuffer, lowResOutMem);
             currentLowResOutCap = size;
@@ -1303,7 +1258,7 @@ struct VulkanContext {
                 vkDestroyBuffer(device, fastGBuffer, nullptr);
                 vkFreeMemory(device, fastGBufferMem, nullptr);
             }
-            createBuffer(fastOutSize,
+            createBuffer(device, primaryDevice, fastOutSize,
                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, fastGBuffer, fastGBufferMem);
             currentFastGCap = fastOutSize;
@@ -1322,7 +1277,7 @@ struct VulkanContext {
                 vkDestroyBuffer(device, finalOutBuffer, nullptr);
                 vkFreeMemory(device, finalOutMem, nullptr);
             }
-            createBuffer(finalSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, finalOutBuffer, finalOutMem);
+            createBuffer(device, primaryDevice, finalSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, finalOutBuffer, finalOutMem);
             currentFinalOutCap = finalSize;
         }
 
@@ -1333,7 +1288,7 @@ struct VulkanContext {
                 vkDestroyBuffer(device, smoothScratchBuffer, nullptr);
                 vkFreeMemory(device, smoothScratchMem, nullptr);
             }
-            createBuffer(scratchSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            createBuffer(device, primaryDevice, scratchSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, smoothScratchBuffer, smoothScratchMem);
             currentSmoothScratchCap = scratchSize;
         }
@@ -1400,7 +1355,7 @@ struct VulkanContext {
                 vkDestroyBuffer(device, finalOutBuffer, nullptr); 
                 vkFreeMemory(device, finalOutMem, nullptr); 
             }
-            createBuffer(finalSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, finalOutBuffer, finalOutMem);
+            createBuffer(device, primaryDevice, finalSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, finalOutBuffer, finalOutMem);
             currentFinalOutCap = finalSize;
         }
 
@@ -1411,7 +1366,7 @@ struct VulkanContext {
                 vkDestroyBuffer(device, guidedCoeffBuffer, nullptr);
                 vkFreeMemory(device, guidedCoeffMem, nullptr);
             }
-            createBuffer(coeffSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            createBuffer(device, primaryDevice, coeffSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, guidedCoeffBuffer, guidedCoeffMem);
             currentGuidedCoeffCap = coeffSize;
         }
@@ -1520,12 +1475,12 @@ void initWavefront() {
     pli.pPushConstantRanges = &pcr;
     vkCreatePipelineLayout(device, &pli, nullptr, &wfPipelineLayout);
 
-    wfInitShader     = createShaderModule("./bin/wf_init.spv");
-    wfArgsShader     = createShaderModule("./bin/wf_args.spv");
-    wfExtendShader   = createShaderModule("./bin/wf_extend.spv");
-    wfShadeShader    = createShaderModule("./bin/wf_shade.spv");
-    wfShadowShader   = createShaderModule("./bin/wf_shadow.spv");
-    wfFinalizeShader = createShaderModule("./bin/wf_finalize.spv");
+    wfInitShader     = createShaderModule(device, "./bin/wf_init.spv");
+    wfArgsShader     = createShaderModule(device, "./bin/wf_args.spv");
+    wfExtendShader   = createShaderModule(device, "./bin/wf_extend.spv");
+    wfShadeShader    = createShaderModule(device, "./bin/wf_shade.spv");
+    wfShadowShader   = createShaderModule(device, "./bin/wf_shadow.spv");
+    wfFinalizeShader = createShaderModule(device, "./bin/wf_finalize.spv");
 
     auto makePipe = [&](VkShaderModule m, VkPipeline& out) {
         VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
@@ -1564,13 +1519,13 @@ void ensureWavefrontBuffers(uint32_t maxPaths) {
     const VkBufferUsageFlags store = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     const VkMemoryPropertyFlags devLocal = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
 
-    createBuffer(maxPaths * WF_PATH_STRIDE,    store, devLocal, wfPathBuf,    wfPathMem);
-    createBuffer(maxPaths * WF_PATHHIT_STRIDE, store, devLocal, wfPathHitBuf, wfPathHitMem);
-    createBuffer(maxPaths * sizeof(uint32_t), store, devLocal, wfExtendABuf, wfExtendAMem);
-    createBuffer(maxPaths * sizeof(uint32_t), store, devLocal, wfExtendBBuf, wfExtendBMem);
-    createBuffer(maxPaths * sizeof(uint32_t), store, devLocal, wfShadeBuf,   wfShadeMem);
-    createBuffer(maxPaths * WF_SHADOW_STRIDE, store, devLocal, wfShadowBuf,  wfShadowMem);
-    createBuffer(WF_COUNTER_SIZE, store | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, devLocal, wfCounterBuf, wfCounterMem);
+    createBuffer(device, primaryDevice, maxPaths * WF_PATH_STRIDE,    store, devLocal, wfPathBuf,    wfPathMem);
+    createBuffer(device, primaryDevice, maxPaths * WF_PATHHIT_STRIDE, store, devLocal, wfPathHitBuf, wfPathHitMem);
+    createBuffer(device, primaryDevice, maxPaths * sizeof(uint32_t), store, devLocal, wfExtendABuf, wfExtendAMem);
+    createBuffer(device, primaryDevice, maxPaths * sizeof(uint32_t), store, devLocal, wfExtendBBuf, wfExtendBMem);
+    createBuffer(device, primaryDevice, maxPaths * sizeof(uint32_t), store, devLocal, wfShadeBuf,   wfShadeMem);
+    createBuffer(device, primaryDevice, maxPaths * WF_SHADOW_STRIDE, store, devLocal, wfShadowBuf,  wfShadowMem);
+    createBuffer(device, primaryDevice, WF_COUNTER_SIZE, store | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, devLocal, wfCounterBuf, wfCounterMem);
     wfPathCap = maxPaths;
 }
 
@@ -1590,7 +1545,7 @@ void writeWavefrontDescriptors() {
     bi[12] = {wfShadowBuf,    0, VK_WHOLE_SIZE};
     bi[13] = {wfCounterBuf,   0, VK_WHOLE_SIZE};
     bi[14] = {wfPathHitBuf,   0, VK_WHOLE_SIZE};
-    bi[15] = {sellmeierBuffer ? sellmeierBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
+    bi[15] = {materialBuffer, 0, VK_WHOLE_SIZE};
     bi[16] = {fogBuffer ? fogBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
 
     VkWriteDescriptorSet w[17] = {};
@@ -1766,8 +1721,7 @@ struct GPUManager {
         if (initialized) return;
         initialized = true;
 
-        const char* multiEnv = std::getenv("SSC_MULTIGPU");
-        bool multiEnabled = !(multiEnv && multiEnv[0] == '0');
+        bool multiEnabled = true;
 
         // If something already initialized vkCtx (e.g. a fast-path render ran
         // first), adopt its instance; otherwise create one via vkCtx below.
@@ -1793,34 +1747,15 @@ struct GPUManager {
             cands.push_back({all[i], s, i});
         }
 
-        // Explicit device list wins over scoring.
-        if (const char* gpusEnv = std::getenv("SSC_GPUS")) {
-            std::vector<Cand> filtered;
-            std::stringstream ss(gpusEnv);
-            std::string tok;
-            while (std::getline(ss, tok, ',')) {
-                uint32_t want = (uint32_t)std::stoul(tok);
-                for (const auto& c : cands)
-                    if (c.idx == want) filtered.push_back(c);
-            }
-            if (!filtered.empty()) cands = std::move(filtered);
-        } else {
-            // Best devices first; drop CPU implementations (lavapipe) when a
-            // real GPU is present so it never steals tiles from actual GPUs.
-            std::stable_sort(cands.begin(), cands.end(),
-                             [](const Cand& a, const Cand& b) { return a.score > b.score; });
-            bool haveGPU = !cands.empty() && cands.front().score >= 2;
-            if (haveGPU) {
-                cands.erase(std::remove_if(cands.begin(), cands.end(),
-                            [](const Cand& c) { return c.score <= 1; }), cands.end());
-            }
+        std::stable_sort(cands.begin(), cands.end(),
+                            [](const Cand& a, const Cand& b) { return a.score > b.score; });
+        bool haveGPU = !cands.empty() && cands.front().score >= 2;
+        if (haveGPU) {
+            cands.erase(std::remove_if(cands.begin(), cands.end(),
+                        [](const Cand& c) { return c.score <= 1; }), cands.end());
         }
 
         if (!multiEnabled && cands.size() > 1) cands.resize(1);
-        if (const char* maxEnv = std::getenv("SSC_MAX_GPUS")) {
-            size_t maxN = (size_t)std::stoul(maxEnv);
-            if (maxN >= 1 && cands.size() > maxN) cands.resize(maxN);
-        }
 
         // Primary context. If vkCtx was already initialized before the manager
         // ran, keep whatever device it has; otherwise give it the best device.
@@ -1831,18 +1766,13 @@ struct GPUManager {
 
         // Secondary contexts for the remaining devices.
         for (size_t i = 0; i < cands.size(); ++i) {
-            if (cands[i].dev == vkCtx.physicalDevice) continue;
-            if (contexts.size() == 1 && i == 0 && vkCtx.initialized && vkCtx.physicalDevice == cands[i].dev) continue;
+            if (cands[i].dev == vkCtx.primaryDevice) continue;
+            if (contexts.size() == 1 && i == 0 && vkCtx.initialized && vkCtx.primaryDevice == cands[i].dev) continue;
             auto c = std::make_unique<VulkanContext>();
             c->init(instance, cands[i].dev);
             contexts.push_back(c.get());
             extras.push_back(std::move(c));
         }
-
-        std::cout << "GPUManager: using " << contexts.size() << " device(s):" << std::endl;
-        for (size_t i = 0; i < contexts.size(); ++i)
-            std::cout << "  [" << i << "] " << contexts[i]->deviceName
-                      << (i == 0 ? " (primary)" : "") << std::endl;
     }
 };
 inline GPUManager gpuMgr;
