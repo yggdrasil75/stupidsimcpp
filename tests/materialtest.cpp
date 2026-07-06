@@ -474,7 +474,7 @@ int main() {
         std::cout << "\nAnimating segment: " << startView.name << " -> " << endView.name << std::endl;
 
         for (int j = 0; j < framesPerSegment; ++j) {
-            if (frameCounter < 1600) {
+            if (frameCounter < -1) {
                 frameCounter++;
                 continue;
             }

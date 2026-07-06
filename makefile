@@ -39,9 +39,9 @@ endif
 CXXFLAGS = $(BASE_CXXFLAGS) $(SIMD_CXXFLAGS) 
 
 # Source files
-# SRC := $(SRC_DIR)/ptest.cpp
+SRC := $(SRC_DIR)/ptest.cpp
 # SRC := $(SRC_DIR)/naturetest.cpp
-SRC := $(SRC_DIR)/materialtest.cpp
+# SRC := $(SRC_DIR)/materialtest.cpp
 SRC += $(IMGUI_DIR)/imgui.cpp $(IMGUI_DIR)/imgui_demo.cpp $(IMGUI_DIR)/imgui_draw.cpp $(IMGUI_DIR)/imgui_tables.cpp $(IMGUI_DIR)/imgui_widgets.cpp
 SRC += $(IMGUI_DIR)/backends/imgui_impl_glfw.cpp $(IMGUI_DIR)/backends/imgui_impl_opengl3.cpp
 SRC += $(SRC_DIR)/stb_image.cpp

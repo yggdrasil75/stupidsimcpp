@@ -1657,12 +1657,12 @@ void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel
         int s1 = std::min(s0 + samplesPerSubmit, sampleEnd);
         VkCommandBuffer cmd = wfCmd[slot];
         {
-            ScopedFunctionTimer _sw("wf.waitSlot");
+            // ScopedFunctionTimer _sw("wf.waitSlot");
             vkWaitForFences(device, 1, &wfFence[slot], VK_TRUE, UINT64_MAX);
             vkResetFences(device, 1, &wfFence[slot]);
         }
 
-        ScopedFunctionTimer* _rec = new ScopedFunctionTimer("wf.recordCmd");
+        // ScopedFunctionTimer* _rec = new ScopedFunctionTimer("wf.recordCmd");
         VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         vkBeginCommandBuffer(cmd, &bi);
@@ -1718,9 +1718,9 @@ void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel
         }
 
         vkEndCommandBuffer(cmd);
-        delete _rec;
+        // delete _rec;
 
-        ScopedFunctionTimer _sw("wf.submit");
+        // ScopedFunctionTimer _sw("wf.submit");
         vkWaitForFences(device, 1, &wfFence[slot ^ 1], VK_TRUE, UINT64_MAX);
         VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
         si.commandBufferCount = 1;
@@ -1731,7 +1731,7 @@ void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel
     // Drain both slots before returning: callers read back / reuse the
     // output buffers immediately after this function.
     {
-        ScopedFunctionTimer _sw("wf.submitAndWait");
+        // ScopedFunctionTimer _sw("wf.submitAndWait");
         vkWaitForFences(device, 2, wfFence, VK_TRUE, UINT64_MAX);
     }
 
@@ -1742,17 +1742,6 @@ void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel
 };
 inline VulkanContext vkCtx;
 
-// -----------------------------------------------------------------------------
-// GPUManager: enumerates every usable Vulkan device and owns one VulkanContext
-// per GPU. contexts[0] is always the global vkCtx (the "primary" GPU), so all
-// existing single-GPU code paths keep working untouched; multi-GPU render
-// paths iterate over all contexts.
-//
-// Environment overrides:
-//   SSC_MULTIGPU=0      disable multi-GPU (primary device only)
-//   SSC_GPUS=0,2        use only these physical-device indices (enumeration order)
-//   SSC_MAX_GPUS=N      cap the number of GPUs used
-// -----------------------------------------------------------------------------
 struct GPUManager {
     std::vector<VulkanContext*> contexts;              // [0] == &vkCtx
     std::vector<std::unique_ptr<VulkanContext>> extras; // owned secondary contexts
