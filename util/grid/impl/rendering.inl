@@ -72,9 +72,7 @@ static PFN_vkGetAccelerationStructureDeviceAddressKHR pfn_vkGetAccelerationStruc
 
 struct alignas(16) GPUMaterial {
     uint32_t chromaticity; //RBG9E5
-    uint32_t materialProps; //8 bits for roughness. 8 for metallicity. leaves 16 for ???
-    uint32_t sellB; //RBG9E5
-    uint32_t sellC; //R11G11B10
+    uint32_t materialProps; //8 bits for roughness. 8 for metallicity. 8 for ior. 8 for ???
     uint32_t absorption; //RBG9E5
     uint32_t albedo; //rgb9e5
 };

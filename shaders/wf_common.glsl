@@ -11,12 +11,10 @@ const int MAX_TRANSPARENT_BOUNCES = 12;
 const int MAX_VOLUMETRIC_BOUNCES  = 8;
 
 struct GPUMaterial {
-    uint chromaticity;   // RGB9E5
-    uint materialProps;  // roughness (8) | metallic (8) | 16 spare
-    uint sellB;          // RGB9E5   - Sellmeier B coefficients
-    uint sellC;          // R11G11B10 - Sellmeier C coefficients (um^2)
-    uint absorption;     // RGB9E5
-    uint albedo;         // RGB9E5
+    uint chromaticity;
+    uint materialProps;
+    uint absorption;
+    uint albedo;
 };
 
 struct GPURenderData {
@@ -53,11 +51,6 @@ const uint WF_NO_HIT = 0xFFFFFFFFu;
 #define FLAG_SPECULAR 1
 #define FLAG_HITFOUND 2
 #define FLAG_ALIVE    4
-#define HERO_SHIFT 5
-#define HERO_MASK  (3 << HERO_SHIFT)
-#define GET_HERO(f)    (((f) & HERO_MASK) >> HERO_SHIFT)
-#define SET_HERO(f, h) (((f) & ~HERO_MASK) | (((h) & 3) << HERO_SHIFT))
-
 
 struct ShadowRay {
     vec4 o_tmax;   // xyz origin, w maxDist
@@ -193,56 +186,10 @@ vec3 unpackRGB9E5(uint c) {
     return vec3(r, g, b);
 }
 
-const float HERO_LAMBDA_R = 0.610;
-const float HERO_LAMBDA_G = 0.550;
-const float HERO_LAMBDA_B = 0.465;
-
-// Unsigned small floats used by R11G11B10: E5M6 (11-bit) / E5M5 (10-bit), bias 15.
-float uf11ToFloat(uint v) {
-    uint E = (v >> 6) & 0x1Fu;
-    uint M = v & 0x3Fu;
-    if (E == 0u) return (M == 0u) ? 0.0 : exp2(-14.0) * (float(M) / 64.0);
-    return exp2(float(E) - 15.0) * (1.0 + float(M) / 64.0);
-}
-float uf10ToFloat(uint v) {
-    uint E = (v >> 5) & 0x1Fu;
-    uint M = v & 0x1Fu;
-    if (E == 0u) return (M == 0u) ? 0.0 : exp2(-14.0) * (float(M) / 32.0);
-    return exp2(float(E) - 15.0) * (1.0 + float(M) / 32.0);
-}
-vec3 unpackR11G11B10(uint c) {
-    return vec3(uf11ToFloat(c & 0x7FFu),
-                uf11ToFloat((c >> 11) & 0x7FFu),
-                uf10ToFloat((c >> 22) & 0x3FFu));
-}
-
-float sellmeierIor(uint sellBPacked, uint sellCPacked, float lambdaUm) {
-    vec3 B = unpackRGB9E5(sellBPacked);
-    vec3 C = unpackR11G11B10(sellCPacked);
-    float l2 = lambdaUm * lambdaUm;
-    vec3 denom = vec3(l2) - C;
-    float n2 = 1.0;
-    if (abs(denom.x) > 1e-8) n2 += B.x * l2 / denom.x;
-    if (abs(denom.y) > 1e-8) n2 += B.y * l2 / denom.y;
-    if (abs(denom.z) > 1e-8) n2 += B.z * l2 / denom.z;
-    return clamp(sqrt(max(1.0, n2)), 1.0, 4.0);
-}
-
-void unpackMaterial(uint m, out float roughness, out float metallic) {
+void unpackMaterial(uint m, out float roughness, out float metallic, out float ior) {
     roughness = float(m & 0xFF) / 255.0;
     metallic  = float((m >> 8) & 0xFF) / 255.0;
-}
-
-float heroLambda(int hero) {
-    if (hero == 1) return HERO_LAMBDA_R;
-    if (hero == 3) return HERO_LAMBDA_B;
-    return HERO_LAMBDA_G;
-}
-
-vec3 heroMask(int hero) {
-    if (hero == 1) return vec3(1.0, 0.0, 0.0);
-    if (hero == 3) return vec3(0.0, 0.0, 1.0);
-    return vec3(0.0, 1.0, 0.0);
+    ior = float((m >> 16) & 0xFF);
 }
 
 bool isInvalid(float v) { return isnan(v) || isinf(v); }
@@ -425,8 +372,8 @@ vec3 shadowTransmit(vec3 ro, vec3 rd, vec3 invD, float maxDist, int lightPtIdx) 
             float tExit  = min(min(tmax3.x, tmax3.y), tmax3.z);
             if (tExit >= max(0.0, tEntry) && tEntry <= maxDist) {
                 GPUMaterial tMat = materials[pt.materialIdx];
-                float r, m;
-                unpackMaterial(tMat.materialProps, r, m);
+                float r, m, ior;
+                unpackMaterial(tMat.materialProps, r, m, ior);
                 vec4 albColor = unpackRGBA8(pt.color);
                 float ptOpacity = albColor.a;
                 float ptTransmission = 1.0 - ptOpacity;

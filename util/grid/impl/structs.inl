@@ -79,28 +79,6 @@ static inline Vec3 unpackRGB9E5(uint32_t c) {
     return Vec3(r, g, b);
 }
 
-static inline uint32_t f32ToUF11(float f) {
-    if (!(f > 0.0f)) return 0u;
-    uint32_t bits; std::memcpy(&bits, &f, sizeof(bits));
-    int e = static_cast<int>((bits >> 23) & 0xFFu) - 127;
-    if (e < -14) return 0u;
-    if (e > 15)  return 0x7BFu;
-    return (static_cast<uint32_t>(e + 15) << 6) | ((bits & 0x7FFFFFu) >> 17);
-}
-
-static inline uint32_t f32ToUF10(float f) {
-    if (!(f > 0.0f)) return 0u;
-    uint32_t bits; std::memcpy(&bits, &f, sizeof(bits));
-    int e = static_cast<int>((bits >> 23) & 0xFFu) - 127;
-    if (e < -14) return 0u;
-    if (e > 15)  return 0x3DFu;
-    return (static_cast<uint32_t>(e + 15) << 5) | ((bits & 0x7FFFFFu) >> 18);
-}
-
-static inline uint32_t packR11G11B10(const Vec3& c) {
-    return f32ToUF11(c.x()) | (f32ToUF11(c.y()) << 11) | (f32ToUF10(c.z()) << 22);
-}
-
 template<typename V>
 static void writeVal(std::ofstream& out, const V& val) {
     out.write(reinterpret_cast<const char*>(&val), sizeof(V));
@@ -300,34 +278,12 @@ struct SPHKernels {
 };
 
 using v3half = Eigen::Matrix<Eigen::half, 3, 1>;
-static constexpr float SELL_LAMBDA_R = 0.610f;
-static constexpr float SELL_LAMBDA_G = 0.550f;
-static constexpr float SELL_LAMBDA_B = 0.465f;
-
-static inline float sellmeierN(const v3half& B, const v3half& C, float lambdaUm) {
-    float l2 = lambdaUm * lambdaUm;
-    float n2 = 1.0f;
-    for (int j = 0; j < 3; ++j) {
-        float Bj = static_cast<float>(B[j]);
-        float Cj = static_cast<float>(C[j]);
-        float denom = l2 - Cj;
-        if (std::abs(denom) > 1e-8f) n2 += Bj * l2 / denom;
-    }
-    return std::sqrt(std::max(1.0f, n2));
-}
-
-static inline void sellmeierFromConstant(float n, v3half& B, v3half& C) {
-    float b0 = std::max(0.0f, n * n - 1.0f);
-    B = v3half(Eigen::half(b0), Eigen::half(0.0f), Eigen::half(0.0f));
-    C = v3half(Eigen::half(0.0f), Eigen::half(0.0f), Eigen::half(0.0f));
-}
 
 struct RenderMaterial {
     uint32_t chromaticity;
     float roughness;
     float metallic;
-    v3half sellB;
-    v3half sellC;
+    float ior;
     Vec3 absorption;
     //vec3 scattering? // sigma_s (The "diffuse color" of the leaf/wood)
     //float phase_g? // Forward/backward scattering bias (-1.0 to 1.0)
@@ -336,35 +292,27 @@ struct RenderMaterial {
     //float translucency? // Thin geometry sss and transparency
     //float porosity? // Rain simulation without rain voxels?
 
-    RenderMaterial(uint32_t e, float r, float m, const v3half& B, const v3half& C,
-              Vec3 a = Eigen::Vector3f::Zero())
-        : chromaticity(e), roughness(r), metallic(m), sellB(B), sellC(C), absorption(a) {}
-
     RenderMaterial(float e = 0.0f, float r = 1.0f, float m = 0.0f, float i = 1.45f, Eigen::Vector3f a = Eigen::Vector3f::Zero())
-        : chromaticity(packRGB9E5(Eigen::Vector3f(e, e, e))), roughness(r), metallic(m), absorption(a) {
-        sellmeierFromConstant(i, sellB, sellC);
-    }
-    float iorGreen() const { return sellmeierN(sellB, sellC, SELL_LAMBDA_G); }
+        : chromaticity(packRGB9E5(Eigen::Vector3f(e, e, e))), roughness(r), metallic(m), absorption(a), ior(i) { }
+
     Vec3 emittanceRGB() const { return unpackRGB9E5(chromaticity); }
 
     bool operator==(const RenderMaterial& o) const {
         return chromaticity == o.chromaticity && roughness == o.roughness &&
-               metallic == o.metallic &&
-               sellB == o.sellB && sellC == o.sellC
-               && absorption == o.absorption;
+               metallic == o.metallic && ior == o.ior && absorption == o.absorption;
     }
     
     bool operator<(const RenderMaterial& o) const {
         if (chromaticity != o.chromaticity) return chromaticity < o.chromaticity;
         if (roughness != o.roughness) return roughness < o.roughness;
         if (metallic != o.metallic) return metallic < o.metallic;
-        return iorGreen() < o.iorGreen();
+        return ior < o.ior;
     }
 
     float dist(const RenderMaterial& o) const {
         float dr = roughness - o.roughness;
         float dm = metallic - o.metallic;
-        float di = iorGreen() - o.iorGreen();
+        float di = ior - o.ior;
         Vec3 de = emittanceRGB() - o.emittanceRGB();
         float empenalty = de.norm();
         float absPenalty = (absorption != o.absorption) ? 0.5f : 0.0f;
@@ -378,10 +326,7 @@ struct RMatHash {
         size_t h = std::hash<uint32_t>()(m.chromaticity);
         h ^= hf(m.roughness) + 0x9e3779b9 + (h << 6) + (h >> 2);
         h ^= hf(m.metallic) + 0x9e3779b9 + (h << 6) + (h >> 2);
-        for (int j = 0; j < 3; ++j)
-            h ^= hf(static_cast<float>(m.sellB[j])) + 0x9e3779b9 + (h << 6) + (h >> 2);
-        for (int j = 0; j < 3; ++j)
-            h ^= hf(static_cast<float>(m.sellC[j])) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= hf(static_cast<float>(m.ior)) + 0x9e3779b9 + (h << 6) + (h >> 2);
         h ^= hf(m.absorption.x()) + 0x9e3779b9 + (h << 6) + (h >> 2);
         h ^= hf(m.absorption.y()) + 0x9e3779b9 + (h << 6) + (h >> 2);
         h ^= hf(m.absorption.z()) + 0x9e3779b9 + (h << 6) + (h >> 2);

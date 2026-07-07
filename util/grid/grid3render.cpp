@@ -356,12 +356,12 @@ static inline uint32_t packRGBA8(const Eigen::Vector4f& c) {
     return r | (g << 8) | (b << 16) | (a << 24);
 }
 
-static inline uint32_t packMaterialProps(float roughness, float metallic) {
+static inline uint32_t packMaterialProps(float roughness, float metallic, float ior) {
     uint32_t r8 = static_cast<uint32_t>(std::clamp(roughness, 0.0f, 1.0f) * 255.0f);
     uint32_t m8 = static_cast<uint32_t>(std::clamp(metallic, 0.0f, 1.0f) * 255.0f);
-    return r8 | (m8 << 8);
+    uint32_t i8 = static_cast<uint32_t>(std::clamp(ior, 0.0f, 255.0f));
+    return r8 | (m8 << 8) | (i8 << 8);
 }
-
 
 struct PointSort {
     uint64_t morton;
@@ -378,9 +378,7 @@ void Octree<T>::buildGPUMaterials(const RenderBuffer_<T>& buf, std::vector<GPUMa
         uint32_t albedoPacked = 0;
         out.push_back({
             m.chromaticity,
-            packMaterialProps(m.roughness, m.metallic),
-            packRGB9E5((m.sellB).template cast<float>()),
-            packR11G11B10((m.sellC).template cast<float>()),
+            packMaterialProps(m.roughness, m.metallic, m.ior),
             packRGB8(m.absorption),
             albedoPacked
         });

@@ -13,12 +13,10 @@ struct GPURenderData {
 layout(std430, binding = 0) readonly buffer PointBuffer { GPURenderData points[]; };
 
 struct GPUMaterial {
-    uint chromaticity;   // RGB9E5
-    uint materialProps;  // roughness (8) | metallic (8) | 16 spare
-    uint sellB;          // RGB9E5   - Sellmeier B coefficients
-    uint sellC;          // R11G11B10 - Sellmeier C coefficients (um^2)
-    uint absorption;     // RGB9E5
-    uint albedo;         // RGB9E5
+    uint chromaticity;
+    uint materialProps;
+    uint absorption;
+    uint albedo;
 };
 layout(std430, binding = 1) readonly buffer MaterialBuffer { GPUMaterial materials[]; };
 
