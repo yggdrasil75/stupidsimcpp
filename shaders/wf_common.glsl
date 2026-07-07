@@ -221,9 +221,11 @@ float sellmeierIor(uint sellBPacked, uint sellCPacked, float lambdaUm) {
     vec3 C = unpackR11G11B10(sellCPacked);
     float l2 = lambdaUm * lambdaUm;
     vec3 denom = vec3(l2) - C;
-    vec3 safe = mix(vec3(0.0), B * l2 / denom, vec3(greaterThan(abs(denom), vec3(1e-8))));
-    float n2 = 1.0 + safe.x + safe.y + safe.z;
-    return sqrt(max(1.0, n2));
+    float n2 = 1.0;
+    if (abs(denom.x) > 1e-8) n2 += B.x * l2 / denom.x;
+    if (abs(denom.y) > 1e-8) n2 += B.y * l2 / denom.y;
+    if (abs(denom.z) > 1e-8) n2 += B.z * l2 / denom.z;
+    return clamp(sqrt(max(1.0, n2)), 1.0, 4.0);
 }
 
 void unpackMaterial(uint m, out float roughness, out float metallic) {

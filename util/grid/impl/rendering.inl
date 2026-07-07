@@ -468,28 +468,10 @@ struct VulkanContext {
         std::vector<VkExtensionProperties> availableExts(extCount);
         vkEnumerateDeviceExtensionProperties(primaryDevice, nullptr, &extCount, availableExts.data());
 
-        bool supportsRaytracingExtensions = false;
-        bool supportRQ = false;
-        bool supportAS = false;
-        bool supportDHO = false;
-        for (const auto& ext : availableExts) {
-            if (strcmp(ext.extensionName, VK_KHR_RAY_QUERY_EXTENSION_NAME) == 0) supportRQ = true;
-            if (strcmp(ext.extensionName, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) == 0) supportAS = true;
-            if (strcmp(ext.extensionName, VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME) == 0) supportDHO = true;
-        }
-        supportsRaytracingExtensions = supportRQ && supportAS && supportDHO;
-
         VkPhysicalDeviceRayQueryFeaturesKHR rqFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR};
         VkPhysicalDeviceAccelerationStructureFeaturesKHR asFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR, &rqFeatures};
         VkPhysicalDeviceVulkan12Features features12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, &asFeatures};
         VkPhysicalDeviceFeatures2 deviceFeatures2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &features12};
-
-        if (supportsRaytracingExtensions) {
-            vkGetPhysicalDeviceFeatures2(primaryDevice, &deviceFeatures2);
-            if (asFeatures.accelerationStructure && rqFeatures.rayQuery && features12.bufferDeviceAddress) {
-                std::cout << "Hardware Ray Tracing is supported and will be enabled." << std::endl;
-            }
-        }
         
         std::vector<const char*> deviceExtensions;
 
