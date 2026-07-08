@@ -121,6 +121,8 @@ private:
     ///@brief Mutex securing read/write operations to the objects map
     mutable std::shared_mutex objectsMutex_;
     
+    RenderMaterialStore renderMaterials_;
+
     Skybox skybox_;
     Vec3 skylight_ = {0.1f, 0.1f, 0.1f};
     Vec3 backgroundColor_ = {0.53f, 0.81f, 0.92f};
@@ -519,6 +521,20 @@ public:
         if (it != objects_.end()) return it->second;
         return nullptr;
     }
+
+    ///@brief Looks up a render material by its grid-global index
+    ///@param idx Index into the grid-wide render material store
+    ///@return The material, or a default RenderMaterial if idx is out of range
+    RenderMaterial getRenderMaterial(uint32_t idx) const {
+        return renderMaterials_.get(idx);
+    }
+
+    ///@brief Interns a render material in the grid-global store, deduplicating
+    ///@param mat The material to insert or look up
+    ///@return The grid-global index for the material
+    uint32_t getOrAddRenderMaterial(const RenderMaterial& mat) {
+        return renderMaterials_.getOrAdd(mat);
+    }
     
     ///@brief Computes and returns the environmental cached skybox flattened array
     ///@param outW Updates variable to the width of the rendered skybox
@@ -859,8 +875,7 @@ private:
             avgPos += item->position * v;
             avgColor += item->color * v;
             
-            auto obj = getObject(item->objectId);
-            RenderMaterial mat = obj ? obj->getRenderMaterial(item->renderMatIdx) : RenderMaterial();
+            RenderMaterial mat = renderMaterials_.get(item->renderMatIdx);
             
             avgChromaticity += mat.emittanceRGB() * v;
             avgRoughness += mat.roughness * v;
@@ -897,8 +912,7 @@ private:
             RenderMaterial avgMat(packRGB9E5(e), float(avgRoughness * invVol),
                             float(avgMetallic * invVol), B, C);
             
-            auto obj = getOrCreateObject(-1);
-            lod->renderMatIdx = obj->getOrAddRenderMaterial(avgMat);
+            lod->renderMatIdx = renderMaterials_.getOrAdd(avgMat);
             
             lod->setActive(true);
             lod->setVisible(true);
@@ -1343,12 +1357,7 @@ private:
     ///@brief Traverses the octree to construct a simplified array layout for fast rendering routines
     ///@param buffer The render buffer structure to populate
     void buildRender(RenderBuffer_<T>& buffer);
-#ifdef VULKAN_SUPPORT
-    ///@brief Compiles and transfers material formats onto GPU compatible structs
-    ///@param buf Reference buffer providing indexing maps
-    ///@param out Passed result array populated with hardware aligned components
-    void buildGPUMaterials(const RenderBuffer_<T>& buf, std::vector<GPUMaterial>& out);
-#endif
+    
     ///@brief Deep compiler function mapping node structures into linear contiguous render arrays
     ///@param node Operating point scope
     ///@param buffer Linearized data destination buffer
@@ -1414,6 +1423,12 @@ public:
                 objects_[pair.first] = std::make_shared<GridObject>(*pair.second);
             }
         }
+        {
+            s_lock lockOther(other.renderMaterials_.mutex);
+            renderMaterials_.materials = other.renderMaterials_.materials;
+            renderMaterials_.matMap = other.renderMaterials_.matMap;
+            renderMaterials_.version = other.renderMaterials_.version;
+        }
         startWorkerThread();
     }
 
@@ -1431,6 +1446,12 @@ public:
             u_lock lockOther(other.objectsMutex_);
             u_lock lockThis(objectsMutex_);
             objects_ = std::move(other.objects_);
+        }
+        {
+            u_lock lockOther(other.renderMaterials_.mutex);
+            renderMaterials_.materials = std::move(other.renderMaterials_.materials);
+            renderMaterials_.matMap = std::move(other.renderMaterials_.matMap);
+            renderMaterials_.version = other.renderMaterials_.version;
         }
         
         {
@@ -1472,6 +1493,13 @@ public:
                 objects_[pair.first] = std::make_shared<GridObject>(*pair.second);
             }
         }
+        {
+            s_lock lockOther(other.renderMaterials_.mutex);
+            u_lock lockThis(renderMaterials_.mutex);
+            renderMaterials_.materials = other.renderMaterials_.materials;
+            renderMaterials_.matMap = other.renderMaterials_.matMap;
+            renderMaterials_.version = other.renderMaterials_.version;
+        }
 
         startWorkerThread();
         return *this;
@@ -1503,6 +1531,13 @@ public:
             u_lock lockOther(other.objectsMutex_);
             u_lock lockThis(objectsMutex_);
             objects_ = std::move(other.objects_);
+        }
+        {
+            u_lock lockOther(other.renderMaterials_.mutex);
+            u_lock lockThis(renderMaterials_.mutex);
+            renderMaterials_.materials = std::move(other.renderMaterials_.materials);
+            renderMaterials_.matMap = std::move(other.renderMaterials_.matMap);
+            renderMaterials_.version = other.renderMaterials_.version;
         }
 
         {
@@ -1668,7 +1703,7 @@ public:
         }
         auto obj = getOrCreateObject(objectId);
         RenderMaterial rmat(emittance, roughness, metallic, ior, absorp);
-        uint16_t rIdx = obj->getOrAddRenderMaterial(rmat);
+        uint32_t rIdx = renderMaterials_.getOrAdd(rmat);
         
         PhysicsMaterial_ pmat{bType, mass, stiffness, breakForce, damping};
         uint16_t pIdx = obj->getOrAddPhysicsMaterial(pmat);
@@ -1769,15 +1804,14 @@ public:
         }
     }
 
-    bool updateRenderMaterial(int objectId, uint16_t index, const RenderMaterial& mat) {
-        auto obj = getObject(objectId);
-        if (!obj) return false;
+    bool updateRenderMaterial(int objectId, uint32_t index, const RenderMaterial& mat) {
         {
-            u_lock lock(obj->objMutex);
-            if (index >= obj->renderMaterials.size()) return false;
-            obj->renderMaterialIndex.erase(obj->renderMaterials[index]);
-            obj->renderMaterials[index] = mat;
-            obj->renderMaterialIndex[mat] = index;
+            u_lock lock(renderMaterials_.mutex);
+            if (index >= renderMaterials_.materials.size()) return false;
+            renderMaterials_.matMap.erase(renderMaterials_.materials[index]);
+            renderMaterials_.materials[index] = mat;
+            renderMaterials_.matMap[mat] = index;
+            ++renderMaterials_.version;
         }
         std::vector<std::shared_ptr<NodeData>> nodes;
         if (root_) collectNodesByObjectId(objectId, nodes);
@@ -1935,7 +1969,7 @@ public:
             }
             auto obj = getOrCreateObject(objectId);
             RenderMaterial mat(emittance, roughness, metallic, ior, absorp);
-            uint16_t rIdx = obj->getOrAddRenderMaterial(mat);
+            uint32_t rIdx = renderMaterials_.getOrAdd(mat);
             
             PhysicsMaterial_ pmat{bType, mass};
             uint16_t pIdx = obj->getOrAddPhysicsMaterial(pmat);
@@ -1993,6 +2027,15 @@ public:
         writeVec3(out, root_->bounds().second);
 
         {
+            s_lock matLock(renderMaterials_.mutex);
+            uint32_t numRMat = renderMaterials_.materials.size();
+            writeVal(out, numRMat);
+            for (const auto& mat : renderMaterials_.materials) {
+                writeVal(out, mat);
+            }
+        }
+
+        {
             s_lock lock(objectsMutex_);
             uint32_t numObjects = objects_.size();
             writeVal(out, numObjects);
@@ -2003,12 +2046,6 @@ public:
                 s_lock objLock(obj->objMutex);
                 writeVal(out, obj->objectFlags);
                 writeVec3(out, obj->centerPosition);
-                
-                uint32_t numRMat = obj->renderMaterials.size();
-                writeVal(out, numRMat);
-                for (const auto& mat : obj->renderMaterials) {
-                    writeVal(out, mat);
-                }
                 
                 uint32_t numPMat = obj->physicsMaterials.size();
                 writeVal(out, numPMat);
@@ -2049,6 +2086,20 @@ public:
         readVec3(in, maxBound);
 
         {
+            u_lock matLock(renderMaterials_.mutex);
+            renderMaterials_.materials.clear();
+            renderMaterials_.matMap.clear();
+            uint32_t numRMat = 0;
+            readVal(in, numRMat);
+            renderMaterials_.materials.resize(numRMat);
+            for (uint32_t j = 0; j < numRMat; ++j) {
+                readVal(in, renderMaterials_.materials[j]);
+                renderMaterials_.matMap[renderMaterials_.materials[j]] = j;
+            }
+            ++renderMaterials_.version;
+        }
+
+        {
             u_lock lock(objectsMutex_);
             objects_.clear();
             uint32_t numObjects = 0;
@@ -2059,13 +2110,6 @@ public:
                 auto obj = std::make_shared<GridObject>(id);
                 readVal(in, obj->objectFlags);
                 readVec3(in, obj->centerPosition);
-                
-                uint32_t numRMat;
-                readVal(in, numRMat);
-                obj->renderMaterials.resize(numRMat);
-                for (uint32_t j = 0; j < numRMat; ++j) {
-                    readVal(in, obj->renderMaterials[j]);
-                }
                 
                 uint32_t numPMat;
                 readVal(in, numPMat);
@@ -2196,8 +2240,8 @@ public:
         pointData->setActive(newActive);
         pointData->objectId = targetObjId;
         
-        auto obj = getOrCreateObject(targetObjId);
-        RenderMaterial mat = obj->getRenderMaterial(pointData->renderMatIdx);
+        getOrCreateObject(targetObjId);
+        RenderMaterial mat = renderMaterials_.get(pointData->renderMatIdx);
         
         if (newEmittance >= 0) mat.chromaticity = packRGB9E5(Vec3::Constant(newEmittance));
         if (newRoughness >= 0) mat.roughness = newRoughness;
@@ -2205,7 +2249,7 @@ public:
         if (newTransmission >= 0) pointData->color.w() = std::clamp(1.0f - newTransmission, 0.0f, 1.0f);
         if (newIor >= 0) sellmeierFromConstant(newIor, mat.sellB, mat.sellC);
         
-        pointData->renderMatIdx = obj->getOrAddRenderMaterial(mat);
+        pointData->renderMatIdx = renderMaterials_.getOrAdd(mat);
         
         bool res = insertRecursive(root_.get(), pointData, 0);
         
@@ -2324,10 +2368,9 @@ public:
     bool setEmittance(const Vec3& pos, const Vec3& chromaticity, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
-        auto obj = getOrCreateObject(pointData->objectId);
-        RenderMaterial mat = obj->getRenderMaterial(pointData->renderMatIdx);
+        RenderMaterial mat = renderMaterials_.get(pointData->renderMatIdx);
         mat.chromaticity = packRGB9E5(chromaticity);
-        pointData->renderMatIdx = obj->getOrAddRenderMaterial(mat);
+        pointData->renderMatIdx = renderMaterials_.getOrAdd(mat);
         invalidateLODForPoint(pointData);
         return true;
     }
@@ -2335,10 +2378,9 @@ public:
     bool setIor(const Vec3& pos, float ior, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
-        auto obj = getOrCreateObject(pointData->objectId);
-        RenderMaterial mat = obj->getRenderMaterial(pointData->renderMatIdx);
+        RenderMaterial mat = renderMaterials_.get(pointData->renderMatIdx);
         sellmeierFromConstant(ior, mat.sellB, mat.sellC);
-        pointData->renderMatIdx = obj->getOrAddRenderMaterial(mat);
+        pointData->renderMatIdx = renderMaterials_.getOrAdd(mat);
         invalidateLODForPoint(pointData);
         return true;
     }
@@ -2346,11 +2388,10 @@ public:
     bool setSellmeier(const Vec3& pos, const v3half& B, const v3half& C, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
-        auto obj = getOrCreateObject(pointData->objectId);
-        RenderMaterial mat = obj->getRenderMaterial(pointData->renderMatIdx);
+        RenderMaterial mat = renderMaterials_.get(pointData->renderMatIdx);
         mat.sellB = B;
         mat.sellC = C;
-        pointData->renderMatIdx = obj->getOrAddRenderMaterial(mat);
+        pointData->renderMatIdx = renderMaterials_.getOrAdd(mat);
         invalidateLODForPoint(pointData);
         return true;
     }
@@ -2358,10 +2399,9 @@ public:
     bool setRoughness(const Vec3& pos, float roughness, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
-        auto obj = getOrCreateObject(pointData->objectId);
-        RenderMaterial mat = obj->getRenderMaterial(pointData->renderMatIdx);
+        RenderMaterial mat = renderMaterials_.get(pointData->renderMatIdx);
         mat.roughness = roughness;
-        pointData->renderMatIdx = obj->getOrAddRenderMaterial(mat);
+        pointData->renderMatIdx = renderMaterials_.getOrAdd(mat);
         invalidateLODForPoint(pointData);
         return true;
     }
@@ -2369,10 +2409,9 @@ public:
     bool setMetallic(const Vec3& pos, float metallic, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
-        auto obj = getOrCreateObject(pointData->objectId);
-        RenderMaterial mat = obj->getRenderMaterial(pointData->renderMatIdx);
+        RenderMaterial mat = renderMaterials_.get(pointData->renderMatIdx);
         mat.metallic = metallic;
-        pointData->renderMatIdx = obj->getOrAddRenderMaterial(mat);
+        pointData->renderMatIdx = renderMaterials_.getOrAdd(mat);
         invalidateLODForPoint(pointData);
         return true;
     }
@@ -2386,18 +2425,15 @@ public:
     }
 
     void setMaterialByObjectId(int objectId, float emittance, float roughness, float metallic) {
-        auto obj = getOrCreateObject(objectId);
-        {
-            u_lock lock(obj->objMutex);
-            for (auto& mat : obj->renderMaterials) {
-                mat.chromaticity = packRGB9E5(Vec3::Constant(emittance));
-                mat.roughness = roughness;
-                mat.metallic = metallic;
-            }
-        }
+        getOrCreateObject(objectId);
         std::vector<std::shared_ptr<NodeData>> nodes;
         collectNodesByObjectId(objectId, nodes);
         for (auto& n : nodes) {
+            RenderMaterial mat = renderMaterials_.get(n->renderMatIdx);
+            mat.chromaticity = packRGB9E5(Vec3::Constant(emittance));
+            mat.roughness = roughness;
+            mat.metallic = metallic;
+            n->renderMatIdx = renderMaterials_.getOrAdd(mat);
             invalidateLODForPoint(n);
         }
     }

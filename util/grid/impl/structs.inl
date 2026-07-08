@@ -27,6 +27,12 @@ static constexpr uint8_t KEEPLOADED_BIT = 1 << 5;
 
 static constexpr uint8_t OBJ_ALLOW_PARTIAL_UNLOAD_BIT = 1 << 0;
 
+static constexpr int SELL_LUT_WAVELENGTHS = 32;
+static constexpr int SELL_LUT_SECONDARY   = 8;
+static constexpr float SELL_LMIN = 0.380f; // um
+static constexpr float SELL_LMAX = 0.720f; // um
+
+
 template<typename> struct is_shared_ptr : std::false_type {};
 template<typename T> struct is_shared_ptr<std::shared_ptr<T>> : std::true_type {};
 using Vec3 = Eigen::Vector3f;
@@ -77,6 +83,30 @@ static inline Vec3 unpackRGB9E5(uint32_t c) {
     float g = static_cast<float>((c >> 9) & 0x1FF) * scale;
     float b = static_cast<float>((c >> 18) & 0x1FF) * scale;
     return Vec3(r, g, b);
+}
+
+static inline uint32_t packRGB8(const Vec3& c) {
+    uint32_t r = static_cast<uint32_t>(std::clamp(c.x(), 0.0f, 1.0f) * 255.0f);
+    uint32_t g = static_cast<uint32_t>(std::clamp(c.y(), 0.0f, 1.0f) * 255.0f);
+    uint32_t b = static_cast<uint32_t>(std::clamp(c.z(), 0.0f, 1.0f) * 255.0f);
+    return r | (g << 8) | (b << 16);
+}
+
+static inline uint32_t packRGBA8(const Eigen::Vector4f& c) {
+    TIME_FUNCTION;
+    uint32_t r = static_cast<uint32_t>(std::clamp(c.x(), 0.0f, 1.0f) * 255.0f);
+    uint32_t g = static_cast<uint32_t>(std::clamp(c.y(), 0.0f, 1.0f) * 255.0f);
+    uint32_t b = static_cast<uint32_t>(std::clamp(c.z(), 0.0f, 1.0f) * 255.0f);
+    uint32_t a = static_cast<uint32_t>(std::clamp(c.w(), 0.0f, 1.0f) * 255.0f);
+    return r | (g << 8) | (b << 16) | (a << 24);
+}
+
+static inline uint32_t packMaterialProps(float roughness, float metallic, uint32_t sellmeierRow) {
+    TIME_FUNCTION;
+    uint32_t r8 = static_cast<uint32_t>(std::clamp(roughness, 0.0f, 1.0f) * 255.0f);
+    uint32_t m8 = static_cast<uint32_t>(std::clamp(metallic, 0.0f, 1.0f) * 255.0f);
+    uint32_t row16 = sellmeierRow & 0xFFFFu;
+    return r8 | (m8 << 8) | (row16 << 16);
 }
 
 template<typename V>
@@ -319,6 +349,13 @@ static inline void sellmeierFromConstant(float n, v3half& B, v3half& C) {
     }
 }
 
+struct alignas(16) GPUMaterial {
+    uint32_t chromaticity; //RBG9E5
+    uint32_t materialProps; //8 bits for roughness. 8 for metallicity. 8 for ior. 8 for ???
+    uint32_t absorption; //RBG9E5
+    uint32_t albedo; //rgb9e5
+};
+
 struct RenderMaterial {
     uint32_t chromaticity;
     float roughness;
@@ -368,6 +405,45 @@ struct RenderMaterial {
     }
 };
 
+static inline std::vector<float> buildSellmeierLUT(const std::vector<Grid::RenderMaterial>& mats) {
+    TIME_FUNCTION;
+    int rows = std::max<size_t>(1, mats.size()) * SELL_LUT_SECONDARY;
+    std::vector<float> lut(static_cast<size_t>(rows) * SELL_LUT_WAVELENGTHS, 1.0f);
+    for (size_t mi = 0; mi < mats.size(); ++mi) {
+        const auto& m = mats[mi];
+        for (int s = 0; s < SELL_LUT_SECONDARY; ++s) {
+            int row = static_cast<int>(mi) * SELL_LUT_SECONDARY + s;
+            for (int w = 0; w < SELL_LUT_WAVELENGTHS; ++w) {
+                float f = (SELL_LUT_WAVELENGTHS == 1) ? 0.0f : float(w) / float(SELL_LUT_WAVELENGTHS - 1);
+                float lambda = SELL_LMIN + f * (SELL_LMAX - SELL_LMIN);
+                lut[static_cast<size_t>(row) * SELL_LUT_WAVELENGTHS + w] = Grid::sellmeierN(m.sellB, m.sellC, lambda);
+            }
+        }
+    }
+    return lut;
+}
+
+static inline void buildGPUMaterialCache(const std::vector<Grid::RenderMaterial>& mats, std::vector<GPUMaterial>& outGpu,
+                                         std::vector<float>& outSellLUT, size_t& outSellRows) {
+    TIME_FUNCTION;
+    outGpu.clear();
+    outGpu.reserve(mats.size() + 1);
+    for (size_t mi = 0; mi < mats.size(); ++mi) {
+        const auto& m = mats[mi];
+        uint32_t sellRow = static_cast<uint32_t>(mi) * SELL_LUT_SECONDARY;
+        outGpu.push_back({
+            m.chromaticity,
+            packMaterialProps(m.roughness, m.metallic, sellRow),
+            packRGB9E5(m.absorption),
+            0u
+        });
+    }
+    outGpu.push_back(GPUMaterial{});
+
+    outSellLUT = buildSellmeierLUT(mats);
+    outSellRows = std::max<size_t>(1, mats.size()) * SELL_LUT_SECONDARY;
+}
+
 struct RMatHash {
     size_t operator()(const RenderMaterial& m) const {
         std::hash<float> hf;
@@ -381,6 +457,84 @@ struct RMatHash {
         for (int j = 0; j < 3; ++j)
             h ^= hf(m.absorption[j]) + 0x9e3779b9 + (h << 6) + (h >> 2);
         return h;
+    }
+};
+
+struct RenderMaterialStore {
+    std::vector<RenderMaterial> materials;
+    std::unordered_map<RenderMaterial, uint32_t, RMatHash> matMap;
+    mutable std::shared_mutex mutex;
+    uint64_t version = 1;
+    struct GPUCache {
+        uint64_t builtVersion = 0; // 0 == never built
+        std::vector<GPUMaterial> gpuMaterials;
+        std::vector<float> sellmeierLUT;
+        size_t sellmeierRows = 0;
+    };
+    GPUCache gpuCache;
+    std::mutex gpuCacheMutex;
+
+    uint32_t getOrAdd(const RenderMaterial& renderMat) {
+        {
+            s_lock readLock(mutex);
+            auto a = matMap.find(renderMat);
+            if (a != matMap.end()) return a->second;
+        }
+
+        if (materials.size() < std::numeric_limits<uint32_t>::max()) {
+            u_lock writeLock(mutex);
+            auto a = matMap.find(renderMat);
+            if (a != matMap.end()) return a->second;
+            uint32_t newIndex = static_cast<uint32_t>(materials.size());
+            materials.push_back(renderMat);
+            matMap[renderMat] = newIndex;
+            ++version;
+            return newIndex;
+        } else {
+            s_lock readLock(mutex);
+            uint32_t bestIndex = 0;
+            float dist = std::numeric_limits<float>::max();
+            for (uint32_t i = 0; i < static_cast<uint32_t>(materials.size()); ++i) {
+                float dist2 = materials[i].dist(renderMat);
+                if (dist2 < dist) {
+                    dist = dist2;
+                    bestIndex = i;
+                }
+            }
+            return bestIndex;
+        }
+    }
+
+    RenderMaterial get(uint32_t idx) const {
+        s_lock lock(mutex);
+        if (idx < materials.size()) return materials[idx];
+        return RenderMaterial();
+    }
+
+    size_t size() const {
+        s_lock lock(mutex);
+        return materials.size();
+    }
+
+    template<typename Builder>
+    void retrieveGPUMaterials(Builder&& builder, const std::vector<GPUMaterial>*& outMaterials,
+                              const std::vector<float>*& outSellLUT, size_t& outSellRows) {
+        std::vector<RenderMaterial> snapshot;
+        uint64_t storeVersion;
+        {
+            s_lock readLock(mutex);
+            storeVersion = version;
+            snapshot = materials;
+        }
+
+        std::lock_guard<std::mutex> cacheLock(gpuCacheMutex);
+        if (gpuCache.builtVersion != storeVersion || gpuCache.gpuMaterials.empty()) {
+            builder(snapshot, gpuCache.gpuMaterials, gpuCache.sellmeierLUT, gpuCache.sellmeierRows);
+            gpuCache.builtVersion = storeVersion;
+        }
+        outMaterials = &gpuCache.gpuMaterials;
+        outSellLUT = &gpuCache.sellmeierLUT;
+        outSellRows = gpuCache.sellmeierRows;
     }
 };
 
@@ -427,8 +581,6 @@ struct GridObject_ {
     uint8_t objectFlags;
     Vec3 centerPosition = Vec3::Zero();
 
-    std::vector<RenderMaterial> renderMaterials;
-    std::unordered_map<RenderMaterial, uint16_t, RMatHash> renderMatMap;
     std::vector<PhysicsMaterial_> physicsMaterials;
     std::unordered_map<PhysicsMaterial_, uint16_t, PMatHash> physicsMatMap;
 
@@ -444,40 +596,6 @@ struct GridObject_ {
     void setPartialUnloadAllowed(bool v) {
         if (v) objectFlags |= OBJ_ALLOW_PARTIAL_UNLOAD_BIT;
         else objectFlags &= ~OBJ_ALLOW_PARTIAL_UNLOAD_BIT;
-    }
-
-    uint16_t getOrAddRenderMaterial(const RenderMaterial& renderMat) {
-        {
-            s_lock readLock(objMutex);
-            auto a = renderMatMap.find(renderMat);
-            if (a != renderMatMap.end()) {
-                return a->second;
-            }
-        }
-
-        if (renderMaterials.size() < std::numeric_limits<uint16_t>::max()) {
-            u_lock writeLock(objMutex);
-            auto a = renderMatMap.find(renderMat);
-            if (a != renderMatMap.end()) {
-                return a->second;
-            }
-            uint16_t newIndex = static_cast<uint16_t>(renderMaterials.size());
-            renderMaterials.push_back(renderMat);
-            renderMatMap[renderMat] = newIndex;
-            return newIndex;
-        } else {
-            s_lock readLock(objMutex);
-            uint16_t bestIndex = 0;
-            float dist = std::numeric_limits<float>::max();
-            for (uint16_t i = 0; i < static_cast<uint16_t>(renderMaterials.size()); ++i) {
-                float dist2 = renderMaterials[i].dist(renderMat);
-                if (dist2 < dist) {
-                    dist = dist2;
-                    bestIndex = i;
-                }
-            }
-            return bestIndex;
-        }
     }
 
     uint16_t getOrAddPhysicsMaterial(const PhysicsMaterial_& pmat) {
@@ -514,12 +632,6 @@ struct GridObject_ {
         }
     }
     
-    RenderMaterial getRenderMaterial(uint16_t idx) const {
-        s_lock lock(objMutex);
-        if (idx < renderMaterials.size()) return renderMaterials[idx];
-        return RenderMaterial();
-    }
-    
     PhysicsMaterial_ getPhysicsMaterial(uint16_t idx) const {
         s_lock lock(objMutex);
         if (idx < physicsMaterials.size()) return physicsMaterials[idx];
@@ -534,13 +646,13 @@ struct NodeData_ {
     int objectId;
     float size;
     Eigen::Vector4f color;
-    uint16_t renderMatIdx;
+    uint32_t renderMatIdx;
     uint16_t physMatIdx;
     std::atomic<uint8_t> flags;
     PhysicsState_<T> physics;
 
     NodeData_(const T& data, const Vec3& pos, bool visible, const Eigen::Vector4f& color, float size = 0.01f,
-                bool active = true, int objectId = -1, uint16_t rIdx = 0, uint16_t pIdx = 0, bool staticbit = 0) 
+                bool active = true, int objectId = -1, uint32_t rIdx = 0, uint16_t pIdx = 0, bool staticbit = 0) 
             : data(data), position(pos), objectId(objectId), size(size), 
                 color(color), renderMatIdx(rIdx), physMatIdx(pIdx), flags(0) {
         setActive(active);

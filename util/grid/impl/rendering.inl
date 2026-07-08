@@ -52,14 +52,12 @@ struct RenderBuffer_ {
     std::vector<RenderNode_<T>> nodes;
     std::vector<RenderData> points;
     std::vector<RenderMaterial> materials;
-    std::unordered_map<int, uint32_t> objMaterialOffsets;
     uint32_t defaultMatIdx;
 
     void clear() {
         nodes.clear();
         points.clear();
         materials.clear();
-        objMaterialOffsets.clear();
     }
 };
 
@@ -77,13 +75,6 @@ static constexpr uint32_t WF_COUNTER_SIZE  = 16 * sizeof(uint32_t);
 static constexpr VkDeviceSize WF_OFF_EXTEND_ARGS = 16;
 static constexpr VkDeviceSize WF_OFF_SHADE_ARGS  = 32;
 static constexpr VkDeviceSize WF_OFF_SHADOW_ARGS = 48;
-
-struct alignas(16) GPUMaterial {
-    uint32_t chromaticity; //RBG9E5
-    uint32_t materialProps; //8 bits for roughness. 8 for metallicity. 8 for ior. 8 for ???
-    uint32_t absorption; //RBG9E5
-    uint32_t albedo; //rgb9e5
-};
 
 struct alignas(16) GPURenderData {
     Vec3 position;
@@ -1508,6 +1499,7 @@ void initWavefront() {
 }
 
 void ensureWavefrontBuffers(uint32_t maxPaths) {
+    TIME_FUNCTION; //this probably shouldnt be called every tile.
     if (maxPaths <= wfPathCap && wfPathBuf) return;
     destroyBuffer(device, wfPathBuf, wfPathMem);
     destroyBuffer(device, wfPathHitBuf, wfPathHitMem);
@@ -1531,6 +1523,7 @@ void ensureWavefrontBuffers(uint32_t maxPaths) {
 }
 
 void writeWavefrontDescriptors() {
+    TIME_FUNCTION; //this probably shouldnt be called every tile.
     VkDescriptorBufferInfo bi[17] = {};
     bi[0]  = {uboBuffer,      0, VK_WHOLE_SIZE};
     bi[1]  = {pbrPointBuffer, 0, VK_WHOLE_SIZE};
@@ -1596,6 +1589,7 @@ void wfPush(VkCommandBuffer cmd, int parity, int stage, int sampleIndex) {
 }
 
 void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel, int sampleStart = 0) {
+    TIME_FUNCTION;
     uint32_t maxPaths = uint32_t(tileW) * uint32_t(tileH);
     if (maxPaths == 0 || samplesPerPixel <= 0) return;
     ensureWavefrontBuffers(maxPaths);
