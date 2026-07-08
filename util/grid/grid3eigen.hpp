@@ -1736,19 +1736,12 @@ public:
         return pt->renderMatIdx;
     }
 
-    ///@brief Looks up dynamic material physical rules registry array index ID mapping for node
-    ///@param pos Precise coordinate spatial bounding block target location
-    ///@param tolerance Distance tolerance handling floating point precision drift
-    ///@return Index mapping value mapped internally or -1 failure representation
     int getPhysicsMaterialIndex(const Vec3& pos, float tolerance = 0.0001f) {
         auto pt = find(pos, tolerance);
         if (!pt) return -1;
         return pt->physMatIdx;
     }
     
-    ///@brief Isolates all discrete octree memory structures grouping them functionally by mapping ID
-    ///@param id Specific relation grouping target mapping tag
-    ///@param results Collection vector array handling final derived data matches
     void collectNodesByObjectId(int id, std::vector<std::shared_ptr<NodeData>>& results) {
         auto obj = getObject(id);
         if (!obj) return;
@@ -1776,11 +1769,6 @@ public:
         }
     }
 
-    ///@brief Rewrites a specifically bound object group underlying rendering materials parameters entirely
-    ///@param objectId Related structural chunk mapped identification signature
-    ///@param index Designated override targeting target parameter map struct ID
-    ///@param mat Full custom configured representation rules to enforce
-    ///@return Status mapping true denoting explicit modification application executed properly
     bool updateRenderMaterial(int objectId, uint16_t index, const RenderMaterial& mat) {
         auto obj = getObject(objectId);
         if (!obj) return false;
@@ -1796,12 +1784,7 @@ public:
         for (auto& n : nodes) invalidateLODForPoint(n);
         return true;
     }
-
-    ///@brief Refactors existing assigned dynamics properties for particular mapped element groups globally
-    ///@param objectId Structural root linking target parameter scope identification index
-    ///@param index Reference map value indexing array
-    ///@param pmat Completely configured data set struct detailing limits applied
-    ///@return True proving correct resolution executing logic parameter swaps mapping
+    
     bool updatePhysicsMaterial(int objectId, uint16_t index, const PhysicsMaterial_& pmat) {
         auto obj = getObject(objectId);
         if (!obj) return false;
@@ -1816,11 +1799,6 @@ public:
         return true;
     }
 
-    ///@brief Applies raw geometric coordinate transform spinning structure around a relative center map
-    ///@param objectId The block cluster mapped group ID signature index target
-    ///@param rotation Defined 3x3 dimensional transformation matrix logic mapping offsets
-    ///@param pivot Designated spatial coordinate fixing the center bounding rotational mapping
-    ///@return Verification denoting success executing complex object modification mapping sequences
     bool rotateObject(int objectId, const Eigen::Matrix3f& rotation, const Vec3& pivot) {
         if (!root_) return false;
         std::vector<std::shared_ptr<NodeData>> nodes;
@@ -1864,28 +1842,19 @@ public:
         return true;
     }
 
-    ///@brief Triggers geometric translation sequence strictly referencing internal dynamic center offsets
-    ///@param objectId Mapped logical grouping structure identification value targeting execution
-    ///@param rotation Fully designated matrix mapping bounds transformations values
-    ///@return Verification logic identifying valid object bounds modifications application successes
     bool rotateObjectCenter(int objectId, const Eigen::Matrix3f& rotation) {
         auto obj = getObject(objectId);
         if (!obj) return false;
         return rotateObject(objectId, rotation, obj->centerPosition);
     }
 
-    ///@brief Deep geometric routine halving each active mapped internal block splitting 1 into 8 parts precisely
-    ///@param objectId Mapping tag logic pulling matching block configurations targeting split
-    ///@return Logic validating sub-mesh fragmentation operations successfully mapping new allocations
     bool subdivideObject(int objectId) {
         if (!root_) return false;
         std::vector<std::shared_ptr<NodeData>> nodes;
         OctreeNode* oldStart = collectNodesByObjectId(objectId, nodes);
         if (nodes.empty()) return false;
 
-        // BoundingBox oldBounds = getNodesBounds(nodes);
         int oldDepth = 0;
-        // OctreeNode* oldStart = getHighestCommonNode(root_.get(), oldBounds, 0, oldDepth);
 
         size_t removed = removeObjectBatchRecursive(oldStart, objectId);
         size -= removed;
@@ -1914,9 +1883,6 @@ public:
         return true;
     }
 
-    ///@brief Fragment structural sub-chunks further removing sharp unmapped corners providing surface smoothing mappings
-    ///@param objectId Mapped internal identification signature targeting elements for edge deletion logic
-    ///@return Status proving block trimming logic functionally adjusted specific exterior boundary segments correctly
     bool smoothObject(int objectId) {
         if (!subdivideObject(objectId)) return false;
 
@@ -1959,22 +1925,6 @@ public:
         return true;
     }
 
-    ///@brief Thread-deferred generation routing data mappings executing node insertions outside frame stalls asynchronously
-    ///@param data Template structured core representation details defining block limits mapping characteristics
-    ///@param pos Assigned spatial placement mapping the exact volume limits configured internally
-    ///@param visible Render toggle limiting evaluation iterations avoiding invisible blocks entirely completely
-    ///@param color Mapped RGB color layout configuration for basic proxy visual outputs mapping representation
-    ///@param size Radius limits establishing block extent scale geometry mathematically defining the shape bounds
-    ///@param active Toggle parameter activating simulation metrics evaluating boundaries dynamically internally mappings
-    ///@param objectId Specific related configuration array offset linking structures mappings groups explicitly logically
-    ///@param emittance Multiplier values defining glowing luminance strength representations dynamically configured limits
-    ///@param roughness Physical structural representation mapping micro scattering reflection simulation constraints values
-    ///@param metallic Configuration parameters detailing pure optical reflection mappings bounds scaling values limits
-    ///@param transmission Mapping parameter defining transparency block optical density metrics evaluation calculations limits
-    ///@param ior Configured refractive value index bounding physical light path simulations mapping internal rules limit
-    ///@param absorp Multi parameter structural light spectrum shift metrics bounding evaluation logic parameters mapping
-    ///@param bType Physical rigid structural dynamic classification flag scaling interactions mapping properties evaluation
-    ///@param mass Multiplier for specific density interactions bounding simulated kinetic interactions properties mapping limits
     void queuedset(const T& data, const Vec3& pos, bool visible, Vec3 color, float size = 0.01f, bool active = true,
              int objectId = -1, float emittance = 0.0f, float roughness = 1.0f, float metallic = 0.0f, float transmission = 0.0f,
              float ior = 1.45f, Vec3 absorp = Vec3::Zero(),
@@ -2012,8 +1962,6 @@ public:
         });
     }
 
-    ///@brief Instructs background worker sequences executing active distance sorting operations dynamically mapping loaded limits completely
-    ///@param cam Primary rendering perspective matrix object mapping boundaries defining distance sorting evaluations rules internally configuring values
     void updateStreaming(const Camera& cam) {
         if (streamingQueued_.exchange(true, std::memory_order_acquire)) return;
         Vec3 camPos = cam.origin;
@@ -2026,9 +1974,6 @@ public:
         });
     }
 
-    ///@brief Dumps raw explicit structured layouts parsing exact parameters configuring mapping memory configurations completely directly fully
-    ///@param filename Configuration path limits referencing mapped files defining saving targets exactly executing fully completely limits bounding string parameters
-    ///@return Status metrics defining if execution sequences properly evaluated targets executing commands completely properly returning values configured values bounds limit mappings
     bool save(const std::string& filename) {
         if (!root_) return false;
 
@@ -2081,9 +2026,6 @@ public:
         return true;
     }
 
-    ///@brief Parses external serialized exact mapping parameters replacing internal states accurately reproducing memory setups directly completely mappings
-    ///@param filename Target defined OS location explicitly mapped resolving input stream execution parameters properly configuring boundaries entirely returning bounds values configurations mapped limits properly sequences values parameters limits
-    ///@return Execution flag defining whether sequences completed operations explicitly passing completely executing limits parameters properly configurations values mappings properly values explicitly limits properly
     bool load(const std::string& filename) {
         std::ifstream in(filename, std::ios::binary);
         if (!in) return false;
@@ -2143,39 +2085,19 @@ public:
         return true;
     }
 
-    ///@brief Resolves precise point bounds executing recursive location search logic parameters resolving targets properly fully mappings limits properly resolving outputs properly completely accurately exactly values mapped parameters
-    ///@param pos The 3D relative mapping spatial targeting evaluation value completely bounding execution parameters correctly sequences limits mapped configurations limits bounds properly mapped limit values values configuring properly executing mappings configurations
-    ///@param objectId Identity filter logic mappings exactly properly filtering explicit configurations bounding limits bounds parameters completely resolving mappings sequences properly accurately bounding values configurations parameters bounds exactly
-    ///@param tolerance Floating error limits passing mappings thresholds configurations accurately parameters mapped limits boundaries completely
-    ///@param node Optimization entry mapping point bypassing root level constraints mapping sequences completely properly parameters values limits bounds configurations properly
-    ///@return Pointer structure exactly resolving data chunk parameters mapped properly entirely exactly limits
     std::shared_ptr<NodeData> find(const Vec3& pos, int objectId = -2, float tolerance = EPSILON, OctreeNode* node = nullptr) {
         if (!node) node = root_.get();
         return findRecursive(node, pos, objectId, tolerance);
     }
 
-    ///@brief Variant search logic bypassing root forcing explicit node entry operations resolving values exact configurations parameters properly mapping limits mapped exactly parameters resolving fully sequences bounds properly boundaries limits limits values bounds boundaries limits
-    ///@param pos Coordinate target parameters evaluating spatial bounds accurately mapping mapped properly completely boundaries sequences limits parameters mapping boundaries limits limits boundaries parameters resolving configurations configurations
-    ///@param node Root logic entry bypassing optimization targeting limits parameters boundaries properly bounds values properly limits limits limits parameters values values limits parameters values boundaries limits mapping mapped boundaries limits limits resolving boundaries boundaries limits mapping resolving limits limits limits limits mapping mapping boundaries mapping limits
-    ///@param objectId Target tag evaluation resolving sequences limits
-    ///@param tolerance Precision deviation boundaries parameters limits
-    ///@return Pointer parameters resolving data outputs mapping explicitly mapped values sequences boundaries properly
     std::shared_ptr<NodeData> findwNode(const Vec3& pos, OctreeNode* node, int objectId = -2, float tolerance = EPSILON) {
-        // node = root_.get();
         return findRecursive(node, pos, objectId, tolerance);
     }
 
-    ///@brief Mathematical bounds checker verifying point positions mapping boundaries inside root octree geometries logic mapped mappings fully completely values boundaries parameters
-    ///@param pos Coordinates bounding mapping validation limits bounds
-    ///@return True executing internal mapping parameters bounds limits limits
     bool inGrid(Vec3 pos) {
         return root_->contains(pos);
     }
 
-    ///@brief Wipes exact component mapped logic parameters resolving exact memory sequences resolving bounds explicitly mapped properly boundaries properly values completely mapping bounds limits parameters fully values
-    ///@param pos Target explicit coordinate limits mapped mapped boundaries parameters fully mapping boundaries sequences
-    ///@param tolerance Error scale bounds limits parameters mapped mapped mapping completely fully boundaries limits mapped mapping
-    ///@return True proving deletion mappings correctly boundaries properly
     bool remove(const Vec3& pos, float tolerance = EPSILON) {
         auto pt = find(pos, tolerance);
         if (!pt) return false;
@@ -2186,11 +2108,6 @@ public:
         return false;
     }
 
-    ///@brief Radius collection parameters extracting bounds values bounds sequences fully completely limits limits mapping boundaries fully mapping bounds limits mapped sequences mapped boundaries parameters limits properly properly bounds mapping mapped boundaries mapped mapping boundaries parameters mapping
-    ///@param center Pivot boundary mapped values limits boundaries limits bounds limits boundaries limits mapped limits properly bounds mapping
-    ///@param radius Distant extent limits properly limits mapping mapped boundaries limits parameters mapping parameters mapping boundaries bounds boundaries mapped limits mapping mapped parameters limits boundaries properly
-    ///@param objectid Target filtering limits parameters mapping boundaries properly mapped mapped bounds limits boundaries
-    ///@return Group mapping parameters limits boundaries values mapped bounds properly mapped mapping mapped boundaries properly limits bounds limits bounds limits mapped mapping mapped limits limits boundaries bounds limits mapping boundaries mapping boundaries bounds boundaries mapped limits mapping mapped mapped bounds limits boundaries mapped limits mapping limits boundaries properly limits mapping mapped mapped limits boundaries limits bounds limits limits limits boundaries mapping limits boundaries bounds limits boundaries mapped boundaries mapped mapping boundaries
     std::vector<std::shared_ptr<NodeData>> findInRadius(const Vec3& center, float radius, int objectid = -1) {
         std::vector<std::shared_ptr<NodeData>> results;
         
@@ -2202,10 +2119,6 @@ public:
         return results;
     }
     
-    ///@brief Modifies structural physics tags forcing mapping values sequences bounds parameters mapped completely limits properly bounds mapped values boundaries mapping boundaries parameters limits boundaries mapped properly mapping mapped mapping mapped boundaries properly mapping limits limits limits mapping mapping boundaries mapping mapped mapped mapping limits limits bounds boundaries limits mapping boundaries mapped mapped mapped limits mapping mapped
-    ///@param objectId Target group configuration boundaries limits mapping properly mapped limits properly boundaries boundaries limits mapped bounds properly mapped limits properly bounds mapped boundaries properly mapping mapped bounds bounds mapping mapped mapping bounds mapping
-    ///@param newMass Override configuration mapped values limits boundaries mapping boundaries limits mapped mapping mapped limits boundaries
-    ///@param newType Flag switching logic limits parameters mapping limits properly boundaries limits mapping properly limits bounds limits mapping boundaries bounds boundaries mapping mapped mapping boundaries mapped bounds boundaries limits mapping mapped mapping mapping boundaries mapped mapping limits bounds mapped bounds limits mapped mapping boundaries mapped mapping limits mapped mapped bounds mapping limits boundaries boundaries mapping limits
     void makeObjectFluid(int objectId, float newMass, BodyType newType = BodyType::FLUID) {
         std::vector<std::shared_ptr<NodeData>> nodes;
         collectNodesByObjectId(objectId, nodes);
@@ -2225,14 +2138,10 @@ public:
         physicsCollidersDirty_.store(true);
     }
 
-    ///@brief Flags global state mappings properly bounds boundaries properly mapping boundaries mapping limits bounds mapped bounds mapping limits boundaries mapping properly mapping boundaries boundaries mapped limits limits boundaries mapping limits mapped mapping boundaries mapped boundaries limits mapped mapped mapping
     void markPhysicsCollidersDirty() {
         physicsCollidersDirty_.store(true);
     }
 
-    ///@brief Extracts non-owning references mapping parameters completely limits boundaries limits mapping mapped bounds bounds limits boundaries limits mapped limits properly mapping properly mapping boundaries mapped mapped mapping limits mapped bounds mapped mapped mapping limits bounds mapping mapped mapped mapping mapped limits mapping mapped
-    ///@param objectId The grouped identifier mapped limits boundaries limits bounds mapping mapping limits mapped mapped mapping limits limits mapping limits mapping bounds mapped mapped limits mapped limits mapping limits mapping mapping mapped limits limits limits bounds mapped mapped limits bounds mapping mapping limits
-    ///@return Extracted pointers mapping parameters mapping limits mapping mapping boundaries mapping limits boundaries boundaries bounds limits mapped mapping limits mapping limits limits mapped bounds mapped mapped limits limits mapped bounds mapped mapping boundaries limits mapped bounds mapped bounds mapped mapping mapped
     std::vector<std::weak_ptr<NodeData>> getWeakNodesByObjectId(int objectId) {
         std::vector<std::shared_ptr<NodeData>> nodes;
         if (root_) collectNodesByObjectId(objectId, nodes);
@@ -2242,10 +2151,6 @@ public:
         return weakNodes;
     }
 
-    ///@brief Immediately overrides target data configurations mappings parameters limits mapping boundaries limits mapping mapped limits boundaries limits mapped limits properly mapping mapped boundaries mapping mapped mapped bounds bounds bounds mapping mapped mapping mapping limits mapping mapped limits mapped
-    ///@param pos The precise lookup parameter mapping targets
-    ///@param newData Complete template swap limits mapping mapped mapping limits mapping bounds mapped mapped mapping mapping limits mapping limits mapped limits mapping mapped mapped bounds mapped mapping limits
-    ///@return True on successful locating mapped mapping mapping limits mapping bounds bounds mapped mapping limits
     bool update(const Vec3& pos, const T& newData) {
         auto pointData = find(pos);
         if (!pointData) return false;
@@ -2254,9 +2159,6 @@ public:
         return true;
     }
 
-    ///@brief Background queued task applying generic template data mappings properly mapped mapping limits mapped mapping mapped mapped boundaries mapping mapped limits mapped bounds mapped bounds mapped bounds mapping mapping limits
-    ///@param pos Lookup bounds parameters limits mapping mapping bounds mapping mapped limits mapping mapped mapping limits bounds mapping mapped
-    ///@param newData New structure mapped mappings mapping bounds mapping limits mapped bounds mapped bounds mapped
     void queuedupdate(const Vec3 pos, const T newData) {
         enqueueTask([this, pos, newData]() {
             OctreeNode* node = root_.get();
@@ -2271,22 +2173,6 @@ public:
         });
     }
 
-    ///@brief Robust granular update mapping massive scale configuration overrides limits mapped limits boundaries limits mapped mapped mapped bounds mapped boundaries limits mapped mapped mapping bounds mapped mapped mapping mapped mapping mapped limits mapped mapped mapping bounds mapped mapped mapping mapped mapping bounds mapped limits mapping bounds
-    ///@param oldPos Exact search metric mappings mapped mapping
-    ///@param newPos Updated location mappings mapped bounds mapped
-    ///@param newData Template mapping payload values
-    ///@param newVisible Render boundary toggle overrides mapped
-    ///@param newColor RGB mapping overrides
-    ///@param newSize Bounding limits redefinition values mapped mapped mapping
-    ///@param newActive Simulation state override limit mapped mapping
-    ///@param newObjectId Group structural ID mapping configuration properly mapped
-    ///@param newEmittance Illumination limits limits mapped bounds
-    ///@param newRoughness Material bounds limit mapping mapped
-    ///@param newMetallic Render property limits mapping mapped bounds mapped mapping
-    ///@param newTransmission Transparency override configuration bounds mapped
-    ///@param newIor Optics re-configuration bounds bounds mapped mapping limits mapping mapped
-    ///@param tolerance Drift mapping offset limitations mapping mapped mapping limits mapping mapped bounds mapped mapping limits mapped
-    ///@return Status mapping limits properly resolving mappings boundaries mapped bounds bounds mapping mapped mapping mapped limits mapped limits mapping limits mapping bounds mapping limits mapping mapped mapped mapping limits
     bool update(const Vec3& oldPos, const Vec3& newPos, const T& newData, bool newVisible = true, 
                 Vec3 newColor = Vec3(1.0f, 1.0f, 1.0f), float newSize = 0.01f, bool newActive = true,
                 int newObjectId = -2, float newEmittance = -1.0f, float newRoughness = -1.0f, 
@@ -2330,10 +2216,6 @@ public:
         return res;
     }
 
-    ///@brief Repositions limits bounds mapping mappings mapping bounds mapped mapped mapping limits mapped mapped mapping
-    ///@param pos Source lookup logic mapped mapped mapping limits mapped mapping
-    ///@param newPos Destination bounds parameters limits mapped bounds mapped mapped mapping limits mapped mapping
-    ///@return Success mapped flags mapping mapped limits mapped mapped mapping
     bool move(const Vec3& pos, const Vec3& newPos) {
         auto pointData = find(pos);
         if (!pointData) return false;
@@ -2348,9 +2230,6 @@ public:
         return false;
     }
 
-    ///@brief Deferred spatial shifting logic mapped mapped bounds bounds mapped bounds mapped mapping bounds limits mapping mapped mapping
-    ///@param pos Active mapping mapped target mapping limits
-    ///@param newPos Override mapping limits limits bounds bounds bounds limits mapped mapping mapped limits mapped mapped mapping mapped
     void queuedmove(const Vec3 pos, const Vec3 newPos) {
         enqueueTask([this, pos, newPos]() {
             auto pointData = find(pos);
@@ -2367,10 +2246,6 @@ public:
         });
     }
 
-    ///@brief Deferred mapping sequence swapping placement and generic template structures properly mapping limits limits mapped bounds bounds mapped bounds
-    ///@param pos Origin configuration parameters mapping
-    ///@param newPos Final bound limits parameters mapping mapping mapped bounds mapped
-    ///@param newData Embedded template parameter mapping configurations limits mapped mapping limits mapping mapped
     void queuedupdate(const Vec3 pos, const Vec3 newPos, const T newData) {
         enqueueTask([this, pos, newPos, newData]() {
             auto pointData = find(pos);
@@ -2388,11 +2263,6 @@ public:
         });
     }
 
-    ///@brief Directly assigns block mapping relationships bounds mapped mapping limits bounds mapping mapped mapped bounds bounds mapped mapping mapped bounds
-    ///@param pos Point mapping mapped search mapped boundaries mapped limits
-    ///@param objectId Target identity offset mapping bounds mapped mapping mapped bounds mapping
-    ///@param tolerance Precision offset bounds limits mapped limits mapped mapped mapping bounds mapped mapping
-    ///@return Status returning properly bounds mapping limits mapping mapped mapping mapped bounds mapped mapping
     bool setObjectId(const Vec3& pos, int objectId, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
@@ -2401,11 +2271,6 @@ public:
         return true;
     }
 
-    ///@brief Explicitly overrides single nested mapped mapping values properly bounds mapping mapped mapped bounds mapped mapping limits mapped mapped mapping mapped limits
-    ///@param pos Search anchor mappings mapping
-    ///@param newData Template limits bounds mapping values
-    ///@param tolerance Precision error allowance bounds mapping mapping limits mapped bounds mapped mapped mapping limits
-    ///@return Success states limits mapping boundaries mapping mapped limits mapped mapped bounds mapping limits
     bool updateData(const Vec3& pos, const T& newData, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
@@ -2414,11 +2279,6 @@ public:
         return true;
     }
 
-    ///@brief Overrides active simulation constraints limits mapped mapped bounds bounds mapped limits mapped mapping mapped mapping
-    ///@param pos Lookup bounds mappings limits mapped limits bounds
-    ///@param active Toggle mappings bounds mapped boundaries mapped mapped bounds mapping limits mapped
-    ///@param tolerance Lookup scale mapping bounds limits mapping mapped mapping mapped mapped
-    ///@return Valid status limit flags
     bool setActive(const Vec3& pos, bool active, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
@@ -2427,11 +2287,6 @@ public:
         return true;
     }
 
-    ///@brief Adjusts optical parsing rendering flags mapped mapping boundaries bounds mapped mapped mapping limits mapping limits mapped bounds mapped mapping mapped
-    ///@param pos Lookup mappings mapping boundaries bounds limits
-    ///@param visible Render flag mapping mapping mapped bounds limits mapped mapping mapped
-    ///@param tolerance Deviation lookup scale values limits mapping
-    ///@return Returns limit validation mapping bounds
     bool setVisible(const Vec3& pos, bool visible, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
@@ -2440,11 +2295,6 @@ public:
         return true;
     }
 
-    ///@brief Updates core color fallback array constraints mapping bounds mapped limits limits mapped mapping mapped limits
-    ///@param pos Coordinates searching bounds limits mapping
-    ///@param color 3-Channel RGB structure mapped
-    ///@param tolerance Distance parameters bounding limits limits mapped mapping limits
-    ///@return Mod validation mapping
     bool setColor(const Vec3& pos, Vec3 color, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
@@ -2453,10 +2303,6 @@ public:
         return true;
     }
 
-    ///@brief Defers color update background logic maps bounding values
-    ///@param pos Lookup mapping coordinates
-    ///@param color RBG structures mapping
-    ///@param tolerance Deviation parameters mapped bounds mapping
     void queuedsetColor(const Vec3& pos, Vec3 color, float tolerance = EPSILON) {
         enqueueTask([this, pos, color, tolerance]() {
             OctreeNode* node = root_.get();
@@ -2471,20 +2317,10 @@ public:
         });
     }
 
-    ///@brief Overwrites physical glow output logic bound configurations mappings bounds mapping limits
-    ///@param pos Source lookup values mapped boundaries limits mapping
-    ///@param emittance Multiplier values scaling limits mapping mapped mapping
-    ///@param tolerance Deviation float bounds mapped mapping limits
-    ///@return Operational execution statuses
     bool setEmittance(const Vec3& pos, float emittance, float tolerance = EPSILON) {
         return setEmittance(pos, Vec3::Constant(emittance), tolerance);
     }
 
-    ///@brief Sets glowing channel limits explicitly mapping bounds boundaries mapping mapped mapping mapped bounds mapped mapping
-    ///@param pos Source vector coordinate target limits mapping
-    ///@param emittance Vector RGB emission parameters mapped
-    ///@param tolerance Extent scaling bounds mapped mapping bounds
-    ///@return Flag validating bounds configurations executed mapping limits
     bool setEmittance(const Vec3& pos, const Vec3& chromaticity, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
@@ -2496,11 +2332,6 @@ public:
         return true;
     }
 
-    ///@brief Configures index of refraction limits bounds mapping physical light mappings bounds mapped mappings bounds limits
-    ///@param pos Spatial coordinate anchor maps limits mapping limits mapped bounds mapped mapping
-    ///@param ior Constant mapping parameters values limits mapped
-    ///@param tolerance Error allowance offset bound limits mapped mapping bounds limits
-    ///@return Valid status mapping configurations mapping
     bool setIor(const Vec3& pos, float ior, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
@@ -2512,12 +2343,6 @@ public:
         return true;
     }
 
-    ///@brief Advanced precise configuration setting complex spectral index formulas bounding mapped values
-    ///@param pos Center bounds coordinate maps mapping mapped mapping bounds mapping
-    ///@param B Float limits formula mapping parameter
-    ///@param C Float limits formula mapping parameter limits mapped
-    ///@param tolerance Search boundaries maps mapping
-    ///@return Status resolving mapped boundaries limits
     bool setSellmeier(const Vec3& pos, const v3half& B, const v3half& C, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
@@ -2530,11 +2355,6 @@ public:
         return true;
     }
 
-    ///@brief Modifies structural render scattering formulas values bounds boundaries limits mapped bounds
-    ///@param pos Target mapping limits map limits mapping mapped mapping limits bounds mapped mapped mapping limits mapped mapped mapping
-    ///@param roughness Bound limit mappings bounds mapping mapped mapped bounds mapping limits
-    ///@param tolerance Radius offset map mappings limits mapped
-    ///@return Flag reporting proper bounds mapping mapped
     bool setRoughness(const Vec3& pos, float roughness, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
@@ -2546,11 +2366,6 @@ public:
         return true;
     }
 
-    ///@brief Configures conducting reflective logic bounds mapping limits mappings bounds mapped limits mapping mapped
-    ///@param pos Origin boundaries mapping maps mapped limits bounds mapped
-    ///@param metallic Bound limits mapping mapped mapping mapping bounds mapped mapping
-    ///@param tolerance Scale bounds limits mapping mapped mapping mapped bounds
-    ///@return Operational reporting metric values limits mapped mapping
     bool setMetallic(const Vec3& pos, float metallic, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
@@ -2562,11 +2377,6 @@ public:
         return true;
     }
 
-    ///@brief Applies density optical mapping limits mapping parameters bounds mapping
-    ///@param pos Lookup bounds mappings mapped bounds mapping limits bounds
-    ///@param transmission Density limits scaling maps mapped mapping mapped mapped
-    ///@param tolerance Error margin limits mapping bounds
-    ///@return Boolean validation status mapped mapping limits
     bool setTransmission(const Vec3& pos, float transmission, float tolerance = EPSILON) {
         auto pointData = find(pos, tolerance);
         if (!pointData) return false;
@@ -2575,11 +2385,6 @@ public:
         return true;
     }
 
-    ///@brief Wide sweeping render update applying global materials overwriting entire structures at once limits mapped mapping
-    ///@param objectId Tag linking structure blocks bounds mapped mapping limits
-    ///@param emittance Brightness override logic mapping bounds
-    ///@param roughness Structure scattering bounds mapped mapping limits bounds
-    ///@param metallic Refraction conductivity bounds mapping mapped limits
     void setMaterialByObjectId(int objectId, float emittance, float roughness, float metallic) {
         auto obj = getOrCreateObject(objectId);
         {
@@ -2597,16 +2402,6 @@ public:
         }
     }
 
-    ///@brief Deep DDA-like hierarchical grid stepper accurately resolving geometry intersections efficiently limits mapping sequences boundaries
-    ///@param origin Raycast origin projection values mapped properly limits boundaries mapping
-    ///@param direction Normalized unit direction tracking mapping boundaries mapping properly
-    ///@param maxDist Safety distance limiting traversal boundaries mapping mapping parameters
-    ///@param hit Complex struct receiving fully solved hit logic variables mapping parameters
-    ///@param ignoreNode Explicit proxy skipping limits mapped boundaries mapped limits boundaries
-    ///@param hitOnlySolid Filtering rules limits mapped mapping boundaries mapped parameters boundaries mappings
-    ///@param resolvePenetration Logic boolean bypassing back face penetration geometries mapping boundaries mapping mapping
-    ///@param solidClassMats Optional passed cache overriding dynamic evaluation locks mappings mapped mapping boundaries mapped bounds
-    ///@return Proper true evaluation confirming valid structural mapping collision boundaries mapped properly parameters
     bool raycast(const Vec3& origin, const Vec3& direction, float maxDist, RayHit& hit,
                  const std::shared_ptr<NodeData>& ignoreNode = nullptr, bool hitOnlySolid = false, bool resolvePenetration = false,
                  const std::vector<std::vector<PhysicsMaterial_>>* solidClassMats = nullptr) {

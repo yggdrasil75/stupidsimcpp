@@ -3,9 +3,11 @@ namespace Grid {
 
 template<typename T>
 void Octree<T>::buildRender(RenderBuffer_<T>& buffer) {
+    TIME_FUNCTION;
     buffer.clear();
     if (!root_) return;
-    buffer.nodes.emplace_back();
+    // buffer.nodes.emplace_back();
+    buffer.points.reserve(size);
 
     std::unordered_map<int, std::shared_ptr<GridObject_<T>>> localObjects;
     {
@@ -46,8 +48,6 @@ void Octree<T>::buildRenderNodeAt(OctreeNode_<T>* node, RenderBuffer_<T>& buffer
             rd.position = pt->position;
             rd.size = pt->size;
             rd.color = pt->color;
-            
-            auto objIt = localObjects.find(pt->objectId);
             
             rd.materialIdx = buffer.defaultMatIdx;
             auto it = buffer.objMaterialOffsets.find(pt->objectId);
@@ -339,8 +339,6 @@ frame Octree<T>::fastRenderFrame(const Camera& cam, int height, int width, frame
     return outFrame;
 }
 
-#ifdef VULKAN_SUPPORT
-
 static inline uint32_t packRGB8(const Vec3& c) {
     uint32_t r = static_cast<uint32_t>(std::clamp(c.x(), 0.0f, 1.0f) * 255.0f);
     uint32_t g = static_cast<uint32_t>(std::clamp(c.y(), 0.0f, 1.0f) * 255.0f);
@@ -349,6 +347,7 @@ static inline uint32_t packRGB8(const Vec3& c) {
 }
 
 static inline uint32_t packRGBA8(const Eigen::Vector4f& c) {
+    TIME_FUNCTION;
     uint32_t r = static_cast<uint32_t>(std::clamp(c.x(), 0.0f, 1.0f) * 255.0f);
     uint32_t g = static_cast<uint32_t>(std::clamp(c.y(), 0.0f, 1.0f) * 255.0f);
     uint32_t b = static_cast<uint32_t>(std::clamp(c.z(), 0.0f, 1.0f) * 255.0f);
@@ -357,6 +356,7 @@ static inline uint32_t packRGBA8(const Eigen::Vector4f& c) {
 }
 
 static inline uint32_t packMaterialProps(float roughness, float metallic, uint32_t sellmeierRow) {
+    TIME_FUNCTION;
     uint32_t r8 = static_cast<uint32_t>(std::clamp(roughness, 0.0f, 1.0f) * 255.0f);
     uint32_t m8 = static_cast<uint32_t>(std::clamp(metallic, 0.0f, 1.0f) * 255.0f);
     uint32_t row16 = sellmeierRow & 0xFFFFu;
@@ -368,6 +368,7 @@ static constexpr float SELL_LMIN = 0.380f; // um
 static constexpr float SELL_LMAX = 0.720f; // um
 
 static inline std::vector<float> buildSellmeierLUT(const std::vector<Grid::RenderMaterial>& mats) {
+    TIME_FUNCTION;
     int rows = std::max<size_t>(1, mats.size()) * SELL_LUT_SECONDARY;
     std::vector<float> lut(static_cast<size_t>(rows) * SELL_LUT_WAVELENGTHS, 1.0f);
     for (size_t mi = 0; mi < mats.size(); ++mi) {
@@ -394,6 +395,7 @@ struct PointSort {
 
 template<typename T>
 void Octree<T>::buildGPUMaterials(const RenderBuffer_<T>& buf, std::vector<GPUMaterial>& out) {
+    TIME_FUNCTION;
     out.clear();
     out.reserve(buf.materials.size());
     for (size_t mi = 0; mi < buf.materials.size(); ++mi) {
@@ -588,9 +590,7 @@ frame Octree<T>::renderFrameVulkan(const Camera& cam, int height, int width, fra
     for (size_t g = 0; g < gpuMgr.count(); ++g) {
         auto& ctx = gpuMgr.ctx(g);
         ctx.updateMaterialBuffer(gpuMaterials);
-        ctx.updateSellmeierBuffer(sellLUT,
-                                  SELL_LUT_WAVELENGTHS,
-                                  std::max<size_t>(1, tl_buffer.materials.size()) * SELL_LUT_SECONDARY);
+        ctx.updateSellmeierBuffer(sellLUT, SELL_LUT_WAVELENGTHS, std::max<size_t>(1, tl_buffer.materials.size()) * SELL_LUT_SECONDARY);
     }
 
     std::vector<bool> isLodPoint(tl_buffer.points.size(), false);
@@ -1293,5 +1293,4 @@ frame Octree<T>::superBlendedRenderFrameVulkan(const Camera& cam, int height, in
     return outFrame;
 }
 
-#endif
 }
