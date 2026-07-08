@@ -37,14 +37,15 @@ void main() {
     float py = (1.0 - 2.0 * (float(coord.y) + nextFloat(rng)) / float(cam.height)) * cam.tanfovy;
     vec3 rayDir = normalize(cam.dir + cam.right * px + cam.up * py);
 
+    int hero = int((uint(globalS) + pixelIndex) % 3u) + 1;
 
     PathHot p;
     p.o_tmax    = vec4(cam.origin, cam.maxDist);
     p.dir_rough = vec4(rayDir, 0.0);
-    p.thp       = vec4(1.0, 1.0, 1.0, 0.0);
+    p.thp       = vec4(heroMask(hero) * 3.0, 0.0);
     p.rad       = vec4(0.0, 0.0, 0.0, LARGE);
     p.u0        = uvec4(pixelIndex, rng, grng, PC_PACK(0, 0, 0));
-    p.i1        = ivec4(-1, -1, -1, FLAG_ALIVE);
+    p.i1        = ivec4(-1, -1, -1, SET_HERO(FLAG_SPECULAR | FLAG_ALIVE, hero));
     pathsHot[gid] = p;
 
     pathsHit[gid].t        = 0.0;

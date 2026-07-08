@@ -51,6 +51,10 @@ const uint WF_NO_HIT = 0xFFFFFFFFu;
 #define FLAG_SPECULAR 1
 #define FLAG_HITFOUND 2
 #define FLAG_ALIVE    4
+#define HERO_SHIFT 5
+#define HERO_MASK  (3 << HERO_SHIFT)
+#define GET_HERO(f)    (((f) & HERO_MASK) >> HERO_SHIFT)
+#define SET_HERO(f, h) (((f) & ~HERO_MASK) | (((h) & 3) << HERO_SHIFT))
 
 struct ShadowRay {
     vec4 o_tmax;   // xyz origin, w maxDist
@@ -104,8 +108,8 @@ layout(binding = 0) uniform CameraData {
     int tileOffsetY;
     int emissiveCount;
     int targetSamples;
-    int pad1;
-    int pad2;
+    int sellWidth;
+    int sellSecondary;
     int fogVolumeCount;
     int camPad0;
 } cam;
@@ -125,6 +129,7 @@ layout(std430, binding = 11) buffer ShadeQ    { uint shadeQueue[]; };
 layout(std430, binding = 12) buffer ShadowQ   { ShadowRay shadowQueue[]; };
 layout(std430, binding = 13) buffer CounterBuf{ Counters ctr; };
 layout(std430, binding = 14) buffer PathHitBuffer { PathHit pathsHit[]; };
+layout(std430, binding = 15) readonly buffer SellmeierBuffer { float sellmeierLUT[]; };
 
 // World-space participating-media boxes (dust/haze/mist). Constant density
 // inside each box; stack boxes for gradients. See Octree::addFogVolume.
@@ -186,10 +191,46 @@ vec3 unpackRGB9E5(uint c) {
     return vec3(r, g, b);
 }
 
-void unpackMaterial(uint m, out float roughness, out float metallic, out float ior) {
+const float SELL_LMIN = 0.380; // um
+const float SELL_LMAX = 0.720; // um
+const float HERO_LAMBDA_R = 0.610;
+const float HERO_LAMBDA_G = 0.550;
+const float HERO_LAMBDA_B = 0.465;
+
+float lambdaToU(float lambdaUm) {
+    return clamp((lambdaUm - SELL_LMIN) / (SELL_LMAX - SELL_LMIN), 0.0, 1.0);
+}
+
+float sampleIor(uint row, float lambdaUm) {
+    int w = cam.sellWidth;
+    if (w <= 0) return 1.45;
+    float u = lambdaToU(lambdaUm) * float(w - 1);
+    int i0 = int(floor(u));
+    int i1 = min(i0 + 1, w - 1);
+    float f = u - float(i0);
+    uint base = row * uint(w);
+    float a = sellmeierLUT[base + uint(i0)];
+    float b = sellmeierLUT[base + uint(i1)];
+    return mix(a, b, f);
+}
+
+void unpackMaterial(uint m, out float roughness, out float metallic, out uint sellRow) {
     roughness = float(m & 0xFF) / 255.0;
     metallic  = float((m >> 8) & 0xFF) / 255.0;
-    ior = float((m >> 16) & 0xFF);
+    sellRow   = (m >> 16) & 0xFFFFu;
+}
+
+float heroLambda(int hero) {
+    if (hero == 1) return HERO_LAMBDA_R;
+    if (hero == 3) return HERO_LAMBDA_B;
+    return HERO_LAMBDA_G;
+}
+
+vec3 heroMask(int hero) {
+    if (hero == 1) return vec3(1.0, 0.0, 0.0);
+    if (hero == 2) return vec3(0.0, 1.0, 0.0);
+    if (hero == 3) return vec3(0.0, 0.0, 1.0);
+    return vec3(1.0, 1.0, 1.0);
 }
 
 bool isInvalid(float v) { return isnan(v) || isinf(v); }
@@ -372,8 +413,9 @@ vec3 shadowTransmit(vec3 ro, vec3 rd, vec3 invD, float maxDist, int lightPtIdx) 
             float tExit  = min(min(tmax3.x, tmax3.y), tmax3.z);
             if (tExit >= max(0.0, tEntry) && tEntry <= maxDist) {
                 GPUMaterial tMat = materials[pt.materialIdx];
-                float r, m, ior;
-                unpackMaterial(tMat.materialProps, r, m, ior);
+                float r, m;
+                uint sellRow;
+                unpackMaterial(tMat.materialProps, r, m, sellRow);
                 vec4 albColor = unpackRGBA8(pt.color);
                 float ptOpacity = albColor.a;
                 float ptTransmission = 1.0 - ptOpacity;

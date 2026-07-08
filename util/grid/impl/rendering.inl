@@ -69,6 +69,14 @@ static PFN_vkCreateAccelerationStructureKHR pfn_vkCreateAccelerationStructureKHR
 static PFN_vkCmdBuildAccelerationStructuresKHR pfn_vkCmdBuildAccelerationStructuresKHR = nullptr;
 static PFN_vkDestroyAccelerationStructureKHR pfn_vkDestroyAccelerationStructureKHR = nullptr;
 static PFN_vkGetAccelerationStructureDeviceAddressKHR pfn_vkGetAccelerationStructureDeviceAddressKHR = nullptr;
+static constexpr uint32_t VCT_RES = 128;
+static constexpr uint32_t WF_PATH_STRIDE   = 6 * 4 * sizeof(float);
+static constexpr uint32_t WF_PATHHIT_STRIDE= 1 * 4 * sizeof(float);
+static constexpr uint32_t WF_SHADOW_STRIDE = 4 * 4 * sizeof(float);
+static constexpr uint32_t WF_COUNTER_SIZE  = 16 * sizeof(uint32_t);
+static constexpr VkDeviceSize WF_OFF_EXTEND_ARGS = 16;
+static constexpr VkDeviceSize WF_OFF_SHADE_ARGS  = 32;
+static constexpr VkDeviceSize WF_OFF_SHADOW_ARGS = 48;
 
 struct alignas(16) GPUMaterial {
     uint32_t chromaticity; //RBG9E5
@@ -115,8 +123,8 @@ struct alignas(16) GPUCameraData {
     int tileOffsetY;
     int emissiveCount;
     int targetSamples;
-    int padn2;
-    int padn1;
+    int sellWidth;
+    int sellSecondary;
     int fogVolumeCount;
     int pad0;
 };
@@ -135,6 +143,31 @@ struct alignas(16) GPUFogVolume {
     Vec3 absorb;
     float pad2;
 };
+
+struct alignas(16) VCTParams {
+    Vec3 volMin;
+    float voxelSize;
+    Vec3 volExtent;
+    float invVoxelSize;
+    Eigen::Vector3i gridRes;
+    int maxMip;
+    Vec3 lightDir;
+    float enabled;
+};
+
+struct VCTMipPush {
+    int dstRes[3];
+    int pad;
+};
+
+static uint32_t vctMipCount(uint32_t res) {
+    uint32_t m = 1;
+    while (res > 1) {
+        res >>= 1;
+        ++m;
+    }
+    return m;
+}
 
 struct VulkanContext {
     VkInstance instance = VK_NULL_HANDLE;
@@ -165,6 +198,8 @@ struct VulkanContext {
     VkPipelineLayout pbrPipelineLayout = VK_NULL_HANDLE;
     VkPipelineLayout smoothPipelineLayout = VK_NULL_HANDLE;
     VkPipelineLayout blendPipelineLayout = VK_NULL_HANDLE;
+    VkPipelineLayout guidedCoeffPipelineLayout = VK_NULL_HANDLE;
+    VkPipelineLayout wfPipelineLayout = VK_NULL_HANDLE;
 
     VkPipeline fastPipeline = VK_NULL_HANDLE;
     VkPipeline pbrPipeline = VK_NULL_HANDLE;
@@ -177,16 +212,6 @@ struct VulkanContext {
     VkPipeline wfShadePipe = VK_NULL_HANDLE;
     VkPipeline wfShadowPipe = VK_NULL_HANDLE;
     VkPipeline wfFinalizePipe = VK_NULL_HANDLE;
-
-    VkPipelineLayout guidedCoeffPipelineLayout = VK_NULL_HANDLE;
-    VkPipelineLayout wfPipelineLayout = VK_NULL_HANDLE;
-
-    VkDescriptorSetLayout fastDescLayout = VK_NULL_HANDLE;
-    VkDescriptorSetLayout pbrDescLayout = VK_NULL_HANDLE;
-    VkDescriptorSetLayout smoothDescLayout = VK_NULL_HANDLE;
-    VkDescriptorSetLayout blendDescLayout = VK_NULL_HANDLE;
-    VkDescriptorSetLayout guidedCoeffDescLayout = VK_NULL_HANDLE;
-    VkDescriptorSetLayout wfDescLayout = VK_NULL_HANDLE;
 
     VkBuffer fastGBuffer = VK_NULL_HANDLE;
     VkBuffer wfPathBuf = VK_NULL_HANDLE;
@@ -216,6 +241,15 @@ struct VulkanContext {
     VkBuffer asInstanceBuffer = VK_NULL_HANDLE;
     VkBuffer blasBuffer = VK_NULL_HANDLE;
     VkBuffer tlasBuffer = VK_NULL_HANDLE;
+    VkBuffer smoothScratchBuffer = VK_NULL_HANDLE;
+    VkBuffer sellmeierBuffer = VK_NULL_HANDLE;
+
+    VkDescriptorSetLayout fastDescLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout pbrDescLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout smoothDescLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout blendDescLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout guidedCoeffDescLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout wfDescLayout = VK_NULL_HANDLE;
 
     VkDescriptorSet wfDescSet    = VK_NULL_HANDLE;
     VkDescriptorSet fastDescSet = VK_NULL_HANDLE;
@@ -252,6 +286,8 @@ struct VulkanContext {
     VkDeviceMemory asInstanceMem = VK_NULL_HANDLE;
     VkDeviceMemory blasMem = VK_NULL_HANDLE;
     VkDeviceMemory tlasMem = VK_NULL_HANDLE;
+    VkDeviceMemory smoothScratchMem = VK_NULL_HANDLE;
+    VkDeviceMemory sellmeierMem = VK_NULL_HANDLE;
     
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
     
@@ -259,12 +295,12 @@ struct VulkanContext {
     VkAccelerationStructureKHR tlas = VK_NULL_HANDLE;
 
     uint32_t currentFastGCap = 0;
+    uint32_t currentFastPointsCap = 0;
     uint32_t wfPathCap = 0;
     uint32_t currentGuidedCoeffCap = 0;
     uint32_t currentFogCap = 0;
     uint32_t currentNodesCap = 0;
     uint32_t currentOutCap = 0;
-    uint32_t currentFastPointsCap = 0;
     uint32_t currentPBRPointsCap = 0;
     uint32_t currentSkyboxCap = 0;
     uint32_t currentLightCap = 0;
@@ -272,22 +308,30 @@ struct VulkanContext {
     uint32_t currentLowResOutCap = 0;
     uint32_t currentAdaptiveCap = 0;
     uint32_t currentMaterialCap = 0;
-    bool initialized = false;
-    bool ownsInstance = true;
     uint32_t currentAabbCap = 0;
     uint32_t currentScratchCap = 0;
     uint32_t lastBlasPrimCount = 0;
     uint32_t framesSinceFullBuild = 0;
-    uint32_t refitInterval = 16;
-    bool blasTopologyValid = false;
-    int lastBlasOrderingTag = -1;
-    bool outMemCoherent = true;
-    void* outStagingMapped = nullptr;
-    bool outStagingCoherent = true;
     uint32_t currentOutStagingCap = 0;
-    void* xferStagingMapped = nullptr;
-    bool xferStagingCoherent = true;
     uint32_t currentXferStagingCap = 0;
+    uint32_t currentSmoothScratchCap = 0;
+    uint32_t currentSellmeierCap = 0;
+    uint32_t sellmeierWidth = 0;
+    uint32_t sellmeierRows = 0;
+
+    bool initialized = false;
+    bool ownsInstance = true;
+    bool blasTopologyValid = false;
+    bool outMemCoherent = true;
+    bool outStagingCoherent = true;
+    bool xferStagingCoherent = true;
+    bool vctReady = false;
+
+    int lastBlasOrderingTag = -1;
+
+    void* outStagingMapped = nullptr;
+    void* xferStagingMapped = nullptr;
+
 
     uint32_t findMemoryType(VkPhysicalDevice& phDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties) {
         VkPhysicalDeviceMemoryProperties memProperties;
@@ -408,6 +452,19 @@ struct VulkanContext {
             case VK_PHYSICAL_DEVICE_TYPE_CPU: return 1;
             default: return 1;
         }
+    }
+    
+    void createAllShaderModules() {
+        fastShader = createShaderModule(device, "./bin/fast_raytrace_hw.spv");
+        smoothShader = createShaderModule(device, "./bin/smooth.spv");
+        blendShader = createShaderModule(device, "./bin/blend.spv");
+        guidedCoeffShader = createShaderModule(device, "./bin/guided_coeff.spv");
+        wfInitShader = createShaderModule(device, "./bin/wf_init.spv");
+        wfArgsShader = createShaderModule(device, "./bin/wf_args.spv");
+        wfExtendShader = createShaderModule(device, "./bin/wf_extend.spv");
+        wfShadeShader = createShaderModule(device, "./bin/wf_shade.spv");
+        wfShadowShader = createShaderModule(device, "./bin/wf_shadow.spv");
+        wfFinalizeShader = createShaderModule(device, "./bin/wf_finalize.spv");
     }
 
     void init(VkPhysicalDevice PhDevice = VK_NULL_HANDLE) {
@@ -601,12 +658,7 @@ struct VulkanContext {
         allocSetInfo.pSetLayouts = &guidedCoeffDescLayout;
         vkAllocateDescriptorSets(device, &allocSetInfo, &guidedCoeffDescSet);
 
-        fastShader = createShaderModule(device, "./bin/fast_raytrace_hw.spv");
-        
-        smoothShader = createShaderModule(device, "./bin/smooth.spv");
-        blendShader = createShaderModule(device, "./bin/blend.spv");
-        guidedCoeffShader = createShaderModule(device, "./bin/guided_coeff.spv");
-        
+        createAllShaderModules();
 
         VkPipelineLayoutCreateInfo pipelineLayoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         pipelineLayoutInfo.setLayoutCount = 1;
@@ -665,6 +717,14 @@ struct VulkanContext {
         initialized = true;
     }
     
+    void destroyBuffer(VkDevice& device, VkBuffer& bf, VkDeviceMemory& mm) {
+        if (bf) {
+            vkDestroyBuffer(device, bf, nullptr);
+            vkFreeMemory(device, mm, nullptr);
+            bf = VK_NULL_HANDLE;
+        }
+    }
+
     void executeSingleTimeCommands(std::function<void(VkCommandBuffer)> action) {
         VkCommandBufferAllocateInfo allocInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
         allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
@@ -692,7 +752,7 @@ struct VulkanContext {
         vkFreeCommandBuffers(device, commandPool, 1, &cmd);
     }
 
-    void copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
+    void copyBuffer(VkDevice device, VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
         executeSingleTimeCommands([&](VkCommandBuffer cmd) {
             VkBufferCopy copyRegion{};
             copyRegion.size = size;
@@ -700,8 +760,6 @@ struct VulkanContext {
         });
     }
 
-    // Grow-only persistent staging used by uploadToBuffer/downloadFromBuffer.
-    // HOST_CACHED preferred (fast host reads for downloads), kept mapped.
     void ensureXferStaging(uint32_t size) {
         if (size <= currentXferStagingCap) return;
         if (xferStagingBuffer) {
@@ -738,15 +796,13 @@ struct VulkanContext {
         ensureXferStaging(size);
         memcpy(xferStagingMapped, src, size);
         flushXferStaging(size);
-        copyBuffer(xferStagingBuffer, dst, size);
+        copyBuffer(device, xferStagingBuffer, dst, size);
     }
 
-    // Read back a (possibly device-local) buffer into host memory via the
-    // persistent staging buffer. src must have TRANSFER_SRC usage.
     void downloadFromBuffer(VkBuffer src, void* dst, uint32_t size) {
         if (!dst || size == 0) return;
         ensureXferStaging(size);
-        copyBuffer(src, xferStagingBuffer, size);
+        copyBuffer(device, src, xferStagingBuffer, size);
         invalidateXferStaging();
         memcpy(dst, xferStagingMapped, size);
     }
@@ -775,15 +831,15 @@ struct VulkanContext {
             memcpy(mappedData, data, dataSize);
             vkUnmapMemory(device, stagingMem);
 
-            copyBuffer(stagingBuffer, buffer, dataSize);
+            copyBuffer(device, stagingBuffer, buffer, dataSize);
 
             vkDestroyBuffer(device, stagingBuffer, nullptr);
             vkFreeMemory(device, stagingMem, nullptr);
         }
     }
 
-    void createBufferWithAddress(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties,
-                                 VkBuffer& buffer, VkDeviceMemory& bufferMemory) {
+    void createBufferWithAddress(VkDevice& device, VkDeviceSize size, VkBufferUsageFlags usage, 
+                                 VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory) {
         VkBufferCreateInfo bufferInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
         bufferInfo.size = size;
         bufferInfo.usage = usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
@@ -811,15 +867,12 @@ struct VulkanContext {
         return vkGetBufferDeviceAddress(device, &info);
     }
 
-    template<typename RenderDataType>
-    void buildHardwareAccelerationStructures(const std::vector<RenderDataType>& points, int orderingTag = 0) {
+    void buildHardwareAccelerationStructures(const std::vector<GPURenderData>& points, int orderingTag = 0) {
         if (points.empty()) return;
 
         const uint32_t numPrimitives = static_cast<uint32_t>(points.size());
-        bool doFullBuild = (!blasTopologyValid)
-                        || (numPrimitives != lastBlasPrimCount)
-                        || (orderingTag != lastBlasOrderingTag)
-                        || (framesSinceFullBuild >= refitInterval);
+        bool doFullBuild = (!blasTopologyValid) || (numPrimitives != lastBlasPrimCount)
+                        || (orderingTag != lastBlasOrderingTag);
         std::vector<VkAabbPositionsKHR> aabbs(numPrimitives);
         for (uint32_t i = 0; i < numPrimitives; ++i) {
             float halfSize = points[i].size * 0.5f;
@@ -831,13 +884,13 @@ struct VulkanContext {
             aabbs[i].maxZ = points[i].position.z() + halfSize;
         }
 
-        uint32_t aabbSize = aabbs.size() * sizeof(VkAabbPositionsKHR);
+        uint32_t aabbSize = numPrimitives * sizeof(VkAabbPositionsKHR);
         if (aabbSize > currentAabbCap) {
             if (aabbBuffer) {
                 vkDestroyBuffer(device, aabbBuffer, nullptr);
                 vkFreeMemory(device, aabbMem, nullptr);
             }
-            createBufferWithAddress(aabbSize, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, 
+            createBufferWithAddress(device, aabbSize, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, 
                                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, aabbBuffer, aabbMem);
             currentAabbCap = aabbSize;
         }
@@ -873,7 +926,7 @@ struct VulkanContext {
                 vkDestroyBuffer(device, blasBuffer, nullptr);
                 vkFreeMemory(device, blasMem, nullptr);
             }
-            createBufferWithAddress(blasSizeInfo.accelerationStructureSize, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
+            createBufferWithAddress(device, blasSizeInfo.accelerationStructureSize, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
                                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, blasBuffer, blasMem);
 
             VkAccelerationStructureCreateInfoKHR blasCreateInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
@@ -901,7 +954,7 @@ struct VulkanContext {
             vkDestroyBuffer(device, asInstanceBuffer, nullptr);
             vkFreeMemory(device, asInstanceMem, nullptr);
         }
-        createBufferWithAddress(sizeof(VkAccelerationStructureInstanceKHR), 
+        createBufferWithAddress(device, sizeof(VkAccelerationStructureInstanceKHR), 
                                 VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, 
                                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, asInstanceBuffer, asInstanceMem);
         
@@ -935,7 +988,7 @@ struct VulkanContext {
                 vkDestroyBuffer(device, tlasBuffer, nullptr);
                 vkFreeMemory(device, tlasMem, nullptr);
             }
-            createBufferWithAddress(tlasSizeInfo.accelerationStructureSize, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
+            createBufferWithAddress(device, tlasSizeInfo.accelerationStructureSize, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
                                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, tlasBuffer, tlasMem);
 
             VkAccelerationStructureCreateInfoKHR tlasCreateInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
@@ -953,7 +1006,7 @@ struct VulkanContext {
                 vkDestroyBuffer(device, asScratchBuffer, nullptr);
                 vkFreeMemory(device, asScratchMem, nullptr);
             }
-            createBufferWithAddress(scratchSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            createBufferWithAddress(device, scratchSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, asScratchBuffer, asScratchMem);
             currentScratchCap = scratchSize;
         }
@@ -984,22 +1037,10 @@ struct VulkanContext {
             pfn_vkCmdBuildAccelerationStructuresKHR(cmd, 1, &tlasBuildInfo, &pTlasOffset);
         });
 
-        // Scratch buffer is persistent now — do not free it here.
-
-        // Refit bookkeeping.
         if (doFullBuild) {
             lastBlasPrimCount = numPrimitives;
             lastBlasOrderingTag = orderingTag;
             blasTopologyValid = true;
-            framesSinceFullBuild = 0;
-        } else {
-            framesSinceFullBuild++;
-        }
-
-        // The TLAS handle only changes on a full build (UPDATE refits in place),
-        // so the descriptor binding only needs rewriting then. On refit frames the
-        // shader already points at the same (now-updated) structure.
-        if (doFullBuild) {
             VkWriteDescriptorSetAccelerationStructureKHR descASInfo{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
             descASInfo.accelerationStructureCount = 1;
             descASInfo.pAccelerationStructures = &tlas;
@@ -1014,6 +1055,9 @@ struct VulkanContext {
                 asWrites[i].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
             }
             vkUpdateDescriptorSets(device, 2, asWrites, 0, nullptr);
+            framesSinceFullBuild = 0;
+        } else {
+            framesSinceFullBuild++;
         }
     }
 
@@ -1038,6 +1082,16 @@ struct VulkanContext {
         size_t dataSize = materials.size() * sizeof(GPUMaterial);
         updateDeviceLocalBuffer(materialBuffer, materialMem, currentMaterialCap, 
                                 materials.empty() ? nullptr : materials.data(), dataSize, allocSize, 
+                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    }
+
+    void updateSellmeierBuffer(const std::vector<float>& lut, uint32_t width, uint32_t rows) {
+        sellmeierWidth = width;
+        sellmeierRows = rows;
+        size_t dataSize = lut.size() * sizeof(float);
+        size_t allocSize = std::max((size_t)256, dataSize);
+        updateDeviceLocalBuffer(sellmeierBuffer, sellmeierMem, currentSellmeierCap,
+                                lut.empty() ? nullptr : lut.data(), dataSize, allocSize,
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     }
 
@@ -1095,13 +1149,8 @@ struct VulkanContext {
         vkUnmapMemory(device, uboMem);
     }
 
-    // Snapshot the first `size` bytes of the (device-local) outBuffer into the
-    // persistent host-cached staging buffer and return a read pointer. The
-    // pointer stays valid until the next readbackOut()/buffer resize; no unmap
-    // is needed. Callers must ensure all GPU writes to outBuffer have been
-    // fenced before calling (every existing call site already does).
     const float* readbackOut(VkDeviceSize size) {
-        copyBuffer(outBuffer, outStagingBuffer, size);
+        copyBuffer(device, outBuffer, outStagingBuffer, size);
         if (!outStagingCoherent) {
             VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
             range.memory = outStagingMem;
@@ -1233,12 +1282,8 @@ struct VulkanContext {
                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, fastGBuffer, fastGBufferMem);
             currentFastGCap = fastOutSize;
         }
-        copyBuffer(outBuffer, fastGBuffer, fastOutSize);
+        copyBuffer(device, outBuffer, fastGBuffer, fastOutSize);
     }
-
-    VkBuffer smoothScratchBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory smoothScratchMem = VK_NULL_HANDLE;
-    uint32_t currentSmoothScratchCap = 0;
 
     void dispatchSmoothPasses(int width, int height, int samples, int iters, bool toFinal) {
         uint32_t finalSize = width * height * 3 * sizeof(float);
@@ -1406,13 +1451,6 @@ struct WFPushConstants {
     int pad;
 };
 
-static constexpr uint32_t WF_PATH_STRIDE   = 6 * 4 * sizeof(float); // hot record (was 9*vec4)
-static constexpr uint32_t WF_PATHHIT_STRIDE= 1 * 4 * sizeof(float); // transient extend->shade hand-off
-static constexpr uint32_t WF_SHADOW_STRIDE = 4 * 4 * sizeof(float);
-static constexpr uint32_t WF_COUNTER_SIZE  = 16 * sizeof(uint32_t);
-static constexpr VkDeviceSize WF_OFF_EXTEND_ARGS = 16;
-static constexpr VkDeviceSize WF_OFF_SHADE_ARGS  = 32;
-static constexpr VkDeviceSize WF_OFF_SHADOW_ARGS = 48;
 
 void initWavefront() {
 
@@ -1471,20 +1509,13 @@ void initWavefront() {
 
 void ensureWavefrontBuffers(uint32_t maxPaths) {
     if (maxPaths <= wfPathCap && wfPathBuf) return;
-    auto destroy = [&](VkBuffer& bf, VkDeviceMemory& mm) {
-        if (bf) {
-            vkDestroyBuffer(device, bf, nullptr);
-            vkFreeMemory(device, mm, nullptr);
-            bf = VK_NULL_HANDLE;
-        }
-    };
-    destroy(wfPathBuf, wfPathMem);
-    destroy(wfPathHitBuf, wfPathHitMem);
-    destroy(wfExtendABuf, wfExtendAMem);
-    destroy(wfExtendBBuf, wfExtendBMem);
-    destroy(wfShadeBuf, wfShadeMem);
-    destroy(wfShadowBuf, wfShadowMem);
-    destroy(wfCounterBuf, wfCounterMem);
+    destroyBuffer(device, wfPathBuf, wfPathMem);
+    destroyBuffer(device, wfPathHitBuf, wfPathHitMem);
+    destroyBuffer(device, wfExtendABuf, wfExtendAMem);
+    destroyBuffer(device, wfExtendBBuf, wfExtendBMem);
+    destroyBuffer(device, wfShadeBuf, wfShadeMem);
+    destroyBuffer(device, wfShadowBuf, wfShadowMem);
+    destroyBuffer(device, wfCounterBuf, wfCounterMem);
 
     const VkBufferUsageFlags store = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     const VkMemoryPropertyFlags devLocal = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
@@ -1515,7 +1546,7 @@ void writeWavefrontDescriptors() {
     bi[12] = {wfShadowBuf,    0, VK_WHOLE_SIZE};
     bi[13] = {wfCounterBuf,   0, VK_WHOLE_SIZE};
     bi[14] = {wfPathHitBuf,   0, VK_WHOLE_SIZE};
-    bi[15] = {materialBuffer, 0, VK_WHOLE_SIZE};
+    bi[15] = {sellmeierBuffer ? sellmeierBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
     bi[16] = {fogBuffer ? fogBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
 
     VkWriteDescriptorSet w[17] = {};

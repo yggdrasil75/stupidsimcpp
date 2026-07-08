@@ -845,7 +845,8 @@ private:
         float avgRoughness = 0.0;
         float avgMetallic = 0.0;
         float avgTransmission = 0.0;
-        float avgIor = 0.0;
+        Vec3 avgSellB = Vec3::Zero();
+        Vec3 avgSellC = Vec3::Zero();
         float totalVolume = 0.0;
         int count = 0;
 
@@ -864,7 +865,10 @@ private:
             avgChromaticity += mat.emittanceRGB() * v;
             avgRoughness += mat.roughness * v;
             avgMetallic += mat.metallic * v;
-            avgIor += mat.ior * v;
+            for (int j = 0; j < 3; ++j) {
+                avgSellB[j] += static_cast<float>(mat.sellB[j]) * v;
+                avgSellC[j] += static_cast<float>(mat.sellC[j]) * v;
+            }
             count++;
         };
 
@@ -888,9 +892,10 @@ private:
 
             lod->color = (avgColor * invVol);
             Vec3 e = avgChromaticity * float(invVol);
-            float ior = avgIor * invVol;
+            Grid::v3half B = (avgSellB * invVol).cast<Eigen::half>();
+            Grid::v3half C = (avgSellC * invVol).cast<Eigen::half>();
             RenderMaterial avgMat(packRGB9E5(e), float(avgRoughness * invVol),
-                            float(avgMetallic * invVol), ior);
+                            float(avgMetallic * invVol), B, C);
             
             auto obj = getOrCreateObject(-1);
             lod->renderMatIdx = obj->getOrAddRenderMaterial(avgMat);
@@ -2312,7 +2317,7 @@ public:
         if (newRoughness >= 0) mat.roughness = newRoughness;
         if (newMetallic >= 0) mat.metallic = newMetallic;
         if (newTransmission >= 0) pointData->color.w() = std::clamp(1.0f - newTransmission, 0.0f, 1.0f);
-        if (newIor >= 0) mat.ior = newIor;
+        if (newIor >= 0) sellmeierFromConstant(newIor, mat.sellB, mat.sellC);
         
         pointData->renderMatIdx = obj->getOrAddRenderMaterial(mat);
         
@@ -2501,7 +2506,25 @@ public:
         if (!pointData) return false;
         auto obj = getOrCreateObject(pointData->objectId);
         RenderMaterial mat = obj->getRenderMaterial(pointData->renderMatIdx);
-        mat.ior = ior;
+        sellmeierFromConstant(ior, mat.sellB, mat.sellC);
+        pointData->renderMatIdx = obj->getOrAddRenderMaterial(mat);
+        invalidateLODForPoint(pointData);
+        return true;
+    }
+
+    ///@brief Advanced precise configuration setting complex spectral index formulas bounding mapped values
+    ///@param pos Center bounds coordinate maps mapping mapped mapping bounds mapping
+    ///@param B Float limits formula mapping parameter
+    ///@param C Float limits formula mapping parameter limits mapped
+    ///@param tolerance Search boundaries maps mapping
+    ///@return Status resolving mapped boundaries limits
+    bool setSellmeier(const Vec3& pos, const v3half& B, const v3half& C, float tolerance = EPSILON) {
+        auto pointData = find(pos, tolerance);
+        if (!pointData) return false;
+        auto obj = getOrCreateObject(pointData->objectId);
+        RenderMaterial mat = obj->getRenderMaterial(pointData->renderMatIdx);
+        mat.sellB = B;
+        mat.sellC = C;
         pointData->renderMatIdx = obj->getOrAddRenderMaterial(mat);
         invalidateLODForPoint(pointData);
         return true;

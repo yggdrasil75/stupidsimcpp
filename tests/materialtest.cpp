@@ -32,7 +32,7 @@ float smoothNoise(float x, float y, float z, float scale) {
 // Helper function to create a solid volume of voxels with material properties
 void createBox(Grid::Octree<int>& octree, const Eigen::Vector3f& center, const Eigen::Vector3f& size, const Eigen::Vector3f& albedo, float emission = 0.0f,
                float roughness = 0.8f, float metallic = 0.0f, float transmission = 0.0f, float ior = 1.45f, const Eigen::Vector3f& absorp = Eigen::Vector3f::Zero(), 
-               int oid = 0, Grid::BodyType bType = Grid::BodyType::STATIC, float mass = 1.0f, float step = 0.1) {
+               int oid = 0, Grid::BodyType bType = Grid::BodyType::STATIC, float mass = 1.0f, float step = 0.1, const Eigen::Vector3f& sellB = Eigen::Vector3f::Zero(), const Eigen::Vector3f& sellC = Eigen::Vector3f::Zero(), bool useSell = false) {
     Eigen::Vector3f halfSize = size / 2.0f;
     Eigen::Vector3f minB = center - halfSize;
     Eigen::Vector3f maxB = center + halfSize;
@@ -45,6 +45,9 @@ void createBox(Grid::Octree<int>& octree, const Eigen::Vector3f& center, const E
                 Eigen::Vector3f pos(x + jitter(rng), y + jitter(rng), z + jitter(rng));
                 
                 octree.insert(1, pos, true, albedo, step, true, oid, emission, roughness, metallic, transmission, ior, absorp, bType, mass);
+                if (useSell) {
+                    octree.setSellmeier(pos, sellB.cast<Eigen::half>(), sellC.cast<Eigen::half>());
+                }
             }
         }
     }
@@ -119,7 +122,8 @@ enum class GemCut { OCTAHEDRON, HEXAGONAL_BIPYRAMID };
 
 void createGem(Grid::Octree<int>& octree, const Eigen::Vector3f& center, float radius, GemCut cut, 
                const Eigen::Vector3f& albedo, float step, int oid, Grid::BodyType bType, float mass, 
-               float transmission, float ior, const Eigen::Vector3f& absorp) {
+               float transmission, float ior, const Eigen::Vector3f& absorp, 
+               const Eigen::Vector3f& sellB = Eigen::Vector3f::Zero(), const Eigen::Vector3f& sellC = Eigen::Vector3f::Zero(), bool useSell = false) {
     
     static std::mt19937 rng(1337);
     std::uniform_real_distribution<float> jitter(-0.002f, 0.002f);
@@ -149,6 +153,9 @@ void createGem(Grid::Octree<int>& octree, const Eigen::Vector3f& center, float r
                 if (inside) {
                     Eigen::Vector3f pos(x + jitter(rng), y + jitter(rng), z + jitter(rng));
                     octree.insert(1, pos, true, albedo, step, true, oid, 0.0f, 0.01f, 0.0f, transmission, ior, absorp, bType, mass);
+                    if (useSell) {
+                        octree.setSellmeier(pos, sellB.cast<Eigen::half>(), sellC.cast<Eigen::half>());
+                    }
                 }
             }
         }
@@ -342,9 +349,9 @@ int main() {
     createTexturedBox(octree, Eigen::Vector3f( sp,  0,  0.0f), size, cPurple, 0.1f, 6, initType, mass);
 
     // LAYER 3: Glass
-    createGem(octree, Eigen::Vector3f(-sp,  sp, 0.0f), 0.45f, GemCut::OCTAHEDRON, cRuby, 0.1f, 7, initType, mass, 0.95f, 1.757f, Eigen::Vector3f(0.05f, 0.8f, 0.8f)); 
-    createBox(octree, Eigen::Vector3f(  0,  sp, 0.0f), size * 0.5, cBlue, 0.0f, 0.01f, 0.0f, 0.89f, 1.309f, Eigen::Vector3f(0.08f, 0.02f, 0.01f), 8, initType, mass, 0.5); 
-    createGem(octree, Eigen::Vector3f( sp,  sp, 0.0f), 0.45f, GemCut::HEXAGONAL_BIPYRAMID, cAmethyst, 0.1f, 9, initType, mass, 0.97f, 1.534f, Eigen::Vector3f(0.8f, 0.6f, 0.05f));
+    createGem(octree, Eigen::Vector3f(-sp,  sp, 0.0f), 0.45f, GemCut::OCTAHEDRON, cRuby, 0.1f, 7, initType, mass, 0.95f, 1.757f, Eigen::Vector3f(0.05f, 0.8f, 0.8f), Eigen::Vector3f(1.4360479f, 0.64583146f, 3.4556846f), Eigen::Vector3f(0.0052998009f, 0.014262926f, 210.80888f), true); 
+    createBox(octree, Eigen::Vector3f(  0,  sp, 0.0f), size * 0.5, cBlue,   0.0f, 0.01f, 0.0f, 0.89f, 1.309f, Eigen::Vector3f(0.08f, 0.02f, 0.01f), 8, initType, mass, 0.5, Eigen::Vector3f(0.54727636f, 0.15459328f, 0.13445437f), Eigen::Vector3f(0.0053423668f, 0.019974298f, 10.596549f), true); 
+    createGem(octree, Eigen::Vector3f( sp,  sp, 0.0f), 0.45f, GemCut::HEXAGONAL_BIPYRAMID, cAmethyst, 0.1f, 9, initType, mass, 0.97f, 1.534f, Eigen::Vector3f(0.8f, 0.6f, 0.05f), Eigen::Vector3f(0.696,0.407,0.897), Eigen::Vector3f(0.0046,0.013, 97.934), true);
 
     std::cout << "Optimizing and Generating LODs..." << std::endl;
     // octree.generateLODs();

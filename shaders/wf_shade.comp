@@ -79,8 +79,13 @@ void main() {
         vec4 albedo = unpackRGBA8(hitData.color);
         float opacity = albedo.a;
         float transmission = 1.0 - opacity;
-        float roughness, metallic, ior;
-        unpackMaterial(surfaceMat.materialProps, roughness, metallic, ior);
+        float roughness, metallic;
+        uint sellRow;
+        unpackMaterial(surfaceMat.materialProps, roughness, metallic, sellRow);
+
+        int hero = GET_HERO(p.i1.w);
+        float lambda = heroLambda(hero == 0 ? 2 : hero);
+        float ior = sampleIor(sellRow, lambda);
         vec3 emittanceRGB = unpackRGB9E5(surfaceMat.chromaticity);
         bool isEmissive = surfaceMat.chromaticity != 0u;
 
@@ -242,9 +247,20 @@ void main() {
         } else {
             isTransmissionInteraction = true;
 
+            int curHero = hero;
             vec3 dispersionMask = vec3(1.0);
+            if (curHero == 0) {
+                curHero = clamp(int(nextFloat(grng) * 3.0) + 1, 1, 3);
+                dispersionMask = heroMask(curHero) * 3.0;
+                p.i1.w = SET_HERO(p.i1.w, curHero);
+            }
             
-            eta = (entering == 1) ? (1.0 / ior) : ior;
+            {
+                float lh = heroLambda(curHero);
+                float iorH = sampleIor(sellRow, lh);
+                eta = (entering == 1) ? (1.0 / iorH) : iorH;
+            }
+
 
             float NDotH = dot(offsetNorm, H);
             float sinThetaT2 = eta * eta * (1.0 - VdotH * VdotH);

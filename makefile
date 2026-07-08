@@ -82,7 +82,7 @@ all: $(EXE) $(SHADER_SPVS)
 	@echo "Build complete for $(UNAME_S)"
 
 
-$(BIN_DIR)/wf_init.spv $(BIN_DIR)/wf_args.spv $(BIN_DIR)/wf_extend.spv $(BIN_DIR)/wf_shade.spv $(BIN_DIR)/wf_shadow.spv $(BIN_DIR)/wf_finalize.spv: $(SHADER_DIR)/wf_common.glsl $(SHADER_DIR)/blue_sample.glsl $(SHADER_DIR)/vct_cone.glsl
+$(BIN_DIR)/wf_init.spv $(BIN_DIR)/wf_args.spv $(BIN_DIR)/wf_extend.spv $(BIN_DIR)/wf_shade.spv $(BIN_DIR)/wf_shadow.spv $(BIN_DIR)/wf_finalize.spv: $(SHADER_DIR)/wf_common.glsl $(SHADER_DIR)/vct_cone.glsl
 
 $(BIN_DIR)/%.spv: $(SHADER_DIR)/%.comp
 	@echo "Compiling shader $< -> $@"

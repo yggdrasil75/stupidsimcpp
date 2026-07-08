@@ -47,8 +47,9 @@ void main() {
         if (hitResult == 1 && hitIndex >= 0 && hitIndex < points.length()) {
             GPURenderData hd = points[hitIndex];
             GPUMaterial mData = materials[hd.materialIdx];
-            float r, m, ior;
-            unpackMaterial(mData.materialProps, r, m, ior);
+            float r, m;
+            uint sellRow;
+            unpackMaterial(mData.materialProps, r, m, sellRow);
             float comp = 0.3;
             if (m > 0.0) comp += 0.2;
             if (r > 0.0 && r < 0.9) comp += 0.3;
@@ -68,8 +69,9 @@ void main() {
     if (mediumVoxelIdx != -1) {
         GPURenderData medData = points[mediumVoxelIdx];
         GPUMaterial mData = materials[medData.materialIdx];
-        float r, m, ior;
-        unpackMaterial(mData.materialProps, r, m, ior);
+        float r, m;
+        uint sellRow;
+        unpackMaterial(mData.materialProps, r, m, sellRow);
         vec3 medAbsorption = unpackRGB9E5(mData.absorption);
         vec4 medAlbedo = unpackRGBA8(medData.color);
         float medOpacity = medAlbedo.a;

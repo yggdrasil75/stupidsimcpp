@@ -278,12 +278,53 @@ struct SPHKernels {
 };
 
 using v3half = Eigen::Matrix<Eigen::half, 3, 1>;
+static constexpr float SELL_LAMBDA_R = 0.610f;
+static constexpr float SELL_LAMBDA_G = 0.550f;
+static constexpr float SELL_LAMBDA_B = 0.465f;
+
+static inline float sellmeierN(const v3half& B, const v3half& C, float lambdaUm) {
+    float l2 = lambdaUm * lambdaUm;
+    float n2 = 1.0f;
+    for (int j = 0; j < 3; ++j) {
+        float Bj = static_cast<float>(B[j]);
+        float Cj = static_cast<float>(C[j]);
+        float denom = l2 - Cj;
+        if (std::abs(denom) > 1e-8f) n2 += Bj * l2 / denom;
+    }
+    return std::sqrt(std::max(1.0f, n2));
+}
+
+static inline void sellmeierFromConstant(float n, v3half& B, v3half& C) {
+    float n2 = n * n;
+
+    if (n >= 1.0f) {
+        float n2_minus_1 = n2 - 1.0f;
+        float c1 = 0.0106f; 
+        float c2 = 100.0f;  
+        float b1 = n2_minus_1 / 1.030788f;
+        float b2 = b1 * 0.2f; 
+
+        B = v3half(Eigen::half(b1), Eigen::half(b2), Eigen::half(0.0f));
+        C = v3half(Eigen::half(c1), Eigen::half(c2), Eigen::half(0.0f));
+
+    } else {
+        n2 = std::max(0.00001f, n2); 
+        float c1 = 0.0f;
+        float c2 = -0.1f;
+        float b1 = 0.611792f * n2 - 1.0f;
+        float b2 = 0.5f * n2;
+
+        B = v3half(Eigen::half(b1), Eigen::half(b2), Eigen::half(0.0f));
+        C = v3half(Eigen::half(c1), Eigen::half(c2), Eigen::half(0.0f));
+    }
+}
 
 struct RenderMaterial {
     uint32_t chromaticity;
     float roughness;
     float metallic;
-    float ior;
+    v3half sellB;
+    v3half sellC;
     Vec3 absorption;
     //vec3 scattering? // sigma_s (The "diffuse color" of the leaf/wood)
     //float phase_g? // Forward/backward scattering bias (-1.0 to 1.0)
@@ -292,27 +333,34 @@ struct RenderMaterial {
     //float translucency? // Thin geometry sss and transparency
     //float porosity? // Rain simulation without rain voxels?
 
-    RenderMaterial(float e = 0.0f, float r = 1.0f, float m = 0.0f, float i = 1.45f, Eigen::Vector3f a = Eigen::Vector3f::Zero())
-        : chromaticity(packRGB9E5(Eigen::Vector3f(e, e, e))), roughness(r), metallic(m), absorption(a), ior(i) { }
+    RenderMaterial(uint32_t e, float r, float m, const v3half& B, const v3half& C,
+              Vec3 a = Eigen::Vector3f::Zero())
+        : chromaticity(e), roughness(r), metallic(m), sellB(B), sellC(C), absorption(a) {}
 
+    RenderMaterial(float e = 0.0f, float r = 1.0f, float m = 0.0f, float i = 1.45f, Eigen::Vector3f a = Eigen::Vector3f::Zero())
+        : chromaticity(packRGB9E5(Eigen::Vector3f(e, e, e))), roughness(r), metallic(m), absorption(a) {
+        sellmeierFromConstant(i, sellB, sellC);
+    }
+    float iorGreen() const { return sellmeierN(sellB, sellC, SELL_LAMBDA_G); }
     Vec3 emittanceRGB() const { return unpackRGB9E5(chromaticity); }
 
     bool operator==(const RenderMaterial& o) const {
         return chromaticity == o.chromaticity && roughness == o.roughness &&
-               metallic == o.metallic && ior == o.ior && absorption == o.absorption;
+               metallic == o.metallic && sellB == o.sellB && sellC == o.sellC
+               && absorption == o.absorption;
     }
     
     bool operator<(const RenderMaterial& o) const {
         if (chromaticity != o.chromaticity) return chromaticity < o.chromaticity;
         if (roughness != o.roughness) return roughness < o.roughness;
         if (metallic != o.metallic) return metallic < o.metallic;
-        return ior < o.ior;
+        return iorGreen() < o.iorGreen();
     }
 
     float dist(const RenderMaterial& o) const {
         float dr = roughness - o.roughness;
         float dm = metallic - o.metallic;
-        float di = ior - o.ior;
+        float di = iorGreen() - o.iorGreen();
         Vec3 de = emittanceRGB() - o.emittanceRGB();
         float empenalty = de.norm();
         float absPenalty = (absorption != o.absorption) ? 0.5f : 0.0f;
@@ -326,10 +374,12 @@ struct RMatHash {
         size_t h = std::hash<uint32_t>()(m.chromaticity);
         h ^= hf(m.roughness) + 0x9e3779b9 + (h << 6) + (h >> 2);
         h ^= hf(m.metallic) + 0x9e3779b9 + (h << 6) + (h >> 2);
-        h ^= hf(static_cast<float>(m.ior)) + 0x9e3779b9 + (h << 6) + (h >> 2);
-        h ^= hf(m.absorption.x()) + 0x9e3779b9 + (h << 6) + (h >> 2);
-        h ^= hf(m.absorption.y()) + 0x9e3779b9 + (h << 6) + (h >> 2);
-        h ^= hf(m.absorption.z()) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        for (int j = 0; j < 3; ++j)
+            h ^= hf(static_cast<float>(m.sellB[j])) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        for (int j = 0; j < 3; ++j)
+            h ^= hf(static_cast<float>(m.sellC[j])) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        for (int j = 0; j < 3; ++j)
+            h ^= hf(m.absorption[j]) + 0x9e3779b9 + (h << 6) + (h >> 2);
         return h;
     }
 };

@@ -22,8 +22,6 @@ struct GPUMaterial {
     uint materialProps;  // roughness (8) | metallic (8) | ior (8) | 8 spare
     uint absorption;     // RGB9E5
     uint albedo;         // RGB9E5
-    uint pad0;
-    uint pad1;
 };
 
 struct GPURenderData {
@@ -103,12 +101,6 @@ vec4 traceCone(vec3 origin, vec3 dir, float aperture, float maxConeDist) {
         dist += diameter * 0.5;
     }
     return acc;
-}
-
-void unpackMaterial(uint m, out float roughness, out float metallic, out float ior) {
-    roughness = float(m & 0xFF) / 255.0;
-    metallic  = float((m >> 8) & 0xFF) / 255.0;
-    ior = float((m >> 16) & 0xFF);
 }
 
 vec3 coneTraceDiffuse(vec3 worldPos, vec3 normal, float maxConeDist, out float ao) {
@@ -409,7 +401,8 @@ vec3 secondaryRadiance(vec3 origin, vec3 dir, int skipObjId) {
     return alb.rgb * lightSample(hp, n, pt.objectId);
 }
 
-vec3 guideShade(vec3 hitPos, vec3 normal, vec3 viewDir, vec4 albedo, uint matProps, float ior, int selfObjId) {
+const float GUIDE_IOR = 1.45;
+vec3 guideShade(vec3 hitPos, vec3 normal, vec3 viewDir, vec4 albedo, uint matProps, int selfObjId) {
     float roughness, metallic;
     unpackFastMaterial(matProps, roughness, metallic);
     float transmission = 1.0 - albedo.a;
@@ -419,7 +412,7 @@ vec3 guideShade(vec3 hitPos, vec3 normal, vec3 viewDir, vec4 albedo, uint matPro
 
     // sample 2: refracted light path, only when the surface actually transmits
     if (transmission > 0.05) {
-        float eta = 1.0 / ior;
+        float eta = 1.0 / GUIDE_IOR;
         vec3 refr = refract(viewDir, normal, eta);
         if (dot(refr, refr) < 1e-6) refr = reflect(viewDir, normal); // TIR fallback
         vec3 o = hitPos - normal * 1e-3;
@@ -485,10 +478,8 @@ void main() {
                 if (guideMode) {
                     vec3 hitPos = ray.origin + ray.dir * hits[i].t;
                     if (i == 0) {
-                        float r, m, ior;
-                        unpackMaterial(mat.materialProps, r, m, ior);
                         pathLight = guideShade(hitPos, hits[i].normal, ray.dir,
-                                               albedo, mat.materialProps, ior, hitData.objectId);
+                                               albedo, mat.materialProps, hitData.objectId);
                     } else {
                         pathLight = albedo.rgb * albedo.a
                                   * lightSample(hitPos, hits[i].normal, hitData.objectId);

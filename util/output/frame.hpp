@@ -2,9 +2,11 @@
 #define FRAME_HPP
 
 #include <vector>
+#include <array>
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <unordered_map>
 #include <queue>
 #include <functional>
@@ -18,6 +20,13 @@
 #include <cmath>
 #include <iomanip>
 #include "../timing_decorator.hpp"
+
+#if !defined(FRAME_ENABLE_OPENGL)
+    #if defined(__gl_h_) || defined(__GL_H__) || defined(__glew_h__) || \
+        defined(__glad_h_) || defined(GLAD_GL_H) || defined(__gl3_h_)
+        #define FRAME_ENABLE_OPENGL 1
+    #endif
+#endif
 
 class frame {
 private:
@@ -59,7 +68,10 @@ private:
             case colormap::BGR: return 3;
             case colormap::BGRA: return 4;
             case colormap::B: return 1;
-            case colormap::RGB: default: return 3;
+            
+            case colormap::RGB: 
+            default:
+                return 3;
         }
     }
 
@@ -339,6 +351,8 @@ public:
             return *this;
         } else if (cformat == compresstype::RAW) {
             cformat = compresstype::RLE;
+        } else {
+            throw std::runtime_error("compressFrameRLE: frame is already compressed with an incompatible codec; decompress first");
         }
         
         std::vector<uint16_t> compressedData;
@@ -354,7 +368,6 @@ public:
                 width = 1;
             }
         }
-        ratio = compressedData.size() / _data.size();
         sourceSize = _data.size();
         _compressedData = std::move(compressedData);
         _data.clear();
@@ -372,34 +385,34 @@ public:
             throw std::runtime_error("LZ78 compression can only be applied to raw data");
         }
         
-        std::unordered_map<uint16_t, uint16_t> dict;
-        for (uint16_t i = 0; i < 256; i++) {
-            dict[i] = i;
-        }
+        std::unordered_map<uint32_t, uint16_t> dict;
+        dict.reserve(65536);
 
-        std::vector<uint16_t> compressed;
-        uint16_t nextDict = 256;
+        uint16_t nextDict = 1;
         uint16_t cpos = 0;
         
         for (uint8_t byte : _data) {
-            uint16_t newval = cpos << 8 | byte;
-            if (dict.find(newval) != dict.end()) {
-                cpos = dict[newval];
+            uint32_t newval = (static_cast<uint32_t>(cpos) << 8) | byte;
+            auto it = dict.find(newval);
+            if (it != dict.end()) {
+                cpos = it->second;
             } else {
                 _compressedData.push_back(cpos);
                 _compressedData.push_back(byte);
                 if (nextDict < 65535) {
                     dict[newval] = nextDict++;
+                } else {
+                    dict.clear();
+                    nextDict = 1;
                 }
+                cpos = 0;
             }
-            cpos = 0;
         }
         if (cpos != 0) {
             _compressedData.push_back(cpos);
             _compressedData.push_back(0);
         }
 
-        ratio = compressed.size() / _data.size();
         sourceSize = _data.size();
         _data.clear();
         _data.shrink_to_fit();
@@ -411,25 +424,117 @@ public:
 
     // Differential compression
     frame& compressFrameDiff() {
-        // TODO
-        throw std::logic_error("Function not yet implemented");
+        TIME_FUNCTION;
+        if (_data.empty()) return *this;
+        if (cformat != compresstype::RAW) {
+            throw std::runtime_error("compressFrameDiff: frame is already compressed; decompress first");
+        }
+        size_t ch = getChannels(colorFormat);
+        if (_data.size() >= ch) {
+            for (size_t i = _data.size() - 1; i >= ch; --i) {
+                _data[i] = static_cast<uint8_t>(_data[i] - _data[i - ch]);
+            }
+        }
+        sourceSize = _data.size();
+        cformat = compresstype::DIFF;
+        return *this;
     }
 
     // Huffman compression
     frame& compressFrameHuffman() {
-        // TODO
-        throw std::logic_error("Function not yet implemented");
+        TIME_FUNCTION;
+        if (_data.empty()) return *this;
+        if (cformat != compresstype::RAW) {
+            throw std::runtime_error("compressFrameHuffman: frame is already compressed; decompress first");
+        }
+
+        std::array<uint64_t, 256> hfreq{};
+        for (uint8_t b : _data) ++hfreq[b];
+
+        struct HNode {
+            uint64_t f;
+            int sym;
+            int left, right;
+        };
+        std::vector<HNode> hnodes;
+        auto hcmp = [&hnodes](int a, int b) { return hnodes[a].f > hnodes[b].f; };
+        std::priority_queue<int, std::vector<int>, decltype(hcmp)> hpq(hcmp);
+        for (int s = 0; s < 256; ++s) {
+            if (hfreq[s] > 0) {
+                hnodes.push_back({hfreq[s], s, -1, -1});
+                hpq.push(static_cast<int>(hnodes.size()) - 1);
+            }
+        }
+        if (hpq.size() == 1) {
+            hnodes.push_back({0, -1, -1, -1});
+            hpq.push(static_cast<int>(hnodes.size()) - 1);
+        }
+        while (hpq.size() > 1) {
+            int a = hpq.top();
+            hpq.pop();
+            int b = hpq.top();
+            hpq.pop();
+            hnodes.push_back({hnodes[a].f + hnodes[b].f, -1, a, b});
+            hpq.push(static_cast<int>(hnodes.size()) - 1);
+        }
+        std::array<uint8_t, 256> codeLen{};
+        std::function<void(int, int)> walk = [&](int n, int depth) {
+            if (hnodes[n].sym >= 0) {
+                codeLen[hnodes[n].sym] = static_cast<uint8_t>(std::max(depth, 1));
+                return;
+            }
+            if (hnodes[n].left < 0) return;
+            walk(hnodes[n].left, depth + 1);
+            walk(hnodes[n].right, depth + 1);
+        };
+        walk(hpq.top(), 0);
+
+        std::array<uint32_t, 256> code{};
+        huffmanCanonicalCodes(codeLen, code);
+
+        _compressedData.clear();
+        _compressedData.reserve(257 + _data.size() / 3);
+        for (int s = 0; s < 256; ++s) _compressedData.push_back(codeLen[s]);
+        _compressedData.push_back(0);
+
+        uint32_t acc = 0;
+        int accBits = 0;
+        for (uint8_t b : _data) {
+            acc = (acc << codeLen[b]) | code[b];
+            accBits += codeLen[b];
+            while (accBits >= 16) {
+                _compressedData.push_back(static_cast<uint16_t>(acc >> (accBits - 16)));
+                accBits -= 16;
+                acc &= (1u << accBits) - 1;
+            }
+        }
+        uint16_t lastBits = 16;
+        if (accBits > 0) {
+            _compressedData.push_back(static_cast<uint16_t>(acc << (16 - accBits)));
+            lastBits = static_cast<uint16_t>(accBits);
+        }
+        _compressedData[256] = lastBits;
+
+        sourceSize = _data.size();
+        _data.clear();
+        _data.shrink_to_fit();
+        cformat = compresstype::HUFFMAN;
+        return *this;
     }
 
-    // Combined compression methods
     frame& compressFrameZigZagRLE() {
         // TODO
         throw std::logic_error("Function not yet implemented");
     }
 
     frame& compressFrameDiffRLE() {
-        // TODO
-        throw std::logic_error("Function not yet implemented");
+        TIME_FUNCTION;
+        if (_data.empty()) return *this;
+        size_t original = _data.size();
+        compressFrameDiff();
+        compressFrameRLE();
+        sourceSize = original;
+        return *this;
     }
 
     // Generic decompression that detects compression type
@@ -442,7 +547,6 @@ public:
                 return decompressFrameDiff();
                 break;
             case compresstype::DIFFRLE:
-                // For combined methods, first decompress RLE then the base method
                 decompressFrameRLE();
                 cformat = compresstype::DIFF;
                 return decompressFrameDiff();
@@ -451,8 +555,7 @@ public:
                 return decompressFrameLZ78();
                 break;
             case compresstype::HUFFMAN:
-                // Huffman decompression would be implemented here
-                throw std::runtime_error("Huffman decompression not fully implemented");
+                return decompressFrameHuffman();
                 break;
             case compresstype::RAW:
             default:
@@ -611,24 +714,43 @@ private:
             throw std::runtime_error("Data is not LZ78 compressed");
         }
 
-        std::unordered_map<uint16_t, std::vector<uint8_t>> dict;
-        for (uint16_t i = 0; i < 256; i++) {
-            dict[i] = {static_cast<uint8_t>(i)};
+        if (_compressedData.size() % 2 != 0) {
+            throw std::runtime_error("decompressFrameLZ78: corrupt stream (odd word count)");
         }
 
-        uint16_t nextdict = 256;
+        std::vector<std::vector<uint8_t>> dict;
+        dict.reserve(65536);
+        dict.emplace_back();
+        uint16_t nextdict = 1;
 
         for (size_t i = 0; i < _compressedData.size(); i+=2) {
             uint16_t cpos = _compressedData[i];
-            uint8_t byte = _compressedData[i+1];
+            uint8_t byte = static_cast<uint8_t>(_compressedData[i+1]);
+            if (cpos >= dict.size()) {
+                throw std::runtime_error("decompressFrameLZ78: invalid dictionary reference");
+            }
             std::vector<uint8_t> seq = dict[cpos];
             seq.push_back(byte);
             _data.insert(_data.end(), seq.begin(), seq.end());
-            if (nextdict < 65535 && cpos != 0) {
-                dict[nextdict++] = seq;
+            if (nextdict < 65535) {
+                dict.push_back(std::move(seq));
+                nextdict++;
+            } else {
+                dict.resize(1);
+                nextdict = 1;
             }
         }
-        cformat == compresstype::RAW;
+
+        if (sourceSize != 0) {
+            if (_data.size() == sourceSize + 1) _data.pop_back();
+            if (_data.size() != sourceSize) {
+                throw std::runtime_error("decompressFrameLZ78: output size mismatch");
+            }
+        }
+
+        _compressedData.clear();
+        _compressedData.shrink_to_fit();
+        cformat = compresstype::RAW;
 
         return *this;
     }
@@ -786,8 +908,100 @@ private:
     }
 
     frame& decompressFrameDiff() {
-        // TODO
-        throw std::logic_error("Function not yet implemented");
+        TIME_FUNCTION;
+        size_t ch = getChannels(colorFormat);
+        for (size_t i = ch; i < _data.size(); ++i) {
+            _data[i] = static_cast<uint8_t>(_data[i] + _data[i - ch]);
+        }
+        cformat = compresstype::RAW;
+        return *this;
+    }
+
+    static void huffmanCanonicalCodes(const std::array<uint8_t, 256>& codeLen,
+                                      std::array<uint32_t, 256>& code) {
+        // symbols sorted by (length, value) get consecutive codes
+        std::vector<int> syms;
+        for (int s = 0; s < 256; ++s)
+            if (codeLen[s] > 0) syms.push_back(s);
+        std::sort(syms.begin(), syms.end(), [&](int a, int b) {
+            if (codeLen[a] != codeLen[b]) return codeLen[a] < codeLen[b];
+            return a < b;
+        });
+        uint32_t c = 0;
+        uint8_t prevLen = 0;
+        for (int s : syms) {
+            c <<= (codeLen[s] - prevLen);
+            code[s] = c++;
+            prevLen = codeLen[s];
+        }
+    }
+
+    frame& decompressFrameHuffman() {
+        TIME_FUNCTION;
+        if (cformat != compresstype::HUFFMAN) {
+            throw std::runtime_error("Data is not Huffman compressed");
+        }
+        if (_compressedData.size() < 257) {
+            throw std::runtime_error("decompressFrameHuffman: stream too short");
+        }
+
+        std::array<uint8_t, 256> codeLen{};
+        uint8_t maxLen = 0;
+        for (int s = 0; s < 256; ++s) {
+            codeLen[s] = static_cast<uint8_t>(_compressedData[s]);
+            maxLen = std::max(maxLen, codeLen[s]);
+        }
+        if (maxLen == 0 || maxLen > 32) {
+            throw std::runtime_error("decompressFrameHuffman: corrupt length table");
+        }
+
+        std::array<uint32_t, 256> code{};
+        huffmanCanonicalCodes(codeLen, code);
+
+        // (code, length) -> symbol
+        std::unordered_map<uint64_t, uint8_t> decode;
+        for (int s = 0; s < 256; ++s) {
+            if (codeLen[s] > 0) {
+                decode[(static_cast<uint64_t>(codeLen[s]) << 32) | code[s]] = static_cast<uint8_t>(s);
+            }
+        }
+
+        uint16_t lastBits = _compressedData[256];
+        _data.clear();
+        _data.reserve(sourceSize);
+
+        uint64_t acc = 0;
+        int accLen = 0;
+        for (size_t w = 257; w < _compressedData.size() && _data.size() < sourceSize; ++w) {
+            int wordBits = (w + 1 == _compressedData.size()) ? lastBits : 16;
+            acc = (acc << wordBits) | (_compressedData[w] >> (16 - wordBits));
+            accLen += wordBits;
+
+            bool progressed = true;
+            while (progressed && _data.size() < sourceSize) {
+                progressed = false;
+                for (int len = 1; len <= maxLen && len <= accLen; ++len) {
+                    uint32_t candidate = static_cast<uint32_t>(acc >> (accLen - len));
+                    auto it = decode.find((static_cast<uint64_t>(len) << 32) | candidate);
+                    if (it != decode.end()) {
+                        _data.push_back(it->second);
+                        accLen -= len;
+                        acc &= (accLen > 0) ? ((1ull << accLen) - 1) : 0;
+                        progressed = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (sourceSize != 0 && _data.size() != sourceSize) {
+            throw std::runtime_error("decompressFrameHuffman: output size mismatch");
+        }
+
+        _compressedData.clear();
+        _compressedData.shrink_to_fit();
+        cformat = compresstype::RAW;
+        return *this;
     }
 
     void resizeNearest(std::vector<uint8_t>& dst, size_t newW, size_t newH, size_t channels) {

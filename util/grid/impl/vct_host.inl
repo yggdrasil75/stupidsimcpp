@@ -1,23 +1,11 @@
 static constexpr uint32_t VCT_RES = 128;
 
-struct alignas(16) VCTParams {
-    Vec3 volMin;
-    float voxelSize;
-    Vec3 volExtent;
-    float invVoxelSize;
-    Eigen::Vector3i gridRes;
-    int maxMip;
-    Vec3 lightDir;
-    float enabled;
-};
-
 VkImage        vctImage      = VK_NULL_HANDLE;
 VkDeviceMemory vctImageMem   = VK_NULL_HANDLE;
 VkImageView    vctSampleView = VK_NULL_HANDLE;
 std::vector<VkImageView> vctMipViews;
 VkSampler      vctSampler    = VK_NULL_HANDLE;
 uint32_t       vctMipLevels  = 1;
-bool           vctReady      = false;
 
 VkBuffer       vctParamBuf   = VK_NULL_HANDLE;
 VkDeviceMemory vctParamMem   = VK_NULL_HANDLE;
@@ -34,17 +22,6 @@ VkDescriptorSetLayout vctMipLayout  = VK_NULL_HANDLE;
 VkPipelineLayout     vctMipPipeLayout = VK_NULL_HANDLE;
 VkPipeline           vctMipPipe     = VK_NULL_HANDLE;
 std::vector<VkDescriptorSet> vctMipSets;
-
-struct VCTMipPush { int dstRes[3]; int pad; };
-
-static uint32_t vctMipCount(uint32_t res) {
-    uint32_t m = 1;
-    while (res > 1) {
-        res >>= 1;
-        ++m;
-    }
-    return m;
-}
 
 void vctCreateImage() {
     vctMipLevels = vctMipCount(VCT_RES);
