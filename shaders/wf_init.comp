@@ -10,11 +10,11 @@ void main() {
     int tileH = min(512, cam.height - cam.tileOffsetY);
     if (tileW <= 0 || tileH <= 0) return;
     uint tilePixels = uint(tileW) * uint(tileH);
-    if (gid >= tilePixels) return;
+    // if (gid >= tilePixels) return;
 
     ivec2 local = ivec2(int(gid) % tileW, int(gid) / tileW);
     ivec2 coord = local + ivec2(cam.tileOffsetX, cam.tileOffsetY);
-    if (coord.x >= cam.width || coord.y >= cam.height) return;
+    // if (coord.x >= cam.width || coord.y >= cam.height) return;
 
     uint pixelIndex = uint(coord.y * cam.width + coord.x);
     uint idx   = pixelIndex * 5u;

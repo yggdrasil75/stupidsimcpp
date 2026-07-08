@@ -160,9 +160,9 @@ static uint32_t vctMipCount(uint32_t res) {
     return m;
 }
 
-struct VulkanContext {
+struct GpuContext {
     VkInstance instance = VK_NULL_HANDLE;
-    std::vector<VkDevice> activeDevices;
+    int score = -1;
     VkDevice device = VK_NULL_HANDLE;
     VkPhysicalDevice primaryDevice = VK_NULL_HANDLE;
     VkPhysicalDeviceType deviceType = VK_PHYSICAL_DEVICE_TYPE_OTHER;
@@ -311,7 +311,6 @@ struct VulkanContext {
     uint32_t sellmeierRows = 0;
 
     bool initialized = false;
-    bool ownsInstance = true;
     bool blasTopologyValid = false;
     bool outMemCoherent = true;
     bool outStagingCoherent = true;
@@ -458,16 +457,20 @@ struct VulkanContext {
         wfFinalizeShader = createShaderModule(device, "./bin/wf_finalize.spv");
     }
 
-    void init(VkPhysicalDevice PhDevice = VK_NULL_HANDLE) {
+    void init(VkPhysicalDevice PhDevice = VK_NULL_HANDLE, VkInstance sharedInstance = VK_NULL_HANDLE) {
         uint32_t extCount;
         if (initialized) return;
-        VkApplicationInfo appInfo{VK_STRUCTURE_TYPE_APPLICATION_INFO};
-        appInfo.apiVersion = VK_API_VERSION_1_2;
 
-        vkEnumerateInstanceExtensionProperties(nullptr, &extCount, nullptr);
-        VkInstanceCreateInfo createInfo{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
-        createInfo.pApplicationInfo = &appInfo;
-        vkCreateInstance(&createInfo, nullptr, &instance);
+        if (sharedInstance != VK_NULL_HANDLE) {
+            instance = sharedInstance;
+        } else if (instance == VK_NULL_HANDLE) {
+            VkApplicationInfo appInfo{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+            appInfo.apiVersion = VK_API_VERSION_1_2;
+            vkEnumerateInstanceExtensionProperties(nullptr, &extCount, nullptr);
+            VkInstanceCreateInfo createInfo{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+            createInfo.pApplicationInfo = &appInfo;
+            vkCreateInstance(&createInfo, nullptr, &instance);
+        }
 
         if (PhDevice != VK_NULL_HANDLE) {
             primaryDevice = PhDevice;
@@ -1499,7 +1502,6 @@ void initWavefront() {
 }
 
 void ensureWavefrontBuffers(uint32_t maxPaths) {
-    TIME_FUNCTION; //this probably shouldnt be called every tile.
     if (maxPaths <= wfPathCap && wfPathBuf) return;
     destroyBuffer(device, wfPathBuf, wfPathMem);
     destroyBuffer(device, wfPathHitBuf, wfPathHitMem);
@@ -1523,7 +1525,6 @@ void ensureWavefrontBuffers(uint32_t maxPaths) {
 }
 
 void writeWavefrontDescriptors() {
-    TIME_FUNCTION; //this probably shouldnt be called every tile.
     VkDescriptorBufferInfo bi[17] = {};
     bi[0]  = {uboBuffer,      0, VK_WHOLE_SIZE};
     bi[1]  = {pbrPointBuffer, 0, VK_WHOLE_SIZE};
@@ -1618,13 +1619,9 @@ void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel
     for (int s0 = sampleStart; s0 < sampleEnd; s0 += samplesPerSubmit, slot ^= 1) {
         int s1 = std::min(s0 + samplesPerSubmit, sampleEnd);
         VkCommandBuffer cmd = wfCmd[slot];
-        {
-            // ScopedFunctionTimer _sw("wf.waitSlot");
-            vkWaitForFences(device, 1, &wfFence[slot], VK_TRUE, UINT64_MAX);
-            vkResetFences(device, 1, &wfFence[slot]);
-        }
+        vkWaitForFences(device, 1, &wfFence[slot], VK_TRUE, UINT64_MAX);
+        vkResetFences(device, 1, &wfFence[slot]);
 
-        // ScopedFunctionTimer* _rec = new ScopedFunctionTimer("wf.recordCmd");
         VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         vkBeginCommandBuffer(cmd, &bi);
@@ -1632,7 +1629,6 @@ void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel
                                 wfPipelineLayout, 0, 1, &wfDescSet, 0, nullptr);
 
         for (int s = s0; s < s1; ++s) {
-            // Clear all counters, then seed the primary-ray queue.
             wfBind(cmd, wfArgsPipe);
             wfPush(cmd, 0, 4, s);
             vkCmdDispatch(cmd, 1, 1, 1);
@@ -1641,7 +1637,6 @@ void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel
             wfPush(cmd, 0, 0, s);
             vkCmdDispatch(cmd, pathGroups, 1, 1);
             wfBarrier(cmd);
-            // Publish extend args for the first iteration (old stage 0).
             wfBind(cmd, wfArgsPipe);
             wfPush(cmd, 0, 0, s);
             vkCmdDispatch(cmd, 1, 1, 1);
@@ -1649,7 +1644,6 @@ void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel
 
             int parity = 0;
             for (int it = 0; it < maxIters; ++it) {
-                // extend: trace the current ray queue
                 wfBind(cmd, wfExtendPipe);
                 wfPush(cmd, parity, 0, s);
                 vkCmdDispatchIndirect(cmd, wfCounterBuf, WF_OFF_EXTEND_ARGS);
@@ -1680,96 +1674,104 @@ void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel
         }
 
         vkEndCommandBuffer(cmd);
-        // delete _rec;
-
-        // ScopedFunctionTimer _sw("wf.submit");
         vkWaitForFences(device, 1, &wfFence[slot ^ 1], VK_TRUE, UINT64_MAX);
         VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
         si.commandBufferCount = 1;
         si.pCommandBuffers = &cmd;
         vkQueueSubmit(queue, 1, &si, wfFence[slot]);
     }
-
-    // Drain both slots before returning: callers read back / reuse the
-    // output buffers immediately after this function.
-    {
-        // ScopedFunctionTimer _sw("wf.submitAndWait");
-        vkWaitForFences(device, 2, wfFence, VK_TRUE, UINT64_MAX);
-    }
+    vkWaitForFences(device, 2, wfFence, VK_TRUE, UINT64_MAX);
 
 }
 
 #include "vct_host.inl"
 
 };
-inline VulkanContext vkCtx;
+inline GpuContext vkCtx;
 
-struct GPUManager {
-    std::vector<VulkanContext*> contexts;              // [0] == &vkCtx
-    std::vector<std::unique_ptr<VulkanContext>> extras; // owned secondary contexts
+struct GpuFleet {
+    VkInstance instance = VK_NULL_HANDLE;                 // shared, fleet-owned
+    std::vector<GpuContext*> gpus;                        // [0] == &vkCtx
+    std::vector<std::unique_ptr<GpuContext>> owned;       // secondaries
     bool initialized = false;
+    bool multiEnabled = true;
 
-    size_t count() const { return contexts.size(); }
-    VulkanContext& ctx(size_t i) { return *contexts[i]; }
+    size_t count() const { return gpus.size(); }
+    GpuContext& ctx(size_t i) { return *gpus[i]; }
+
+    // Convenience views if you want bare handles (e.g. for external interop).
+    std::vector<VkDevice> devices() const {
+        std::vector<VkDevice> v; v.reserve(gpus.size());
+        for (auto* g : gpus) v.push_back(g->device);
+        return v;
+    }
+    std::vector<VkPhysicalDevice> physicalDevices() const {
+        std::vector<VkPhysicalDevice> v; v.reserve(gpus.size());
+        for (auto* g : gpus) v.push_back(g->primaryDevice);
+        return v;
+    }
+
+    VkInstance ensureInstance() {
+        // Adopt an instance already created by vkCtx (e.g. a fast-path render
+        // ran first); otherwise create the one shared instance here.
+        if (instance != VK_NULL_HANDLE) return instance;
+        if (vkCtx.initialized && vkCtx.instance != VK_NULL_HANDLE) {
+            instance = vkCtx.instance;
+            return instance;
+        }
+        VkApplicationInfo appInfo{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+        appInfo.apiVersion = VK_API_VERSION_1_2;
+        VkInstanceCreateInfo createInfo{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+        createInfo.pApplicationInfo = &appInfo;
+        vkCreateInstance(&createInfo, nullptr, &instance);
+        return instance;
+    }
 
     void init() {
         if (initialized) return;
         initialized = true;
 
-        bool multiEnabled = true;
-
-        // If something already initialized vkCtx (e.g. a fast-path render ran
-        // first), adopt its instance; otherwise create one via vkCtx below.
-        VkInstance instance = vkCtx.initialized ? vkCtx.instance : VK_NULL_HANDLE;
-        if (instance == VK_NULL_HANDLE) {
-            VkApplicationInfo appInfo{VK_STRUCTURE_TYPE_APPLICATION_INFO};
-            appInfo.apiVersion = VK_API_VERSION_1_2;
-            VkInstanceCreateInfo createInfo{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
-            createInfo.pApplicationInfo = &appInfo;
-            vkCreateInstance(&createInfo, nullptr, &instance);
-        }
+        ensureInstance();
 
         uint32_t deviceCount = 0;
         vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
         std::vector<VkPhysicalDevice> all(deviceCount);
         vkEnumeratePhysicalDevices(instance, &deviceCount, all.data());
 
-        struct Cand { VkPhysicalDevice dev; int score; uint32_t idx; };
+        struct Cand { VkPhysicalDevice dev; int score; };
         std::vector<Cand> cands;
-        for (uint32_t i = 0; i < deviceCount; ++i) {
-            int s = VulkanContext::scorePhysicalDevice(all[i]);
-            if (s < 0) continue;
-            cands.push_back({all[i], s, i});
+        for (auto dev : all) {
+            int s = GpuContext::scorePhysicalDevice(dev);
+            if (s >= 0) cands.push_back({dev, s});
         }
-
         std::stable_sort(cands.begin(), cands.end(),
-                            [](const Cand& a, const Cand& b) { return a.score > b.score; });
-        bool haveGPU = !cands.empty() && cands.front().score >= 2;
-        if (haveGPU) {
+                         [](const Cand& a, const Cand& b) { return a.score > b.score; });
+
+        // If any real GPU is present, drop the CPU/fallback (score <= 1) devices.
+        if (!cands.empty() && cands.front().score >= 2) {
             cands.erase(std::remove_if(cands.begin(), cands.end(),
                         [](const Cand& c) { return c.score <= 1; }), cands.end());
         }
-
         if (!multiEnabled && cands.size() > 1) cands.resize(1);
 
-        // Primary context. If vkCtx was already initialized before the manager
-        // ran, keep whatever device it has; otherwise give it the best device.
+        // Primary context (vkCtx). Keep its device if already initialized.
         if (!vkCtx.initialized) {
-            vkCtx.init(cands.empty() ? VK_NULL_HANDLE : cands.front().dev);
+            vkCtx.init(cands.empty() ? VK_NULL_HANDLE : cands.front().dev, instance);
         }
-        contexts.push_back(&vkCtx);
+        if (!cands.empty()) vkCtx.score = cands.front().score;
+        gpus.push_back(&vkCtx);
 
-        // Secondary contexts for the remaining devices.
-        for (size_t i = 0; i < cands.size(); ++i) {
-            if (cands[i].dev == vkCtx.primaryDevice) continue;
-            if (contexts.size() == 1 && i == 0 && vkCtx.initialized && vkCtx.primaryDevice == cands[i].dev) continue;
-            auto c = std::make_unique<VulkanContext>();
-            c->init(cands[i].dev);
-            contexts.push_back(c.get());
-            extras.push_back(std::move(c));
+        // Secondary contexts for the remaining distinct devices.
+        for (auto& c : cands) {
+            if (c.dev == vkCtx.primaryDevice) continue;
+            auto g = std::make_unique<GpuContext>();
+            g->init(c.dev, instance);
+            g->score = c.score;
+            gpus.push_back(g.get());
+            owned.push_back(std::move(g));
         }
     }
 };
-inline GPUManager gpuMgr;
+inline GpuFleet gpuFleet;
 #endif
 }

@@ -93,7 +93,6 @@ static inline uint32_t packRGB8(const Vec3& c) {
 }
 
 static inline uint32_t packRGBA8(const Eigen::Vector4f& c) {
-    TIME_FUNCTION;
     uint32_t r = static_cast<uint32_t>(std::clamp(c.x(), 0.0f, 1.0f) * 255.0f);
     uint32_t g = static_cast<uint32_t>(std::clamp(c.y(), 0.0f, 1.0f) * 255.0f);
     uint32_t b = static_cast<uint32_t>(std::clamp(c.z(), 0.0f, 1.0f) * 255.0f);
@@ -102,7 +101,6 @@ static inline uint32_t packRGBA8(const Eigen::Vector4f& c) {
 }
 
 static inline uint32_t packMaterialProps(float roughness, float metallic, uint32_t sellmeierRow) {
-    TIME_FUNCTION;
     uint32_t r8 = static_cast<uint32_t>(std::clamp(roughness, 0.0f, 1.0f) * 255.0f);
     uint32_t m8 = static_cast<uint32_t>(std::clamp(metallic, 0.0f, 1.0f) * 255.0f);
     uint32_t row16 = sellmeierRow & 0xFFFFu;
@@ -406,7 +404,6 @@ struct RenderMaterial {
 };
 
 static inline std::vector<float> buildSellmeierLUT(const std::vector<Grid::RenderMaterial>& mats) {
-    TIME_FUNCTION;
     int rows = std::max<size_t>(1, mats.size()) * SELL_LUT_SECONDARY;
     std::vector<float> lut(static_cast<size_t>(rows) * SELL_LUT_WAVELENGTHS, 1.0f);
     for (size_t mi = 0; mi < mats.size(); ++mi) {
@@ -425,7 +422,6 @@ static inline std::vector<float> buildSellmeierLUT(const std::vector<Grid::Rende
 
 static inline void buildGPUMaterialCache(const std::vector<Grid::RenderMaterial>& mats, std::vector<GPUMaterial>& outGpu,
                                          std::vector<float>& outSellLUT, size_t& outSellRows) {
-    TIME_FUNCTION;
     outGpu.clear();
     outGpu.reserve(mats.size() + 1);
     for (size_t mi = 0; mi < mats.size(); ++mi) {

@@ -3,7 +3,7 @@ namespace Grid {
 
 template<typename T>
 void Octree<T>::buildRender(RenderBuffer_<T>& buffer) {
-    TIME_FUNCTION;
+    // TIME_FUNCTION;
     buffer.clear();
     if (!root_) return;
     // buffer.nodes.emplace_back();
@@ -349,7 +349,7 @@ static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData
             tiles.push_back({x, y, std::min(tileW, width - x), std::min(tileH, height - y)});
 
     int start = 0;
-    const size_t nGPU = gpuMgr.count();
+    const size_t nGPU = gpuFleet.count();
 
     ScopedFunctionTimer ngpul1("wavefront part 1: ");
     if (nGPU <= 1) {
@@ -388,7 +388,7 @@ static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData
         std::vector<std::thread> calib;
         for (size_t g = 0; g < nGPU; ++g) {
             calib.emplace_back([&, g] {
-                auto& ctx = gpuMgr.ctx(g);
+                auto& ctx = gpuFleet.ctx(g);
                 GPUCameraData cd = camTemplate;
                 cd.tileOffsetX = ct.x();
                 cd.tileOffsetY = ct.y();
@@ -423,7 +423,7 @@ static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData
     // the caller's seed (calibration scribbled on the buffers, so this also
     // cleans that up).
     for (size_t g = 0; g < nGPU; ++g) {
-        auto& ctx = gpuMgr.ctx(g);
+        auto& ctx = gpuFleet.ctx(g);
         const float* pix = (g == 0 && buffersPreSeeded) ? seedPix.data() : zeros.data();
         const float* ad  = (g == 0 && buffersPreSeeded) ? seedAd.data()  : zeros.data();
         ctx.uploadToBuffer(ctx.outBuffer, pix, bufBytes);
@@ -446,8 +446,8 @@ static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData
                 cd.tileOffsetY = t.y();
                 cd.currentSampleOffset = sampleOffset;
                 cd.dispatchSamples = myCount;
-                gpuMgr.ctx(g).updateCameraData(cd);
-                gpuMgr.ctx(g).dispatchWavefront(t.z(), t.w(), maxBounces, myCount, myStart);
+                gpuFleet.ctx(g).updateCameraData(cd);
+                gpuFleet.ctx(g).dispatchWavefront(t.z(), t.w(), maxBounces, myCount, myStart);
             }
             msSpent[g] = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         });
@@ -465,7 +465,7 @@ static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData
     // the downstream smooth/blend passes see every GPU's contribution.
     std::vector<float> merged(pixFloats, 0.0f), mergedAd(pixFloats, 0.0f), tmp(pixFloats);
     for (size_t g = 0; g < nGPU; ++g) {
-        auto& ctx = gpuMgr.ctx(g);
+        auto& ctx = gpuFleet.ctx(g);
         if (g != 0 && counts[g] <= 0) continue; // untouched zeros
         // outBuffer is device-local now: snapshot it into the context's
         // persistent host-cached staging buffer and read from there.
@@ -482,7 +482,7 @@ static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData
 
 // Uploads the octree's fog volumes to the GPU and stamps the count into camData.
 template<typename T>
-static void uploadFogVolumes(VulkanContext& vkCtx, GPUCameraData& camData,
+static void uploadFogVolumes(GpuContext& vkCtx, GPUCameraData& camData,
                              const std::vector<T>& fogVolumes) {
     std::vector<GPUFogVolume> gpuFog;
     gpuFog.reserve(fogVolumes.size());
@@ -504,18 +504,18 @@ frame Octree<T>::renderFrameVulkan(const Camera& cam, int height, int width, fra
                 int maxBounces, bool globalIllumination, bool useLod) {
     TIME_FUNCTION;
     updateStreaming(cam);
-    // optimize();
+    optimize();
     thread_local RenderBuffer tl_buffer;
     buildRender(tl_buffer);
     
-    gpuMgr.init();
+    gpuFleet.init();
 
     const std::vector<GPUMaterial>* gpuMaterials = nullptr;
     const std::vector<float>* sellLUT = nullptr;
     size_t sellRows = 0;
     renderMaterials_.retrieveGPUMaterials(buildGPUMaterialCache, gpuMaterials, sellLUT, sellRows);
-    for (size_t g = 0; g < gpuMgr.count(); ++g) {
-        auto& ctx = gpuMgr.ctx(g);
+    for (size_t g = 0; g < gpuFleet.count(); ++g) {
+        auto& ctx = gpuFleet.ctx(g);
         ctx.updateMaterialBuffer(*gpuMaterials);
         ctx.updateSellmeierBuffer(*sellLUT, SELL_LUT_WAVELENGTHS, sellRows);
     }
@@ -602,8 +602,8 @@ frame Octree<T>::renderFrameVulkan(const Camera& cam, int height, int width, fra
 
     size_t pixFloats = width * height * 5;
     size_t outSize = pixFloats * sizeof(float);
-    for (size_t g = 0; g < gpuMgr.count(); ++g) {
-        auto& ctx = gpuMgr.ctx(g);
+    for (size_t g = 0; g < gpuFleet.count(); ++g) {
+        auto& ctx = gpuFleet.ctx(g);
         uploadFogVolumes(ctx, camData, fogVolumes_);
         ctx.updateCommonBuffers(outSize, camData);
         ctx.updateSkyboxBuffer(skyData);
@@ -748,18 +748,18 @@ frame Octree<T>::blendedRenderFrameVulkan(const Camera& cam, int height, int wid
                 frame::colormap colorformat, int samplesPerPixel, int maxBounces, bool globalIllumination, bool useLod) {
     TIME_FUNCTION;
     updateStreaming(cam);
-    optimize();
+    // optimize();
     thread_local RenderBuffer tl_buffer;
     buildRender(tl_buffer);
     
-    gpuMgr.init();
+    gpuFleet.init();
 
     const std::vector<GPUMaterial>* gpuMaterials = nullptr;
     const std::vector<float>* sellLUT = nullptr;
     size_t sellRows = 0;
     renderMaterials_.retrieveGPUMaterials(buildGPUMaterialCache, gpuMaterials, sellLUT, sellRows);
-    for (size_t g = 0; g < gpuMgr.count(); ++g) {
-        auto& ctx = gpuMgr.ctx(g);
+    for (size_t g = 0; g < gpuFleet.count(); ++g) {
+        auto& ctx = gpuFleet.ctx(g);
         ctx.updateMaterialBuffer(*gpuMaterials);
         ctx.updateSellmeierBuffer(*sellLUT, SELL_LUT_WAVELENGTHS, sellRows);
     }
@@ -855,8 +855,8 @@ frame Octree<T>::blendedRenderFrameVulkan(const Camera& cam, int height, int wid
 
     size_t pixFloats = lowW * lowH * 5;
     size_t pbrOutSize = pixFloats * sizeof(float);
-    for (size_t g = 0; g < gpuMgr.count(); ++g) {
-        auto& ctx = gpuMgr.ctx(g);
+    for (size_t g = 0; g < gpuFleet.count(); ++g) {
+        auto& ctx = gpuFleet.ctx(g);
         uploadFogVolumes(ctx, pbrCamData, fogVolumes_);
         ctx.updateCommonBuffers(pbrOutSize, pbrCamData);
         ctx.updateSkyboxBuffer(skyData);
@@ -938,18 +938,18 @@ frame Octree<T>::superBlendedRenderFrameVulkan(const Camera& cam, int height, in
                 bool useLod, int minSamplesPerPixel) {
     TIME_FUNCTION;
     updateStreaming(cam);
-    optimize();
+    // optimize();
     thread_local RenderBuffer tl_buffer;
     buildRender(tl_buffer);
 
-    gpuMgr.init();
+    gpuFleet.init();
 
     const std::vector<GPUMaterial>* gpuMaterials = nullptr;
     const std::vector<float>* sellLUT = nullptr;
     size_t sellRows = 0;
     renderMaterials_.retrieveGPUMaterials(buildGPUMaterialCache, gpuMaterials, sellLUT, sellRows);
-    for (size_t g = 0; g < gpuMgr.count(); ++g) {
-        auto& ctx = gpuMgr.ctx(g);
+    for (size_t g = 0; g < gpuFleet.count(); ++g) {
+        auto& ctx = gpuFleet.ctx(g);
         ctx.updateMaterialBuffer(*gpuMaterials);
         ctx.updateSellmeierBuffer(*sellLUT, SELL_LUT_WAVELENGTHS, sellRows);
     }
@@ -1181,8 +1181,8 @@ frame Octree<T>::superBlendedRenderFrameVulkan(const Camera& cam, int height, in
 
     size_t pixFloats = lowW * lowH * 5;
     size_t pbrOutSize = pixFloats * sizeof(float);
-    for (size_t g = 0; g < gpuMgr.count(); ++g) {
-        auto& ctx = gpuMgr.ctx(g);
+    for (size_t g = 0; g < gpuFleet.count(); ++g) {
+        auto& ctx = gpuFleet.ctx(g);
         uploadFogVolumes(ctx, pbrCamData, fogVolumes_);
         ctx.updateCommonBuffers(pbrOutSize, pbrCamData);
         if (g > 0) {

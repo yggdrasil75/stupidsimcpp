@@ -357,14 +357,14 @@ int voxelTraverse(vec3 ro, vec3 rd, vec3 invD, float maxDist,
             if (rayCubeIntersect(ro, rd, invD, points[ptIdx], t, n, hp, tEx) && t >= 0.0 && t < tBest) {
                 rayQueryGenerateIntersectionEXT(rq, t);
                 tBest = t;
+                outNormal = n;
+                outHitPoint = hp;
             }
         }
     }
     if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionGeneratedEXT) {
         hitIndex = rayQueryGetIntersectionPrimitiveIndexEXT(rq, true);
         outT = rayQueryGetIntersectionTEXT(rq, true);
-        float dummyT, tEx;
-        rayCubeIntersect(ro, rd, invD, points[hitIndex], dummyT, outNormal, outHitPoint, tEx);
         return 1;
     }
     hitIndex = -1;
