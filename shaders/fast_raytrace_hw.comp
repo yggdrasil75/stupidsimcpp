@@ -307,7 +307,8 @@ bool pickLight(vec3 pos, int selfObjId, out vec3 ldir, out float ldist,
         if (lp.objectId == selfObjId) continue;
         vec3 toL = lp.position - pos;
         float distSq = max(dot(toL, toL), EPS);
-        vec3 e = unpackRGBA8(lp.color).rgb * unpackRGB9E5(materials[lp.materialIdx].chromaticity);
+        vec3 emitCol = unpackRGB9E5(materials[lp.materialIdx].chromaticity);
+        vec3 e = max(emitCol, unpackRGBA8(lp.color).rgb * emitCol);
         float lum = dot(e, vec3(0.2126, 0.7152, 0.0722));
         float score = lum * lp.size * lp.size / distSq;
         if (score > bestScore) {
@@ -395,7 +396,8 @@ vec3 secondaryRadiance(vec3 origin, vec3 dir, int skipObjId) {
     vec4 alb = unpackRGBA8(pt.color);
     GPUMaterial m = materials[pt.materialIdx];
     if (m.chromaticity != 0u) {
-        return alb.rgb * unpackRGB9E5(m.chromaticity);             // hit a light directly
+        vec3 emitCol = unpackRGB9E5(m.chromaticity);
+        return max(emitCol, alb.rgb * emitCol);
     }
     vec3 hp = origin + dir * t;
     return alb.rgb * lightSample(hp, n, pt.objectId);
@@ -466,8 +468,10 @@ void main() {
         bool isInternalVoxel = (hasPrev && hitData.objectId == prevOid);
 
         vec3 surfaceColor;
-        if (mat.chromaticity != 0u) {
-            surfaceColor = albedo.rgb * unpackRGB9E5(mat.chromaticity);
+        bool isEmitter = (mat.chromaticity != 0u);
+        if (isEmitter) {
+            vec3 emitCol = unpackRGB9E5(mat.chromaticity);
+            surfaceColor = max(emitCol, albedo.rgb * emitCol);
         } else {
             vec3 lightDir = normalize(-cam.dir);
             float diffuse = 0.0;
@@ -507,7 +511,9 @@ void main() {
         float fogFactor = clamp((cam.maxDist - hits[i].t) * cam.invFogRange, cam.minVisibility, 1.0);
         vec3 skyColor = sampleSkybox(rayDir);
         
-        surfaceColor = surfaceColor * fogFactor + skyColor * (1.0 - fogFactor);
+        if (!isEmitter) {
+            surfaceColor = surfaceColor * fogFactor + skyColor * (1.0 - fogFactor);
+        }
 
         float coverage;
         if (isInternalVoxel) {

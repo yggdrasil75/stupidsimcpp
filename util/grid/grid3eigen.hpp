@@ -2613,6 +2613,8 @@ public:
                 frame::colormap colorformat = frame::colormap::RGB, int samplesPerPixel = 100,
                 int maxBounces = 4, bool globalIllumination = true, bool useLod = false,
                 int minSamplesPerPixel = 4);
+    frame GameStyleRenderFrame(const Camera& cam, int height, int width,
+                frame::colormap colorformat = frame::colormap::RGB);
     frame fastRenderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB);
     frame renderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB,
         int samplesPerPixel = 2, int maxBounces = 4, bool globalIllumination = false, bool useLod = true);

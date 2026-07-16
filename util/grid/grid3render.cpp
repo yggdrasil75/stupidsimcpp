@@ -46,8 +46,7 @@ void Octree<T>::buildRenderNodeAt(OctreeNode_<T>* node, RenderBuffer_<T>& buffer
             rd.size = pt->size;
             rd.color = pt->color;
             
-            rd.materialIdx = (pt->renderMatIdx < buffer.defaultMatIdx)
-                                 ? pt->renderMatIdx : buffer.defaultMatIdx;
+            rd.materialIdx = (pt->renderMatIdx < buffer.defaultMatIdx) ? pt->renderMatIdx : buffer.defaultMatIdx;
             
             rd.objectId = pt->objectId;
             buffer.points.push_back(rd);
@@ -933,6 +932,171 @@ frame Octree<T>::blendedRenderFrameVulkan(const Camera& cam, int height, int wid
 }
 
 template<typename T>
+frame Octree<T>::GameStyleRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat) {
+    TIME_FUNCTION;
+    updateStreaming(cam);
+    // optimize();
+    thread_local RenderBuffer tl_buffer;
+    buildRender(tl_buffer);
+
+    gpuFleet.init();
+
+    const std::vector<GPUMaterial>* gpuMaterials = nullptr;
+    const std::vector<float>* sellLUT = nullptr;
+    size_t sellRows = 0;
+    renderMaterials_.retrieveGPUMaterials(buildGPUMaterialCache, gpuMaterials, sellLUT, sellRows);
+    for (size_t g = 0; g < gpuFleet.count(); ++g) {
+        auto& ctx = gpuFleet.ctx(g);
+        ctx.updateMaterialBuffer(*gpuMaterials);
+        ctx.updateSellmeierBuffer(*sellLUT, SELL_LUT_WAVELENGTHS, sellRows);
+    }
+
+    std::vector<bool> isLodPoint(tl_buffer.points.size(), false);
+    for(const auto& n : tl_buffer.nodes) {
+        if(n.lodPoint != -1) isLodPoint[n.lodPoint] = true;
+    }
+
+    Vec3 globalMin = Vec3::Constant(std::numeric_limits<float>::max());
+    Vec3 globalMax = Vec3::Constant(std::numeric_limits<float>::lowest());
+
+    std::vector<size_t> validIndices;
+    validIndices.reserve(tl_buffer.points.size());
+    for(size_t i = 0; i < tl_buffer.points.size(); ++i) {
+        if(isLodPoint[i]) continue;
+        validIndices.push_back(i);
+        globalMin = globalMin.cwiseMin(tl_buffer.points[i].position);
+        globalMax = globalMax.cwiseMax(tl_buffer.points[i].position);
+    }
+
+    Vec3 extent = globalMax - globalMin;
+    if (extent.x() <= 0.0f) extent.x() = 1.0f;
+    if (extent.y() <= 0.0f) extent.y() = 1.0f;
+    if (extent.z() <= 0.0f) extent.z() = 1.0f;
+    Vec3 invExtent = extent.cwiseInverse();
+
+    std::vector<PointSort> sortedPoints;
+    sortedPoints.reserve(validIndices.size());
+    for(size_t idx : validIndices) {
+        Vec3 normPos = (tl_buffer.points[idx].position - globalMin).cwiseProduct(invExtent);
+        uint32_t x = std::min(std::max(normPos.x() * 2097151.0f, 0.0f), 2097151.0f);
+        uint32_t y = std::min(std::max(normPos.y() * 2097151.0f, 0.0f), 2097151.0f);
+        uint32_t z = std::min(std::max(normPos.z() * 2097151.0f, 0.0f), 2097151.0f);
+
+        uint64_t m = 0;
+        for (int i = 0; i < 21; ++i) {
+            m |= ((uint64_t)((x >> i) & 1) << (3 * i)) |
+                 ((uint64_t)((y >> i) & 1) << (3 * i + 1)) |
+                 ((uint64_t)((z >> i) & 1) << (3 * i + 2));
+        }
+        sortedPoints.push_back({m, idx});
+    }
+    std::sort(sortedPoints.begin(), sortedPoints.end());
+    std::vector<GPURenderData> gpuFastPoints;
+    gpuFastPoints.reserve(sortedPoints.size());
+    struct LightRef { float power; uint32_t idx; };
+    std::vector<LightRef> lightRefs;
+
+    for(const auto& sp : sortedPoints) {
+        const auto& p = tl_buffer.points[sp.idx];
+
+        gpuFastPoints.push_back({
+            p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId
+        });
+
+        if (tl_buffer.materials[p.materialIdx].chromaticity != 0u) {
+            Vec3 emit = unpackRGB9E5(tl_buffer.materials[p.materialIdx].chromaticity);
+            float lum = 0.2126f * emit.x() * p.color.x() + 0.7152f * emit.y() * p.color.y() + 0.0722f * emit.z() * p.color.z();
+            lightRefs.push_back({lum * p.size * p.size, (uint32_t)(gpuFastPoints.size() - 1)});
+        }
+    }
+
+    std::sort(lightRefs.begin(), lightRefs.end(),
+              [](const LightRef& a, const LightRef& b) { return a.power > b.power; });
+    std::vector<uint32_t> gpuLights;
+    gpuLights.reserve(lightRefs.size());
+    for (const auto& lr : lightRefs) gpuLights.push_back(lr.idx);
+
+    int emissiveCount = (int)gpuLights.size();
+    if(gpuFastPoints.empty()) gpuFastPoints.push_back(GPURenderData{});
+    if(gpuLights.empty()) gpuLights.push_back(0);
+    
+    float aspect = static_cast<float>(width) / height;
+    float fovRad = cam.fovRad();
+    float tanHalfFov = tan(fovRad * 0.5f);
+    float invFogRange = 1.0f / std::max(0.001f, maxDistance_ - lodMinDistance_);
+
+    size_t skyW, skyH;
+    const std::vector<Eigen::Vector4f>& skyData = getCachedSkyData(skyW, skyH);
+    vkCtx.updateSkyboxBuffer(skyData);
+
+    GPUCameraData fastCamData = {
+        cam.origin, lodMinDistance_, cam.direction.normalized(), invLodf, cam.up.normalized(), 0.1f, cam.right(), maxDistance_,
+        skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
+        width, height, 1, 1, invFogRange, frameCounter_++, (int)skyW, (int)skyH, 0, 1, 2,
+        0, (uint32_t)gpuFastPoints.size(), 0, 0, emissiveCount, 1
+    };
+
+    size_t fastOutSize = size_t(width) * size_t(height) * 5 * sizeof(float);
+    vkCtx.updateCommonBuffers(fastOutSize, fastCamData);
+    vkCtx.updateLightBuffer(gpuLights);
+    vkCtx.updateFastBuffers(gpuFastPoints);
+
+    {
+        Vec3 keyLight = (-cam.direction.normalized());
+        vkCtx.vctBuildVolume(vkCtx.fastPointBuffer, (uint32_t)gpuFastPoints.size(),
+                             globalMin, globalMax, keyLight, true);
+    }
+
+
+    {
+        int tileW = 512, tileH = 512;
+        for (int y = 0; y < height; y += tileH) {
+            for (int x = 0; x < width; x += tileW) {
+                int drawW = std::min(tileW, width - x);
+                int drawH = std::min(tileH, height - y);
+                fastCamData.tileOffsetX = x;
+                fastCamData.tileOffsetY = y;
+                vkCtx.updateCameraData(fastCamData);
+
+                VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+                vkBeginCommandBuffer(vkCtx.commandBuffer, &beginInfo);
+                vkCmdBindPipeline(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.fastPipeline);
+                vkCmdBindDescriptorSets(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.fastPipelineLayout, 0, 1, &vkCtx.fastDescSet, 0, nullptr);
+                vkCmdDispatch(vkCtx.commandBuffer, (drawW + 7) / 8, (drawH + 7) / 8, 1);
+                vkEndCommandBuffer(vkCtx.commandBuffer);
+
+                VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+                submitInfo.commandBufferCount = 1;
+                submitInfo.pCommandBuffers = &vkCtx.commandBuffer;
+
+                VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+                VkFence fence;
+                vkCreateFence(vkCtx.device, &fenceInfo, nullptr, &fence);
+                vkQueueSubmit(vkCtx.queue, 1, &submitInfo, fence);
+                vkWaitForFences(vkCtx.device, 1, &fence, VK_TRUE, UINT64_MAX);
+                vkDestroyFence(vkCtx.device, fence, nullptr);
+            }
+        }
+    }
+    frame outFrame(width, height, colorformat);
+    std::vector<float> guide(size_t(width) * size_t(height) * 5);
+    {
+        const float* raw = vkCtx.readbackOut(fastOutSize);
+        memcpy(guide.data(), raw, fastOutSize);
+    }
+
+    std::vector<float> colorBuffer(size_t(width) * size_t(height) * 3);
+    for (size_t px = 0; px < size_t(width) * size_t(height); ++px) {
+        colorBuffer[px * 3 + 0] = guide[px * 5 + 0];
+        colorBuffer[px * 3 + 1] = guide[px * 5 + 1];
+        colorBuffer[px * 3 + 2] = guide[px * 5 + 2];
+    }
+
+    outFrame.setData(colorBuffer, frame::colormap::RGB);
+    return outFrame;
+}
+
+template<typename T>
 frame Octree<T>::superBlendedRenderFrameVulkan(const Camera& cam, int height, int width, float ptScale,
                 frame::colormap colorformat, int samplesPerPixel, int maxBounces, bool globalIllumination,
                 bool useLod, int minSamplesPerPixel) {
@@ -1047,12 +1211,10 @@ frame Octree<T>::superBlendedRenderFrameVulkan(const Camera& cam, int height, in
     int lowW = std::max(1, static_cast<int>(width * ptScale));
     int lowH = std::max(1, static_cast<int>(height * ptScale));
 
-    // ------------- Stage 1: full-resolution deterministic guide pass -------------
     GPUCameraData fastCamData = {
         cam.origin, lodMinDistance_, cam.direction.normalized(), invLodf, cam.up.normalized(), 0.1f, cam.right(), maxDistance_,
         skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
-        width, height, 1, useLod ? 1 : 0, invFogRange, frameCounter_, (int)skyW, (int)skyH, 0, 1,
-        /*globalIllumination = 2 -> top-3-light guide mode in fast_raytrace_hw*/ 2,
+        width, height, 1, useLod ? 1 : 0, invFogRange, frameCounter_, (int)skyW, (int)skyH, 0, 1, 2,
         0, (uint32_t)gpuFastPoints.size(), 0, 0, emissiveCount, 1
     };
 
@@ -1064,7 +1226,7 @@ frame Octree<T>::superBlendedRenderFrameVulkan(const Camera& cam, int height, in
     {
         Vec3 keyLight = (-cam.direction.normalized());
         vkCtx.vctBuildVolume(vkCtx.fastPointBuffer, (uint32_t)gpuFastPoints.size(),
-                             globalMin, globalMax, keyLight, /*enabled=*/true);
+                             globalMin, globalMax, keyLight, true);
     }
 
     {
@@ -1098,17 +1260,12 @@ frame Octree<T>::superBlendedRenderFrameVulkan(const Camera& cam, int height, in
         }
     }
 
-    // Read the guide image back (rgb, depth, objId per pixel).
     std::vector<float> guide(size_t(width) * size_t(height) * 5);
     {
         const float* raw = vkCtx.readbackOut(fastOutSize);
         memcpy(guide.data(), raw, fastOutSize);
     }
 
-    // ------------- Stage 2: importance map from the guide -------------
-    // For each low-res path-trace pixel, inspect its footprint in the guide:
-    // luminance contrast and object/depth discontinuities mean the MIS
-    // integrator needs more samples there; flat areas get the minimum.
     int minS = std::clamp(minSamplesPerPixel, 1, samplesPerPixel);
     std::vector<float> adaptiveSeed(size_t(lowW) * size_t(lowH) * 5, 0.0f);
     std::vector<float> pixelSeed(size_t(lowW) * size_t(lowH) * 5, 0.0f);
@@ -1155,21 +1312,18 @@ frame Octree<T>::superBlendedRenderFrameVulkan(const Camera& cam, int height, in
             int req = std::clamp((int)std::lround(samplesPerPixel * importance), minS, samplesPerPixel);
 
             size_t ai = (size_t(ly) * lowW + lx) * 5;
-            adaptiveSeed[ai]     = 0.0f;           // running luminance sum
-            adaptiveSeed[ai + 1] = 0.0f;           // running luminance^2 sum
-            adaptiveSeed[ai + 2] = (float)req;     // pre-seeded sample budget
+            adaptiveSeed[ai]     = 0.0f;
+            adaptiveSeed[ai + 1] = 0.0f;
+            adaptiveSeed[ai + 2] = (float)req;
             adaptiveSeed[ai + 3] = 0.0f;
             adaptiveSeed[ai + 4] = 0.0f;
 
-            // rgb + depth accumulate from zero; objId is normally only written
-            // on the first-ever sample, so seed it from the guide for the blend.
             int cx = std::min(width - 1,  (int)((lx + 0.5f) * invScaleX));
             int cy = std::min(height - 1, (int)((ly + 0.5f) * invScaleY));
             pixelSeed[ai + 4] = guide[(size_t(cy) * width + cx) * 5 + 4];
         }
     }
 
-    // ------------- Stage 3: low-res MIS path trace with seeded budgets -------------
     GPUCameraData pbrCamData = {
         cam.origin, lodMinDistance_, cam.direction.normalized(), invLodf, cam.up.normalized(), 0.1f, cam.right(), maxDistance_,
         skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
@@ -1199,9 +1353,6 @@ frame Octree<T>::superBlendedRenderFrameVulkan(const Camera& cam, int height, in
     vkCtx.ensureLowResBuffer(pbrOutSize);
     vkCtx.copyBuffer(vkCtx.device, vkCtx.outBuffer, vkCtx.lowResOutBuffer, pbrOutSize);
 
-    // ------------- Stage 4: blend guide (full res) with path trace (low res) -------------
-    // Restore the guide image into the full-res slot instead of re-running the
-    // fast pass; it is the same image.
     vkCtx.updateCommonBuffers(fastOutSize, fastCamData);
     vkCtx.uploadToBuffer(vkCtx.outBuffer, guide.data(), fastOutSize);
 

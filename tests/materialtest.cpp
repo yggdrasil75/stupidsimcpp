@@ -427,6 +427,10 @@ int main() {
         // out.compressFrameLZ78();
         // out.decompress();
         BMPWriter::saveBMP(filename, out);
+
+        frame gameOut = octree.GameStyleRenderFrame(cam, height, width, frame::colormap::RGB);
+        std::string gameFilename = "output/gameready_vulkanrender_" + view.name + ".bmp";
+        BMPWriter::saveBMP(gameFilename, gameOut);
     }
     FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
 
