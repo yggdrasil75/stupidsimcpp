@@ -39,6 +39,7 @@ using BoundingBox = std::pair<Vec3, Vec3>;
 using u_lock = std::unique_lock<std::shared_mutex>;
 using s_lock = std::shared_lock<std::shared_mutex>;
 namespace fs = std::filesystem;
+constexpr int u32M = std::numeric_limits<uint32_t>::max()
 
 enum class BodyType : uint8_t {
     STATIC = 0,
@@ -482,7 +483,7 @@ struct RenderMaterialStore {
             if (a != matMap.end()) return a->second;
         }
 
-        if (materials.size() < std::numeric_limits<uint32_t>::max()) {
+        if (materials.size() < u32M) {
             u_lock writeLock(mutex);
             auto a = matMap.find(renderMat);
             if (a != matMap.end()) return a->second;
@@ -1129,6 +1130,37 @@ struct OctreeNodeStore {
     std::unordered_map<Vec3, uint32_t, Vec3fHash> nodeMap;
     mutable std::shared_mutex mutex;
 
+    uint32_t getOrAdd(const OctreeNode_<T>& node) {
+        {
+            s_lock readLock(mutex);
+            auto a = nodeMap.find(node.center);
+            if (a != nodeMap.end()) return a->second;
+        }
+
+        if (NodeList.size() + 8 < u32M) {
+            u_lock writeLock(mutex);
+            auto a = nodeMap.find(node.center);
+            if (a != nodeMap.end()) return a-> second;
+            uint32_t newIndex = static_cast<uint32_t>(NodeList.size());
+            NodeList.push_back(node);
+            int eight = 8;
+            while (eight > 0) {
+                NodeList.emplace_back();
+                eight--;
+            }
+            nodeMap[node.center] = newIndex;
+            return newIndex;
+        } else {
+            return 0;
+        }
+    }
+
+    OctreeNode_<T> get(uint32_t idx) const {
+        s_lock lock(mutex);
+        if (idx < NodeList.size()) return NodeList[idx];
+        return OctreeNode_<T>();
+    }
+    
 }
 
 
