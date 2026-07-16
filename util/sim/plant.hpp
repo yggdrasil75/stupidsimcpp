@@ -794,9 +794,6 @@ struct PlantState {
     int leafCount = 0;
     int rootCount = 0;
 
-    // Skeleton of woody stem nodes for secondary (girth) growth. Each entry is a
-    // segment centre paired with the axis through it and the primary radius it was
-    // built at; periodically these thicken outward as the plant ages.
     struct TrunkNode {
         v3 pos;
         v3 axis;

@@ -32,7 +32,6 @@ static constexpr int SELL_LUT_SECONDARY   = 8;
 static constexpr float SELL_LMIN = 0.380f; // um
 static constexpr float SELL_LMAX = 0.720f; // um
 
-
 template<typename> struct is_shared_ptr : std::false_type {};
 template<typename T> struct is_shared_ptr<std::shared_ptr<T>> : std::true_type {};
 using Vec3 = Eigen::Vector3f;
@@ -50,6 +49,12 @@ enum class BodyType : uint8_t {
 };
 
 struct Vec3i64Hash {
+    std::size_t operator()(const std::array<int64_t, 3>& v) const {
+        return (std::size_t)((v[0] * 73856093) ^ (v[1] * 19349663) ^ (v[2] * 83492791));
+    }
+};
+
+struct Vec3fHash {
     std::size_t operator()(const std::array<int64_t, 3>& v) const {
         return (std::size_t)((v[0] * 73856093) ^ (v[1] * 19349663) ^ (v[2] * 83492791));
     }
@@ -1117,6 +1122,15 @@ struct OctreeNode_ {
         return BoundingBox({center - hs, center + hs});
     }
 };
+
+template<typename T>
+struct OctreeNodeStore {
+    std::vector<OctreeNode_<T>> NodeList;
+    std::unordered_map<Vec3, uint32_t, Vec3fHash> nodeMap;
+    mutable std::shared_mutex mutex;
+
+}
+
 
 template<typename T>
 struct RayHit_ {

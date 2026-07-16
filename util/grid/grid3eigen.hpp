@@ -97,7 +97,6 @@ private:
     
     ///@brief Mutex securing read/write operations to the objects map
     mutable std::shared_mutex objectsMutex_;
-    
     RenderMaterialStore renderMaterials_;
 
     Skybox skybox_;

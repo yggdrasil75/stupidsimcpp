@@ -453,15 +453,14 @@ public:
 
     inline void _applyNoise(std::function<float(const Eigen::Vector3f&)> noiseFunc) {
         std::vector<v3> newPos(config.surfaceNodes.size());
-        // grid.waitForIdle();
+        grid.waitForIdle();
         for (int i = 0; i < config.surfaceNodes.size(); i++) {
             v3 pos = config.surfaceNodes[i];
-        // for (auto& pos : config.surfaceNodes) {
             
-            auto node = grid.find(pos, config.voxelSize * 0.5f);
-            // if (!node) continue;
+            auto node = grid.find(pos, -2, config.voxelSize * 0.5f);
             if (!node) {
                 std::cout << "something broke as early as applynoise!" << std::endl;
+                continue;
             }
             Particle p = node->data;
             Eigen::Vector3f oldPos = p.currentPos;
