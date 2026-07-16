@@ -332,7 +332,7 @@ struct ImpactEvent {
 class planetsim {
 public:
     planetConfig config;
-    Grid::Octree<Particle> grid;
+    Grid::Octree<Particle> grid{v3(-config.gridSizeCubeMin,-config.gridSizeCubeMin,-config.gridSizeCubeMin),v3(config.gridSizeCubeMin,config.gridSizeCubeMin,config.gridSizeCubeMin), "output/Planet", 16};
     std::vector<PlateConfig> plates;
     std::mt19937 rng = std::mt19937(42);
     bool starAdded = false;
@@ -350,28 +350,18 @@ public:
 
     v3 getOriginColor(const NodeType& pt) {
         if (!pt) return v3(1,1,1);
-        auto obj = grid.getObject(pt->objectId);
-        if (obj) return obj->getRenderMaterial(pt->renderMatIdx).absorption;
-        return v3(1,1,1);
+        return pt->color.template head<3>();
     }
 
     void setOriginColor(const NodeType& pt, const v3& color) {
-        if (!pt) return;
-        auto obj = grid.getOrCreateObject(pt->objectId);
-        auto mat = obj->getRenderMaterial(pt->renderMatIdx);
-        mat.absorption = color;
-        pt->renderMatIdx = obj->getOrAddRenderMaterial(mat);
+        grid.setColor(pt->position, color);
     }
 
     void changeNodeObject(const v3& pos, int newObjectId) {
         auto pt = grid.find(pos, config.voxelSize * 0.5f);
         if (pt && pt->objectId != newObjectId) {
-            auto oldObj = grid.getObject(pt->objectId);
-            typename Grid::RenderMaterial mat;
-            if (oldObj) mat = oldObj->getRenderMaterial(pt->renderMatIdx);
             
             auto newObj = grid.getOrCreateObject(newObjectId);
-            pt->renderMatIdx = newObj->getOrAddRenderMaterial(mat);
             pt->objectId = newObjectId;
         }
     }
@@ -430,7 +420,7 @@ public:
     void generateFibSphere() {
         TIME_FUNCTION;
         grid.load("output/fibSphere.yggs");
-        grid.clear();
+        grid.clear(v3(-config.gridSizeCubeMin,-config.gridSizeCubeMin,-config.gridSizeCubeMin),v3(config.gridSizeCubeMin,config.gridSizeCubeMin,config.gridSizeCubeMin));
         config.surfaceNodes.clear();
         config.surfaceNodes.resize(config.surfacePoints);
         for (int i = 0; i < config.surfacePoints; i++) {

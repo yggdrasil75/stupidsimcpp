@@ -45,31 +45,8 @@ namespace Grid {
     // I could also use callbacks
     // for physics I could make a object class and store in that an index for subobject physic types (ie: skin vs bone vs cartilege all stored in an animal object)
     // I need to make sure that objects are either fully loaded or fully unloaded. I cant have a partially loaded object. so that has to be included in the lazy unload at some point.
-    // further notes on objects: could bring back indexed render materials, store a vector of materials in the object, index in the item. have it be 1 byte instead of 4.
-    // same with physical materials, ie: have a "bone" material, "skin" "muscle" "blood" etc when simulating the physical body of a character. (well, maybe not that detailed. but something similar)
     // also need to store relative positions to the object center, both "resting" and "current". 
     // some rendering options: sgvf (temporal accumulation)
-
-    // a-trous wavelet denoising intead of bilateral filtering.
-    // secondary pass of edge sharpening.
-    // have pbr buffer output sum and sum of squares to make better blending easier to manage
-    // edge aware median prefilter for luminance variance clamping passes
-    // dynamically resize smoothing window based on noise level
-
-    //object crud:
-    /*
-    insert list of voxels.
-    get a vector of weak pointers to all voxels in an object
-    change the current allow partial offload bit to be a flag so I can add more there later.
-    changing a render material by its index
-    getting a render material index from a voxel
-    changing a physics material by its index
-    getting a physics material index from a voxel
-    object transforms (rotation, moving, etc)
-    removing an object
-    subdivide object (split each voxel into 8)
-    smooth object? (subdivide and then remove corner?)
-    */
 
 
 ///@brief A highly optimized sparse voxel Octree tailored for physics, rendering, LOD, and streaming.
