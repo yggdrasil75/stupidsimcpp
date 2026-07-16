@@ -6,7 +6,7 @@ void Octree<T>::buildRender(RenderBuffer_<T>& buffer) {
     // TIME_FUNCTION;
     buffer.clear();
     if (!root_) return;
-    // buffer.nodes.emplace_back();
+    buffer.nodes.emplace_back();
     buffer.points.reserve(size);
 
     std::unordered_map<int, std::shared_ptr<GridObject_<T>>> localObjects;
