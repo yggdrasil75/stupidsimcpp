@@ -360,47 +360,83 @@ vec3 lightSample(vec3 pos, vec3 normal, int selfObjId) {
     return emit * (ndotl * atten * vis);
 }
 
-// Nearest solid-ish hit for a deterministic secondary ray (skips the object
-// the ray originated inside so refraction rays exit their own volume).
+const float OPAQUE_CUTOFF = 0.5;
+const float FOG_CUTOFF    = 0.02;
+
 bool nearestHit(vec3 origin, vec3 dir, float maxT, int skipObjId,
-                out float tOut, out vec3 nOut, out int idxOut) {
+                out float tOut, out vec3 nOut, out int idxOut, out vec3 tintOut) {
     Ray ray = makeRay(origin, dir);
     rayQueryEXT rq;
     rayQueryInitializeEXT(rq, tlas, gl_RayFlagsNoneEXT, 0xFF, origin, 0.0, dir, maxT);
-    float best = maxT;
-    bool found = false;
+
+    int   hitIdx[MAX_HITS];
+    float hitT[MAX_HITS];
+    vec3  hitN[MAX_HITS];
+    int   count = 0;
+
     while (rayQueryProceedEXT(rq)) {
         if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionAABBEXT) {
             int ptIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
             GPURenderData pt = points[ptIdx];
             if (pt.objectId == skipObjId) continue;
-            if (unpackRGBA8(pt.color).a < 0.25) continue;          // ignore wispy volumes
             float t, tExit; vec3 n;
-            if (rayCubeIntersect(ray, pt, t, tExit, n) && t > 1e-4 && t < best) {
-                best = t; nOut = n; idxOut = ptIdx; found = true;
+            if (rayCubeIntersect(ray, pt, t, tExit, n) && t > 1e-4 && t < maxT) {
+                if (count < MAX_HITS) {
+                    hitIdx[count] = ptIdx; hitT[count] = t; hitN[count] = n; count++;
+                } else {
+                    int   fi = 0; float ft = hitT[0];
+                    for (int k = 1; k < MAX_HITS; k++) if (hitT[k] > ft) { ft = hitT[k]; fi = k; }
+                    if (t < ft) { hitIdx[fi] = ptIdx; hitT[fi] = t; hitN[fi] = n; }
+                }
             }
         }
     }
-    tOut = best;
-    return found;
+
+    tintOut = vec3(1.0);
+    if (count == 0) { tOut = maxT; return false; }
+
+    for (int i = 0; i < count - 1; i++) {
+        int mi = i;
+        for (int j = i + 1; j < count; j++) if (hitT[j] < hitT[mi]) mi = j;
+        if (mi != i) {
+            float tt = hitT[i]; hitT[i] = hitT[mi]; hitT[mi] = tt;
+            int   ii = hitIdx[i]; hitIdx[i] = hitIdx[mi]; hitIdx[mi] = ii;
+            vec3  nn = hitN[i]; hitN[i] = hitN[mi]; hitN[mi] = nn;
+        }
+    }
+
+    for (int i = 0; i < count; i++) {
+        vec4 alb = unpackRGBA8(points[hitIdx[i]].color);
+        if (alb.a < FOG_CUTOFF) continue;
+        if (alb.a >= OPAQUE_CUTOFF) {
+            tOut = hitT[i]; nOut = hitN[i]; idxOut = hitIdx[i];
+            return true;
+        }
+        tintOut *= mix(vec3(1.0), alb.rgb, alb.a);
+        if (max(tintOut.r, max(tintOut.g, tintOut.b)) < 0.02) {
+            tOut = hitT[i]; nOut = hitN[i]; idxOut = hitIdx[i];
+            return true;
+        }
+    }
+
+    tOut = maxT;
+    return false;
 }
 
-// Radiance arriving at a deterministic secondary hit: the hit's own emission
-// (so reflections show the lights) plus one NEE connection.
 vec3 secondaryRadiance(vec3 origin, vec3 dir, int skipObjId) {
-    float t; vec3 n; int idx;
-    if (!nearestHit(origin, dir, cam.maxDist, skipObjId, t, n, idx)) {
-        return sampleSkybox(dir);
+    float t; vec3 n; int idx; vec3 tint;
+    if (!nearestHit(origin, dir, cam.maxDist, skipObjId, t, n, idx, tint)) {
+        return tint * sampleSkybox(dir);
     }
     GPURenderData pt = points[idx];
     vec4 alb = unpackRGBA8(pt.color);
     GPUMaterial m = materials[pt.materialIdx];
     if (m.chromaticity != 0u) {
         vec3 emitCol = unpackRGB9E5(m.chromaticity);
-        return max(emitCol, alb.rgb * emitCol);
+        return tint * max(emitCol, alb.rgb * emitCol);
     }
     vec3 hp = origin + dir * t;
-    return alb.rgb * lightSample(hp, n, pt.objectId);
+    return tint * alb.rgb * lightSample(hp, n, pt.objectId);
 }
 
 const float GUIDE_IOR = 1.45;
@@ -409,22 +445,26 @@ vec3 guideShade(vec3 hitPos, vec3 normal, vec3 viewDir, vec4 albedo, uint matPro
     unpackFastMaterial(matProps, roughness, metallic);
     float transmission = 1.0 - albedo.a;
 
-    // sample 1: primary light path (always)
-    vec3 col = albedo.rgb * (1.0 - metallic) * albedo.a * lightSample(hitPos, normal, selfObjId);
+    float cosTheta = clamp(dot(-viewDir, normal), 0.0, 1.0);
+    float F0 = mix(0.04, 1.0, metallic);
+    float fresnel = F0 + (1.0 - F0) * pow(1.0 - cosTheta, 5.0);
+    
+    float surfaceResponse = mix(albedo.a, 1.0, fresnel);
+    surfaceResponse = max(surfaceResponse, 0.15 * (1.0 - metallic));
+    vec3 col = albedo.rgb * (1.0 - metallic) * surfaceResponse
+             * lightSample(hitPos, normal, selfObjId);
 
-    // sample 2: refracted light path, only when the surface actually transmits
     if (transmission > 0.05) {
         float eta = 1.0 / GUIDE_IOR;
         vec3 refr = refract(viewDir, normal, eta);
         if (dot(refr, refr) < 1e-6) refr = reflect(viewDir, normal); // TIR fallback
         vec3 o = hitPos - normal * 1e-3;
-        col += transmission * albedo.rgb * secondaryRadiance(o, normalize(refr), selfObjId);
+        col += transmission * (1.0 - fresnel) * albedo.rgb
+             * secondaryRadiance(o, normalize(refr), selfObjId);
     }
 
-    // sample 3: mirror-reflection light path, only for smooth or metallic surfaces
-    float F0 = mix(0.04, 1.0, metallic);
     float smoothness = 1.0 - roughness;
-    float wRefl = F0 * smoothness * smoothness;
+    float wRefl = fresnel * smoothness * smoothness;
     if (wRefl > 0.02) {
         vec3 refl = reflect(viewDir, normal);
         vec3 o = hitPos + normal * 1e-3;
@@ -516,12 +556,17 @@ void main() {
         }
 
         float coverage;
-        if (isInternalVoxel) {
+        if (isEmitter) {
+            coverage = 1.0;
+        } else if (isInternalVoxel) {
             float thickness = max(0.0, hits[i].tExit - hits[i].t);
             float trPerUnit = clamp(1.0 - alpha, 0.0, 1.0);
             coverage = 1.0 - pow(trPerUnit, thickness);
         } else {
-            coverage = alpha;
+            vec3 vdir = ray.dir;
+            float cosT = clamp(dot(-vdir, hits[i].normal), 0.0, 1.0);
+            float fres = 0.04 + 0.96 * pow(1.0 - cosT, 5.0);
+            coverage = clamp(mix(alpha, 1.0, fres) + 0.10 * (1.0 - alpha), 0.0, 1.0);
         }
         
         accum += surfaceColor * coverage * (1.0 - accumAlpha);
