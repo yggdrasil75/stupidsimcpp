@@ -5,7 +5,7 @@ template<typename T>
 void Octree<T>::buildRender(RenderBuffer_<T>& buffer) {
     // TIME_FUNCTION;
     buffer.clear();
-    if (!root_) return;
+    if (root_ == INVALID_IDX) return;
     buffer.nodes.emplace_back();
     buffer.points.reserve(size);
 
@@ -40,7 +40,8 @@ void Octree<T>::buildRenderNodeAt(uint32_t nodeIndex, RenderBuffer_<T>& buffer, 
     
     rnode.firstPoint = static_cast<uint32_t>(buffer.points.size());
     if (isLoaded) {
-        for (const auto& pt : pointsView(nodeIndex)) {
+        const auto pts = pointsOf(nodeIndex);
+        for (const auto& pt : pts) {
             if (!pt || !pt->isActive() || !pt->isVisible()) continue; 
             RenderData rd;
             rd.position = pt->position;
@@ -76,13 +77,12 @@ void Octree<T>::buildRenderNodeAt(uint32_t nodeIndex, RenderBuffer_<T>& buffer, 
     rnode.firstChild = 0;
     
     if (!node->isLeaf() && isLoaded) {
-        uint8_t mask = 0;
+        const uint32_t srcFirstChild = node->firstChild;
+        const uint8_t mask = node->childMask;
+        node = nullptr;
         int childCount = 0;
         for (int i = 0; i < 8; ++i) {
-            if (node->hasChild(i)) {
-                mask |= (1 << i);
-                childCount++;
-            }
+            if (mask & (1 << i)) childCount++;
         }
         rnode.childMask = mask;
         if (childCount > 0) {
@@ -91,7 +91,7 @@ void Octree<T>::buildRenderNodeAt(uint32_t nodeIndex, RenderBuffer_<T>& buffer, 
             int cidx = 0;
             for (int i = 0; i < 8; ++i) {
                 if (mask & (1 << i)) {
-                    buildRenderNodeAt(node->firstChild + i, buffer, rnode.firstChild + cidx, localObjects);
+                    buildRenderNodeAt(srcFirstChild + i, buffer, rnode.firstChild + cidx, localObjects);
                     cidx++;
                 }
             }

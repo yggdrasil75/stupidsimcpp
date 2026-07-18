@@ -361,16 +361,16 @@ int main() {
     octree.setMaxDistance(4096);
 
     // 3. Setup rendering loop
-    int width = 512;
-    int height = 512;
+    int width = 1920;
+    int height = 1080;
     
     const float fps = 60.0f;
     const float durationPerSegment = 10.0f;
     const int framesPerSegment = static_cast<int>(fps * durationPerSegment);
-    const int samples = 10;
-    const int blendedsamples = 30;
-    const float blendedfactor = 0.5;
-    const int videosamples = 500;
+    const int samples = 100;
+    const int blendedsamples = 300;
+    const float blendedfactor = 0.65;
+    const int videosamples = 300;
     const int bounces = 8;
     const int physicsSubsteps = 10;
     const float physicsDt = 1.0f / fps;
@@ -387,10 +387,10 @@ int main() {
     std::vector<View> views = {
         {"+X", Eigen::Vector3f( 6.8f,  0.0f,  2.0f), Eigen::Vector3f(0.0f, 0.0f, 0.5f)},
         {"+Y", Eigen::Vector3f( 0.0f,  6.8f,  2.0f), Eigen::Vector3f(0.0f, 0.0f, 0.5f)},
-        // {"-X", Eigen::Vector3f(-6.8f,  0.0f,  2.0f), Eigen::Vector3f(0.0f, 0.0f, 0.5f)},
-        // {"+Z", Eigen::Vector3f( 0.0f,  0.0f,  7.3f), Eigen::Vector3f(0.0f, 1.0f, 0.0f)},
-        // {"-Y", Eigen::Vector3f( 0.0f, -6.8f,  2.0f), Eigen::Vector3f(0.0f, 0.0f, 0.5f)},
-        // {"-Z", Eigen::Vector3f( 0.0f,  0.0f,  -1.3f), Eigen::Vector3f(0.0f, -1.0f, 0.0f)}
+        {"-X", Eigen::Vector3f(-6.8f,  0.0f,  2.0f), Eigen::Vector3f(0.0f, 0.0f, 0.5f)},
+        {"+Z", Eigen::Vector3f( 0.0f,  0.0f,  7.3f), Eigen::Vector3f(0.0f, 1.0f, 0.0f)},
+        {"-Y", Eigen::Vector3f( 0.0f, -6.8f,  2.0f), Eigen::Vector3f(0.0f, 0.0f, 0.5f)},
+        {"-Z", Eigen::Vector3f( 0.0f,  0.0f,  -1.3f), Eigen::Vector3f(0.0f, -1.0f, 0.0f)}
     };
 
     std::vector<StateEvent> timeline = {

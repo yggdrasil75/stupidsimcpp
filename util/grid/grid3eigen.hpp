@@ -1043,7 +1043,7 @@ private:
         if (!node) return;
         if (node->lodIdx != INVALID_IDX) return;
 
-        auto nodePoints = pointsView(idx);
+        const auto nodePoints = pointsOf(idx);
 
         if (node->isLeaf()) {
             if (nodePoints.empty()) {

@@ -943,6 +943,7 @@ struct PointStore {
     }
 
     uint32_t count(uint32_t blockIdx) const {
+        s_lock lock(mutex);
         if (blockIdx == INVALID_IDX) return 0;
         if (blockIdx >= blocks.size()) return 0;
         return blocks[blockIdx].count;
@@ -959,6 +960,7 @@ struct PointStore {
     };
 
     View view(uint32_t blockIdx) const {
+        s_lock lock(mutex);
         if (blockIdx == INVALID_IDX) return {};
         if (blockIdx >= blocks.size()) return {};
         const Block& b = blocks[blockIdx];
@@ -967,6 +969,7 @@ struct PointStore {
     }
 
     std::vector<std::shared_ptr<NodeData_<T>>> get(uint32_t blockIdx) const {
+        s_lock lock(mutex);
         std::vector<std::shared_ptr<NodeData_<T>>> out;
         if (blockIdx == INVALID_IDX) return out;
         if (blockIdx >= blocks.size()) return out;
@@ -977,6 +980,7 @@ struct PointStore {
     }
 
     std::shared_ptr<NodeData_<T>> at(uint32_t blockIdx, uint32_t i) const {
+        s_lock lock(mutex);
         if (blockIdx == INVALID_IDX) return nullptr;
         if (blockIdx >= blocks.size()) return nullptr;
         const Block& b = blocks[blockIdx];
