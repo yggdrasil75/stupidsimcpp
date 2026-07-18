@@ -16,9 +16,9 @@ struct SolidNb { Vec3 pos; float size; };
 template<typename T>
 void Octree<T>::stepPhysics(float dt) {
     TIME_FUNCTION;
-    if (!root_ || dt <= 0.0f) return;
+    if (root_ == INVALID_IDX || dt <= 0.0f) return;
     
-    const BoundingBox domainBounds = root_->bounds();
+    const BoundingBox domainBounds = nodeAt(root_)->bounds();
     const Vec3 domLo = domainBounds.first;
     const Vec3 domHi = domainBounds.second;
 
@@ -158,16 +158,16 @@ void Octree<T>::stepPhysics(float dt) {
 
         std::vector<Vec3> regionCorners = {regionLo, regionHi};
         int rd = 0;
-        OctreeNode* solidStart = getHighestCommonNode(regionCorners, root_.get(), rd);
-        if (!solidStart) solidStart = root_.get();
+        uint32_t solidStart = getHighestCommonNode(regionCorners, root_, rd);
+        if (solidStart == INVALID_IDX) solidStart = root_;
 
-        std::vector<OctreeNode*> stack{solidStart};
+        std::vector<uint32_t> stack{solidStart};
         while (!stack.empty()) {
-            OctreeNode* cur = stack.back(); stack.pop_back();
+            uint32_t curIdx = stack.back(); stack.pop_back();
+            const OctreeNode* cur = nodeAt(curIdx);
             if (!cur || !boxIntersectsBox(cur->bounds(), region) || !cur->isLoaded()) continue;
-            s_lock lock(cur->nodeMutex);
-            for (const auto& pt : cur->points) {
-                if (!pt->isActive()) continue;
+            for (const auto& pt : pointsView(curIdx)) {
+                if (!pt || !pt->isActive()) continue;
                 int oi = pt->objectId + 1;
                 if (pt->physMatIdx >= fastMats[oi].size()) continue;
                 if (oi < 0 || oi >= (int)fastMatsSize) continue;
@@ -179,7 +179,7 @@ void Octree<T>::stepPhysics(float dt) {
                 solidCells[keyOf(pp)].push_back({pp, pt->size});
             }
             if (!cur->isLeaf())
-                for (int i=0;i<8;++i) if (cur->children[i]) stack.push_back(cur->children[i].get());
+                for (int i=0;i<8;++i) if (cur->hasChild(i)) stack.push_back(cur->firstChild + i);
         }
 
         #pragma omp parallel for schedule(dynamic, 32)
@@ -412,14 +412,14 @@ void Octree<T>::stepPhysics(float dt) {
         span[0] = mv.oldPos;
         span[1] = mv.newPos;
         int depth = 0;
-        OctreeNode* start = getHighestCommonNode(span, root_.get(), depth);
-        if (!start) start = root_.get();
+        uint32_t start = getHighestCommonNode(span, root_, depth);
+        if (start == INVALID_IDX) start = root_;
 
         if (!removeRecursive(start, pd->getCubeBounds(), pd))
-            removeRecursive(root_.get(), pd->getCubeBounds(), pd);
+            removeRecursive(root_, pd->getCubeBounds(), pd);
         pd->position = mv.newPos;
         if (!insertRecursive(start, pd, depth))
-            if (!insertRecursive(root_.get(), pd, 0)) size--;
+            if (!insertRecursive(root_, pd, 0)) size--;
     }
 }
 
@@ -530,13 +530,13 @@ void Octree<T>::stepRigidLattice(
         auto pd = mv.node;
         std::vector<Vec3> span = { mv.oldPos, mv.newPos };
         int depth = 0;
-        OctreeNode* start = getHighestCommonNode(span, root_.get(), depth);
-        if (!start) start = root_.get();
+        uint32_t start = getHighestCommonNode(span, root_, depth);
+        if (start == INVALID_IDX) start = root_;
         if (!removeRecursive(start, pd->getCubeBounds(), pd))
-            removeRecursive(root_.get(), pd->getCubeBounds(), pd);
+            removeRecursive(root_, pd->getCubeBounds(), pd);
         pd->position = mv.newPos;
         if (!insertRecursive(start, pd, depth))
-            if (!insertRecursive(root_.get(), pd, 0)) size--;
+            if (!insertRecursive(root_, pd, 0)) size--;
     }
 }
 

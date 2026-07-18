@@ -36,7 +36,7 @@ struct RenderNode_ {
     int32_t lodPoint;
     uint32_t firstChild;
     
-    OctreeNode_<T>* originalNode;
+    uint32_t originalNode = INVALID_IDX;
 
     const Vec3 boundsMin() const {
         return (center - Vec3::Constant(0.5 * nodeSize));

@@ -22,12 +22,13 @@ void Octree<T>::buildRender(RenderBuffer_<T>& buffer) {
     buffer.defaultMatIdx = buffer.materials.size();
     buffer.materials.push_back(RenderMaterial());
 
-    buildRenderNodeAt(root_.get(), buffer, 0, localObjects);
+    buildRenderNodeAt(root_, buffer, 0, localObjects);
 }
 
 template<typename T>
-void Octree<T>::buildRenderNodeAt(OctreeNode_<T>* node, RenderBuffer_<T>& buffer, uint32_t nodeIdx, const std::unordered_map<int, std::shared_ptr<GridObject>>& localObjects) {
-    s_lock lock(node->nodeMutex);
+void Octree<T>::buildRenderNodeAt(uint32_t nodeIndex, RenderBuffer_<T>& buffer, uint32_t nodeIdx, const std::unordered_map<int, std::shared_ptr<GridObject>>& localObjects) {
+    const OctreeNode_<T>* node = nodeAt(nodeIndex);
+    if (!node) return;
     bool isLoaded = node->isLoaded();
     
     RenderNode_<T> rnode;
@@ -35,12 +36,12 @@ void Octree<T>::buildRenderNodeAt(OctreeNode_<T>* node, RenderBuffer_<T>& buffer
     rnode.nodeSize = node->nodeSize;
     rnode.isLeaf = node->isLeaf();
     rnode.isLoaded = isLoaded;
-    rnode.originalNode = node; 
+    rnode.originalNode = nodeIndex;
     
     rnode.firstPoint = static_cast<uint32_t>(buffer.points.size());
     if (isLoaded) {
-        for (const auto& pt : node->points) {
-            if (!pt->isActive() || !pt->isVisible()) continue; 
+        for (const auto& pt : pointsView(nodeIndex)) {
+            if (!pt || !pt->isActive() || !pt->isVisible()) continue; 
             RenderData rd;
             rd.position = pt->position;
             rd.size = pt->size;
@@ -56,17 +57,17 @@ void Octree<T>::buildRenderNodeAt(OctreeNode_<T>* node, RenderBuffer_<T>& buffer
     rnode.pointCount = static_cast<uint32_t>(buffer.points.size() - rnode.firstPoint);
     
     rnode.lodPoint = -1;
-    if (node->lodData) {
+    auto lodData = lodOf(nodeIndex);
+    if (lodData) {
         RenderData ld;
-        ld.position = node->lodData->position;
-        ld.size = node->lodData->size;
-        ld.color = node->lodData->color;
-        
-        
-        ld.materialIdx = (node->lodData->renderMatIdx < buffer.defaultMatIdx)
-                             ? node->lodData->renderMatIdx : buffer.defaultMatIdx;
-        
-        ld.objectId = node->lodData->objectId; 
+        ld.position = lodData->position;
+        ld.size = lodData->size;
+        ld.color = lodData->color;
+
+        ld.materialIdx = (lodData->renderMatIdx < buffer.defaultMatIdx)
+                             ? lodData->renderMatIdx : buffer.defaultMatIdx;
+
+        ld.objectId = lodData->objectId; 
         rnode.lodPoint = static_cast<int32_t>(buffer.points.size());
         buffer.points.push_back(ld);
     }
@@ -78,7 +79,7 @@ void Octree<T>::buildRenderNodeAt(OctreeNode_<T>* node, RenderBuffer_<T>& buffer
         uint8_t mask = 0;
         int childCount = 0;
         for (int i = 0; i < 8; ++i) {
-            if (node->children[i]) {
+            if (node->hasChild(i)) {
                 mask |= (1 << i);
                 childCount++;
             }
@@ -90,7 +91,7 @@ void Octree<T>::buildRenderNodeAt(OctreeNode_<T>* node, RenderBuffer_<T>& buffer
             int cidx = 0;
             for (int i = 0; i < 8; ++i) {
                 if (mask & (1 << i)) {
-                    buildRenderNodeAt(node->children[i].get(), buffer, rnode.firstChild + cidx, localObjects);
+                    buildRenderNodeAt(node->firstChild + i, buffer, rnode.firstChild + cidx, localObjects);
                     cidx++;
                 }
             }
@@ -127,7 +128,7 @@ std::vector<RenderData*> Octree<T>::fastVoxelTraverse(const RenderBuffer_<T>& bu
             
             const RenderNode_<T>& node = buffer.nodes[current.nodeIdx];
 
-            if (!node.isLoaded && node.originalNode) {
+            if (!node.isLoaded && node.originalNode != INVALID_IDX) {
                 ensureLoaded(node.originalNode, true);
             }
 

@@ -80,8 +80,229 @@ private:
         return count;
     }
 
-    ///@brief The root node of the octree structure
-    std::unique_ptr<OctreeNode> root_;
+    ///@brief Flat storage backing every node in the tree.
+    ///       Nodes are addressed by stable uint32_t index rather than pointer.
+    OctreeNodeStore<T> store_;
+
+    ///@brief Index of the root node inside store_.
+    uint32_t root_ = INVALID_IDX;
+
+    ///@brief Convenience accessors into the flat store.
+    OctreeNode* nodeAt(uint32_t idx) { return store_.ptr(idx); }
+    const OctreeNode* nodeAt(uint32_t idx) const { return store_.ptr(idx); }
+    bool validNode(uint32_t idx) const { return idx != INVALID_IDX; }
+
+    ///@brief Points of a node, copied out of the point store.
+    std::vector<std::shared_ptr<NodeData>> pointsOf(uint32_t idx) const {
+        const OctreeNode* n = store_.ptr(idx);
+        if (!n) return {};
+        return store_.points.get(n->pointBlock);
+    }
+
+    ///@brief Zero-copy view of a node's points, for read-only hot paths.
+    typename PointStore<T>::View pointsView(uint32_t idx) const {
+        const OctreeNode* n = store_.ptr(idx);
+        if (!n) return {};
+        return store_.points.view(n->pointBlock);
+    }
+
+    void setPoints(uint32_t idx, const std::vector<std::shared_ptr<NodeData>>& pts) {
+        OctreeNode* n = store_.ptr(idx);
+        if (!n) return;
+        n->pointBlock = store_.points.assign(n->pointBlock, pts);
+    }
+
+    size_t pointCountOf(uint32_t idx) const {
+        const OctreeNode* n = store_.ptr(idx);
+        if (!n) return 0;
+        return store_.points.count(n->pointBlock);
+    }
+
+    std::shared_ptr<NodeData> lodOf(uint32_t idx) const {
+        const OctreeNode* n = store_.ptr(idx);
+        if (!n || n->lodIdx == INVALID_IDX) return nullptr;
+        return store_.points.at(n->lodIdx, 0);
+    }
+
+    void setLod(uint32_t idx, const std::shared_ptr<NodeData>& lod) {
+        OctreeNode* n = store_.ptr(idx);
+        if (!n) return;
+        if (!lod) { n->lodIdx = INVALID_IDX; return; }
+        n->lodIdx = store_.points.addSingle(lod);
+    }
+
+    ///@brief Recursive point count over a subtree.
+    size_t subtreePointCount(uint32_t idx) const {
+        const OctreeNode* n = store_.ptr(idx);
+        if (!n || !n->isLoaded()) return 0;
+        size_t count = store_.points.count(n->pointBlock);
+        if (!n->isLeaf()) {
+            for (int i = 0; i < 8; ++i) {
+                if (n->hasChild(i)) count += subtreePointCount(n->firstChild + i);
+            }
+        }
+        return count;
+    }
+
+    ///@brief Writes one node's points to a stream.
+    void writePoints(std::ofstream& out, uint32_t idx) const {
+        auto pts = pointsOf(idx);
+        writeVal(out, pts.size());
+        for (const auto& pt : pts) {
+            OctreeNode::serializeData(out, pt->data);
+            writeVec3(out, pt->position);
+            writeVal(out, pt->objectId);
+            writeVal(out, pt->flags.load(std::memory_order_relaxed));
+            writeVal(out, pt->size);
+            writeVec4(out, pt->color);
+            writeVal(out, pt->renderMatIdx);
+            writeVal(out, pt->physMatIdx);
+        }
+    }
+
+    ///@brief Reads a node's points back from a stream.
+    void readPoints(std::ifstream& in, uint32_t idx) {
+        size_t pointCount = 0;
+        readVal(in, pointCount);
+        std::vector<std::shared_ptr<NodeData>> pts;
+        pts.reserve(pointCount);
+        for (size_t i = 0; i < pointCount; ++i) {
+            auto pt = std::make_shared<NodeData>();
+            OctreeNode::deserializeData(in, pt->data);
+            readVec3(in, pt->position);
+            readVal(in, pt->objectId);
+            uint8_t f;
+            readVal(in, f);
+            pt->flags.store(f, std::memory_order_relaxed);
+            readVal(in, pt->size);
+            readVec4(in, pt->color);
+            readVal(in, pt->renderMatIdx);
+            readVal(in, pt->physMatIdx);
+            pts.push_back(pt);
+        }
+        setPoints(idx, pts);
+    }
+
+    ///@brief Recursively serializes a subtree (structure + points).
+    void serializeSubtree(std::ofstream& out, uint32_t idx) const {
+        const OctreeNode* n = nodeAt(idx);
+        writeVal(out, n->isLeaf());
+        writePoints(out, idx);
+        if (!n->isLeaf()) {
+            writeVal(out, n->childMask);
+            for (int i = 0; i < 8; ++i) {
+                if (n->hasChild(i)) serializeSubtree(out, n->firstChild + i);
+            }
+        }
+    }
+
+    ///@brief Recursively rebuilds a subtree, allocating child blocks as needed.
+    void deserializeSubtree(std::ifstream& in, uint32_t idx) {
+        bool leaf;
+        readVal(in, leaf);
+        nodeAt(idx)->setLeaf(leaf);
+        readPoints(in, idx);
+
+        if (!leaf) {
+            uint8_t childMask;
+            readVal(in, childMask);
+            uint32_t first = store_.allocChildren();
+            OctreeNode* n = nodeAt(idx);
+            n->firstChild = first;
+            n->childMask = childMask;
+            Vec3 c = n->center;
+            BoundingBox b = n->bounds();
+
+            for (int i = 0; i < 8; ++i) {
+                if ((childMask >> i) & 1) {
+                    Vec3 childMin, childMax;
+                    for (int d = 0; d < Dim; ++d) {
+                        bool high = (i >> d) & 1;
+                        childMin[d] = high ? c[d] : b.first[d];
+                        childMax[d] = high ? b.second[d] : c[d];
+                    }
+                    store_[first + i] = OctreeNode(childMin, childMax);
+                    deserializeSubtree(in, first + i);
+                }
+            }
+        }
+        OctreeNode* n = nodeAt(idx);
+        n->setLoaded(true);
+        n->setDirty(false);
+    }
+
+    void clearDirtySubtree(uint32_t idx) {
+        OctreeNode* n = nodeAt(idx);
+        if (!n) return;
+        n->setDirty(false);
+        if (!n->isLeaf()) {
+            for (int i = 0; i < 8; ++i) {
+                if (n->hasChild(i)) clearDirtySubtree(n->firstChild + i);
+            }
+        }
+    }
+
+    ///@brief Saves a node's subtree to its own region file.
+    bool saveRegion(uint32_t idx) {
+        const OctreeNode* n = nodeAt(idx);
+        if (!n) return false;
+        std::ofstream out(n->getRegionPath(storagepath), std::ios::binary);
+        if (!out) return false;
+        serializeSubtree(out, idx);
+        clearDirtySubtree(idx);
+        return true;
+    }
+
+    ///@brief Loads a node's subtree back from its region file.
+    bool loadRegion(uint32_t idx) {
+        OctreeNode* n = nodeAt(idx);
+        if (!n) return false;
+        std::ifstream in(n->getRegionPath(storagepath), std::ios::binary);
+        if (!in) return false;
+        deserializeSubtree(in, idx);
+        nodeAt(idx)->setLoaded(true);
+        return true;
+    }
+
+    ///@brief Deep-copies a subtree from another octree's store into this one.
+    uint32_t cloneSubtree(const Octree& other, uint32_t srcIdx) {
+        const OctreeNode* src = other.store_.ptr(srcIdx);
+        if (!src) return INVALID_IDX;
+
+        uint32_t dst = store_.add(*src);
+        OctreeNode* d = nodeAt(dst);
+        d->firstChild = INVALID_IDX;
+        d->pointBlock = INVALID_IDX;
+        d->lodIdx = INVALID_IDX;
+
+        auto pts = other.store_.points.get(src->pointBlock);
+        if (!pts.empty()) setPoints(dst, pts);
+
+        if (!src->isLeaf() && src->firstChild != INVALID_IDX) {
+            uint32_t first = store_.allocChildren();
+            nodeAt(dst)->firstChild = first;
+            nodeAt(dst)->childMask = src->childMask;
+            for (int i = 0; i < 8; ++i) {
+                if (!((src->childMask >> i) & 1)) continue;
+                uint32_t sub = cloneSubtree(other, src->firstChild + i);
+                if (sub != INVALID_IDX) {
+                    store_[first + i] = store_[sub];
+                }
+            }
+        }
+        return dst;
+    }
+
+    bool subtreeFullyLoaded(uint32_t idx) const {
+        const OctreeNode* n = store_.ptr(idx);
+        if (!n || !n->isLoaded()) return false;
+        if (!n->isLeaf()) {
+            for (int i = 0; i < 8; ++i) {
+                if (n->hasChild(i) && !subtreeFullyLoaded(n->firstChild + i)) return false;
+            }
+        }
+        return true;
+    }
     
     ///@brief Total number of elements/points in the octree
     size_t size;
@@ -200,66 +421,46 @@ private:
 
     ///@brief Submits a node to be background saved and released from RAM
     ///@param node The node to offload
-    void lazilyOffload(OctreeNode* node) {
-        {
-            u_lock lock(node->nodeMutex);
-            if (!node->isLoaded() || node->isSaveQueued()) return;
-
-            node->setSaveQueued(true);
-            node->setLoadQueued(false);
-        }
-
-        enqueueTask([this, node]() {
-            {
-                s_lock nlock(node->nodeMutex);
-                if (node->isLoaded() && node->isSaveQueued() && node->isDirty()) {
-                    node->saveRegion(storagepath);
-                }
-            }
-            node->offload();
-            {
-                u_lock nlock(node->nodeMutex);
-                node->setSaveQueued(false);
-            }
-        });
+    void lazilyOffload(uint32_t idx) {
+        (void)idx;
     }
 
     ///@brief Validates that a node is loaded, pulling it from disk if needed
     ///@param node The node to evaluate
     ///@param asyncLoad If true, loads the node in the background thread
-    void ensureLoaded(OctreeNode* node, bool asyncLoad = false) {
+    void ensureLoaded(uint32_t idx, bool asyncLoad = false) {
+        OctreeNode* node = nodeAt(idx);
+        if (!node) return;
+        if (node->isLoaded() || node->isQueued()) return;
+
         {
-            if (node->isLoaded() || node->isQueued()) return; 
-            else {
-                node->setLoadQueued(true);
-                node->setSaveQueued(false);
-            }
+            u_lock nlock(store_.stripe(idx));
+            node->setLoadQueued(true);
+            node->setSaveQueued(false);
         }
 
         if (asyncLoad) {
-            enqueueTask([this, node]() {
+            enqueueTask([this, idx]() {
                 bool justLoaded = false;
                 {
-                    u_lock nlock(node->nodeMutex);
-                    if (!node->isLoaded()) {
-                        node->loadRegion(storagepath);
-                        justLoaded = node->isLoaded();
+                    u_lock nlock(store_.stripe(idx));
+                    OctreeNode* n = nodeAt(idx);
+                    if (n && !n->isLoaded()) {
+                        loadRegion(idx);
+                        justLoaded = n->isLoaded();
                     }
-                    node->setLoadQueued(false);
+                    if (n) n->setLoadQueued(false);
                 }
-                if (justLoaded) {
-                    ensureLOD(node);
-                }
+                if (justLoaded) ensureLOD(idx);
             });
         } else {
             {
-                u_lock nlock(node->nodeMutex);
-                if (!node->isLoaded()) node->loadRegion(storagepath);
-                node->setLoadQueued(false);
+                u_lock nlock(store_.stripe(idx));
+                OctreeNode* n = nodeAt(idx);
+                if (n && !n->isLoaded()) loadRegion(idx);
+                if (n) n->setLoadQueued(false);
             }
-            if (node->isLoaded()) {
-                ensureLOD(node);
-            }
+            if (nodeAt(idx)->isLoaded()) ensureLOD(idx);
         }
     }
 
@@ -325,12 +526,13 @@ private:
     ///@param current The current evaluation node
     ///@param depth Tracks the recursive depth offset output
     ///@return A pointer to the highest shared node
-    inline OctreeNode* getHighestCommonNodeRecursive(const Vec3& Min, const Vec3& Max, OctreeNode* current, int& depth) const {
+    inline uint32_t getHighestCommonNodeRecursive(const Vec3& Min, const Vec3& Max, uint32_t current, int& depth) const {
+        const OctreeNode* n = nodeAt(current);
+        if (!n) return current;
         depth++;
-        s_lock lock(current->nodeMutex);
-        uint8_t mcell = getOctant(Min, current->center);
-        if (mcell == getOctant(Max, current->center) && current->children[mcell]) {
-            return getHighestCommonNodeRecursive(Min, Max, current->children[mcell].get(), depth);
+        uint8_t mcell = getOctant(Min, n->center);
+        if (mcell == getOctant(Max, n->center) && n->hasChild(mcell)) {
+            return getHighestCommonNodeRecursive(Min, Max, n->firstChild + mcell, depth);
         }
         depth--;
         return current;
@@ -342,16 +544,17 @@ private:
     ///@param currentDepth Current depth layer
     ///@param outDepth Tracks the final derived recursive depth
     ///@return A pointer to the highest shared node
-    OctreeNode* getHighestCommonNode(const BoundingBox& bounds, OctreeNode* current, int currentDepth, int& outDepth) const {
-        if (!current || current->isLeaf()) {
+    uint32_t getHighestCommonNode(const BoundingBox& bounds, uint32_t current, int currentDepth, int& outDepth) const {
+        const OctreeNode* n = nodeAt(current);
+        if (!n || n->isLeaf()) {
             outDepth = currentDepth;
             return current;
         }
         for (int i = 0; i < 8; ++i) {
-            if (current->children[i]) {
-                BoundingBox cb = createChildBounds(current, i);
+            if (n->hasChild(i)) {
+                BoundingBox cb = createChildBounds(n, i);
                 if (boxContainsBox(cb, bounds)) {
-                    return getHighestCommonNode(current->children[i].get(), bounds, currentDepth + 1, outDepth);
+                    return getHighestCommonNode(bounds, n->firstChild + i, currentDepth + 1, outDepth);
                 }
             }
         }
@@ -364,8 +567,8 @@ private:
     ///@param current The current search node
     ///@param depth Reference to write final relative tree depth
     ///@return A pointer to the deepest shared node
-    OctreeNode* getHighestCommonNode(const std::vector<Vec3>& positions, OctreeNode* current = nullptr, int& depth = 0) const {
-        if (!current) current = root_.get();
+    uint32_t getHighestCommonNode(const std::vector<Vec3>& positions, uint32_t current, int& depth) const {
+        if (current == INVALID_IDX) current = root_;
         Vec3 min = positions[0];
         Vec3 max = positions[0];
         for (const auto& pos : positions) {
@@ -381,8 +584,8 @@ private:
     ///@param current The current search node
     ///@param depth Reference to write final relative tree depth
     ///@return A pointer to the deepest shared node
-    OctreeNode* getHighestCommonNode(const std::vector<std::shared_ptr<NodeData>>& nodes, OctreeNode* current = nullptr, int& depth = 0) const {
-        if (!current) current = root_.get();
+    uint32_t getHighestCommonNode(const std::vector<std::shared_ptr<NodeData>>& nodes, uint32_t current, int& depth) const {
+        if (current == INVALID_IDX) current = root_;
         Vec3 min = nodes[0]->position;
         Vec3 max = nodes[0]->position;
         for (const auto& node : nodes) {
@@ -396,29 +599,33 @@ private:
     ///@param node The starting search node
     ///@param objectId The internal ID to erase
     ///@return The number of erased points
-    inline size_t removeObjectBatchRecursive(OctreeNode* node, int objectId) {
+    inline size_t removeObjectBatchRecursive(uint32_t idx, int objectId) {
+        if (idx == INVALID_IDX) return 0;
+        ensureLoaded(idx, false);
+        OctreeNode* node = nodeAt(idx);
         if (!node) return 0;
-        ensureLoaded(node, false);
         size_t removed = 0;
         {
-            std::lock_guard<std::shared_mutex> lock(node->nodeMutex);
-            int oldSize = node->points.size();
-            std::erase_if(node->points, [objectId](const auto& pt) {
-                return pt->objectId == objectId;
+            u_lock lock(store_.stripe(idx));
+            auto pts = pointsOf(idx);
+            size_t oldSize = pts.size();
+            std::erase_if(pts, [objectId](const auto& pt) {
+                return pt && pt->objectId == objectId;
             });
-            removed += oldSize - node->points.size();
+            removed += oldSize - pts.size();
+            if (oldSize != pts.size()) setPoints(idx, pts);
         }
         if (!node->isLeaf()) {
-            for (auto& child : node->children) {
-                if (child) {
-                    removed += removeObjectBatchRecursive(child.get(), objectId);
+            for (int i = 0; i < 8; ++i) {
+                if (node->hasChild(i)) {
+                    removed += removeObjectBatchRecursive(node->firstChild + i, objectId);
                 }
             }
         }
         
         if (removed > 0) {
-            u_lock lock(node->nodeMutex);
-            node->lodData = nullptr;
+            u_lock lock(store_.stripe(idx));
+            node->lodIdx = INVALID_IDX;
             node->setDirty(true);
         }
         return removed;
@@ -429,7 +636,7 @@ private:
     ///@return True if successfully removed at least some related components
     bool removeObject(int objectId) {
         std::vector<std::shared_ptr<NodeData>> nodes;
-        OctreeNode* startNode = collectNodesByObjectId(objectId, nodes);
+        uint32_t startNode = collectNodesByObjectId(objectId, nodes);
         if (nodes.empty()) return false;
 
         size_t removed = removeObjectBatchRecursive(startNode, objectId);
@@ -446,29 +653,34 @@ private:
     ///@param node The common ancestor node to parse from
     ///@param nodesToRemove The mapped instances to delete
     ///@return The number of elements deleted
-    size_t removeSpecificNodesBatchRecursive(OctreeNode* node, const std::unordered_set<std::shared_ptr<NodeData>>& nodesToRemove) {
-        if (!node || nodesToRemove.empty()) return 0;
-        ensureLoaded(node, false);
+    size_t removeSpecificNodesBatchRecursive(uint32_t idx, const std::unordered_set<std::shared_ptr<NodeData>>& nodesToRemove) {
+        if (idx == INVALID_IDX || nodesToRemove.empty()) return 0;
+        ensureLoaded(idx, false);
+        OctreeNode* node = nodeAt(idx);
+        if (!node) return 0;
         size_t removed = 0;
         {
-            std::lock_guard<std::shared_mutex> lock(node->nodeMutex);
-            int oldSize = node->points.size();
-            std::erase_if(node->points, [nodesToRemove](const auto& pt) {
-                nodesToRemove.find(pt) == nodesToRemove.end();
+            u_lock lock(store_.stripe(idx));
+            auto pts = pointsOf(idx);
+            size_t oldSize = pts.size();
+            // Was a no-op before: the lambda never returned its predicate.
+            std::erase_if(pts, [&nodesToRemove](const auto& pt) {
+                return nodesToRemove.find(pt) != nodesToRemove.end();
             });
-            removed += oldSize - node->points.size();
+            removed += oldSize - pts.size();
+            if (oldSize != pts.size()) setPoints(idx, pts);
         }
         if (!node->isLeaf()) {
-            for (auto& child : node->children) {
-                if (child) {
-                    removed += removeSpecificNodesBatchRecursive(child.get(), nodesToRemove);
+            for (int i = 0; i < 8; ++i) {
+                if (node->hasChild(i)) {
+                    removed += removeSpecificNodesBatchRecursive(node->firstChild + i, nodesToRemove);
                 }
             }
         }
 
         if (removed > 0) {
-            u_lock lock(node->nodeMutex);
-            node->lodData = nullptr;
+            u_lock lock(store_.stripe(idx));
+            node->lodIdx = INVALID_IDX;
             node->setDirty(true);
         }
         return removed;
@@ -695,32 +907,47 @@ private:
     ///@brief Subdivides an active leaf node into 8 smaller octant child nodes
     ///@param node The full node pending division
     ///@param depth Internal recursive tracker
-    void splitNodeRecursive(OctreeNode* node, int depth) {
-        std::vector<std::shared_ptr<NodeData>> keep;
-        keep.reserve(node->points.size());
-        u_lock lock(node->nodeMutex);
+    void splitNodeRecursive(uint32_t idx, int depth) {
+        OctreeNode* node = nodeAt(idx);
+        if (!node) return;
+
+        uint32_t first = store_.allocChildren();
+        if (first == INVALID_IDX) return;
+
         for (int i = 0; i < 8; ++i) {
-            BoundingBox childBounds = createChildBounds(node, i);
-            node->children[i] = std::make_unique<OctreeNode>(childBounds.first, childBounds.second);
+            BoundingBox cb = createChildBounds(node, i);
+            store_[first + i] = OctreeNode(cb.first, cb.second);
         }
 
-        for (auto& pointData : node->points) {
-            Vec3 c = pointData->position;
-            float size = pointData->size;
+        auto pts = pointsOf(idx);
+        std::vector<std::shared_ptr<NodeData>> keep;
+        keep.reserve(pts.size());
+        std::array<std::vector<std::shared_ptr<NodeData>>, 8> buckets;
+
+        for (auto& pointData : pts) {
+            if (!pointData) continue;
             BoundingBox cubeBounds = pointData->getCubeBounds();
-            uint8_t targetIndex = getOctant(c, node->center);
-            if (boxContainsBox(node->children[targetIndex]->bounds(), cubeBounds)) {
-                node->children[targetIndex]->points.emplace_back(std::move(pointData));
+            uint8_t targetIndex = getOctant(pointData->position, node->center);
+            if (boxContainsBox(store_[first + targetIndex].bounds(), cubeBounds)) {
+                buckets[targetIndex].emplace_back(std::move(pointData));
             } else {
                 keep.emplace_back(std::move(pointData));
             }
         }
-        node->points = std::move(keep);
-        node->setLeaf(false);
 
-        for (auto& child : node->children) {
-            if (child && child->points.size() > maxPointsPerNode) {
-                splitNodeRecursive(child.get(), depth + 1);
+        node = nodeAt(idx);
+        node->firstChild = first;
+        node->childMask = 0xFF;
+        node->setLeaf(false);
+        setPoints(idx, keep);
+
+        for (int i = 0; i < 8; ++i) {
+            if (!buckets[i].empty()) setPoints(first + i, buckets[i]);
+        }
+
+        for (int i = 0; i < 8; ++i) {
+            if (pointCountOf(first + i) > maxPointsPerNode) {
+                splitNodeRecursive(first + i, depth + 1);
             }
         }
     }
@@ -730,64 +957,70 @@ private:
     ///@param pointData Populated element to be stored
     ///@param depth Hierarchy loop tracker
     ///@return True if insertion successfully found an appropriate branch
-    inline bool insertRecursive(OctreeNode* node, const std::shared_ptr<NodeData>& pointData, int depth) {
+    inline bool insertRecursive(uint32_t idx, const std::shared_ptr<NodeData>& pointData, int depth) {
+        if (idx == INVALID_IDX) return false;
+        ensureLoaded(idx);
+        OctreeNode* node = nodeAt(idx);
         if (!node) return false;
-        ensureLoaded(node);
+
         BoundingBox cubeBounds = pointData->getCubeBounds();
         if (!boxContainsBox(node->bounds(), cubeBounds)) return false;
 
-        {
-            u_lock lock(node->nodeMutex);
-            node->lodData = nullptr;
-        }
+        node->lodIdx = INVALID_IDX;
 
-        if (node->isLeaf() && node->points.size() == maxPointsPerNode) {
-            splitNodeRecursive(node, depth);
+        if (node->isLeaf() && pointCountOf(idx) >= maxPointsPerNode) {
+            splitNodeRecursive(idx, depth);
+            node = nodeAt(idx);
         }
-        u_lock lock(node->nodeMutex);
 
         if (node->isLeaf()) {
-            node->points.emplace_back(pointData);
+            u_lock lock(store_.stripe(idx));
+            node->pointBlock = store_.points.push(node->pointBlock, pointData);
             node->setDirty(true);
             return true;
-        } else {
-            lock.unlock();
-            bool insertedInChild = false;
-            uint8_t targetIndex = getOctant(pointData->position, node->center);
-            OctreeNode* targetChild = node->children[targetIndex].get();
-            if (targetChild) {
-                insertedInChild = insertRecursive(targetChild, pointData, depth);
-            }
-            
-            if (!insertedInChild) {
-                u_lock lock(node->nodeMutex);
-                node->points.emplace_back(pointData);
-                node->setDirty(true);
-            }
-            return true;
         }
+
+        uint8_t targetIndex = getOctant(pointData->position, node->center);
+        bool insertedInChild = false;
+        if (node->hasChild(targetIndex)) {
+            insertedInChild = insertRecursive(node->firstChild + targetIndex, pointData, depth);
+        }
+
+        if (!insertedInChild) {
+            node = nodeAt(idx);
+            u_lock lock(store_.stripe(idx));
+            node->pointBlock = store_.points.push(node->pointBlock, pointData);
+            node->setDirty(true);
+        }
+        return true;
     }
 
     ///@brief Wipes out generated cache details downward for a mutated physical space
     ///@param node Scope root node
     ///@param bounds Targeted refresh footprint
     ///@return True if any bounding intersection verified cleanup
-    bool invalidateNodeLODRecursive(OctreeNode* node, const BoundingBox& bounds) {
+    bool invalidateNodeLODRecursive(uint32_t idx, const BoundingBox& bounds) {
+        OctreeNode* node = nodeAt(idx);
+        if (!node) return false;
         if (!boxIntersectsBox(node->bounds(), bounds)) return false;
-        ensureLoaded(node);
-        
-        std::array<OctreeNode*, 8> safeChildren = {nullptr};
+        ensureLoaded(idx);
+        node = nodeAt(idx);
+
+        std::array<uint32_t, 8> safeChildren;
+        safeChildren.fill(INVALID_IDX);
         {
-            std::lock_guard<std::shared_mutex> lock(node->nodeMutex);
-            node->lodData = nullptr;
+            u_lock lock(store_.stripe(idx));
+            node->lodIdx = INVALID_IDX;
             node->setDirty(true);
             if (!node->isLeaf()) {
-                for(int i = 0; i < 8; ++i) safeChildren[i] = node->children[i].get();
+                for (int i = 0; i < 8; ++i) {
+                    if (node->hasChild(i)) safeChildren[i] = node->firstChild + i;
+                }
             }
         }
         
         for (int i = 0; i < 8; ++i) {
-            if (safeChildren[i]) {
+            if (safeChildren[i] != INVALID_IDX) {
                 invalidateNodeLODRecursive(safeChildren[i], bounds);
             }
         }
@@ -797,36 +1030,39 @@ private:
     ///@brief Proxy trigger for invalidating all LOD scales tracking a modified element
     ///@param pointData The modified memory node mapping out invalidation zone
     void invalidateLODForPoint(const std::shared_ptr<NodeData>& pointData) {
-        if (root_ && pointData) {
-            invalidateNodeLODRecursive(root_.get(), pointData->getCubeBounds());
+        if (root_ != INVALID_IDX && pointData) {
+            invalidateNodeLODRecursive(root_, pointData->getCubeBounds());
         }
     }
 
     ///@brief Repopulates LOD proxies utilizing volumetric rendering logic
     ///@param node Operation target
-    void ensureLOD(OctreeNode* node) {
-        ensureLoaded(node);
-        std::lock_guard<std::shared_mutex> lock(node->nodeMutex);
-        if (node->lodData != nullptr) return;
+    void ensureLOD(uint32_t idx) {
+        ensureLoaded(idx);
+        OctreeNode* node = nodeAt(idx);
+        if (!node) return;
+        if (node->lodIdx != INVALID_IDX) return;
+
+        auto nodePoints = pointsView(idx);
 
         if (node->isLeaf()) {
-            if (node->points.empty()) {
+            if (nodePoints.empty()) {
                 auto lod = std::make_shared<NodeData>();
                 lod->position = node->center;
-                node->lodData = lod;
+                setLod(idx, lod);
                 return;
-            } else if (node->points.size() == 1) {
-                const auto& pt = node->points[0];
-                if (pt->isActive() && pt->isVisible()) {
+            } else if (nodePoints.size() == 1) {
+                const auto& pt = nodePoints[0];
+                if (pt && pt->isActive() && pt->isVisible()) {
                     double v = static_cast<double>(pt->size) * pt->size * pt->size;
                     if (v > static_cast<double>(minLodVolume_)) {
-                        node->lodData = pt;
+                        setLod(idx, pt);
                         return;
                     }
                 }
                 auto lod = std::make_shared<NodeData>();
                 lod->position = node->center;
-                node->lodData = lod;
+                setLod(idx, lod);
                 return;
             }
         }
@@ -863,16 +1099,23 @@ private:
             count++;
         };
 
-        for(const auto& pt : node->points) accumulate(pt);
+        for (const auto& pt : nodePoints) accumulate(pt);
 
-        for (const auto& child : node->children) {
-            if (child) {
-                ensureLOD(child.get());
-                if (child->lodData) {
-                    accumulate(child->lodData);
+        {
+            const OctreeNode* n = nodeAt(idx);
+            if (n && !n->isLeaf()) {
+                uint32_t first = n->firstChild;
+                uint8_t mask = n->childMask;
+                for (int i = 0; i < 8; ++i) {
+                    if ((mask >> i) & 1) {
+                        ensureLOD(first + i);
+                        auto childLod = lodOf(first + i);
+                        if (childLod) accumulate(childLod);
+                    }
                 }
             }
         }
+        node = nodeAt(idx);
 
         if (count > 0 && totalVolume > minLodVolume_) {
             double invVol = 1.0 / totalVolume;
@@ -892,38 +1135,36 @@ private:
             
             lod->setActive(true);
             lod->setVisible(true);
-            lod->objectId = -1; 
-            node->lodData = lod;
+            lod->objectId = -1;
+            setLod(idx, lod);
         } else {
             auto lod = std::make_shared<NodeData>();
             lod->position = node->center;
-            node->lodData = lod;
+            setLod(idx, lod);
         }
     }
 
     ///@brief Drills through every sub-branch verifying block data resides in memory
     ///@param node Evaluated origin block
-    void loadSubtreeRecursive(OctreeNode* node) {
-        if (!node) return;
-        ensureLoaded(node, true);
-        s_lock lock(node->nodeMutex);
-        if (!node->isLeaf()) {
-            for (auto& child : node->children) {
-                loadSubtreeRecursive(child.get());
-            }
+    void loadSubtreeRecursive(uint32_t idx) {
+        if (idx == INVALID_IDX) return;
+        ensureLoaded(idx, true);
+        const OctreeNode* node = nodeAt(idx);
+        if (!node || node->isLeaf()) return;
+        for (int i = 0; i < 8; ++i) {
+            if (node->hasChild(i)) loadSubtreeRecursive(node->firstChild + i);
         }
     }
 
     ///@brief Similar to loadSubtreeRecursive but explicitly invokes LOD generation concurrently
     ///@param node Evaluated origin block
-    void loadAndLodSubtreeRecursive(OctreeNode* node) {
-        if (!node) return;
-        ensureLOD(node);
-        s_lock lock(node->nodeMutex);
-        if (!node->isLeaf()) {
-            for (auto& child : node->children) {
-                loadAndLodSubtreeRecursive(child.get());
-            }
+    void loadAndLodSubtreeRecursive(uint32_t idx) {
+        if (idx == INVALID_IDX) return;
+        ensureLOD(idx);
+        const OctreeNode* node = nodeAt(idx);
+        if (!node || node->isLeaf()) return;
+        for (int i = 0; i < 8; ++i) {
+            if (node->hasChild(i)) loadAndLodSubtreeRecursive(node->firstChild + i);
         }
     }
 
@@ -931,7 +1172,8 @@ private:
     ///@param node Scope analysis node
     ///@param camPos Rendering camera anchor
     ///@param camDir Rendering camera facing vector for frustum logic
-    void updateStreamingRecursive(OctreeNode* node, const Vec3& camPos, const Vec3& camDir) {
+    void updateStreamingRecursive(uint32_t idx, const Vec3& camPos, const Vec3& camDir) {
+        OctreeNode* node = nodeAt(idx);
         if (!node) return;
         
         float minDistSq = 0.0f;
@@ -967,42 +1209,45 @@ private:
         }
         
         if (maxDistSq <= lodMinDistanceSq) {
-            loadSubtreeRecursive(node);
+            loadSubtreeRecursive(idx);
             return;
         }
 
         if (maxDistSq <= maxDistSq_max && minDistSq > lodMinDistanceSq) {
-            loadAndLodSubtreeRecursive(node);
+            loadAndLodSubtreeRecursive(idx);
             return;
         }
         
         if (minDistSq > keepDistSq) {
             if (!node->isLoaded()) return;
-            size_t subPoints = node->getSubtreePointCount();
-            bool fullyLoaded = node->isSubtreeFullyLoaded();
+            size_t subPoints = subtreePointCount(idx);
+            bool fullyLoaded = subtreeFullyLoaded(idx);
 
             if ((subPoints > regionTargetPoints_ || node->isLeaf()) && fullyLoaded) {
-                if (subPoints > 0) lazilyOffload(node);
+                if (subPoints > 0) lazilyOffload(idx);
                 return;
             }
-            if (!node->isLeaf()){
+            if (!node->isLeaf()) {
                 for (int i = 0; i < 8; ++i) {
-                    updateStreamingRecursive(node->children[i].get(), camPos, camDir);
+                    if (node->hasChild(i)) {
+                        updateStreamingRecursive(node->firstChild + i, camPos, camDir);
+                    }
                 }
             }
             return;
         }
 
         if (minDistSq > lodMinDistanceSq) {
-            ensureLOD(node);
+            ensureLOD(idx);
         } else {
-            ensureLoaded(node, true);
+            ensureLoaded(idx, true);
         }
 
-        if (!node->isLeaf()) {
+        node = nodeAt(idx);
+        if (node && !node->isLeaf()) {
             for (int i = 0; i < 8; ++i) {
-                if (node->children[i]) {
-                    updateStreamingRecursive(node->children[i].get(), camPos, camDir);
+                if (node->hasChild(i)) {
+                    updateStreamingRecursive(node->firstChild + i, camPos, camDir);
                 }
             }
         }
@@ -1014,23 +1259,23 @@ private:
     ///@param objectId Target identity filter
     ///@param tolerance Accepted drift scale
     ///@return Located physical voxel data structure or nullptr
-    std::shared_ptr<NodeData> findRecursive(OctreeNode* node, const Vec3& pos, int objectId, float tolerance) {
-        if (!node->contains(pos)) return nullptr;
-        ensureLoaded(node, false);
-        s_lock lock(node->nodeMutex);
-        
-        for (const auto& pointData : node->points) {
+    std::shared_ptr<NodeData> findRecursive(uint32_t idx, const Vec3& pos, int objectId, float tolerance) {
+        const OctreeNode* node = nodeAt(idx);
+        if (!node || !node->contains(pos)) return nullptr;
+        ensureLoaded(idx, false);
+        node = nodeAt(idx);
+
+        for (const auto& pointData : pointsView(idx)) {
+            if (!pointData) continue;
             if (pointData->objectId != objectId && objectId >= 0) continue;
             float distSq = (pointData->position - pos).squaredNorm();
-            if (distSq <= tolerance * tolerance) {
-                return pointData;
-            }
+            if (distSq <= tolerance * tolerance) return pointData;
         }
 
         if (!node->isLeaf()) {
             int octant = getOctant(pos, node->center);
-            if (node->children[octant]) {
-                return findRecursive(node->children[octant].get(), pos, objectId, tolerance);
+            if (node->hasChild(octant)) {
+                return findRecursive(node->firstChild + octant, pos, objectId, tolerance);
             }
         }
         return nullptr;
@@ -1041,33 +1286,36 @@ private:
     ///@param bounds Targeted boundary region containing element
     ///@param targetPt Specific node item pointer targeting cleanup
     ///@return True if an actual element erasure triggered
-    bool removeRecursive(OctreeNode* node, const BoundingBox& bounds, const std::shared_ptr<NodeData>& targetPt) {
-        if (!boxIntersectsBox(node->bounds(), bounds)) return false;
-        ensureLoaded(node, false);
+    bool removeRecursive(uint32_t idx, const BoundingBox& bounds, const std::shared_ptr<NodeData>& targetPt) {
+        OctreeNode* node = nodeAt(idx);
+        if (!node || !boxIntersectsBox(node->bounds(), bounds)) return false;
+        ensureLoaded(idx, false);
+        node = nodeAt(idx);
         bool foundAny = false;
         
         {
-            std::lock_guard<std::shared_mutex> lock(node->nodeMutex);
-            int oldSize = node->points.size();
-
-            std::erase_if(node->points, [targetPt](const std::shared_ptr<NodeData>& pointData){
+            u_lock lock(store_.stripe(idx));
+            auto pts = pointsOf(idx);
+            size_t oldSize = pts.size();
+            std::erase_if(pts, [&targetPt](const std::shared_ptr<NodeData>& pointData) {
                 return pointData == targetPt;
             });
-            if (oldSize > node->points.size()) foundAny = true;
-            if (foundAny) {
-                node->lodData = nullptr; 
+            if (oldSize > pts.size()) {
+                foundAny = true;
+                setPoints(idx, pts);
+                node->lodIdx = INVALID_IDX;
                 node->setDirty(true);
             }
         }
         if (!node->isLeaf()) {
-            for (auto& child : node->children) {
-                if (child) {
-                    foundAny |= removeRecursive(child.get(), bounds, targetPt);
+            for (int i = 0; i < 8; ++i) {
+                if (node->hasChild(i)) {
+                    foundAny |= removeRecursive(node->firstChild + i, bounds, targetPt);
                 }
             }
             if (foundAny) {
-                u_lock lock(node->nodeMutex);
-                node->lodData = nullptr;
+                u_lock lock(store_.stripe(idx));
+                node->lodIdx = INVALID_IDX;
                 node->setDirty(true);
             }
         }
@@ -1080,14 +1328,15 @@ private:
     ///@param radiusSq Radial mathematical max extent
     ///@param objectid Filter for collecting specific object segments
     ///@param results Target return collection passed functionally
-    void searchNodeRecursive(OctreeNode* node, const Vec3& center, float radiusSq, int objectid, 
+    void searchNodeRecursive(uint32_t idx, const Vec3& center, float radiusSq, int objectid,
                                std::vector<std::shared_ptr<NodeData>>& results) {
-        ensureLoaded(node, false);
-        s_lock lock(node->nodeMutex);
-        
-        for (const auto& pointData : node->points) {
-            if (!pointData->isActive()) continue;
-            
+        if (idx == INVALID_IDX) return;
+        ensureLoaded(idx, false);
+        const OctreeNode* node = nodeAt(idx);
+        if (!node) return;
+
+        for (const auto& pointData : pointsView(idx)) {
+            if (!pointData || !pointData->isActive()) continue;
             float pointDistSq = (pointData->position - center).squaredNorm();
             if (pointDistSq <= radiusSq && (pointData->objectId == objectid || objectid < 0)) {
                 results.emplace_back(pointData);
@@ -1095,29 +1344,35 @@ private:
         }
         
         if (!node->isLeaf()) {
-            for (const auto& child : node->children) {
-                if (child) searchNodeRecursive(child.get(), center, radiusSq, objectid, results);
+            for (int i = 0; i < 8; ++i) {
+                if (node->hasChild(i)) {
+                    searchNodeRecursive(node->firstChild + i, center, radiusSq, objectid, results);
+                }
             }
         }
     }
     
     ///@brief Brute force destructive wipe of all components cascading down from a block
     ///@param node Element marked for termination
-    void clearNode(OctreeNode* node) {
+    void clearNode(uint32_t idx) {
+        OctreeNode* node = nodeAt(idx);
         if (!node) return;
-        
-        u_lock lock(node->nodeMutex);
-        node->points.clear();
-        node->points.shrink_to_fit();
-        node->lodData = nullptr;
-        
-        for (auto& child : node->children) {
-            if (child) {
-                clearNode(child.get());
-                child.reset(nullptr);
+
+        store_.points.release(node->pointBlock);
+        node->pointBlock = INVALID_IDX;
+        node->lodIdx = INVALID_IDX;
+
+        if (!node->isLeaf() && node->firstChild != INVALID_IDX) {
+            uint32_t first = node->firstChild;
+            for (int i = 0; i < 8; ++i) {
+                if (node->hasChild(i)) clearNode(first + i);
             }
+            store_.freeChildren(first);
         }
-        
+
+        node = nodeAt(idx);
+        node->firstChild = INVALID_IDX;
+        node->childMask = 0;
         node->setLeaf(true);
     }
 
@@ -1132,8 +1387,9 @@ private:
     ///@param minPointsInLeaf Metric output tracking sparsest valid block
     ///@param lodGeneratedNodes Metric mapping proxy generator usages
     ///@param unloaded Metric capturing disk-banked regions currently dropped
-    void printStatsRecursive(const OctreeNode* node, size_t depth, size_t& totalNodes, size_t& leafNodes, size_t& actualPoints, 
+    void printStatsRecursive(uint32_t idx, size_t depth, size_t& totalNodes, size_t& leafNodes, size_t& actualPoints,
                             size_t& maxTreeDepth, size_t& maxPointsInLeaf, size_t& minPointsInLeaf, size_t& lodGeneratedNodes, size_t& unloaded) const {
+        const OctreeNode* node = nodeAt(idx);
         if (!node) return;
         
         totalNodes++;
@@ -1144,10 +1400,9 @@ private:
             return;
         }
 
-        s_lock lock(node->nodeMutex);
-        if (node->lodData) lodGeneratedNodes++;
-        
-        size_t pts = node->points.size();
+        if (node->lodIdx != INVALID_IDX) lodGeneratedNodes++;
+
+        size_t pts = store_.points.count(node->pointBlock);
         actualPoints += pts;
 
         if (node->isLeaf()) {
@@ -1155,90 +1410,92 @@ private:
             maxPointsInLeaf = std::max(maxPointsInLeaf, pts);
             minPointsInLeaf = std::min(minPointsInLeaf, pts);
         } else {
-            for (const auto& child : node->children) {
-                printStatsRecursive(child.get(), depth + 1, totalNodes, leafNodes, actualPoints, 
-                                    maxTreeDepth, maxPointsInLeaf, minPointsInLeaf, lodGeneratedNodes, unloaded);
+            for (int i = 0; i < 8; ++i) {
+                if (node->hasChild(i)) {
+                    printStatsRecursive(node->firstChild + i, depth + 1, totalNodes, leafNodes, actualPoints,
+                                        maxTreeDepth, maxPointsInLeaf, minPointsInLeaf, lodGeneratedNodes, unloaded);
+                }
             }
         }
     }
 
     ///@brief Merges sparse nodes into shared parents restoring tree performance density
     ///@param node Evaluation starting anchor
-    void optimizeRecursive(OctreeNode* node) {
+    void optimizeRecursive(uint32_t idx) {
+        OctreeNode* node = nodeAt(idx);
         if (!node) return;
-        if (!node->isLoaded() || node->isLeaf()) return; 
+        if (!node->isLoaded() || node->isLeaf()) return;
 
+        uint32_t first = node->firstChild;
+        uint8_t mask = node->childMask;
 
-        for (auto& child : node->children) {
-            if (child) {
-                optimizeRecursive(child.get());
-            }
+        for (int i = 0; i < 8; ++i) {
+            if ((mask >> i) & 1) optimizeRecursive(first + i);
         }
+
+        node = nodeAt(idx);
+        if (node->isLeaf()) return;
 
         bool childrenAreLeaves = true;
-        {
-            s_lock lock(node->nodeMutex);
-            for (auto& child : node->children) {
-                if (child && !child->isLeaf()) {
-                    childrenAreLeaves = false;
-                    break;
-                }
+        for (int i = 0; i < 8; ++i) {
+            if (node->hasChild(i) && !store_[node->firstChild + i].isLeaf()) {
+                childrenAreLeaves = false;
+                break;
+            }
+        }
+        if (!childrenAreLeaves) return;
+
+        u_lock lock(store_.stripe(idx));
+        std::vector<std::shared_ptr<NodeData>> allPoints = pointsOf(idx);
+        for (int i = 0; i < 8; ++i) {
+            if (node->hasChild(i)) {
+                auto cp = pointsOf(node->firstChild + i);
+                allPoints.insert(allPoints.end(), cp.begin(), cp.end());
             }
         }
 
-        if (childrenAreLeaves) {
-            u_lock lock(node->nodeMutex);
-            bool stillLeaves = true;
-            for (auto& child : node->children) {
-                if (child && !child->isLeaf()) {
-                    stillLeaves = false;
-                    break;
+        if (allPoints.size() <= maxPointsPerNode) {
+            setPoints(idx, allPoints);
+            uint32_t block = node->firstChild;
+            for (int i = 0; i < 8; ++i) {
+                if (node->hasChild(i)) {
+                    OctreeNode& c = store_[block + i];
+                    store_.points.release(c.pointBlock);
+                    c.pointBlock = INVALID_IDX;
+                    c.lodIdx = INVALID_IDX;
                 }
             }
-            
-            if (stillLeaves) {
-                std::vector<std::shared_ptr<NodeData>> allPoints = node->points;
-                for (auto& child : node->children) {
-                    if (child) {
-                        s_lock childLock(child->nodeMutex);
-                        allPoints.insert(allPoints.end(), child->points.begin(), child->points.end());
-                    }
-                }
-
-                if (allPoints.size() <= maxPointsPerNode) {
-                    node->points = std::move(allPoints);
-                    for (auto& child : node->children) {
-                        child.reset(nullptr);
-                    }
-                    node->setLeaf(true);
-                    node->setDirty(true);
-                    
-                    node->lodData = nullptr;
-                }
-            }
+            store_.freeChildren(block);
+            node = nodeAt(idx);
+            node->firstChild = INVALID_IDX;
+            node->childMask = 0;
+            node->setLeaf(true);
+            node->setDirty(true);
+            node->lodIdx = INVALID_IDX;
         }
     }
 
     ///@brief Immediately evaluates saving/offloading rules down an entire subtree
     ///@param node Topmost region targeted for cleanup tests
-    void offloadRecursive(OctreeNode* node) {
-        if (!node->isLoaded()) return;
-        
-        size_t subPoints = node->getSubtreePointCount();
-        bool fullyLoaded = node->isSubtreeFullyLoaded();
-        
+    ///@brief Walks the tree saving dirty regions to disk.
+    void offloadRecursive(uint32_t idx) {
+        OctreeNode* node = nodeAt(idx);
+        if (!node || !node->isLoaded()) return;
+
+        size_t subPoints = subtreePointCount(idx);
+        bool fullyLoaded = subtreeFullyLoaded(idx);
+
         if (subPoints > 0 && (subPoints <= regionTargetPoints_ || node->isLeaf()) && fullyLoaded) {
             if (node->isDirty()) {
-                u_lock lock(node->nodeMutex);
-                node->saveRegion(storagepath);
+                u_lock lock(store_.stripe(idx));
+                saveRegion(idx);
             }
-            node->offload();
             return;
         }
 
         if (!node->isLeaf()) {
-            for (auto& child : node->children) {
-                if (child) offloadRecursive(child.get());
+            for (int i = 0; i < 8; ++i) {
+                if (node->hasChild(i)) offloadRecursive(node->firstChild + i);
             }
         }
     }
@@ -1339,7 +1596,7 @@ private:
     ///@param buffer Linearized data destination buffer
     ///@param nodeIdx Mapped relative insertion point
     ///@param localObjects Readonly copy of instantiated object metadata
-    void buildRenderNodeAt(OctreeNode* node, RenderBuffer_<T>& buffer, uint32_t nodeIdx, const std::unordered_map<int, std::shared_ptr<GridObject>>& localObjects);
+    void buildRenderNodeAt(uint32_t nodeIndex, RenderBuffer_<T>& buffer, uint32_t nodeIdx, const std::unordered_map<int, std::shared_ptr<GridObject>>& localObjects);
     
     ///@brief Rapid DDA-style hierarchical step iterator for extremely fast line intersection logic
     ///@param buffer Renderable linear data footprint mapping tree hierarchy
@@ -1354,15 +1611,17 @@ public:
     ///@param storagepath Relative or direct string referencing save directory
     ///@param maxPointsPerNode Scaling threshold managing recursive depth optimization
     Octree(const Vec3& minBound, const Vec3& maxBound, std::string storagepath, size_t maxPointsPerNode=8) :
-            root_(std::make_unique<OctreeNode>(minBound, maxBound)), maxPointsPerNode(maxPointsPerNode),
+            maxPointsPerNode(maxPointsPerNode),
             size(0), skybox_(1024, 1024), storagepath(storagepath),
             streamingQueued_(false) {
+        root_ = store_.add(OctreeNode(minBound, maxBound));
         skybox_.setBackground(backgroundColor_.x(), backgroundColor_.y(), backgroundColor_.z(), 1.0f);
         startWorkerThread();
     }
 
     ///@brief Defualt parameter-less initializer building 1.0x1.0 core unit block footprint
-    Octree() : root_(std::make_unique<OctreeNode>(Vec3::Constant(-0.5f), Vec3::Constant(0.5f))), maxPointsPerNode(8), size(0), skybox_(1024, 1024), streamingQueued_(false) {
+    Octree() : maxPointsPerNode(8), size(0), skybox_(1024, 1024), streamingQueued_(false) {
+        root_ = store_.add(OctreeNode(Vec3::Constant(-0.5f), Vec3::Constant(0.5f)));
         skybox_.setBackground(backgroundColor_.x(), backgroundColor_.y(), backgroundColor_.z(), 1.0f);
         startWorkerThread();
     }
@@ -1390,7 +1649,7 @@ public:
             skylight_(other.skylight_), backgroundColor_(other.backgroundColor_), autoOptimize_(other.autoOptimize_.load()),
             streamingQueued_(false), skybox_(other.skybox_), regionTargetPoints_(other.regionTargetPoints_),
             minLodSize_(other.minLodSize_), minLodVolume_(other.minLodVolume_) {
-        if (other.root_) root_ = other.root_->clone();
+        if (other.root_ != INVALID_IDX) root_ = cloneSubtree(other, other.root_);
         
         {
             s_lock lockOther(other.objectsMutex_);
@@ -1416,7 +1675,8 @@ public:
             streamingQueued_(false), skybox_(std::move(other.skybox_)), regionTargetPoints_(other.regionTargetPoints_),
             minLodSize_(other.minLodSize_), minLodVolume_(other.minLodVolume_) {
         other.stopWorkerThread();
-        root_ = std::move(other.root_);
+        root_ = other.root_;
+        other.root_ = INVALID_IDX;
         
         {
             u_lock lockOther(other.objectsMutex_);
@@ -1459,7 +1719,7 @@ public:
         minLodSize_ = other.minLodSize_;
         minLodVolume_ = other.minLodVolume_;
 
-        if (other.root_) root_ = other.root_->clone();
+        if (other.root_ != INVALID_IDX) root_ = cloneSubtree(other, other.root_);
         
         {
             s_lock lockOther(other.objectsMutex_);
@@ -1501,7 +1761,8 @@ public:
         minLodSize_ = other.minLodSize_;
         minLodVolume_ = other.minLodVolume_;
         
-        root_ = std::move(other.root_);
+        root_ = other.root_;
+        other.root_ = INVALID_IDX;
         
         {
             u_lock lockOther(other.objectsMutex_);
@@ -1538,7 +1799,7 @@ public:
 
     ///@brief Forces massive disk serialization offloading currently cached block data matching rules
     void offloadRegions() {
-        if (root_) offloadRecursive(root_.get());
+        if (root_ != INVALID_IDX) offloadRecursive(root_);
     }
 
     ///@brief Adjusts atomic background periodic tree sorting optimization behavior
@@ -1646,8 +1907,8 @@ public:
 
     ///@brief Forces explicit re-evaluation of all node hierarchies creating structural block representations
     void generateLODs() {
-        if (!root_) return;
-        ensureLOD(root_.get());
+        if (root_ == INVALID_IDX) return;
+        ensureLOD(root_);
     }
 
     ///@brief Generates and inserts a precise physical mapped voxel piece defining simulation interactions
@@ -1674,7 +1935,7 @@ public:
              int objectId = -1, float emittance = 0.0f, float roughness = 1.0f, float metallic = 0.0f, float transmission = 0.0f,
              float ior = 1.45f, Vec3 absorp = Vec3::Zero(), BodyType bType = BodyType::STATIC, float mass = 1.0f,
              float stiffness = 4000.0f, float breakForce = 60.0f, float damping = 0.4f) {
-        if (!pos.allFinite() || !root_->contains(pos)) {
+        if (!pos.allFinite() || !nodeAt(root_)->contains(pos)) {
             return false;
         }
         auto obj = getOrCreateObject(objectId);
@@ -1693,7 +1954,7 @@ public:
             obj->relativeVoxels.push_back({relPos});
         }
         
-        if (insertRecursive(root_.get(), pointData, 0)) {
+        if (insertRecursive(root_, pointData, 0)) {
             this->size++;
             if (bType != BodyType::STATIC) {
                 std::lock_guard<std::mutex> lock(physicsMutex_);
@@ -1753,14 +2014,14 @@ public:
         return pt->physMatIdx;
     }
     
-    void collectNodesByObjectId(int id, std::vector<std::shared_ptr<NodeData>>& results) {
+    uint32_t collectNodesByObjectId(int id, std::vector<std::shared_ptr<NodeData>>& results, int* outDepth = nullptr) {
         auto obj = getObject(id);
-        if (!obj) return;
+        if (!obj) return INVALID_IDX;
         
         std::vector<Vec3> absolutePositions;
         {
             s_lock lock(obj->objMutex);
-            if (obj->relativeVoxels.empty()) return;
+            if (obj->relativeVoxels.empty()) return INVALID_IDX;
             
             absolutePositions.reserve(obj->relativeVoxels.size());
             for (const auto& relPos : obj->relativeVoxels) {
@@ -1768,7 +2029,10 @@ public:
             }
         }
         int depth = 0;
-        OctreeNode* commonNode = getHighestCommonNode(absolutePositions, root_.get(), depth);
+        uint32_t commonNode = getHighestCommonNode(absolutePositions, root_, depth);
+        if (outDepth) {
+            *outDepth = depth;
+        }
         results.reserve(absolutePositions.size());
         
         for (const auto& absPos : absolutePositions) {
@@ -1778,6 +2042,7 @@ public:
                 results.push_back(pt);
             }
         }
+        return commonNode;
     }
 
     bool updateRenderMaterial(int objectId, uint32_t index, const RenderMaterial& mat) {
@@ -1790,7 +2055,7 @@ public:
             ++renderMaterials_.version;
         }
         std::vector<std::shared_ptr<NodeData>> nodes;
-        if (root_) collectNodesByObjectId(objectId, nodes);
+        if (root_ != INVALID_IDX) collectNodesByObjectId(objectId, nodes);
         for (auto& n : nodes) invalidateLODForPoint(n);
         return true;
     }
@@ -1810,14 +2075,14 @@ public:
     }
 
     bool rotateObject(int objectId, const Eigen::Matrix3f& rotation, const Vec3& pivot) {
-        if (!root_) return false;
+        if (root_ == INVALID_IDX) return false;
         std::vector<std::shared_ptr<NodeData>> nodes;
         collectNodesByObjectId(objectId, nodes);
         if (nodes.empty()) return false;
 
         BoundingBox oldBounds = getNodesBounds(nodes);
         int oldDepth = 0;
-        OctreeNode* oldStart = getHighestCommonNode(oldBounds, root_.get(), 0, oldDepth);
+        uint32_t oldStart = getHighestCommonNode(oldBounds, root_, 0, oldDepth);
 
         size_t removed = removeObjectBatchRecursive(oldStart, objectId);
         size -= removed;
@@ -1830,7 +2095,7 @@ public:
         BoundingBox newBounds = getNodesBounds(nodes);
 
         int newDepth = 0;
-        OctreeNode* newStart = getHighestCommonNode(newBounds, root_.get(), 0, newDepth);
+        uint32_t newStart = getHighestCommonNode(newBounds, root_, 0, newDepth);
 
         size_t added = 0;
         for (auto& n : nodes) {
@@ -1859,12 +2124,11 @@ public:
     }
 
     bool subdivideObject(int objectId) {
-        if (!root_) return false;
+        if (root_ == INVALID_IDX) return false;
         std::vector<std::shared_ptr<NodeData>> nodes;
-        OctreeNode* oldStart = collectNodesByObjectId(objectId, nodes);
-        if (nodes.empty()) return false;
-
         int oldDepth = 0;
+        uint32_t oldStart = collectNodesByObjectId(objectId, nodes, &oldDepth);
+        if (nodes.empty()) return false;
 
         size_t removed = removeObjectBatchRecursive(oldStart, objectId);
         size -= removed;
@@ -1927,7 +2191,7 @@ public:
         if (!toRemoveVec.empty()) {
             BoundingBox remBounds = getNodesBounds(toRemoveVec);
             int remDepth = 0;
-            OctreeNode* start = getHighestCommonNode(remBounds, root_.get(), 0, remDepth);
+            uint32_t start = getHighestCommonNode(remBounds, root_, 0, remDepth);
             size_t removed = removeSpecificNodesBatchRecursive(start, toRemove);
             size -= removed;
         }
@@ -1940,7 +2204,7 @@ public:
              float ior = 1.45f, Vec3 absorp = Vec3::Zero(),
              BodyType bType = BodyType::STATIC, float mass = 1.0f) {
         enqueueTask([this, data, pos, visible, color, size, active, objectId, emittance, roughness, metallic, transmission, ior, absorp, bType, mass]() {
-            if (!pos.allFinite() || !root_->contains(pos)) {
+            if (!pos.allFinite() || !nodeAt(root_)->contains(pos)) {
                 return;
             }
             auto obj = getOrCreateObject(objectId);
@@ -1959,7 +2223,7 @@ public:
                 obj->relativeVoxels.push_back({relPos});
             }
 
-            if (insertRecursive(root_.get(), pointData, 0)) {
+            if (insertRecursive(root_, pointData, 0)) {
                 this->size++;
                 if (bType != BodyType::STATIC) {
                     std::lock_guard<std::mutex> lock(physicsMutex_);
@@ -1977,15 +2241,15 @@ public:
         Vec3 camPos = cam.origin;
         Vec3 camDir = cam.direction.normalized();
         enqueueTask([this, camPos, camDir]() {
-            if (root_) {
-                updateStreamingRecursive(root_.get(), camPos, camDir);
+            if (root_ != INVALID_IDX) {
+                updateStreamingRecursive(root_, camPos, camDir);
             }
             streamingQueued_.store(false, std::memory_order_release);
         });
     }
 
     bool save(const std::string& filename) {
-        if (!root_) return false;
+        if (root_ == INVALID_IDX) return false;
 
         std::ofstream out(filename, std::ios::binary);
         if (!out) return false;
@@ -1999,8 +2263,8 @@ public:
         writeVec3(out, skylight_);
         writeVec3(out, backgroundColor_);
         
-        writeVec3(out, root_->bounds().first);
-        writeVec3(out, root_->bounds().second);
+        writeVec3(out, nodeAt(root_)->bounds().first);
+        writeVec3(out, nodeAt(root_)->bounds().second);
 
         {
             s_lock matLock(renderMaterials_.mutex);
@@ -2031,8 +2295,7 @@ public:
             }
         }
 
-        u_lock rlock(root_->nodeMutex);
-        root_->serialize(out, regionTargetPoints_, storagepath);
+        serializeSubtree(out, root_);
         
         out.close();
         std::cout << "successfully saved grid to " << filename << std::endl;
@@ -2097,31 +2360,32 @@ public:
             }
         }
 
-        root_ = std::make_unique<OctreeNode>(minBound, maxBound);
-        root_->deserialize(in, regionTargetPoints_);
+        store_.clear();
+        root_ = store_.add(OctreeNode(minBound, maxBound));
+        deserializeSubtree(in, root_);
 
         in.close();
         std::cout << "successfully loaded grid from " << filename << std::endl;
         return true;
     }
 
-    std::shared_ptr<NodeData> find(const Vec3& pos, int objectId = -2, float tolerance = EPSILON, OctreeNode* node = nullptr) {
-        if (!node) node = root_.get();
+    std::shared_ptr<NodeData> find(const Vec3& pos, int objectId = -2, float tolerance = EPSILON, uint32_t node = INVALID_IDX) {
+        if (node == INVALID_IDX) node = root_;
         return findRecursive(node, pos, objectId, tolerance);
     }
 
-    std::shared_ptr<NodeData> findwNode(const Vec3& pos, OctreeNode* node, int objectId = -2, float tolerance = EPSILON) {
+    std::shared_ptr<NodeData> findwNode(const Vec3& pos, uint32_t node, int objectId = -2, float tolerance = EPSILON) {
         return findRecursive(node, pos, objectId, tolerance);
     }
 
     bool inGrid(Vec3 pos) {
-        return root_->contains(pos);
+        return nodeAt(root_)->contains(pos);
     }
 
     bool remove(const Vec3& pos, float tolerance = EPSILON) {
-        auto pt = find(pos, tolerance);
+        auto pt = find(pos, -2, tolerance);
         if (!pt) return false;
-        if (removeRecursive(root_.get(), pt->getCubeBounds(), pt)) {
+        if (removeRecursive(root_, pt->getCubeBounds(), pt)) {
             size--;
             return true;
         }
@@ -2133,7 +2397,7 @@ public:
         
         float radiusSq = radius * radius;
         int depth = 0;
-        OctreeNode* startingPoint = getHighestCommonNodeRecursive(center - Vec3::Constant(radius), center + Vec3::Constant(radius), root_.get(), depth);
+        uint32_t startingPoint = getHighestCommonNodeRecursive(center - Vec3::Constant(radius), center + Vec3::Constant(radius), root_, depth);
         searchNodeRecursive(startingPoint, center, radiusSq, objectid, results);
         
         return results;
@@ -2164,7 +2428,7 @@ public:
 
     std::vector<std::weak_ptr<NodeData>> getWeakNodesByObjectId(int objectId) {
         std::vector<std::shared_ptr<NodeData>> nodes;
-        if (root_) collectNodesByObjectId(objectId, nodes);
+        if (root_ != INVALID_IDX) collectNodesByObjectId(objectId, nodes);
         std::vector<std::weak_ptr<NodeData>> weakNodes;
         weakNodes.reserve(nodes.size());
         for (auto& n : nodes) weakNodes.push_back(n);
@@ -2181,11 +2445,11 @@ public:
 
     void queuedupdate(const Vec3 pos, const T newData) {
         enqueueTask([this, pos, newData]() {
-            OctreeNode* node = root_.get();
+            uint32_t node = root_;
             auto pointData = findwNode(pos, node, -2);
             if (!pointData) return;
             else {
-                std::lock_guard<std::shared_mutex> lock(node->nodeMutex);
+                u_lock lock(store_.stripe(node));
                 pointData->data = newData;
             }
             invalidateLODForPoint(pointData);
@@ -2203,7 +2467,7 @@ public:
 
         int targetObjId = (newObjectId != -2) ? newObjectId : pointData->objectId;
         
-        removeRecursive(root_.get(), pointData->getCubeBounds(), pointData);
+        removeRecursive(root_, pointData->getCubeBounds(), pointData);
         
         pointData->data = newData;
         pointData->position = newPos;
@@ -2227,7 +2491,7 @@ public:
         
         pointData->renderMatIdx = renderMaterials_.getOrAdd(mat);
         
-        bool res = insertRecursive(root_.get(), pointData, 0);
+        bool res = insertRecursive(root_, pointData, 0);
         
         if(!res) {
             size--;
@@ -2240,10 +2504,10 @@ public:
         auto pointData = find(pos);
         if (!pointData) return false;
 
-        removeRecursive(root_.get(), pointData->getCubeBounds(), pointData);
+        removeRecursive(root_, pointData->getCubeBounds(), pointData);
         pointData->position = newPos;
 
-        if (insertRecursive(root_.get(), pointData, 0)) {
+        if (insertRecursive(root_, pointData, 0)) {
             return true;
         }
         size--;
@@ -2255,10 +2519,10 @@ public:
             auto pointData = find(pos);
             if (!pointData) return;
 
-            removeRecursive(root_.get(), pointData->getCubeBounds(), pointData);
+            removeRecursive(root_, pointData->getCubeBounds(), pointData);
             pointData->position = newPos;
 
-            if (insertRecursive(root_.get(), pointData, 0)) {
+            if (insertRecursive(root_, pointData, 0)) {
                 return;
             }
             size--;
@@ -2271,13 +2535,13 @@ public:
             auto pointData = find(pos);
             if (!pointData) return;
             
-            removeRecursive(root_.get(), pointData->getCubeBounds(), pointData);
+            removeRecursive(root_, pointData->getCubeBounds(), pointData);
             
             auto newPointData = std::make_shared<NodeData>(*pointData);
             newPointData->position = newPos;
             newPointData->data = newData;
             
-            if (!insertRecursive(root_.get(), newPointData, 0)) {
+            if (!insertRecursive(root_, newPointData, 0)) {
                 size--;
             }
         });
@@ -2325,11 +2589,11 @@ public:
 
     void queuedsetColor(const Vec3& pos, Vec3 color, float tolerance = EPSILON) {
         enqueueTask([this, pos, color, tolerance]() {
-            OctreeNode* node = root_.get();
+            uint32_t node = root_;
             auto pointData = findwNode(pos, node, -2, tolerance);
             if (!pointData) return;
             {
-                std::lock_guard<std::shared_mutex> lock(node->nodeMutex);
+                u_lock lock(store_.stripe(node));
                 pointData->color.template head<3>() = color;
             }
             invalidateLODForPoint(pointData);
@@ -2417,26 +2681,26 @@ public:
     bool raycast(const Vec3& origin, const Vec3& direction, float maxDist, RayHit& hit,
                  const std::shared_ptr<NodeData>& ignoreNode = nullptr, bool hitOnlySolid = false, bool resolvePenetration = false,
                  const std::vector<std::vector<PhysicsMaterial_>>* solidClassMats = nullptr) {
-        if (!root_) return false;
-        
+        if (root_ == INVALID_IDX) return false;
+
         Ray ray(origin, direction.normalized());
         
         float tMin, tMax;
-        if (!rayBoxIntersect(ray, root_->bounds(), tMin, tMax)) return false;
+        if (!rayBoxIntersect(ray, nodeAt(root_)->bounds(), tMin, tMax)) return false;
         tMax = std::min(tMax, maxDist);
         
         float currentMaxDist = maxDist;
         std::shared_ptr<NodeData> bestNode = nullptr;
 
         struct StackItem {
-            OctreeNode* node;
+            uint32_t node;
             float tMin;
             float tMax;
         };
         
-        StackItem stack[128]; 
+        StackItem stack[128];
         int stackPtr = 0;
-        stack[stackPtr++] = {root_.get(), std::max(0.0f, tMin), tMax};
+        stack[stackPtr++] = {root_, std::max(0.0f, tMin), tMax};
 
         const float ro[3] = {ray.origin.x(), ray.origin.y(), ray.origin.z()};
         const float rd_inv[3] = {ray.invDir.x(), ray.invDir.y(), ray.invDir.z()};
@@ -2447,17 +2711,17 @@ public:
             
             if (current.tMin > currentMaxDist) continue;
 
-            OctreeNode* node = current.node;
+            uint32_t nodeIdx = current.node;
+            OctreeNode* node = nodeAt(nodeIdx);
+            if (!node) continue;
 
             if (!node->isLoaded()) {
-                ensureLoaded(node, true);
+                ensureLoaded(nodeIdx, true);
                 continue;
             }
 
-            s_lock lock(node->nodeMutex);
-
-            for (const auto& pt : node->points) {
-                if (!pt->isActive() || pt == ignoreNode) continue;
+            for (const auto& pt : pointsView(nodeIdx)) {
+                if (!pt || !pt->isActive() || pt == ignoreNode) continue;
                 if (hitOnlySolid) {
                     bool isFluid = false;
                     if (solidClassMats) {
@@ -2521,7 +2785,7 @@ public:
 
             int currIdx = ((t0 >= ttt_x) ? 1 : 0) | ((t0 >= ttt_y) ? 2 : 0) | ((t0 >= ttt_z) ? 4 : 0);
 
-            struct ChildInterval { OctreeNode* node; float tMin; float tMax; };
+            struct ChildInterval { uint32_t node; float tMin; float tMax; };
             ChildInterval children[4];
             int childCount = 0;
 
@@ -2533,8 +2797,8 @@ public:
                 float tNext = std::min({next_tx, next_ty, next_tz});
                 int physIdx = currIdx ^ ray.signMask;
 
-                if (node->children[physIdx]) {
-                    children[childCount++] = {node->children[physIdx].get(), t0, tNext};
+                if (node->hasChild(physIdx)) {
+                    children[childCount++] = {node->firstChild + (uint32_t)physIdx, t0, tNext};
                 }
 
                 t0 = tNext;
@@ -2599,14 +2863,14 @@ public:
                           const std::vector<std::vector<PhysicsMaterial_>>& fastMats, size_t fastMatsSize);
 
     void optimize() {
-        if (root_) {
-            optimizeRecursive(root_.get());
+        if (root_ != INVALID_IDX) {
+            optimizeRecursive(root_);
             generateLODs();
         }
     }
 
     void printStats(std::ostream& os = std::cout) const {
-        if (!root_) {
+        if (root_ == INVALID_IDX) {
             os << "[Octree Stats] Tree is null/empty." << std::endl;
             return;
         }
@@ -2620,7 +2884,7 @@ public:
         size_t lodGeneratedNodes = 0;
         size_t unloaded = 0;
 
-        printStatsRecursive(root_.get(), 0, totalNodes, leafNodes, actualPoints, 
+        printStatsRecursive(root_, 0, totalNodes, leafNodes, actualPoints, 
                             maxTreeDepth, maxPointsInLeaf, minPointsInLeaf, lodGeneratedNodes, unloaded);
 
         if (leafNodes == 0) minPointsInLeaf = 0;
@@ -2649,8 +2913,8 @@ public:
         os << "  Points/Leaf (Min) : " << minPointsInLeaf << "\n";
         os << "  Points/Leaf (Max) : " << maxPointsInLeaf << "\n";
         os << "Bounds:\n";
-        os << "  Min               : [" << root_->bounds().first.transpose() << "]\n";
-        os << "  Max               : [" << root_->bounds().second.transpose() << "]\n";
+        os << "  Min               : [" << nodeAt(root_)->bounds().first.transpose() << "]\n";
+        os << "  Max               : [" << nodeAt(root_)->bounds().second.transpose() << "]\n";
         os << "Memory (Approx):\n";
         os << "  Node Structure    : " << (nodeMem / 1024.0) << " KB\n";
         os << "  Point Data        : " << (dataMem / 1024.0) << " KB\n";
@@ -2660,27 +2924,27 @@ public:
     bool empty() const { return size == 0; }
 
     void clear(Vec3 minBound = Vec3::Constant(-1.0), Vec3 maxBound = Vec3::Constant(1.0)) {
-        if (root_) {
-            clearNode(root_.get());
-            root_.reset();
+        if (root_ != INVALID_IDX) {
+            clearNode(root_);
+            clearNode(root_);
         }
-        root_ = std::make_unique<OctreeNode>(minBound, maxBound);
+        store_.clear();
+        root_ = store_.add(OctreeNode(minBound, maxBound));
         size = 0;
     }
     
-    void getLoadedStatsSafe(const OctreeNode* node, size_t& loadedNodes, size_t& loadedPoints) const {
+    void getLoadedStatsSafe(uint32_t idx, size_t& loadedNodes, size_t& loadedPoints) const {
+        const OctreeNode* node = nodeAt(idx);
         if (!node) return;
         loadedNodes++;
-        
-        s_lock lock(node->nodeMutex);
+
         if (!node->isLoaded()) return;
-        
-        loadedPoints += node->points.size();
+
+        loadedPoints += store_.points.count(node->pointBlock);
         if (!node->isLeaf()) {
             for (int i = 0; i < 8; ++i) {
-                if (node->children[i]) {
-                    getLoadedStatsSafe(node->children[i].get(), loadedNodes, loadedPoints);
-                }
+                if (node->hasChild(i))
+                    getLoadedStatsSafe(node->firstChild + i, loadedNodes, loadedPoints);
             }
         }
     }
@@ -2688,7 +2952,7 @@ public:
     size_t getEstimatedMemoryUsageMB() const {
         size_t loadedNodes = 0;
         size_t loadedPoints = 0;
-        getLoadedStatsSafe(root_.get(), loadedNodes, loadedPoints);
+        getLoadedStatsSafe(root_, loadedNodes, loadedPoints);
         
         size_t nodeMem = loadedNodes * sizeof(OctreeNode);
         size_t pointMem = loadedPoints * (sizeof(NodeData) + sizeof(std::shared_ptr<NodeData>));
@@ -2699,7 +2963,7 @@ public:
     size_t getLoadedPointCount() const {
         size_t loadedNodes = 0;
         size_t loadedPoints = 0;
-        getLoadedStatsSafe(root_.get(), loadedNodes, loadedPoints);
+        getLoadedStatsSafe(root_, loadedNodes, loadedPoints);
         return loadedPoints;
     }
 

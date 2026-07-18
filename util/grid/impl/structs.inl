@@ -9,6 +9,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
+#include <deque>
 
 namespace Grid{
 
@@ -39,7 +40,8 @@ using BoundingBox = std::pair<Vec3, Vec3>;
 using u_lock = std::unique_lock<std::shared_mutex>;
 using s_lock = std::shared_lock<std::shared_mutex>;
 namespace fs = std::filesystem;
-constexpr int u32M = std::numeric_limits<uint32_t>::max()
+constexpr uint32_t u32M = std::numeric_limits<uint32_t>::max();
+constexpr uint32_t INVALID_IDX = std::numeric_limits<uint32_t>::max();
 
 enum class BodyType : uint8_t {
     STATIC = 0,
@@ -721,60 +723,64 @@ struct NodeData_ {
 
 template<typename T>
 struct OctreeNode_ {
-    std::vector<std::shared_ptr<NodeData_<T>>> points;
-    std::array<std::unique_ptr<OctreeNode_<T>>, 8> children;
     Vec3 center;
     float nodeSize;
+    uint32_t firstChild = INVALID_IDX;
+    uint32_t pointBlock = INVALID_IDX;
+    uint32_t lodIdx = INVALID_IDX;
+    uint8_t childMask = 0;
     std::atomic<uint8_t> flags;
-    
-    mutable std::shared_ptr<NodeData_<T>> lodData;
-    mutable std::shared_mutex nodeMutex;
 
-    OctreeNode_(const Vec3& min, const Vec3& max) : flags(0), lodData(nullptr) {
+    OctreeNode_() : flags(0) {}
+
+    OctreeNode_(const Vec3& min, const Vec3& max) : flags(0) {
         setLeaf(true);
         setLoaded(true);
         setDirty(true);
         setLoadQueued(false);
         setSaveQueued(false);
         setKeepLoaded(false);
-        for (std::unique_ptr<OctreeNode_<T>>& child : children) {
-            child = nullptr;
-        }
         center = (min + max) * 0.5;
         nodeSize = (max - min).maxCoeff();
     }
 
-    OctreeNode_(const Vec3& center, const float& size) : center(center), nodeSize(size), flags(0), lodData(nullptr) {
+    OctreeNode_(const Vec3& center, const float& size) : center(center), nodeSize(size), flags(0) {
         setLeaf(true);
         setLoaded(true);
         setDirty(true);
         setLoadQueued(false);
         setSaveQueued(false);
         setKeepLoaded(false);
-        for (std::unique_ptr<OctreeNode_<T>>& child : children) {
-            child = nullptr;
-        }
     }
+
+    OctreeNode_(const OctreeNode_& other) : center(other.center), nodeSize(other.nodeSize),
+            firstChild(other.firstChild), pointBlock(other.pointBlock), lodIdx(other.lodIdx),
+            childMask(other.childMask), flags(other.flags.load(std::memory_order_relaxed)) {}
 
     std::unique_ptr<OctreeNode_<T>> clone() const {
         auto newNode = std::make_unique<OctreeNode_<T>>(center, nodeSize);
         newNode->flags.store(flags.load(std::memory_order_relaxed), std::memory_order_relaxed);
         
-        newNode->points = points;
+        newNode->pointBlock = pointBlock;
         newNode->center = center;
         newNode->nodeSize = nodeSize;
-        newNode->lodData = lodData;
         
-        if (!isLeaf()) {
-            for (int i = 0; i < 8; ++i) {
-                if (children[i]) {
-                    newNode->children[i] = children[i]->clone();
-                }
-            }
-        }
         return newNode;
     }
 
+    OctreeNode_& operator=(const OctreeNode_& other) {
+        if (this != &other) {
+            center = other.center;
+            nodeSize = other.nodeSize;
+            firstChild = other.firstChild;
+            pointBlock = other.pointBlock;
+            lodIdx = other.lodIdx;
+            childMask = other.childMask;
+            flags.store(other.flags.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        }
+        return *this;
+    }
+    
     bool isLeaf() const {
         return flags.load(std::memory_order_relaxed) & LEAF_BIT;
     }
@@ -819,19 +825,19 @@ struct OctreeNode_ {
         else flags.fetch_and(~KEEPLOADED_BIT, std::memory_order_relaxed);
     }
 
+    bool hasChild(int i) const { return (childMask >> i) & 1; }
+
+    uint32_t child(int i) const {
+        return hasChild(i) ? firstChild + static_cast<uint32_t>(i) : INVALID_IDX;
+    }
+
     bool contains(const Vec3& point) const {
         BoundingBox b = bounds();
         return ((point.array() >= b.first.array()) && (point.array() <= b.second.array())).all();
     }
 
     bool isEmpty() const {
-        if (!points.empty()) return false;
-        if (!isLeaf()) {
-            for (int i = 0; i < 8; ++i) {
-                if (children[i] && !children[i]->isEmpty()) return false;
-            }
-        }
-        return true;
+        return pointBlock == INVALID_IDX && childMask == 0;
     }
 
     std::string getRegionPath(const std::string storagepath) const {
@@ -895,228 +901,6 @@ struct OctreeNode_ {
         }
     }
 
-    size_t getSubtreePointCount() const {
-        if (!isLoaded()) return 0;
-        size_t count = points.size();
-        if (!isLeaf()) {
-            for (auto& child : children) {
-                if (child) {
-                    count += child->getSubtreePointCount();
-                }
-            }
-        }
-        return count;
-    }
-
-    bool isSubtreeFullyLoaded() const {
-        if (!isLoaded()) return false;
-        if (!isLeaf()) {
-            for (auto& child : children) {
-                if (child && !child->isSubtreeFullyLoaded()) return false;
-            }
-        }
-        return true;
-    }
-
-    void serializeSubtree(std::ofstream& out) const {
-        writeVal(out, isLeaf());
-        writeVal(out, points.size());
-        for (const auto& pt : points) {
-            serializeData(out, pt->data);
-            writeVec3(out, pt->position);
-            writeVal(out, pt->objectId);
-            writeVal(out, pt->flags.load(std::memory_order_relaxed));
-            writeVal(out, pt->size);
-            writeVec4(out, pt->color);
-            writeVal(out, pt->renderMatIdx);
-            writeVal(out, pt->physMatIdx);
-        }
-
-        if (!isLeaf()) {
-            uint8_t childMask = 0;
-            for (int i = 0; i < 8; ++i) if (children[i]) childMask |= (1 << i);
-            writeVal(out, childMask);
-            for (auto& child : children) {
-                if (child) child->serializeSubtree(out);
-            }
-        }
-    }
-
-    void deserializeSubtree(std::ifstream& in) {
-        bool leaf;
-        readVal(in, leaf);
-        setLeaf(leaf);
-
-        size_t pointCount;
-        readVal(in, pointCount);
-        points.reserve(pointCount);
-        for (size_t i = 0; i < pointCount; ++i) {
-            auto pt = std::make_shared<NodeData_<T>>();
-            deserializeData(in, pt->data);
-            readVec3(in, pt->position);
-            readVal(in, pt->objectId);
-            uint8_t f;
-            readVal(in, f);
-            pt->flags.store(f, std::memory_order_relaxed);
-            readVal(in, pt->size);
-            readVec4(in, pt->color);
-            readVal(in, pt->renderMatIdx);
-            readVal(in, pt->physMatIdx);
-            points.push_back(pt);
-        }
-
-        if (!isLeaf()) {
-            uint8_t childMask;
-            readVal(in, childMask);
-            for (int i = 0; i < 8; ++i) {
-                if ((childMask >> i) & 1) {
-                    Vec3 childMin, childMax;
-                    for (int d = 0; d < Dim; ++d) {
-                        bool high = (i >> d) & 1;
-                        childMin[d] = high ? center[d] : bounds().first[d];
-                        childMax[d] = high ? bounds().second[d] : center[d];
-                    }
-                    children[i] = std::make_unique<OctreeNode_<T>>(childMin, childMax);
-                    std::lock_guard<std::shared_mutex> lock(children[i]->nodeMutex);
-                    children[i]->deserializeSubtree(in);
-                } else {
-                    children[i] = nullptr;
-                }
-            }
-        }
-        setLoaded(true);
-        setDirty(false);
-    }
-
-    void clearDirtySubtree() {
-        setDirty(false);
-        if (!isLeaf()) {
-            for (auto& child : children) if (child) child->clearDirtySubtree();
-        }
-    }
-
-    bool saveRegion(const std::string storagepath) {
-        std::string path = getRegionPath(storagepath);
-        std::ofstream out(path, std::ios::binary);
-        if (!out) return false;
-        serializeSubtree(out);
-        clearDirtySubtree();
-        return true;
-    }
-
-    bool loadRegion(const std::string storagepath) {
-        std::string path = getRegionPath(storagepath);
-        std::ifstream in(path, std::ios::binary);
-        if (in) {
-            deserializeSubtree(in);
-            setLoaded(true);
-            return true;
-        }
-        return false;
-    }
-
-    void offload() {
-        std::lock_guard<std::shared_mutex> lock(nodeMutex);
-        if (isKeepLoaded() || isDirty()) return;
-        setLoaded(false);
-        for (int i = 0; i < 8; ++i) {
-            children[i].reset();
-        }
-        points.clear();
-        points.shrink_to_fit();
-    }
-
-    void serialize(std::ofstream& out, size_t regionTargetPoints, std::string storagepath) {
-        bool offloaded = !isLoaded();
-        size_t subPoints = offloaded ? 0 : getSubtreePointCount();
-
-        bool isRegion = offloaded || (subPoints > 0 && (subPoints <= regionTargetPoints || isLeaf()) && isSubtreeFullyLoaded());
-
-        writeVal(out, isRegion);
-
-        if (isRegion) {
-            if (!offloaded && isDirty()) saveRegion(storagepath);
-            return;
-        }
-
-        writeVal(out, isLeaf());
-        writeVal(out, points.size());
-        for (const auto& pt : points) {
-            serializeData(out, pt->data);
-            writeVec3(out, pt->position);
-            writeVal(out, pt->objectId);
-            writeVal(out, pt->flags.load(std::memory_order_relaxed));
-            writeVal(out, pt->size);
-            writeVec4(out, pt->color);
-            writeVal(out, pt->renderMatIdx);
-            writeVal(out, pt->physMatIdx);
-        }
-
-        if (!isLeaf()) {
-            uint8_t childMask = 0;
-            for (int i = 0; i < 8; ++i) if (children[i]) childMask |= (1 << i);
-            writeVal(out, childMask);
-            for (auto& child : children) {
-                if (child) child->serialize(out, regionTargetPoints, storagepath);
-            }
-        }
-    }
-
-    void deserialize(std::ifstream& in, size_t regionTargetPoints) {
-        bool isRegion;
-        readVal(in, isRegion);
-
-        if (isRegion) {
-            setLoaded(false);
-            setDirty(false);
-            setLeaf(false);
-            return;
-        }
-
-        bool leaf;
-        readVal(in, leaf);
-        setLeaf(leaf);
-
-        size_t pointCount;
-        readVal(in, pointCount);
-        points.reserve(pointCount);
-        for (size_t i = 0; i < pointCount; ++i) {
-            auto pt = std::make_shared<NodeData_<T>>();
-            deserializeData(in, pt->data);
-            readVec3(in, pt->position);
-            readVal(in, pt->objectId);
-            uint8_t f;
-            readVal(in, f);
-            pt->flags.store(f, std::memory_order_relaxed);
-            readVal(in, pt->size);
-            readVec4(in, pt->color);
-            readVal(in, pt->renderMatIdx);
-            readVal(in, pt->physMatIdx);
-            points.push_back(pt);
-        }
-
-        if (!isLeaf()) {
-            uint8_t childMask;
-            readVal(in, childMask);
-            for (int i = 0; i < 8; ++i) {
-                if ((childMask >> i) & 1) {
-                    Vec3 childMin, childMax;
-                    for (int d = 0; d < Dim; ++d) {
-                        bool high = (i >> d) & 1;
-                        childMin[d] = high ? center[d] : bounds().first[d];
-                        childMax[d] = high ? bounds().second[d] : center[d];
-                    }
-                    children[i] = std::make_unique<OctreeNode_<T>>(childMin, childMax);
-                    children[i]->deserialize(in, regionTargetPoints);
-                } else {
-                    children[i] = nullptr;
-                }
-            }
-        }
-        setLoaded(true);
-        setDirty(false);
-    }
-
     BoundingBox bounds() const {
         float halfsize = static_cast<float>(nodeSize) * 0.5f;
         Vec3 hs = Vec3::Constant(halfsize);
@@ -1125,44 +909,241 @@ struct OctreeNode_ {
 };
 
 template<typename T>
-struct OctreeNodeStore {
-    std::vector<OctreeNode_<T>> NodeList;
-    std::unordered_map<Vec3, uint32_t, Vec3fHash> nodeMap;
+struct PointStore {
+
+    struct Block {
+        uint32_t offset = 0;
+        uint32_t count = 0;
+        uint32_t capacity = 0;
+    };
+
+    std::vector<std::shared_ptr<NodeData_<T>>> pool;
+    std::vector<Block> blocks;
+    std::vector<uint32_t> freeBlocks;
     mutable std::shared_mutex mutex;
 
-    uint32_t getOrAdd(const OctreeNode_<T>& node) {
-        {
-            s_lock readLock(mutex);
-            auto a = nodeMap.find(node.center);
-            if (a != nodeMap.end()) return a->second;
-        }
-
-        if (NodeList.size() + 8 < u32M) {
-            u_lock writeLock(mutex);
-            auto a = nodeMap.find(node.center);
-            if (a != nodeMap.end()) return a-> second;
-            uint32_t newIndex = static_cast<uint32_t>(NodeList.size());
-            NodeList.push_back(node);
-            int eight = 8;
-            while (eight > 0) {
-                NodeList.emplace_back();
-                eight--;
-            }
-            nodeMap[node.center] = newIndex;
-            return newIndex;
-        } else {
-            return 0;
-        }
+    uint32_t alloc(const std::vector<std::shared_ptr<NodeData_<T>>>& pts) {
+        u_lock lock(mutex);
+        return allocLocked(pts);
     }
+
+    uint32_t allocLocked(const std::vector<std::shared_ptr<NodeData_<T>>>& pts) {
+        uint32_t offset = static_cast<uint32_t>(pool.size());
+        for (const auto& p : pts) pool.push_back(p);
+
+        Block b{offset, static_cast<uint32_t>(pts.size()), static_cast<uint32_t>(pts.size())};
+        if (!freeBlocks.empty()) {
+            uint32_t idx = freeBlocks.back();
+            freeBlocks.pop_back();
+            blocks[idx] = b;
+            return idx;
+        }
+        blocks.push_back(b);
+        return static_cast<uint32_t>(blocks.size() - 1);
+    }
+
+    uint32_t count(uint32_t blockIdx) const {
+        if (blockIdx == INVALID_IDX) return 0;
+        if (blockIdx >= blocks.size()) return 0;
+        return blocks[blockIdx].count;
+    }
+
+    struct View {
+        const std::shared_ptr<NodeData_<T>>* data = nullptr;
+        uint32_t n = 0;
+        const std::shared_ptr<NodeData_<T>>* begin() const { return data; }
+        const std::shared_ptr<NodeData_<T>>* end()   const { return data + n; }
+        uint32_t size() const { return n; }
+        bool empty() const { return n == 0; }
+        const std::shared_ptr<NodeData_<T>>& operator[](uint32_t i) const { return data[i]; }
+    };
+
+    View view(uint32_t blockIdx) const {
+        if (blockIdx == INVALID_IDX) return {};
+        if (blockIdx >= blocks.size()) return {};
+        const Block& b = blocks[blockIdx];
+        if (b.count == 0) return {};
+        return View{pool.data() + b.offset, b.count};
+    }
+
+    std::vector<std::shared_ptr<NodeData_<T>>> get(uint32_t blockIdx) const {
+        std::vector<std::shared_ptr<NodeData_<T>>> out;
+        if (blockIdx == INVALID_IDX) return out;
+        if (blockIdx >= blocks.size()) return out;
+        const Block& b = blocks[blockIdx];
+        out.reserve(b.count);
+        for (uint32_t i = 0; i < b.count; ++i) out.push_back(pool[b.offset + i]);
+        return out;
+    }
+
+    std::shared_ptr<NodeData_<T>> at(uint32_t blockIdx, uint32_t i) const {
+        if (blockIdx == INVALID_IDX) return nullptr;
+        if (blockIdx >= blocks.size()) return nullptr;
+        const Block& b = blocks[blockIdx];
+        if (i >= b.count) return nullptr;
+        return pool[b.offset + i];
+    }
+
+    uint32_t push(uint32_t blockIdx, const std::shared_ptr<NodeData_<T>>& pt) {
+        u_lock lock(mutex);
+        if (blockIdx == INVALID_IDX || blockIdx >= blocks.size()) {
+            uint32_t offset = static_cast<uint32_t>(pool.size());
+            pool.push_back(pt);
+            blocks.push_back(Block{offset, 1, 1});
+            return static_cast<uint32_t>(blocks.size() - 1);
+        }
+        Block& b = blocks[blockIdx];
+        if (b.offset + b.count == pool.size()) {
+            pool.push_back(pt);
+            b.count++;
+            b.capacity = b.count;
+            return blockIdx;
+        }
+        
+        uint32_t newOffset = static_cast<uint32_t>(pool.size());
+        for (uint32_t i = 0; i < b.count; ++i) pool.push_back(pool[b.offset + i]);
+        pool.push_back(pt);
+        b.offset = newOffset;
+        b.count++;
+        b.capacity = b.count;
+        return blockIdx;
+    }
+
+    uint32_t assign(uint32_t blockIdx, const std::vector<std::shared_ptr<NodeData_<T>>>& pts) {
+        u_lock lock(mutex);
+        if (blockIdx != INVALID_IDX && blockIdx < blocks.size()) {
+            Block& b = blocks[blockIdx];
+            if (pts.size() <= b.capacity) {
+                for (size_t i = 0; i < pts.size(); ++i) pool[b.offset + i] = pts[i];
+                for (size_t i = pts.size(); i < b.count; ++i) pool[b.offset + i] = nullptr;
+                b.count = static_cast<uint32_t>(pts.size());
+                return blockIdx;
+            }
+            freeBlocks.push_back(blockIdx);
+        }
+        return allocLocked(pts);
+    }
+
+    void release(uint32_t blockIdx) {
+        if (blockIdx == INVALID_IDX) return;
+        u_lock lock(mutex);
+        if (blockIdx >= blocks.size()) return;
+        Block& b = blocks[blockIdx];
+        for (uint32_t i = 0; i < b.count; ++i) pool[b.offset + i] = nullptr;
+        b.count = 0;
+        freeBlocks.push_back(blockIdx);
+    }
+
+    uint32_t addSingle(const std::shared_ptr<NodeData_<T>>& pt) {
+        u_lock lock(mutex);
+        uint32_t offset = static_cast<uint32_t>(pool.size());
+        pool.push_back(pt);
+        blocks.push_back(Block{offset, 1, 1});
+        return static_cast<uint32_t>(blocks.size() - 1);
+    }
+
+    void clear() {
+        u_lock lock(mutex);
+        pool.clear();
+        blocks.clear();
+        freeBlocks.clear();
+    }
+
+    size_t totalPoints() const {
+        s_lock lock(mutex);
+        size_t n = 0;
+        for (const auto& b : blocks) n += b.count;
+        return n;
+    }
+};
+
+template<typename T>
+struct OctreeNodeStore {
+    static constexpr size_t StripeCount = 1024;
+
+    std::deque<OctreeNode_<T>> NodeList;
+    std::vector<uint32_t> freeBlocks;
+    mutable std::shared_mutex mutex;
+    mutable std::unique_ptr<std::shared_mutex[]> stripes;
+
+    PointStore<T> points;
+
+    OctreeNodeStore() : stripes(new std::shared_mutex[StripeCount]) {}
+
+    std::shared_mutex& stripe(uint32_t idx) const {
+        return stripes[idx % StripeCount];
+    }
+
+    size_t size() const {
+        s_lock lock(mutex);
+        return NodeList.size();
+    }
+
+    uint32_t add(const OctreeNode_<T>& node) {
+        u_lock lock(mutex);
+        if (NodeList.size() >= u32M) return INVALID_IDX;
+        NodeList.push_back(node);
+        return static_cast<uint32_t>(NodeList.size() - 1);
+    }
+
+    uint32_t allocChildren() {
+        u_lock lock(mutex);
+        if (!freeBlocks.empty()) {
+            uint32_t idx = freeBlocks.back();
+            freeBlocks.pop_back();
+            for (int i = 0; i < 8; ++i) NodeList[idx + i] = OctreeNode_<T>();
+            return idx;
+        }
+        if (NodeList.size() + 8 >= u32M) return INVALID_IDX;
+        uint32_t first = static_cast<uint32_t>(NodeList.size());
+        for (int i = 0; i < 8; ++i) NodeList.emplace_back();
+        return first;
+    }
+
+    void freeChildren(uint32_t firstChild) {
+        if (firstChild == INVALID_IDX) return;
+        u_lock lock(mutex);
+        if (firstChild + 7 >= NodeList.size()) return;
+        for (int i = 0; i < 8; ++i) NodeList[firstChild + i] = OctreeNode_<T>();
+        freeBlocks.push_back(firstChild);
+    }
+
+    OctreeNode_<T>* ptr(uint32_t idx) {
+        if (idx == INVALID_IDX || idx >= NodeList.size()) return nullptr;
+        return &NodeList[idx];
+    }
+
+    const OctreeNode_<T>* ptr(uint32_t idx) const {
+        if (idx == INVALID_IDX || idx >= NodeList.size()) return nullptr;
+        return &NodeList[idx];
+    }
+
+    OctreeNode_<T>& operator[](uint32_t idx) { return NodeList[idx]; }
+    const OctreeNode_<T>& operator[](uint32_t idx) const { return NodeList[idx]; }
 
     OctreeNode_<T> get(uint32_t idx) const {
         s_lock lock(mutex);
         if (idx < NodeList.size()) return NodeList[idx];
         return OctreeNode_<T>();
     }
-    
-}
 
+    bool valid(uint32_t idx) const {
+        s_lock lock(mutex);
+        return idx != INVALID_IDX && idx < NodeList.size();
+    }
+
+    void clear() {
+        u_lock lock(mutex);
+        NodeList.clear();
+        freeBlocks.clear();
+        points.clear();
+    }
+
+    size_t memoryUsage() const {
+        s_lock lock(mutex);
+        return NodeList.size() * sizeof(OctreeNode_<T>);
+    }
+};
 
 template<typename T>
 struct RayHit_ {
