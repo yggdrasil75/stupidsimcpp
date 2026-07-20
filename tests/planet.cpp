@@ -400,7 +400,7 @@ public:
 
         if (currentColorMode == DebugColorMode::NOISE) {
             for (const auto& pos : sim.config.surfaceNodes) {
-                auto pt = sim.grid.find(pos, sim.config.voxelSize * 0.5f);
+                auto pt = sim.grid.find(pos, -2, sim.config.voxelSize * 0.5f);
                 if (!pt) continue;
                 if (pt->data.noiseDisplacement < minNoise) minNoise = pt->data.noiseDisplacement;
                 if (pt->data.noiseDisplacement > maxNoise) maxNoise = pt->data.noiseDisplacement;
@@ -408,7 +408,7 @@ public:
         }
 
         for (auto& pos : sim.config.surfaceNodes) {
-            auto pt = sim.grid.find(pos, sim.config.voxelSize * 0.5f);
+            auto pt = sim.grid.find(pos, -2, sim.config.voxelSize * 0.5f);
             if (!pt) continue;
             auto& p = pt->data;
             v3 originColor = sim.getOriginColor(pt);
@@ -477,7 +477,7 @@ public:
             // sim.grid.update(p.currentPos, p.currentPos, p, true, color, sim.config.voxelSize, true, -2, false, 0.0f, 0.0f, 0.0f);
         }
         for (auto& pos : sim.config.interpolatedNodes) {
-            auto pt = sim.grid.find(pos, sim.config.voxelSize * 0.5f);
+            auto pt = sim.grid.find(pos, -2, sim.config.voxelSize * 0.5f);
             if (!pt) continue;
             auto& p = pt->data;
             v3 originColor = sim.getOriginColor(pt);
@@ -560,7 +560,7 @@ public:
         float maxD = std::numeric_limits<float>::lowest();
 
         for (const auto& pos : sim.config.surfaceNodes) {
-            auto pt = sim.grid.find(pos, sim.config.voxelSize * 0.5f);
+            auto pt = sim.grid.find(pos, -2, sim.config.voxelSize * 0.5f);
             if (!pt || !pt->isActive()) continue;
             auto& p = pt->data;
 
@@ -586,7 +586,7 @@ public:
         }
 
         for (const auto& pos : sim.config.surfaceNodes) {
-            auto pt = sim.grid.find(pos, sim.config.voxelSize * 0.5f);
+            auto pt = sim.grid.find(pos, -2, sim.config.voxelSize * 0.5f);
             if (!pt || !pt->isActive()) continue;
             auto& p = pt->data;
 

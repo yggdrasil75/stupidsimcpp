@@ -358,7 +358,7 @@ public:
     }
 
     void changeNodeObject(const v3& pos, int newObjectId) {
-        auto pt = grid.find(pos, config.voxelSize * 0.5f);
+        auto pt = grid.find(pos, -2, config.voxelSize * 0.5f);
         if (pt && pt->objectId != newObjectId) {
             
             auto newObj = grid.getOrCreateObject(newObjectId);
@@ -501,8 +501,8 @@ public:
                 
                 bool tooClose = false;
                 for (int selectedIndex : selectedSeedIndices) {
-                    auto existingNode = grid.find(config.surfaceNodes[selectedIndex], config.voxelSize * 0.5f);
-                    auto candidateNode = grid.find(config.surfaceNodes[seedIndex], config.voxelSize * 0.5f);
+                    auto existingNode = grid.find(config.surfaceNodes[selectedIndex], -2, config.voxelSize * 0.5f);
+                    auto candidateNode = grid.find(config.surfaceNodes[seedIndex], -2, config.voxelSize * 0.5f);
                     if (!existingNode || !candidateNode) {
                         std::cout << "no nodes" << std::endl;
                         continue;
@@ -526,7 +526,7 @@ public:
                     selectedSeedIndices.push_back(seedIndex);
                     plates[i].plateId = i;
                     
-                    auto sNode = grid.find(config.surfaceNodes[seedIndex], config.voxelSize * 0.5f);
+                    auto sNode = grid.find(config.surfaceNodes[seedIndex], -2, config.voxelSize * 0.5f);
                     if (sNode) {
                         changeNodeObject(config.surfaceNodes[seedIndex], i);
                         plates[i].plateEulerPolep = sNode->position;
@@ -554,7 +554,7 @@ public:
                 selectedSeedIndices.push_back(seedIndex);
                 plates[i].plateId = i;
 
-                auto sNode = grid.find(config.surfaceNodes[seedIndex], config.voxelSize * 0.5f);
+                auto sNode = grid.find(config.surfaceNodes[seedIndex], -2, config.voxelSize * 0.5f);
                 if (sNode) {
                     changeNodeObject(config.surfaceNodes[seedIndex], i);
                     plates[i].plateEulerPolep = sNode->position;
@@ -584,7 +584,7 @@ public:
         std::vector<v3> normPos(numNodes);
         #pragma omp parallel for schedule(static)
         for (int i = 0; i < numNodes; i++) {
-            auto node = grid.find(config.surfaceNodes[i], config.voxelSize * 0.5f);
+            auto node = grid.find(config.surfaceNodes[i], -2, config.voxelSize * 0.5f);
             if (node) {
                 normPos[i] = node->data.altPos->originalPos.normalized();
             } else {
@@ -594,7 +594,7 @@ public:
         
         #pragma omp parallel for schedule(static)
         for (int i = 0; i < config.surfaceNodes.size(); i++) {
-            auto node = grid.find(config.surfaceNodes[i], config.voxelSize * 0.5f);
+            auto node = grid.find(config.surfaceNodes[i], -2, config.voxelSize * 0.5f);
             if (!node) continue;
             Particle in = node->data;
             
@@ -637,7 +637,7 @@ public:
         std::vector<std::vector<int>> frontiers(config.numPlates);
         
         for (int i = 0; i < config.surfaceNodes.size(); i++) {
-            auto node = grid.find(config.surfaceNodes[i], config.voxelSize * 0.5f);
+            auto node = grid.find(config.surfaceNodes[i], -2, config.voxelSize * 0.5f);
             if (!node) {
                 std::cout << "gpr couldnt find" << std::endl;
                 continue;
@@ -650,7 +650,7 @@ public:
                 for (int n = 0; n < 8; n++) {
                     int nIdx = node->data.nearNeighbors[n].index;
                     if (nIdx == -1) break;
-                    auto nNode = grid.find(config.surfaceNodes[nIdx], config.voxelSize * 0.5f);
+                    auto nNode = grid.find(config.surfaceNodes[nIdx], -2, config.voxelSize * 0.5f);
                     if (nNode && nNode->objectId == -1) {
                         frontiers[pID].push_back(nIdx);
                     }
@@ -693,7 +693,7 @@ public:
                 frontiers[selPlate][fIdx] = frontiers[selPlate].back();
                 frontiers[selPlate].pop_back();
 
-                auto candNode = grid.find(config.surfaceNodes[candIdx], config.voxelSize * 0.5f);
+                auto candNode = grid.find(config.surfaceNodes[candIdx], -2, config.voxelSize * 0.5f);
                 if (candNode && candNode->objectId == -1) {
                     changeNodeObject(config.surfaceNodes[candIdx], selPlate);
                     
@@ -704,7 +704,7 @@ public:
                     for (int n = 0; n < 8; n++) {
                         int nIdx = candNode->data.nearNeighbors[n].index;
                         if (nIdx == -1) break;
-                        auto nNode = grid.find(config.surfaceNodes[nIdx], config.voxelSize * 0.5f);
+                        auto nNode = grid.find(config.surfaceNodes[nIdx], -2, config.voxelSize * 0.5f);
                         if (nNode && nNode->objectId == -1) {
                             frontiers[selPlate].push_back(nIdx);
                         }
@@ -731,7 +731,7 @@ public:
         std::cout << "growing using cellular automata" << std::endl;
         int unassignedCount = 0;
         for (const auto& pos : config.surfaceNodes) {
-            auto node = grid.find(pos, config.voxelSize * 0.5f);
+            auto node = grid.find(pos, -2, config.voxelSize * 0.5f);
             if (node && node->objectId == -1) unassignedCount++;
         }
 
@@ -740,7 +740,7 @@ public:
             int assignedThisRound = 0;
             
             for (int i = 0; i < config.surfaceNodes.size(); i++) {
-                auto node = grid.find(config.surfaceNodes[i], config.voxelSize * 0.5f);
+                auto node = grid.find(config.surfaceNodes[i], -2, config.voxelSize * 0.5f);
                 if (!node) continue;
                 
                 if (node->objectId != -1) {
@@ -753,7 +753,7 @@ public:
                     for (int n = 0; n < 8; n++) {
                         int nIdx = node->data.nearNeighbors[n].index;
                         if (nIdx == -1) break;
-                        auto nNode = grid.find(config.surfaceNodes[nIdx], config.voxelSize * 0.5f);
+                        auto nNode = grid.find(config.surfaceNodes[nIdx], -2, config.voxelSize * 0.5f);
                         if (!nNode) continue;
                         
                         int pID = nNode->objectId;
@@ -773,7 +773,7 @@ public:
             }
             
             for (int i = 0; i < config.surfaceNodes.size(); i++) {
-                auto node = grid.find(config.surfaceNodes[i], config.voxelSize * 0.5f);
+                auto node = grid.find(config.surfaceNodes[i], -2, config.voxelSize * 0.5f);
                 if (node && node->objectId == -1 && nextState[i] != -1) {
                     changeNodeObject(config.surfaceNodes[i], nextState[i]);
                     plates[nextState[i]].assignedNodes.push_back(i);
@@ -783,7 +783,7 @@ public:
             
             if (assignedThisRound == 0 && unassignedCount > 0) {
                 for (int i = 0; i < config.surfaceNodes.size(); i++) {
-                    auto node = grid.find(config.surfaceNodes[i], config.voxelSize * 0.5f);
+                    auto node = grid.find(config.surfaceNodes[i], -2, config.voxelSize * 0.5f);
                     if (node && node->objectId == -1) {
                         int closestPlate = 0;
                         float minDist = std::numeric_limits<float>::max();
@@ -813,7 +813,7 @@ public:
             std::vector<int> nextPlateID(config.surfaceNodes.size(), -1);
             
             for (int i = 0; i < config.surfaceNodes.size(); i++) {
-                auto node = grid.find(config.surfaceNodes[i], config.voxelSize * 0.5f);
+                auto node = grid.find(config.surfaceNodes[i], -2, config.voxelSize * 0.5f);
                 if (!node) continue;
                 
                 std::unordered_map<int, int> counts;
@@ -822,7 +822,7 @@ public:
                 for (int n = 0; n < 8; n++) {
                     int nIdx = node->data.nearNeighbors[n].index;
                     if (nIdx == -1) break;
-                    auto nNode = grid.find(config.surfaceNodes[nIdx], config.voxelSize * 0.5f);
+                    auto nNode = grid.find(config.surfaceNodes[nIdx], -2, config.voxelSize * 0.5f);
                     if (nNode) counts[nNode->objectId]++;
                 }
                 
@@ -838,7 +838,7 @@ public:
             }
             
             for (int i = 0; i < config.surfaceNodes.size(); i++) {
-                auto node = grid.find(config.surfaceNodes[i], config.voxelSize * 0.5f);
+                auto node = grid.find(config.surfaceNodes[i], -2, config.voxelSize * 0.5f);
                 if (node && nextPlateID[i] != -1 && node->objectId != nextPlateID[i]) {
                     changeNodeObject(config.surfaceNodes[i], nextPlateID[i]);
                 }
@@ -849,7 +849,7 @@ public:
             plate.assignedNodes.clear();
         }
         for (int i = 0; i < config.surfaceNodes.size(); i++) {
-            auto node = grid.find(config.surfaceNodes[i], config.voxelSize * 0.5f);
+            auto node = grid.find(config.surfaceNodes[i], -2, config.voxelSize * 0.5f);
             if (node && node->objectId != -1) {
                 plates[node->objectId].assignedNodes.push_back(i);
             }
@@ -871,7 +871,7 @@ public:
             Eigen::Vector3f centroid(0,0,0);
             
             for (int nIdx : plates[i].assignedNodes) {
-                auto node = grid.find(config.surfaceNodes[nIdx], config.voxelSize * 0.5f);
+                auto node = grid.find(config.surfaceNodes[nIdx], -2, config.voxelSize * 0.5f);
                 if (!node) continue;
                 sumElevation += node->data.currentPos.norm();
                 centroid += node->data.altPos->originalPos;
@@ -883,7 +883,7 @@ public:
 
                 float maxSpread = 0.0f;
                 for (int nIdx : plates[i].assignedNodes) {
-                    auto node = grid.find(config.surfaceNodes[nIdx], config.voxelSize * 0.5f);
+                    auto node = grid.find(config.surfaceNodes[nIdx], -2, config.voxelSize * 0.5f);
                     if (!node) continue;
                     float d = (node->data.altPos->originalPos - centroid).norm();
                     if (d > maxSpread) maxSpread = d;
@@ -899,7 +899,7 @@ public:
                         float minDistToCentroid = std::numeric_limits<float>::max();
                         
                         for (int nIdx : plates[i].assignedNodes) {
-                            auto node = grid.find(config.surfaceNodes[nIdx], config.voxelSize * 0.5f);
+                            auto node = grid.find(config.surfaceNodes[nIdx], -2, config.voxelSize * 0.5f);
                             if (!node) continue;
                             float d = (node->data.altPos->originalPos - centroid).norm();
                             if (d < minDistToCentroid) {
@@ -907,7 +907,7 @@ public:
                                 bestNodeIdx = nIdx;
                             }
                         }
-                        auto bestNode = grid.find(config.surfaceNodes[bestNodeIdx], config.voxelSize * 0.5f);
+                        auto bestNode = grid.find(config.surfaceNodes[bestNodeIdx], -2, config.voxelSize * 0.5f);
                         if (bestNode) {
                             plates[i].plateEulerPolep = bestNode->position;
                         }
@@ -980,7 +980,7 @@ public:
             std::vector<float> newNoise = nodeNoise;
             
             for (int i = 0; i < numNodes; i++) {
-                auto node = grid.find(config.surfaceNodes[i], config.voxelSize * 0.5f);
+                auto node = grid.find(config.surfaceNodes[i], -2, config.voxelSize * 0.5f);
                 if (!node) continue;
                 Particle p = node->data;
 
@@ -998,7 +998,7 @@ public:
                     int nIdx = p.nearNeighbors[n].index;
                     if (nIdx == -1) break;
                     
-                    auto nNode = grid.find(config.surfaceNodes[nIdx], config.voxelSize * 0.5f);
+                    auto nNode = grid.find(config.surfaceNodes[nIdx], -2, config.voxelSize * 0.5f);
                     if (!nNode) continue;
 
                     int nPlate = nNode->objectId;
@@ -1058,7 +1058,7 @@ public:
         }
         
         for (int i = 0; i < numNodes; i++) {
-            auto node = grid.find(config.surfaceNodes[i], config.voxelSize * 0.5f);
+            auto node = grid.find(config.surfaceNodes[i], -2, config.voxelSize * 0.5f);
             if (!node) continue;
             Particle p = node->data;
             p.plateDisplacement = nodeStress[i];
@@ -1081,7 +1081,7 @@ public:
         std::vector<v3> newPos(config.surfaceNodes.size());
         for (int i = 0; i < config.surfaceNodes.size(); i++) {
             v3 pos = config.surfaceNodes[i];
-            auto node = grid.find(pos, config.voxelSize * 0.5f);
+            auto node = grid.find(pos, -2, config.voxelSize * 0.5f);
             if (!node || !node->isActive()) {
                 newPos[i] = pos;
                 continue;
@@ -1161,7 +1161,7 @@ public:
         std::set<std::tuple<int, int, int>> uniqueTriangles;
 
         for (int i = 0; i < config.surfaceNodes.size(); i++) {
-            auto pt1 = grid.find(config.surfaceNodes[i], config.voxelSize * 0.5f);
+            auto pt1 = grid.find(config.surfaceNodes[i], -2, config.voxelSize * 0.5f);
             if (!pt1) {
                 std::cout << "something broke interpolate find" << std::endl;
                 continue;
@@ -1176,7 +1176,7 @@ public:
                 if (j == -1) break;
                 if (j >= i) continue; 
                 
-                auto pt2 = grid.find(config.surfaceNodes[j], config.voxelSize * 0.5f);
+                auto pt2 = grid.find(config.surfaceNodes[j], -2, config.voxelSize * 0.5f);
                 if (!pt2) continue;
                 Particle p2 = pt2->data;
 
@@ -1185,7 +1185,7 @@ public:
                     if (k == -1) break;
                     if (k <= j) continue;
                     
-                    auto pt3 = grid.find(config.surfaceNodes[k], config.voxelSize * 0.5f);
+                    auto pt3 = grid.find(config.surfaceNodes[k], -2, config.voxelSize * 0.5f);
                     if (!pt3) continue;
 
                     bool isNeighbor = false;
@@ -1210,11 +1210,11 @@ public:
             int idx2 = std::get<1>(tri);
             int idx3 = std::get<2>(tri);
 
-            auto pt1 = grid.find(config.surfaceNodes[idx1], config.voxelSize * 0.5f);
+            auto pt1 = grid.find(config.surfaceNodes[idx1], -2, config.voxelSize * 0.5f);
             Particle p1 = pt1->data;
-            auto pt2 = grid.find(config.surfaceNodes[idx2], config.voxelSize * 0.5f);
+            auto pt2 = grid.find(config.surfaceNodes[idx2], -2, config.voxelSize * 0.5f);
             Particle p2 = pt2->data;
-            auto pt3 = grid.find(config.surfaceNodes[idx3], config.voxelSize * 0.5f);
+            auto pt3 = grid.find(config.surfaceNodes[idx3], -2, config.voxelSize * 0.5f);
             Particle p3 = pt3->data;
 
             if (!p1.altPos || !p2.altPos || !p3.altPos) continue;
@@ -1292,7 +1292,7 @@ public:
         std::vector<float> surfaceMap(LON_RES * LAT_RES, safeRadius);
 
         for (const auto& pos : config.surfaceNodes) {
-            auto node = grid.find(pos, config.voxelSize * 0.5f);
+            auto node = grid.find(pos, -2, config.voxelSize * 0.5f);
             if (!node) continue;
             v3 d = node->data.currentPos - config.center;
             float r = d.norm();
@@ -1323,7 +1323,7 @@ public:
         }
 
         for (const auto& pos : config.interpolatedNodes) {
-            auto node = grid.find(pos, config.voxelSize * 0.5f);
+            auto node = grid.find(pos, -2, config.voxelSize * 0.5f);
             if (!node) continue;
             v3 d = node->data.currentPos - config.center;
             float r = d.norm();
@@ -1672,7 +1672,7 @@ public:
 
         std::vector<Particle> surfData(config.surfaceNodes.size());
         for (int i = 0; i < config.surfaceNodes.size(); i++) {
-            auto node = grid.find(config.surfaceNodes[i], config.voxelSize * 0.5f);
+            auto node = grid.find(config.surfaceNodes[i], -2, config.voxelSize * 0.5f);
             if (node) surfData[i] = node->data;
             else {
                 surfData[i] = Particle(); 
@@ -1779,7 +1779,7 @@ public:
         std::vector<v3> normals(config.surfaceNodes.size());
         std::vector<float> heights(config.surfaceNodes.size());
         for (int i = 0; i < config.surfaceNodes.size(); i++) {
-            auto node = grid.find(config.surfaceNodes[i], config.voxelSize * 0.5f);
+            auto node = grid.find(config.surfaceNodes[i], -2, config.voxelSize * 0.5f);
             if (node) {
                 surfData[i] = node->data;
                 normals[i] = node->data.currentPos.normalized();

@@ -683,7 +683,7 @@ inline std::shared_ptr<PlantsimParticle> PlantsimParticle::deserialize(std::ifst
 }
 
 struct PlantConfig {
-    float voxelSize = 0.5f;
+    float voxelSize = 1.0f;
     float plantVoxelSize = 0.1f;
     float stemFacetSize = 0.03f;
     float waterVoxelSize = 0.08f;
@@ -1129,7 +1129,7 @@ public:
             for (int s = 0; s < N; ++s) {
                 float ang = (float)s / N * 2.0f * (float)M_PI;
                 v3 vp = center + (u * std::cos(ang) + w * std::sin(ang)) * r;
-                if (grid.find(vp, facet * 0.5f)) continue;
+                if (grid.find(vp, -2, facet * 0.5f)) continue;
                 auto bv = std::make_shared<PlantParticle>(
                     isRoot ? PlantPart::ROOT : PlantPart::STEM, nullptr, center, w, 0);
                 bv->plantId = plantId;
@@ -1173,7 +1173,7 @@ public:
                     v3 off(ix * facet, iy * facet, iz * facet);
                     if (off.squaredNorm() > r2) continue;
                     v3 vp = center + off;
-                    if (grid.find(vp, facet * 0.5f)) continue;
+                    if (grid.find(vp, -2, facet * 0.5f)) continue;
                     auto bv = std::make_shared<PlantParticle>(part, nullptr, center, v3(0,1,0), 0);
                     bv->plantId = plantId;
                     bv->isMature = true;
@@ -1208,7 +1208,7 @@ public:
                 }
                 for (int k = 0; k < layers; ++k) {
                     v3 vp = base + along * (ly * halfL) + u * (wx * halfW) + w * (k * facet);
-                    if (grid.find(vp, facet * 0.5f)) continue;
+                    if (grid.find(vp, -2, facet * 0.5f)) continue;
                     auto lv = std::make_shared<PlantParticle>(PlantPart::LEAF, nullptr, base, along, 0);
                     lv->plantId = plantId;
                     lv->isMature = true;
@@ -1294,7 +1294,7 @@ private:
                 if (chanceDist(rng) > getRainfallDensity(rx, rz)) continue;
                 v3 spawnPos(rx, 50.0f, rz);
                 
-                if (!grid.find(spawnPos, config.waterVoxelSize)) {
+                if (!grid.find(spawnPos, -2, config.waterVoxelSize)) {
                     spawnWaterVoxel(spawnPos, v3(0, -10.0f, 0));
                 }
             }
@@ -1311,7 +1311,7 @@ private:
                 if (chanceDist(rng) > getRainfallDensity(rx, rz)) continue;
                 v3 spawnPos(rx, 50.0f, rz);
 
-                if (!grid.find(spawnPos, config.waterVoxelSize)) {
+                if (!grid.find(spawnPos, -2, config.waterVoxelSize)) {
                     auto s = std::make_shared<SnowParticle>();
                     s->velocity = v3(0, -2.0f, 0);   // drifts down gently
                     float mass = config.waterVoxelSize * config.waterVoxelSize *
@@ -1655,7 +1655,7 @@ private:
                 if (pos.y() - restY > config.plantVoxelSize * config.seedSnapDepth ||
                     pos.y() < restY - config.plantVoxelSize * 0.25f) {
                     v3 settled(pos.x(), restY, pos.z());
-                    if (!grid.find(settled, config.plantVoxelSize * 0.5f)) {
+                    if (!grid.find(settled, -2, config.plantVoxelSize * 0.5f)) {
                         grid.remove(pos);
                         p->seedPos = settled;
                         grid.insert(p, settled, true, v3(0.2f, 0.8f, 0.2f),
@@ -1699,7 +1699,7 @@ private:
                 // keeps the first growth AT the seed rather than a voxel above it.
                 v3 rootDir(0, -1, 0);
                 v3 rootPos = pos + rootDir * config.plantVoxelSize;
-                if (!grid.find(rootPos, config.stemFacetSize * 0.5f)) {
+                if (!grid.find(rootPos, -2, config.stemFacetSize * 0.5f)) {
                     auto root = std::make_shared<PlantParticle>(PlantPart::ROOT, p->dna, p->seedPos, rootDir, 0);
                     root->plantId = p->plantId;
                     if (grid.insert(root, rootPos, true, v3(0.45f, 0.34f, 0.26f), config.stemFacetSize, true, 1)) {
@@ -2108,7 +2108,7 @@ private:
             if (sy < config.waterLevel) sy = config.waterLevel;
             v3 seedPos(sx, sy, sz);
 
-            if (!grid.find(seedPos, config.voxelSize * 0.5f)) {
+            if (!grid.find(seedPos, -2, config.voxelSize * 0.5f)) {
                 int pId = nextPlantId++;
                 auto st = std::make_shared<PlantState>();
                 st->energy = 40.0f;
