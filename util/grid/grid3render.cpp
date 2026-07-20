@@ -40,7 +40,7 @@ void Octree<T>::buildRenderNodeAt(uint32_t nodeIndex, RenderBuffer_<T>& buffer, 
     
     rnode.firstPoint = static_cast<uint32_t>(buffer.points.size());
     if (isLoaded) {
-        const auto pts = pointsOf(nodeIndex);
+        const auto pts = pointsView(nodeIndex);
         for (const auto& pt : pts) {
             if (!pt || !pt->isActive() || !pt->isVisible()) continue; 
             RenderData rd;
@@ -336,6 +336,57 @@ struct PointSort {
     bool operator<(const PointSort& o) const { return morton < o.morton; }
 };
 
+static inline uint64_t mortonSplit3(uint64_t v) {
+    v &= 0x1fffffULL;
+    v = (v | v << 32) & 0x1f00000000ffffULL;
+    v = (v | v << 16) & 0x1f0000ff0000ffULL;
+    v = (v | v << 8)  & 0x100f00f00f00f00fULL;
+    v = (v | v << 4)  & 0x10c30c30c30c30c3ULL;
+    v = (v | v << 2)  & 0x1249249249249249ULL;
+    return v;
+}
+
+static inline uint64_t mortonEncode21(uint32_t x, uint32_t y, uint32_t z) {
+    return mortonSplit3(x) | (mortonSplit3(y) << 1) | (mortonSplit3(z) << 2);
+}
+
+static void mortonRadixSort(std::vector<PointSort>& v, std::vector<PointSort>& scratch) {
+    const size_t n = v.size();
+    if (n < 2) return;
+    scratch.resize(n);
+    for (int shift = 0; shift < 64; shift += 8) {
+        size_t count[257] = {0};
+        for (size_t i = 0; i < n; ++i) ++count[((v[i].morton >> shift) & 0xFF) + 1];
+        if (count[((v[0].morton >> shift) & 0xFF) + 1] == n) continue;
+        for (int k = 0; k < 256; ++k) count[k + 1] += count[k];
+        for (size_t i = 0; i < n; ++i) scratch[count[(v[i].morton >> shift) & 0xFF]++] = v[i];
+        v.swap(scratch);
+    }
+}
+template<typename GetPos>
+static void mortonSortIndices(const std::vector<size_t>& indices, const Vec3& boundsMin, const Vec3& boundsMax,
+                              GetPos&& getPos, std::vector<PointSort>& out) {
+    Vec3 extent = boundsMax - boundsMin;
+    if (extent.x() <= 0.0f) extent.x() = 1.0f;
+    if (extent.y() <= 0.0f) extent.y() = 1.0f;
+    if (extent.z() <= 0.0f) extent.z() = 1.0f;
+    Vec3 invExtent = extent.cwiseInverse();
+
+    out.clear();
+    out.resize(indices.size());
+    for (size_t k = 0; k < indices.size(); ++k) {
+        const size_t idx = indices[k];
+        Vec3 normPos = (getPos(idx) - boundsMin).cwiseProduct(invExtent);
+        uint32_t x = static_cast<uint32_t>(std::min(std::max(normPos.x() * 2097151.0f, 0.0f), 2097151.0f));
+        uint32_t y = static_cast<uint32_t>(std::min(std::max(normPos.y() * 2097151.0f, 0.0f), 2097151.0f));
+        uint32_t z = static_cast<uint32_t>(std::min(std::max(normPos.z() * 2097151.0f, 0.0f), 2097151.0f));
+        out[k] = {mortonEncode21(x, y, z), idx};
+    }
+
+    static thread_local std::vector<PointSort> scratch;
+    mortonRadixSort(out, scratch);
+}
+
 static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData& camTemplate,
                                       int samplesPerPixel, int maxBounces, int sampleOffset, size_t pixFloats, size_t bufBytes,
                                       bool buffersPreSeeded = false) {
@@ -351,7 +402,6 @@ static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData
     int start = 0;
     const size_t nGPU = gpuFleet.count();
 
-    ScopedFunctionTimer ngpul1("wavefront part 1: ");
     if (nGPU <= 1) {
         for (const auto& t : tiles) {
             GPUCameraData cd = camTemplate;
@@ -364,9 +414,7 @@ static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData
         }
         return;
     }
-    ngpul1.stop();
 
-    ScopedFunctionTimer ngpul2("wavefront part multigpu: ");
 
     std::vector<float> zeros(pixFloats, 0.0f);
     std::vector<float> seedPix, seedAd;
@@ -377,8 +425,6 @@ static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData
         vkCtx.downloadFromBuffer(vkCtx.adaptiveBuffer, seedAd.data(), bufBytes);
     }
 
-    // Per-device speed estimate (samples/ms), EMA-refined by every real
-    // render. First call calibrates with one concurrent 1-sample tile per GPU.
     static std::vector<double> speedEMA;
     if (speedEMA.size() != nGPU) speedEMA.assign(nGPU, 0.0);
     bool needCalib = false;
@@ -392,7 +438,7 @@ static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData
                 GPUCameraData cd = camTemplate;
                 cd.tileOffsetX = ct.x();
                 cd.tileOffsetY = ct.y();
-                cd.currentSampleOffset = 1; // never firstEver during calibration
+                cd.currentSampleOffset = 1;
                 cd.dispatchSamples = 1;
                 ctx.updateCameraData(cd);
                 auto t0 = std::chrono::steady_clock::now();
@@ -404,9 +450,6 @@ static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData
         for (auto& t : calib) t.join();
     }
 
-    // Proportional sample split (floor + remainder to the fastest device). A
-    // device whose fair share rounds to zero simply sits out this frame
-    // instead of gating it.
     double speedSum = 0.0;
     for (size_t g = 0; g < nGPU; ++g) speedSum += speedEMA[g];
     std::vector<int> counts(nGPU, 0);
@@ -419,9 +462,6 @@ static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData
     }
     counts[fastest] += samplesPerPixel - assigned;
 
-    // Seed accumulation buffers: zeros everywhere, except the primary keeps
-    // the caller's seed (calibration scribbled on the buffers, so this also
-    // cleans that up).
     for (size_t g = 0; g < nGPU; ++g) {
         auto& ctx = gpuFleet.ctx(g);
         const float* pix = (g == 0 && buffersPreSeeded) ? seedPix.data() : zeros.data();
@@ -430,8 +470,6 @@ static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData
         ctx.uploadToBuffer(ctx.adaptiveBuffer, ad, bufBytes);
     }
 
-    // Concurrent render: one host thread per participating GPU, each covering
-    // the full frame with its own disjoint sample range.
     std::vector<double> msSpent(nGPU, 0.0);
     std::vector<std::thread> workers;
     for (size_t g = 0; g < nGPU; ++g) {
@@ -461,14 +499,10 @@ static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData
         }
     }
 
-    // Merge by summation, then push the result into the primary context so
-    // the downstream smooth/blend passes see every GPU's contribution.
     std::vector<float> merged(pixFloats, 0.0f), mergedAd(pixFloats, 0.0f), tmp(pixFloats);
     for (size_t g = 0; g < nGPU; ++g) {
         auto& ctx = gpuFleet.ctx(g);
-        if (g != 0 && counts[g] <= 0) continue; // untouched zeros
-        // outBuffer is device-local now: snapshot it into the context's
-        // persistent host-cached staging buffer and read from there.
+        if (g != 0 && counts[g] <= 0) continue;
         const float* src = ctx.readbackOut(bufBytes);
         for (size_t i = 0; i < pixFloats; ++i) merged[i] += src[i];
 
@@ -477,10 +511,8 @@ static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData
     }
     vkCtx.uploadToBuffer(vkCtx.outBuffer, merged.data(), bufBytes);
     vkCtx.uploadToBuffer(vkCtx.adaptiveBuffer, mergedAd.data(), bufBytes);
-    ngpul2.stop();
 }
 
-// Uploads the octree's fog volumes to the GPU and stamps the count into camData.
 template<typename T>
 static void uploadFogVolumes(GpuContext& vkCtx, GPUCameraData& camData,
                              const std::vector<T>& fogVolumes) {
@@ -537,30 +569,10 @@ frame Octree<T>::renderFrameVulkan(const Camera& cam, int height, int width, fra
         globalMax = globalMax.cwiseMax(tl_buffer.points[i].position);
     }
     
-    Vec3 extent = globalMax - globalMin;
-    if (extent.x() <= 0.0f) extent.x() = 1.0f;
-    if (extent.y() <= 0.0f) extent.y() = 1.0f;
-    if (extent.z() <= 0.0f) extent.z() = 1.0f;
-    Vec3 invExtent = extent.cwiseInverse();
-
     std::vector<PointSort> sortedPoints;
-    sortedPoints.reserve(validIndices.size());
-    for(size_t idx : validIndices) {
-        Vec3 normPos = (tl_buffer.points[idx].position - globalMin).cwiseProduct(invExtent);
-        uint32_t x = std::min(std::max(normPos.x() * 2097151.0f, 0.0f), 2097151.0f);
-        uint32_t y = std::min(std::max(normPos.y() * 2097151.0f, 0.0f), 2097151.0f);
-        uint32_t z = std::min(std::max(normPos.z() * 2097151.0f, 0.0f), 2097151.0f);
-        
-        uint64_t m = 0;
-        for (int i = 0; i < 21; ++i) {
-            m |= ((uint64_t)((x >> i) & 1) << (3 * i)) |
-                 ((uint64_t)((y >> i) & 1) << (3 * i + 1)) |
-                 ((uint64_t)((z >> i) & 1) << (3 * i + 2));
-        }
-        sortedPoints.push_back({m, idx});
-    }
-    
-    std::sort(sortedPoints.begin(), sortedPoints.end());
+    mortonSortIndices(validIndices, globalMin, globalMax,
+                      [&](size_t idx) { return tl_buffer.points[idx].position; },
+                      sortedPoints);
 
     std::vector<GPURenderData> gpuPoints;
     std::vector<uint32_t> gpuLights;
@@ -655,21 +667,40 @@ frame Octree<T>::fastRenderFrameVulkan(const Camera& cam, int height, int width,
     gpuPoints.reserve(tl_buffer.points.size());
     Vec3 vctMin = Vec3::Constant(std::numeric_limits<float>::max());
     Vec3 vctMax = Vec3::Constant(std::numeric_limits<float>::lowest());
+    Vec3 globalMin = Vec3::Constant(std::numeric_limits<float>::max());
+    Vec3 globalMax = Vec3::Constant(std::numeric_limits<float>::lowest());
+
+    std::vector<size_t> validIndices;
+    validIndices.reserve(tl_buffer.points.size());
     for(size_t i = 0; i < tl_buffer.points.size(); ++i) {
         if(isLodPoint[i]) continue;
         const auto& p = tl_buffer.points[i];
-        
-        gpuPoints.push_back({p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId});
-        
-        if (tl_buffer.materials[p.materialIdx].chromaticity != 0u) {
-            gpuLights.push_back(gpuPoints.size() - 1);
-        }
+        validIndices.push_back(i);
+
+        globalMin = globalMin.cwiseMin(p.position);
+        globalMax = globalMax.cwiseMax(p.position);
 
         float h = p.size * 0.5f;
         vctMin = vctMin.cwiseMin(p.position - Vec3::Constant(h));
         vctMax = vctMax.cwiseMax(p.position + Vec3::Constant(h));
     }
-    if (vctMin.x() > vctMax.x()) { vctMin.setZero(); vctMax.setOnes(); } // empty scene guard
+    if (vctMin.x() > vctMax.x()) {
+        vctMin.setZero();
+        vctMax.setOnes();
+    }
+
+    std::vector<PointSort> sortedPoints;
+    mortonSortIndices(validIndices, globalMin, globalMax, [&](size_t idx) { return tl_buffer.points[idx].position; }, sortedPoints);
+
+    for(const auto& sp : sortedPoints) {
+        const auto& p = tl_buffer.points[sp.idx];
+
+        gpuPoints.push_back({p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId});
+        
+        if (tl_buffer.materials[p.materialIdx].chromaticity != 0u) {
+            gpuLights.push_back(gpuPoints.size() - 1);
+        }
+    }
 
     int emissiveCount = gpuLights.size();
     if(gpuPoints.empty()) gpuPoints.push_back(GPURenderData{});
@@ -698,15 +729,13 @@ frame Octree<T>::fastRenderFrameVulkan(const Camera& cam, int height, int width,
 
     {
         Vec3 keyLight = (-cam.direction.normalized());
-        vkCtx.vctBuildVolume(vkCtx.fastPointBuffer, (uint32_t)gpuPoints.size(),
-                             vctMin, vctMax, keyLight, /*enabled=*/true);
+        vkCtx.vctBuildVolume(vkCtx.fastPointBuffer, (uint32_t)gpuPoints.size(), vctMin, vctMax, keyLight, true);
     }
 
     VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     vkBeginCommandBuffer(vkCtx.commandBuffer, &beginInfo);
     vkCmdBindPipeline(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.fastPipeline);
     vkCmdBindDescriptorSets(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.fastPipelineLayout, 0, 1, &vkCtx.fastDescSet, 0, nullptr);
-    
     vkCmdDispatch(vkCtx.commandBuffer, (width + 7) / 8, (height + 7) / 8, 1);
     vkEndCommandBuffer(vkCtx.commandBuffer);
 
@@ -734,7 +763,7 @@ frame Octree<T>::fastRenderFrameVulkan(const Camera& cam, int height, int width,
     for (int i = 0; i < pixelCount; ++i) {
         int outIdx = i * 3;
         int inIdx = i * 5;
-        colorBuffer[outIdx]     = std::clamp(raw[inIdx],     0.0f, 1.0f);
+        colorBuffer[outIdx] = std::clamp(raw[inIdx], 0.0f, 1.0f);
         colorBuffer[outIdx + 1] = std::clamp(raw[inIdx + 1], 0.0f, 1.0f);
         colorBuffer[outIdx + 2] = std::clamp(raw[inIdx + 2], 0.0f, 1.0f);
     }
@@ -781,30 +810,10 @@ frame Octree<T>::blendedRenderFrameVulkan(const Camera& cam, int height, int wid
         globalMax = globalMax.cwiseMax(tl_buffer.points[i].position);
     }
     
-    Vec3 extent = globalMax - globalMin;
-    if (extent.x() <= 0.0f) extent.x() = 1.0f;
-    if (extent.y() <= 0.0f) extent.y() = 1.0f;
-    if (extent.z() <= 0.0f) extent.z() = 1.0f;
-    Vec3 invExtent = extent.cwiseInverse();
-
     std::vector<PointSort> sortedPoints;
-    sortedPoints.reserve(validIndices.size());
-    for(size_t idx : validIndices) {
-        Vec3 normPos = (tl_buffer.points[idx].position - globalMin).cwiseProduct(invExtent);
-        uint32_t x = std::min(std::max(normPos.x() * 2097151.0f, 0.0f), 2097151.0f);
-        uint32_t y = std::min(std::max(normPos.y() * 2097151.0f, 0.0f), 2097151.0f);
-        uint32_t z = std::min(std::max(normPos.z() * 2097151.0f, 0.0f), 2097151.0f);
-        
-        uint64_t m = 0;
-        for (int i = 0; i < 21; ++i) {
-            m |= ((uint64_t)((x >> i) & 1) << (3 * i)) |
-                 ((uint64_t)((y >> i) & 1) << (3 * i + 1)) |
-                 ((uint64_t)((z >> i) & 1) << (3 * i + 2));
-        }
-        sortedPoints.push_back({m, idx});
-    }
-    
-    std::sort(sortedPoints.begin(), sortedPoints.end());
+    mortonSortIndices(validIndices, globalMin, globalMax,
+                      [&](size_t idx) { return tl_buffer.points[idx].position; },
+                      sortedPoints);
 
     std::vector<GPURenderData> gpuPBRPoints;
     gpuPBRPoints.reserve(sortedPoints.size());
@@ -969,29 +978,10 @@ frame Octree<T>::GameStyleRenderFrame(const Camera& cam, int height, int width, 
         globalMax = globalMax.cwiseMax(tl_buffer.points[i].position);
     }
 
-    Vec3 extent = globalMax - globalMin;
-    if (extent.x() <= 0.0f) extent.x() = 1.0f;
-    if (extent.y() <= 0.0f) extent.y() = 1.0f;
-    if (extent.z() <= 0.0f) extent.z() = 1.0f;
-    Vec3 invExtent = extent.cwiseInverse();
-
     std::vector<PointSort> sortedPoints;
-    sortedPoints.reserve(validIndices.size());
-    for(size_t idx : validIndices) {
-        Vec3 normPos = (tl_buffer.points[idx].position - globalMin).cwiseProduct(invExtent);
-        uint32_t x = std::min(std::max(normPos.x() * 2097151.0f, 0.0f), 2097151.0f);
-        uint32_t y = std::min(std::max(normPos.y() * 2097151.0f, 0.0f), 2097151.0f);
-        uint32_t z = std::min(std::max(normPos.z() * 2097151.0f, 0.0f), 2097151.0f);
-
-        uint64_t m = 0;
-        for (int i = 0; i < 21; ++i) {
-            m |= ((uint64_t)((x >> i) & 1) << (3 * i)) |
-                 ((uint64_t)((y >> i) & 1) << (3 * i + 1)) |
-                 ((uint64_t)((z >> i) & 1) << (3 * i + 2));
-        }
-        sortedPoints.push_back({m, idx});
-    }
-    std::sort(sortedPoints.begin(), sortedPoints.end());
+    mortonSortIndices(validIndices, globalMin, globalMax,
+                      [&](size_t idx) { return tl_buffer.points[idx].position; },
+                      sortedPoints);
     std::vector<GPURenderData> gpuFastPoints;
     gpuFastPoints.reserve(sortedPoints.size());
     struct LightRef { float power; uint32_t idx; };
@@ -1136,29 +1126,10 @@ frame Octree<T>::superBlendedRenderFrameVulkan(const Camera& cam, int height, in
         globalMax = globalMax.cwiseMax(tl_buffer.points[i].position);
     }
 
-    Vec3 extent = globalMax - globalMin;
-    if (extent.x() <= 0.0f) extent.x() = 1.0f;
-    if (extent.y() <= 0.0f) extent.y() = 1.0f;
-    if (extent.z() <= 0.0f) extent.z() = 1.0f;
-    Vec3 invExtent = extent.cwiseInverse();
-
     std::vector<PointSort> sortedPoints;
-    sortedPoints.reserve(validIndices.size());
-    for(size_t idx : validIndices) {
-        Vec3 normPos = (tl_buffer.points[idx].position - globalMin).cwiseProduct(invExtent);
-        uint32_t x = std::min(std::max(normPos.x() * 2097151.0f, 0.0f), 2097151.0f);
-        uint32_t y = std::min(std::max(normPos.y() * 2097151.0f, 0.0f), 2097151.0f);
-        uint32_t z = std::min(std::max(normPos.z() * 2097151.0f, 0.0f), 2097151.0f);
-
-        uint64_t m = 0;
-        for (int i = 0; i < 21; ++i) {
-            m |= ((uint64_t)((x >> i) & 1) << (3 * i)) |
-                 ((uint64_t)((y >> i) & 1) << (3 * i + 1)) |
-                 ((uint64_t)((z >> i) & 1) << (3 * i + 2));
-        }
-        sortedPoints.push_back({m, idx});
-    }
-    std::sort(sortedPoints.begin(), sortedPoints.end());
+    mortonSortIndices(validIndices, globalMin, globalMax,
+                      [&](size_t idx) { return tl_buffer.points[idx].position; },
+                      sortedPoints);
 
     std::vector<GPURenderData> gpuPBRPoints;
     gpuPBRPoints.reserve(sortedPoints.size());

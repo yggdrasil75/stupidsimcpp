@@ -146,8 +146,8 @@ private:
 
     ///@brief Writes one node's points to a stream.
     void writePoints(std::ofstream& out, uint32_t idx) const {
-        auto pts = pointsOf(idx);
-        writeVal(out, pts.size());
+        auto pts = pointsView(idx);
+        writeVal(out, static_cast<size_t>(pts.size()));
         for (const auto& pt : pts) {
             OctreeNode::serializeData(out, pt->data);
             writeVec3(out, pt->position);
