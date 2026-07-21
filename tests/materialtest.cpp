@@ -368,10 +368,10 @@ int main() {
     const float fps = 60.0f;
     const float durationPerSegment = 10.0f;
     const int framesPerSegment = static_cast<int>(fps * durationPerSegment);
-    const int samples = 100;
-    const int blendedsamples = 300;
+    const int samples = 10;
+    const int blendedsamples = 30;
     const float blendedfactor = 0.65;
-    const int videosamples = 300;
+    const int videosamples = 30;
     const int bounces = 8;
     const int physicsSubsteps = 10;
     const float physicsDt = 1.0f / fps;
@@ -434,7 +434,7 @@ int main() {
         bool havePending = false;
 
         for (const auto& view : views) {
-            std::cout << "\nRendering view from " << view.name << " direction (Fast Pass)..." << std::endl;
+            // std::cout << "\nRendering view from " << view.name << " direction (Fast Pass)..." << std::endl;
 
             Camera cam;
             cam.origin = view.origin;
@@ -465,7 +465,7 @@ int main() {
         bool havePending = false;
 
         for (const auto& view : views) {
-            std::cout << "\nRendering view from " << view.name << " direction (Gamestyle Pass)..." << std::endl;
+            // std::cout << "\nRendering view from " << view.name << " direction (Gamestyle Pass)..." << std::endl;
 
             Camera cam;
             cam.origin = view.origin;
@@ -496,7 +496,7 @@ int main() {
         bool havePending = false;
 
         for (const auto& view : views) {
-            std::cout << "\nRendering view from " << view.name << " direction (Slow " << samples << " Samples Pass)..." << std::endl;
+            // std::cout << "\nRendering view from " << view.name << " direction (Slow " << samples << " Samples Pass)..." << std::endl;
 
             Camera cam;
             cam.origin = view.origin;
@@ -511,7 +511,7 @@ int main() {
             inflight = next;
             pendingName = view.name;
             havePending = true;
-            std::cout << "slow submitted" << std::endl;
+            // std::cout << "slow submitted" << std::endl;
         }
         if (havePending) {
             frame prev = octree.endRenderFrameVulkan(inflight);
@@ -528,7 +528,7 @@ int main() {
         bool havePending = false;
 
         for (const auto& view : views) {
-            std::cout << "\nRendering view from " << view.name << " direction (Superblend Pass)..." << std::endl;
+            // std::cout << "\nRendering view from " << view.name << " direction (Superblend Pass)..." << std::endl;
 
             Camera cam;
             cam.origin = view.origin;
@@ -543,7 +543,7 @@ int main() {
             inflight = next;
             pendingName = view.name;
             havePending = true;
-            std::cout << "super blended submitted" << std::endl;
+            // std::cout << "super blended submitted" << std::endl;
         }
         if (havePending) {
             frame prev = octree.endSuperBlendedRenderFrameVulkan(inflight);
@@ -560,7 +560,7 @@ int main() {
         bool havePending = false;
 
         for (const auto& view : views) {
-            std::cout << "\nRendering view from " << view.name << " direction (Blend Pass)..." << std::endl;
+            // std::cout << "\nRendering view from " << view.name << " direction (Blend Pass)..." << std::endl;
 
             Camera cam;
             cam.origin = view.origin;
@@ -575,7 +575,7 @@ int main() {
             inflight = next;
             pendingName = view.name;
             havePending = true;
-            std::cout << "blended submitted" << std::endl;
+            // std::cout << "blended submitted" << std::endl;
         }
         if (havePending) {
             frame prev = octree.endBlendedRenderFrameVulkan(inflight);
@@ -592,6 +592,7 @@ int main() {
 
     std::cout << "\nStarting video render..." << std::endl;
     std::cout << "Total frames to render: " << totalFrames << std::endl;
+    octree.enableDDGI(2.0f);
 
     for (size_t i = 0; i < views.size(); ++i) {
         ScopedFunctionTimer meh("Video");
@@ -620,7 +621,7 @@ int main() {
             cam.up = currentUp;
             cam.direction = (target - cam.origin).normalized();
             
-            std::cout << "Rendering video frame " << frameCounter << "/" << totalFrames << "..." << std::endl;
+            // std::cout << "Rendering video frame " << frameCounter << "/" << totalFrames << "..." << std::endl;
             // frame out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
             Grid::InFlightFrame next = octree.beginSuperBlendedRenderFrameVulkan(cam, height * 2, width * 2, blendedfactor, frame::colormap::RGB, videosamples, bounces, false);
             if (havePending) {

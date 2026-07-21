@@ -1,0 +1,39 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : require
+#include "wf_common.glsl"
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    int rays = ddgiVolume.state.y;
+    uint total = uint(ddgiVolume.counts.w) * uint(rays);
+    if (gid >= total || ddgiVolume.state.z == 0) return;
+
+    int probeIdx = int(gid) / rays;
+    int rayIdx   = int(gid) % rays;
+
+    ivec3 c = ddgiProbeCoord(probeIdx, ddgiVolume.counts.xyz);
+    vec3 origin = ddgiProbePosition(c, ddgiVolume);
+    vec3 dir = ddgiRayDir(rayIdx, rays, uint(ddgiVolume.state.x));
+
+    uint seed = pcg_hash(gid ^ (uint(ddgiVolume.state.x) * 9781u));
+
+    PathHot p;
+    p.o_tmax    = vec4(origin, cam.maxDist);
+    p.dir_rough = vec4(dir, 1.0);
+    p.thp       = vec4(1.0, 1.0, 1.0, 0.0);
+    p.rad       = vec4(0.0);
+    p.u0        = uvec4(gid, seed, pcg_hash(seed), PC_PACK(0, 0, 0));
+    p.i1        = ivec4(-1, -1, int(gid), FLAG_ALIVE | FLAG_DDGI_RAY);
+
+    pathsHot[gid] = p;
+    pathsHit[gid].t = 0.0;
+    pathsHit[gid].hitIndex = WF_NO_HIT;
+    pathsHit[gid].misc = -1.0;
+
+    ddgiRayData[gid * DDGI_RAY_STRIDE + 0] = vec4(0.0);
+    ddgiRayData[gid * DDGI_RAY_STRIDE + 1] = vec4(DDGI_MAX_PROBE_DIST, 0.0, 0.0, 0.0);
+
+    uint q = atomicAdd(ctr.extendCount, 1u);
+    extendA[q] = gid;
+}

@@ -55,6 +55,8 @@ const uint WF_NO_HIT = 0xFFFFFFFFu;
 #define HERO_MASK  (3 << HERO_SHIFT)
 #define GET_HERO(f)    (((f) & HERO_MASK) >> HERO_SHIFT)
 #define SET_HERO(f, h) (((f) & ~HERO_MASK) | (((h) & 3) << HERO_SHIFT))
+#define FLAG_DDGI_RAY 8
+#define DDGI_RAY_STRIDE 2
 
 struct ShadowRay {
     vec4 o_tmax;   // xyz origin, w maxDist
@@ -141,7 +143,15 @@ struct FogVolume {
 };
 layout(std430, binding = 16) readonly buffer FogVolumeBuffer { FogVolume fogVolumes[]; };
 
-// Ray/AABB overlap clipped to [0, tMax]. Returns entry/exit in t0/t1.
+#include "ddgi_common.glsl"
+
+layout(std430, binding = 17) buffer DDGIIrradianceBuffer { vec4 ddgiIrradiance[]; };
+layout(std430, binding = 18) buffer DDGIVisibilityBuffer { vec4 ddgiVisibility[]; };
+layout(std430, binding = 19) buffer DDGIRayBuffer        { vec4 ddgiRayData[]; };
+layout(binding = 20) uniform DDGIVolumeBuffer            { DDGIVolume ddgiVolume; };
+
+#include "ddgi_sample.glsl"
+
 bool fogClip(vec3 ro, vec3 invD, float tMax, vec4 minB, vec4 maxB, out float t0, out float t1) {
     vec3 tA = (minB.xyz - ro) * invD;
     vec3 tB = (maxB.xyz - ro) * invD;
@@ -152,8 +162,6 @@ bool fogClip(vec3 ro, vec3 invD, float tMax, vec4 minB, vec4 maxB, out float t0,
     return t1 > t0;
 }
 
-// Beer-Lambert transmittance through all fog volumes along [0, dist].
-// Used to attenuate shadow rays so light shafts have correct edges.
 vec3 fogTransmittance(vec3 ro, vec3 rd, vec3 invD, float dist) {
     vec3 tau = vec3(0.0);
     for (int i = 0; i < cam.fogVolumeCount; ++i) {

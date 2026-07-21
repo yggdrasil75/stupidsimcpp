@@ -1,0 +1,20 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : require
+#include "wf_common.glsl"
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (ddgiVolume.state.z == 0) return;
+
+    uint total = uint(ddgiVolume.counts.w) * uint(ddgiVolume.state.y);
+    if (gid >= total) return;
+
+    vec3 rad = pathsHot[gid].rad.xyz;
+    if (isInvalid(rad)) rad = vec3(0.0);
+
+    float lum = dot(rad, vec3(0.2126, 0.7152, 0.0722));
+    if (lum > 8.0) rad *= 8.0 / lum;
+
+    ddgiRayData[gid * DDGI_RAY_STRIDE + 0] = vec4(rad, 0.0);
+}

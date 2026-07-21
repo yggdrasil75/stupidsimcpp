@@ -56,6 +56,7 @@ GLSLC := glslc --target-env=vulkan1.3
 SHADER_SRCS := $(SHADER_DIR)/fast_raytrace_hw.comp $(SHADER_DIR)/smooth.comp $(SHADER_DIR)/blend.comp
 SHADER_SRCS += $(SHADER_DIR)/wf_init.comp $(SHADER_DIR)/wf_args.comp $(SHADER_DIR)/wf_extend.comp $(SHADER_DIR)/wf_shade.comp $(SHADER_DIR)/wf_shadow.comp $(SHADER_DIR)/wf_finalize.comp
 SHADER_SRCS += $(SHADER_DIR)/vct_mip.comp $(SHADER_DIR)/vct_voxelize.comp $(SHADER_DIR)/guided_coeff.comp $(SHADER_DIR)/aabb_build.comp
+SHADER_SRCS += $(SHADER_DIR)/ddgi_trace.comp $(SHADER_DIR)/ddgi_blend.comp $(SHADER_DIR)/ddgi_gather.comp
 SHADER_SPVS := $(patsubst $(SHADER_DIR)/%.comp,$(BIN_DIR)/%.spv,$(SHADER_SRCS))
 
 $(shell mkdir -p $(OBJ_DIR))
@@ -82,7 +83,8 @@ all: $(EXE) $(SHADER_SPVS)
 	@echo "Build complete for $(UNAME_S)"
 
 
-$(BIN_DIR)/wf_init.spv $(BIN_DIR)/wf_args.spv $(BIN_DIR)/wf_extend.spv $(BIN_DIR)/wf_shade.spv $(BIN_DIR)/wf_shadow.spv $(BIN_DIR)/wf_finalize.spv: $(SHADER_DIR)/wf_common.glsl $(SHADER_DIR)/vct_cone.glsl
+$(BIN_DIR)/wf_init.spv $(BIN_DIR)/wf_args.spv $(BIN_DIR)/wf_extend.spv $(BIN_DIR)/wf_shade.spv $(BIN_DIR)/wf_shadow.spv $(BIN_DIR)/wf_finalize.spv: $(SHADER_DIR)/wf_common.glsl $(SHADER_DIR)/vct_cone.glsl $(SHADER_DIR)/ddgi_common.glsl $(SHADER_DIR)/ddgi_sample.glsl
+$(BIN_DIR)/ddgi_trace.spv $(BIN_DIR)/ddgi_blend.spv $(BIN_DIR)/ddgi_gather.spv: $(SHADER_DIR)/wf_common.glsl $(SHADER_DIR)/vct_cone.glsl $(SHADER_DIR)/ddgi_common.glsl $(SHADER_DIR)/ddgi_sample.glsl
 
 $(BIN_DIR)/%.spv: $(SHADER_DIR)/%.comp
 	@echo "Compiling shader $< -> $@"

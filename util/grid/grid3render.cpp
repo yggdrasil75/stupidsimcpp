@@ -713,6 +713,7 @@ InFlightFrame Octree<T>::beginRenderFrameVulkan(const Camera& cam, int height, i
             ctx.pbrPointsResident = true;
         }
     }
+    if (vkCtx.ddgiVolume.enabled) vkCtx.ddgiUpdateProbes(maxBounces);
 
     runWavefrontTilesMultiGPU(width, height, camData, samplesPerPixel, maxBounces, 0, pixFloats, outSize);
 
@@ -759,6 +760,21 @@ frame Octree<T>::renderFrameVulkan(const Camera& cam, int height, int width, fra
     InFlightFrame pending = beginRenderFrameVulkan(cam, height, width, colorformat, samplesPerPixel,
                                                    maxBounces, globalIllumination, useLod);
     return endRenderFrameVulkan(pending);
+}
+
+template<typename T>
+void Octree<T>::enableDDGI(float spacing) {
+    if (root_ == INVALID_IDX) return;
+    const OctreeNode* r = nodeAt(root_);
+    if (!r) return;
+    BoundingBox b = r->bounds();
+    vkCtx.ddgiConfigure(b.first, b.second, spacing);
+}
+
+template<typename T>
+void Octree<T>::disableDDGI() {
+    vkCtx.ddgiVolume.enabled = 0;
+    vkCtx.ddgiUploadVolume();
 }
 
 template<typename T>

@@ -2897,6 +2897,12 @@ public:
         int samplesPerPixel = 2, int maxBounces = 4, bool globalIllumination = false, bool useLod = true);
     ///@brief Waits on a submitted offline frame and reads its pixels back
     frame endRenderFrameVulkan(InFlightFrame& pending);
+
+    ///@brief Fits a DDGI probe grid over the scene and enables probe lighting
+    ///@param spacing Probe spacing in world units; smaller resolves finer bounce detail
+    void enableDDGI(float spacing);
+    ///@brief Turns probe lighting off without releasing the atlases
+    void disableDDGI();
     void stepPhysics(float dt);
     void stepRigidLattice(float dt, std::vector<std::shared_ptr<NodeData>>& rigidNodes,
                           const std::vector<std::vector<PhysicsMaterial_>>& fastMats, size_t fastMatsSize);

@@ -1,0 +1,90 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : require
+#include "wf_common.glsl"
+
+shared vec4 s_rayRadiance[DDGI_PROBE_RAYS];
+shared vec4 s_rayDirDist[DDGI_PROBE_RAYS];
+
+ivec2 ddgiBorderMirror(ivec2 t, int res) {
+    int last = res + 1;
+    bool xEdge = (t.x == 0 || t.x == last);
+    bool yEdge = (t.y == 0 || t.y == last);
+    if (xEdge && yEdge) {
+        return ivec2(t.x == 0 ? res : 1, t.y == 0 ? res : 1);
+    }
+    if (t.x == 0) t = ivec2(1, res + 1 - t.y);
+    else if (t.x == last) t = ivec2(res, res + 1 - t.y);
+    else if (t.y == 0) t = ivec2(res + 1 - t.x, 1);
+    else if (t.y == last) t = ivec2(res + 1 - t.x, res);
+    return t;
+}
+
+void main() {
+    if (ddgiVolume.state.z == 0) return;
+
+    int probeIdx = int(gl_WorkGroupID.x);
+    if (probeIdx >= ddgiVolume.counts.w) return;
+
+    bool isIrr = (pc.stage == 0);
+    int res = isIrr ? DDGI_IRR_RES : DDGI_VIS_RES;
+    int bres = res + 2;
+    int rays = clamp(ddgiVolume.state.y, 1, DDGI_PROBE_RAYS);
+
+    for (uint i = gl_LocalInvocationID.x; i < uint(rays); i += gl_WorkGroupSize.x) {
+        uint r = uint(probeIdx) * uint(rays) + i;
+        s_rayRadiance[i] = ddgiRayData[r * DDGI_RAY_STRIDE + 0];
+        s_rayDirDist[i]  = ddgiRayData[r * DDGI_RAY_STRIDE + 1];
+    }
+    barrier();
+
+    float spacing = ddgiVolume.originSpacing.w;
+    float maxDist = spacing * 1.5;
+    float sharpness = ddgiVolume.params.y;
+
+    for (uint texel = gl_LocalInvocationID.x; texel < uint(res * res); texel += gl_WorkGroupSize.x) {
+        ivec2 t = ivec2(int(texel) % res, int(texel) / res);
+        vec2 oct = ((vec2(t) + 0.5) / float(res)) * 2.0 - 1.0;
+        vec3 texelDir = octToDir(oct);
+
+        vec4 acc = vec4(0.0);
+        for (int r = 0; r < rays; ++r) {
+            vec3 rd = ddgiRayDir(r, rays, uint(ddgiVolume.state.x));
+            float w = dot(texelDir, rd);
+            if (isIrr) {
+                if (w <= 0.0) continue;
+                acc += vec4(s_rayRadiance[r].rgb * w, w);
+            } else {
+                w = pow(max(0.0, w), sharpness);
+                if (w <= 1e-6) continue;
+                float d = min(s_rayDirDist[r].x, maxDist);
+                acc += vec4(d * w, d * d * w, 0.0, w);
+            }
+        }
+        if (acc.w > 1e-6) acc.xyz /= acc.w;
+
+        int base = isIrr ? ddgiIrrBase(probeIdx) : ddgiVisBase(probeIdx);
+        int idx = base + (t.y + 1) * bres + (t.x + 1);
+
+        vec3 newVal = isIrr ? sqrt(max(vec3(0.0), acc.rgb)) : vec3(acc.x, acc.y, 0.0);
+        vec4 prev = isIrr ? ddgiIrradiance[idx] : ddgiVisibility[idx];
+
+        float hyst = (ddgiVolume.state.x == 0 || prev.w < 0.5) ? 0.0 : ddgiVolume.params.x;
+        vec3 blended = mix(newVal, prev.rgb, hyst);
+
+        if (isIrr) ddgiIrradiance[idx] = vec4(blended, 1.0);
+        else ddgiVisibility[idx] = vec4(blended, 1.0);
+    }
+
+    barrier();
+
+    int borderTexels = bres * bres;
+    for (uint i = gl_LocalInvocationID.x; i < uint(borderTexels); i += gl_WorkGroupSize.x) {
+        ivec2 t = ivec2(int(i) % bres, int(i) / bres);
+        if (t.x != 0 && t.y != 0 && t.x != bres - 1 && t.y != bres - 1) continue;
+        ivec2 src = ddgiBorderMirror(t, res);
+        int base = isIrr ? ddgiIrrBase(probeIdx) : ddgiVisBase(probeIdx);
+        if (isIrr) ddgiIrradiance[base + t.y * bres + t.x] = ddgiIrradiance[base + src.y * bres + src.x];
+        else ddgiVisibility[base + t.y * bres + t.x] = ddgiVisibility[base + src.y * bres + src.x];
+    }
+}
