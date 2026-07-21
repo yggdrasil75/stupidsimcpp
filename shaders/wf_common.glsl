@@ -351,7 +351,7 @@ bool rayCubeIntersect(vec3 ro, vec3 rd, vec3 invD, GPURenderData pt,
 }
 
 int voxelTraverse(vec3 ro, vec3 rd, vec3 invD, float maxDist,
-                  out int hitIndex, out float outT, out vec3 outNormal, out vec3 outHitPoint) {
+                  out int hitIndex, out float outT) {
     rayQueryEXT rq;
     rayQueryInitializeEXT(rq, tlas, gl_RayFlagsNoneEXT, 0xFF, ro, 0.0, rd, maxDist);
     float tBest = maxDist;
@@ -359,16 +359,18 @@ int voxelTraverse(vec3 ro, vec3 rd, vec3 invD, float maxDist,
         if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionAABBEXT) {
             int ptIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
             GPURenderData cand = points[ptIdx];
-            if (dot(abs(cand.position - ro), abs(rd)) - cand.size * 0.8660254 > tBest) continue;
-            float t;
-            vec3 n;
-            vec3 hp;
-            float tEx;
-            if (rayCubeIntersect(ro, rd, invD, cand, t, n, hp, tEx) && t >= 0.0 && t < tBest) {
+            vec3 half3 = vec3(cand.size * 0.5f);
+            vec3 t0 = (cand.position - half3 - ro) * invD;
+            vec3 t1 = (cand.position + half3 - ro) * invD;
+            vec3 tmin3 = min(t0, t1);
+            vec3 tmax3 = max(t0, t1);
+            float tMin = max(max(tmin3.x, tmin3.y), tmin3.z);
+            float tMax = min(min(tmax3.x, tmax3.y), tmax3.z);
+            if (tMax < max(0.0f, tMin)) continue;
+            float t = (tMin < 0.0f) ? tMax : tMin;
+            if (t >= 0.0f && t < tBest) {
                 rayQueryGenerateIntersectionEXT(rq, t);
                 tBest = t;
-                outNormal = n;
-                outHitPoint = hp;
             }
         }
     }
@@ -403,7 +405,7 @@ int getMediumVoxelAt(vec3 hitPoint, vec3 normal, int targetObjectId, int ignoreI
 
 vec3 shadowTransmit(vec3 ro, vec3 rd, vec3 invD, float maxDist, int lightPtIdx) {
     rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, tlas, gl_RayFlagsTerminateOnFirstHitEXT, 0xFF, ro, 0.0, rd, maxDist);
+    rayQueryInitializeEXT(rq, tlas, gl_RayFlagsNoneEXT, 0xFF, ro, 0.0f, rd, maxDist);
     float tBest = maxDist;   // shrinking committed-hit bound (see voxelTraverse)
     vec3 transmittance = vec3(1.0);
     if (cam.invFogRange > 0.0) transmittance *= exp(-vec3(cam.invFogRange) * maxDist);
@@ -413,16 +415,14 @@ vec3 shadowTransmit(vec3 ro, vec3 rd, vec3 invD, float maxDist, int lightPtIdx) 
             int ptIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
             if (ptIdx == lightPtIdx) continue;
             GPURenderData pt = points[ptIdx];
-            if (dot(abs(pt.position - ro), abs(rd)) - pt.size * 0.8660254 > tBest) continue;
-            vec3 bMin = pt.position - pt.size * 0.5;
-            vec3 bMax = pt.position + pt.size * 0.5;
-            vec3 t0 = (bMin - ro) * invD;
-            vec3 t1 = (bMax - ro) * invD;
+            vec3 half3 = vec3(pt.size * 0.5f);
+            vec3 t0 = (pt.position - half3 - ro) * invD;
+            vec3 t1 = (pt.position + half3 - ro) * invD;
             vec3 tmin3 = min(t0, t1);
             vec3 tmax3 = max(t0, t1);
             float tEntry = max(max(tmin3.x, tmin3.y), tmin3.z);
             float tExit  = min(min(tmax3.x, tmax3.y), tmax3.z);
-            if (tExit >= max(0.0, tEntry) && tEntry <= maxDist) {
+            if (tExit >= max(0.0f, tEntry) && tEntry <= maxDist) {
                 GPUMaterial tMat = materials[pt.materialIdx];
                 float r, m;
                 uint sellRow;

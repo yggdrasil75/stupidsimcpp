@@ -37,9 +37,7 @@ void main() {
 
     int hitIndex;
     float t;
-    vec3 normal;
-    vec3 hitPoint;
-    int hitResult = voxelTraverse(origin, dir, invD, remainingMaxDist, hitIndex, t, normal, hitPoint);
+    int hitResult = voxelTraverse(origin, dir, invD, remainingMaxDist, hitIndex, t);
     if (hitResult == 0) t = remainingMaxDist;
 
     bool isProbeRay = (p.i1.w & FLAG_DDGI_RAY) != 0;

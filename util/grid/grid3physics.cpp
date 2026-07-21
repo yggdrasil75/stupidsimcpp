@@ -11,6 +11,11 @@ struct FluidMoveAction {
 };
 
 struct SolidNb { Vec3 pos; float size; };
+template<typename T>
+struct Fragment_ {
+    std::vector<std::shared_ptr<NodeData_<T>>> nodes;
+    int sourceObjectId = -1;
+};
 
 
 template<typename T>
@@ -430,18 +435,13 @@ void Octree<T>::stepRigidLattice(
     if (rigidNodes.empty() || dt <= 0.0f) return;
     TIME_FUNCTION;
 
-    auto matOf = [&](const std::shared_ptr<NodeData>& n) -> const PhysicsMaterial_* {
-        int oi = n->objectId + 1;
-        if (oi < 0 || oi >= (int)fastMatsSize) return nullptr;
-        if (n->physMatIdx >= fastMats[oi].size()) return nullptr;
-        return &fastMats[oi][n->physMatIdx];
-    };
-
     ScopedFunctionTimer _tRForces("stepRigidLattice.forces");
+    std::atomic<bool> anyBroke{false};
+
     #pragma omp parallel for schedule(dynamic, 64)
     for (int i = 0; i < (int)rigidNodes.size(); ++i) {
         auto& node = rigidNodes[i];
-        const PhysicsMaterial_* m = matOf(node);
+        const PhysicsMaterial_* m = physMatOf(node, fastMats, fastMatsSize);
         if (!m) { node->physics.force.setZero(); continue; }
 
         float mass = std::max(m->mass, 1e-4f);
@@ -456,7 +456,8 @@ void Octree<T>::stepRigidLattice(
 
         for (auto& bond : node->physics.bonds) {
             auto other = bond.other.lock();
-            if (!other || !other->isActive()) { bond.strength = -1.0f; continue; }
+            if (!other || !other->isActive()) { bond.broken = true; continue; }
+            if (bond.broken) continue;
 
             Vec3 d = other->position - node->position;
             float len = d.norm();
@@ -472,7 +473,24 @@ void Octree<T>::stepRigidLattice(
             float total = springF + dampF;
             force += dir * total;
 
-            if (std::abs(springF) > bond.strength) bond.strength = -1.0f;
+            float limit = (ext >= 0.0f) ? bond.strength
+                                        : bond.strength * m->breakCompressionScale;
+            float load = std::abs(springF);
+
+            if (m->breakTorque > 0.0f) {
+                Vec3 lateral = relVel - dir * relVel.dot(dir);
+                float shear = m->stiffness * lateral.norm() * 0.02f;
+                if (shear > m->breakTorque) { bond.broken = true; anyBroke.store(true, std::memory_order_relaxed); continue; }
+            }
+
+            if (load > limit) {
+                bond.broken = true;
+                anyBroke.store(true, std::memory_order_relaxed);
+            } else if (m->fatigue > 0.0f && load > limit * 0.5f) {
+                bond.damage = std::min(1.0f, bond.damage + m->fatigue * (load / limit - 0.5f) * dt);
+                bond.strength = m->breakForce * (1.0f - bond.damage);
+                if (bond.damage >= 1.0f) { bond.broken = true; anyBroke.store(true, std::memory_order_relaxed); }
+            }
         }
 
         node->physics.force = force;
@@ -487,7 +505,7 @@ void Octree<T>::stepRigidLattice(
     #pragma omp parallel for schedule(static)
     for (int i = 0; i < (int)rigidNodes.size(); ++i) {
         auto& node = rigidNodes[i];
-        const PhysicsMaterial_* m = matOf(node);
+        const PhysicsMaterial_* m = physMatOf(node, fastMats, fastMatsSize);
         if (!m) continue;
         float mass = std::max(m->mass, 1e-4f);
 
@@ -517,11 +535,27 @@ void Octree<T>::stepRigidLattice(
     _tRIntegrate.stop();
 
     ScopedFunctionTimer _tRRelocate("stepRigidLattice.relocate_SERIAL");
+
+    std::unordered_set<int> fracturedObjects;
     for (auto& node : rigidNodes) {
-        auto& b = node->physics.bonds;
-        b.erase(std::remove_if(b.begin(), b.end(),
-                   [](const Bond_<T>& x){ return x.strength < 0.0f; }),
-                b.end());
+        for (auto& bond : node->physics.bonds) {
+            if (!bond.broken) continue;
+            fracturedObjects.insert(node->objectId);
+            auto other = bond.other.lock();
+            if (!other) continue;
+            for (auto& back : other->physics.bonds) {
+                if (back.other.lock() == node) back.broken = true;
+            }
+        }
+    }
+
+    for (auto& node : rigidNodes) {
+        std::vector<Bond_<T>>& b = node->physics.bonds;
+        size_t writeIdx = 0;
+        for (size_t j = 0; j < b.size(); ++j) {
+            if (!b[j].broken) b[writeIdx++] = std::move(b[j]);
+        }
+        b.resize(writeIdx);
     }
 
     for (int i = 0; i < (int)rigidNodes.size(); ++i) {
@@ -538,6 +572,149 @@ void Octree<T>::stepRigidLattice(
         if (!insertRecursive(start, pd, depth))
             if (!insertRecursive(root_, pd, 0)) size--;
     }
+    _tRRelocate.stop();
+
+    if (!fracturedObjects.empty()) {
+        ScopedFunctionTimer _tFrac("stepRigidLattice.resolveFractures");
+        for (int objId : fracturedObjects) resolveFracture(objId, fastMats, fastMatsSize);
+    }
+}
+
+template<typename T>
+const PhysicsMaterial_* Octree<T>::physMatOf(const std::shared_ptr<NodeData>& n,
+        const std::vector<std::vector<PhysicsMaterial_>>& fastMats, size_t fastMatsSize) const {
+    int oi = n->objectId + 1;
+    if (oi < 0 || oi >= (int)fastMatsSize) return nullptr;
+    if (n->physMatIdx >= fastMats[oi].size()) return nullptr;
+    return &fastMats[oi][n->physMatIdx];
+}
+
+template<typename T>
+void Octree<T>::resolveFracture(int objectId,
+        const std::vector<std::vector<PhysicsMaterial_>>& fastMats, size_t fastMatsSize) {
+    TIME_FUNCTION;
+
+    std::vector<std::shared_ptr<NodeData>> nodes;
+    collectNodesByObjectId(objectId, nodes);
+    if (nodes.size() < 2) return;
+
+    std::unordered_map<NodeData*, uint32_t> component;
+    component.reserve(nodes.size());
+    for (const auto& n : nodes) component[n.get()] = INVALID_IDX;
+
+    std::vector<Fragment_<T>> fragments;
+    std::vector<std::shared_ptr<NodeData>> stack;
+
+    for (const auto& seed : nodes) {
+        if (component[seed.get()] != INVALID_IDX) continue;
+        uint32_t cid = static_cast<uint32_t>(fragments.size());
+        fragments.push_back(Fragment_<T>{});
+        fragments[cid].sourceObjectId = objectId;
+
+        stack.clear();
+        stack.push_back(seed);
+        component[seed.get()] = cid;
+
+        while (!stack.empty()) {
+            std::shared_ptr<NodeData> cur = stack.back();
+            stack.pop_back();
+            fragments[cid].nodes.push_back(cur);
+
+            for (const auto& bond : cur->physics.bonds) {
+                if (bond.toAnchor) continue;
+                auto other = bond.other.lock();
+                if (!other) continue;
+                auto slot = component.find(other.get());
+                if (slot == component.end() || slot->second != INVALID_IDX) continue;
+                slot->second = cid;
+                stack.push_back(other);
+            }
+        }
+    }
+
+    if (fragments.size() < 2) return;
+
+    size_t largest = 0;
+    for (size_t i = 1; i < fragments.size(); ++i) {
+        if (fragments[i].nodes.size() > fragments[largest].nodes.size()) largest = i;
+    }
+
+    SplitPolicy policy = SplitPolicy::NEW_OID;
+    uint32_t minFragment = 1;
+    if (auto obj = getObject(objectId)) {
+        policy = obj->splitPolicy;
+        int oi = objectId + 1;
+        if (oi >= 0 && oi < (int)fastMatsSize && !fastMats[oi].empty())
+            minFragment = fastMats[oi][0].minFragmentVoxels;
+    }
+
+    if (policy == SplitPolicy::KEEP_OID) return;
+
+    for (size_t i = 0; i < fragments.size(); ++i) {
+        if (i == largest) continue;
+        Fragment_<T>& frag = fragments[i];
+
+        if (frag.nodes.size() < minFragment || policy == SplitPolicy::DISSOLVE) {
+            std::unordered_set<std::shared_ptr<NodeData>> doomed(frag.nodes.begin(), frag.nodes.end());
+            size -= removeSpecificNodesBatchRecursive(root_, doomed);
+            continue;
+        }
+
+        if (policy == SplitPolicy::SHED_STATIC) {
+            freezeFragment(frag.nodes);
+            continue;
+        }
+
+        reassignFragment(frag.nodes, objectId);
+    }
+
+    physicsCollidersDirty_.store(true);
+}
+
+template<typename T>
+void Octree<T>::freezeFragment(const std::vector<std::shared_ptr<NodeData>>& frag) {
+    auto obj = getOrCreateObject(frag.front()->objectId);
+    PhysicsMaterial_ pmat;
+    pmat.type = BodyType::STATIC;
+    uint16_t staticIdx = obj->getOrAddPhysicsMaterial(pmat);
+
+    for (const auto& n : frag) {
+        n->physics.velocity.setZero();
+        n->physics.force.setZero();
+        n->physics.bonds.clear();
+        n->physMatIdx = staticIdx;
+        n->setStatic(true);
+    }
+}
+
+template<typename T>
+void Octree<T>::reassignFragment(const std::vector<std::shared_ptr<NodeData>>& frag, int sourceObjectId) {
+    auto src = getObject(sourceObjectId);
+    auto dst = getOrCreateObject(-1);
+    if (!dst) return;
+
+    if (src) {
+        s_lock srcLock(src->objMutex);
+        u_lock dstLock(dst->objMutex);
+        dst->splitPolicy = src->splitPolicy;
+        dst->objectFlags = src->objectFlags;
+        dst->physicsMaterials = src->physicsMaterials;
+        dst->physicsMatMap = src->physicsMatMap;
+    }
+
+    Vec3 center = Vec3::Zero();
+    for (const auto& n : frag) center += n->position;
+    center /= static_cast<float>(frag.size());
+
+    {
+        u_lock dstLock(dst->objMutex);
+        dst->centerPosition = center;
+        dst->relativeVoxels.clear();
+        dst->relativeVoxels.reserve(frag.size());
+        for (const auto& n : frag) dst->relativeVoxels.push_back({n->position - center});
+    }
+
+    for (const auto& n : frag) n->objectId = dst->id;
 }
 
 }

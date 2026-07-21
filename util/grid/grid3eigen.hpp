@@ -1992,10 +1992,11 @@ public:
             if (restLen < 1e-5f) continue;
 
             if (nbType == BodyType::STATIC) {
-                if (nb->objectId != node->objectId) node->physics.bonds.push_back({nb, restLen, strength, true});
+                if (nb->objectId != node->objectId)
+                    node->physics.bonds.push_back({nb, restLen, strength, 0.0f, true, false});
             } else if (nbType == BodyType::RIGID && nb->objectId == node->objectId) {
-                node->physics.bonds.push_back({nb, restLen, strength, false});
-                nb->physics.bonds.push_back({node, restLen, strength, false});
+                node->physics.bonds.push_back({nb, restLen, strength, 0.0f, false, false});
+                nb->physics.bonds.push_back({node, restLen, strength, 0.0f, false, false});
             }
         }
         node->physics.bondsBuilt = true;
@@ -2288,6 +2289,7 @@ public:
                 
                 s_lock objLock(obj->objMutex);
                 writeVal(out, obj->objectFlags);
+                writeVal(out, obj->splitPolicy);
                 writeVec3(out, obj->centerPosition);
                 
                 uint32_t numPMat = obj->physicsMaterials.size();
@@ -2351,6 +2353,7 @@ public:
                 readVal(in, id);
                 auto obj = std::make_shared<GridObject>(id);
                 readVal(in, obj->objectFlags);
+                readVal(in, obj->splitPolicy);
                 readVec3(in, obj->centerPosition);
                 
                 uint32_t numPMat;
@@ -2427,6 +2430,12 @@ public:
 
     void markPhysicsCollidersDirty() {
         physicsCollidersDirty_.store(true);
+    }
+
+    void setObjectSplitPolicy(int objectId, SplitPolicy policy) {
+        auto obj = getOrCreateObject(objectId);
+        u_lock lock(obj->objMutex);
+        obj->splitPolicy = policy;
     }
 
     std::vector<std::weak_ptr<NodeData>> getWeakNodesByObjectId(int objectId) {
@@ -2906,6 +2915,22 @@ public:
     void stepPhysics(float dt);
     void stepRigidLattice(float dt, std::vector<std::shared_ptr<NodeData>>& rigidNodes,
                           const std::vector<std::vector<PhysicsMaterial_>>& fastMats, size_t fastMatsSize);
+
+    ///@brief Resolves the physics material for a node against the flattened per-object table
+    ///@return Pointer into fastMats, or nullptr when the object or index is out of range
+    const PhysicsMaterial_* physMatOf(const std::shared_ptr<NodeData>& n,
+                          const std::vector<std::vector<PhysicsMaterial_>>& fastMats, size_t fastMatsSize) const;
+
+    ///@brief Splits an object whose bond graph came apart into connected components
+    ///@param objectId The object that lost at least one bond this step
+    void resolveFracture(int objectId,
+                          const std::vector<std::vector<PhysicsMaterial_>>& fastMats, size_t fastMatsSize);
+
+    ///@brief Converts a fragment to STATIC debris in place
+    void freezeFragment(const std::vector<std::shared_ptr<NodeData>>& frag);
+
+    ///@brief Moves a fragment onto a fresh object id, inheriting materials and policy
+    void reassignFragment(const std::vector<std::shared_ptr<NodeData>>& frag, int sourceObjectId);
 
     void optimize() {
         if (root_ != INVALID_IDX) {

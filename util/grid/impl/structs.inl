@@ -51,6 +51,14 @@ enum class BodyType : uint8_t {
     FLUID = 4
 };
 
+///@brief What happens to fragments when a rigid body's bond graph splits apart
+enum class SplitPolicy : uint8_t {
+    NEW_OID = 0,
+    KEEP_OID = 1,
+    SHED_STATIC = 2,
+    DISSOLVE = 3
+};
+
 struct Vec3i64Hash {
     std::size_t operator()(const std::array<int64_t, 3>& v) const {
         return (std::size_t)((v[0] * 73856093) ^ (v[1] * 19349663) ^ (v[2] * 83492791));
@@ -163,7 +171,9 @@ struct Bond_ {
     std::weak_ptr<NodeData_<T>> other;
     float restLength = 0.0f;
     float strength   = 0.0f;
+    float damage     = 0.0f;
     bool  toAnchor   = false;
+    bool  broken     = false;
 };
 
 template<typename T>
@@ -549,18 +559,29 @@ struct PhysicsMaterial_ {
     float breakForce = 60.0f;
     float damping    = 0.4f;
     ///TODO: restitution, density
-    
+
+    float breakCompressionScale = 4.0f;
+    float breakTorque = 0.0f;
+    float fatigue = 0.0f;
+    uint32_t minFragmentVoxels = 1;
+
     bool operator==(const PhysicsMaterial_& o) const {
         return type == o.type && mass == o.mass && stiffness == o.stiffness &&
-               breakForce == o.breakForce && damping == o.damping;
+               breakForce == o.breakForce && damping == o.damping &&
+               breakCompressionScale == o.breakCompressionScale &&
+               breakTorque == o.breakTorque && fatigue == o.fatigue &&
+               minFragmentVoxels == o.minFragmentVoxels;
     }
 
     float dist(const PhysicsMaterial_& o) const {
         float dm = mass - o.mass;
         float ds = (stiffness - o.stiffness) * 0.001f;
         float db = (breakForce - o.breakForce) * 0.01f;
+        float dc = breakCompressionScale - o.breakCompressionScale;
+        float dt = (breakTorque - o.breakTorque) * 0.01f;
+        float df = fatigue - o.fatigue;
         float typePenalty = (type != o.type) ? 10.0f : 0.0f;
-        return dm*dm + ds*ds + db*db + typePenalty;
+        return dm*dm + ds*ds + db*db + dc*dc + dt*dt + df*df + typePenalty;
     }
 };
 
@@ -571,6 +592,10 @@ struct PMatHash {
         h ^= hf(m.mass) + 0x9e3779b9 + (h << 6) + (h >> 2);
         h ^= hf(m.stiffness) + 0x9e3779b9 + (h << 6) + (h >> 2);
         h ^= hf(m.breakForce) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= hf(m.breakCompressionScale) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= hf(m.breakTorque) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= hf(m.fatigue) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<uint32_t>()(m.minFragmentVoxels) + 0x9e3779b9 + (h << 6) + (h >> 2);
         return h;
     }
 };
@@ -583,6 +608,7 @@ template<typename T>
 struct GridObject_ {
     int id;
     uint8_t objectFlags;
+    SplitPolicy splitPolicy = SplitPolicy::NEW_OID;
     Vec3 centerPosition = Vec3::Zero();
 
     std::vector<PhysicsMaterial_> physicsMaterials;
