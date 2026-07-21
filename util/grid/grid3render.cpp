@@ -3,7 +3,7 @@ namespace Grid {
 
 template<typename T>
 void Octree<T>::buildRender(RenderBuffer_<T>& buffer) {
-    TIME_FUNCTION;
+    // TIME_FUNCTION;
     buffer.clear();
     if (root_ == INVALID_IDX) return;
     buffer.nodes.emplace_back();
@@ -764,7 +764,7 @@ frame Octree<T>::renderFrameVulkan(const Camera& cam, int height, int width, fra
 template<typename T>
 InFlightFrame Octree<T>::beginFastRenderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat) {
     TIME_FUNCTION;
-    ScopedFunctionTimer frfv("fast render frame vulkan startup");
+    // ScopedFunctionTimer frfv("fast render frame vulkan startup");
     vkCtx.awaitFastFullFrame();
     updateStreaming(cam);
     // optimize();
@@ -817,7 +817,7 @@ InFlightFrame Octree<T>::beginFastRenderFrameVulkan(const Camera& cam, int heigh
         vkCtx.vctBuildVolume(vkCtx.fastPointBuffer, (uint32_t)gpuPoints.size(), vctMin, vctMax, keyLight, true);
     }
     
-    frfv.stop();
+    // frfv.stop();
     vkCtx.submitFastFullFrame(width, height);
 
     InFlightFrame pending;

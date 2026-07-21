@@ -1770,7 +1770,7 @@ void wfPush(VkCommandBuffer cmd, int parity, int stage, int sampleIndex) {
 }
 
 void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel, int sampleStart = 0) {
-    TIME_FUNCTION;
+    // TIME_FUNCTION;
     uint32_t maxPaths = uint32_t(tileW) * uint32_t(tileH);
     if (maxPaths == 0 || samplesPerPixel <= 0) return;
     ensureWavefrontBuffers(maxPaths);
