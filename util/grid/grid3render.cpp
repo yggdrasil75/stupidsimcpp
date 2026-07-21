@@ -3,7 +3,7 @@ namespace Grid {
 
 template<typename T>
 void Octree<T>::buildRender(RenderBuffer_<T>& buffer) {
-    // TIME_FUNCTION;
+    TIME_FUNCTION;
     buffer.clear();
     if (root_ == INVALID_IDX) return;
     buffer.nodes.emplace_back();
@@ -643,6 +643,7 @@ frame Octree<T>::renderFrameVulkan(const Camera& cam, int height, int width, fra
 template<typename T>
 frame Octree<T>::fastRenderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat) {
     TIME_FUNCTION;
+    ScopedFunctionTimer frfv("fast render frame vulkan startup");
     updateStreaming(cam);
     // optimize();
     thread_local RenderBuffer tl_buffer;
@@ -667,8 +668,6 @@ frame Octree<T>::fastRenderFrameVulkan(const Camera& cam, int height, int width,
     gpuPoints.reserve(tl_buffer.points.size());
     Vec3 vctMin = Vec3::Constant(std::numeric_limits<float>::max());
     Vec3 vctMax = Vec3::Constant(std::numeric_limits<float>::lowest());
-    Vec3 globalMin = Vec3::Constant(std::numeric_limits<float>::max());
-    Vec3 globalMax = Vec3::Constant(std::numeric_limits<float>::lowest());
 
     std::vector<size_t> validIndices;
     validIndices.reserve(tl_buffer.points.size());
@@ -676,9 +675,6 @@ frame Octree<T>::fastRenderFrameVulkan(const Camera& cam, int height, int width,
         if(isLodPoint[i]) continue;
         const auto& p = tl_buffer.points[i];
         validIndices.push_back(i);
-
-        globalMin = globalMin.cwiseMin(p.position);
-        globalMax = globalMax.cwiseMax(p.position);
 
         float h = p.size * 0.5f;
         vctMin = vctMin.cwiseMin(p.position - Vec3::Constant(h));
@@ -689,11 +685,8 @@ frame Octree<T>::fastRenderFrameVulkan(const Camera& cam, int height, int width,
         vctMax.setOnes();
     }
 
-    std::vector<PointSort> sortedPoints;
-    mortonSortIndices(validIndices, globalMin, globalMax, [&](size_t idx) { return tl_buffer.points[idx].position; }, sortedPoints);
-
-    for(const auto& sp : sortedPoints) {
-        const auto& p = tl_buffer.points[sp.idx];
+    for(const size_t idx : validIndices) {
+        const auto& p = tl_buffer.points[idx];
 
         gpuPoints.push_back({p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId});
         
@@ -731,7 +724,7 @@ frame Octree<T>::fastRenderFrameVulkan(const Camera& cam, int height, int width,
         Vec3 keyLight = (-cam.direction.normalized());
         vkCtx.vctBuildVolume(vkCtx.fastPointBuffer, (uint32_t)gpuPoints.size(), vctMin, vctMax, keyLight, true);
     }
-
+    
     VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     vkBeginCommandBuffer(vkCtx.commandBuffer, &beginInfo);
     vkCmdBindPipeline(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.fastPipeline);
@@ -742,7 +735,7 @@ frame Octree<T>::fastRenderFrameVulkan(const Camera& cam, int height, int width,
     VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &vkCtx.commandBuffer;
-
+    frfv.stop();
     if (vkCtx.renderFence == VK_NULL_HANDLE) {
         VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
         vkCreateFence(vkCtx.device, &fenceInfo, nullptr, &vkCtx.renderFence);
@@ -890,42 +883,16 @@ frame Octree<T>::blendedRenderFrameVulkan(const Camera& cam, int height, int wid
     vkCtx.updateCommonBuffers(fastOutSize, fastCamData);
     vkCtx.updateFastBuffers(gpuFastPoints);
 
-    // VCT: build the radiance volume once for the whole frame (shared across tiles).
     {
         Vec3 keyLight = (-cam.direction.normalized());
         vkCtx.vctBuildVolume(vkCtx.fastPointBuffer, (uint32_t)gpuFastPoints.size(),
-                             globalMin, globalMax, keyLight, /*enabled=*/true);
+                             globalMin, globalMax, keyLight, true);
     }
 
-    int tileW = 512;
-    int tileH = 512;
-    for (int y = 0; y < height; y += tileH) {
-        for (int x = 0; x < width; x += tileW) {
-            int drawW = std::min(tileW, width - x);
-            int drawH = std::min(tileH, height - y);
-            fastCamData.tileOffsetX = x;
-            fastCamData.tileOffsetY = y;
-            vkCtx.updateCameraData(fastCamData);
-
-            VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-            vkBeginCommandBuffer(vkCtx.commandBuffer, &beginInfo);
-            vkCmdBindPipeline(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.fastPipeline);
-            vkCmdBindDescriptorSets(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.fastPipelineLayout, 0, 1, &vkCtx.fastDescSet, 0, nullptr);
-            vkCmdDispatch(vkCtx.commandBuffer, (drawW + 7) / 8, (drawH + 7) / 8, 1);
-            vkEndCommandBuffer(vkCtx.commandBuffer);
-
-            VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-            submitInfo.commandBufferCount = 1;
-            submitInfo.pCommandBuffers = &vkCtx.commandBuffer;
-
-            VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-            VkFence fence;
-            vkCreateFence(vkCtx.device, &fenceInfo, nullptr, &fence);
-            vkQueueSubmit(vkCtx.queue, 1, &submitInfo, fence);
-            vkWaitForFences(vkCtx.device, 1, &fence, VK_TRUE, UINT64_MAX);
-            vkDestroyFence(vkCtx.device, fence, nullptr);
-        }
-    }
+    fastCamData.tileOffsetX = 0;
+    fastCamData.tileOffsetY = 0;
+    vkCtx.updateCameraData(fastCamData);
+    vkCtx.dispatchFastFullFrame(width, height);
 
     frame outFrame(width, height, colorformat);
     std::vector<float> colorBuffer(width * height * 3);
@@ -1039,36 +1006,10 @@ frame Octree<T>::GameStyleRenderFrame(const Camera& cam, int height, int width, 
     }
 
 
-    {
-        int tileW = 512, tileH = 512;
-        for (int y = 0; y < height; y += tileH) {
-            for (int x = 0; x < width; x += tileW) {
-                int drawW = std::min(tileW, width - x);
-                int drawH = std::min(tileH, height - y);
-                fastCamData.tileOffsetX = x;
-                fastCamData.tileOffsetY = y;
-                vkCtx.updateCameraData(fastCamData);
-
-                VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-                vkBeginCommandBuffer(vkCtx.commandBuffer, &beginInfo);
-                vkCmdBindPipeline(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.fastPipeline);
-                vkCmdBindDescriptorSets(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.fastPipelineLayout, 0, 1, &vkCtx.fastDescSet, 0, nullptr);
-                vkCmdDispatch(vkCtx.commandBuffer, (drawW + 7) / 8, (drawH + 7) / 8, 1);
-                vkEndCommandBuffer(vkCtx.commandBuffer);
-
-                VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-                submitInfo.commandBufferCount = 1;
-                submitInfo.pCommandBuffers = &vkCtx.commandBuffer;
-
-                VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-                VkFence fence;
-                vkCreateFence(vkCtx.device, &fenceInfo, nullptr, &fence);
-                vkQueueSubmit(vkCtx.queue, 1, &submitInfo, fence);
-                vkWaitForFences(vkCtx.device, 1, &fence, VK_TRUE, UINT64_MAX);
-                vkDestroyFence(vkCtx.device, fence, nullptr);
-            }
-        }
-    }
+    fastCamData.tileOffsetX = 0;
+    fastCamData.tileOffsetY = 0;
+    vkCtx.updateCameraData(fastCamData);
+    vkCtx.dispatchFastFullFrame(width, height);
     frame outFrame(width, height, colorformat);
     std::vector<float> guide(size_t(width) * size_t(height) * 5);
     {
@@ -1136,8 +1077,7 @@ frame Octree<T>::superBlendedRenderFrameVulkan(const Camera& cam, int height, in
     std::vector<GPURenderData> gpuFastPoints;
     gpuFastPoints.reserve(sortedPoints.size());
 
-    // Lights sorted by emissive power (emittance * albedo luminance * area) so
-    // the guide pass can just take the first three as the "primary" lights.
+
     struct LightRef { float power; uint32_t idx; };
     std::vector<LightRef> lightRefs;
 
@@ -1201,36 +1141,10 @@ frame Octree<T>::superBlendedRenderFrameVulkan(const Camera& cam, int height, in
                              globalMin, globalMax, keyLight, true);
     }
 
-    {
-        int tileW = 512, tileH = 512;
-        for (int y = 0; y < height; y += tileH) {
-            for (int x = 0; x < width; x += tileW) {
-                int drawW = std::min(tileW, width - x);
-                int drawH = std::min(tileH, height - y);
-                fastCamData.tileOffsetX = x;
-                fastCamData.tileOffsetY = y;
-                vkCtx.updateCameraData(fastCamData);
-
-                VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-                vkBeginCommandBuffer(vkCtx.commandBuffer, &beginInfo);
-                vkCmdBindPipeline(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.fastPipeline);
-                vkCmdBindDescriptorSets(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.fastPipelineLayout, 0, 1, &vkCtx.fastDescSet, 0, nullptr);
-                vkCmdDispatch(vkCtx.commandBuffer, (drawW + 7) / 8, (drawH + 7) / 8, 1);
-                vkEndCommandBuffer(vkCtx.commandBuffer);
-
-                VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-                submitInfo.commandBufferCount = 1;
-                submitInfo.pCommandBuffers = &vkCtx.commandBuffer;
-
-                VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-                VkFence fence;
-                vkCreateFence(vkCtx.device, &fenceInfo, nullptr, &fence);
-                vkQueueSubmit(vkCtx.queue, 1, &submitInfo, fence);
-                vkWaitForFences(vkCtx.device, 1, &fence, VK_TRUE, UINT64_MAX);
-                vkDestroyFence(vkCtx.device, fence, nullptr);
-            }
-        }
-    }
+    fastCamData.tileOffsetX = 0;
+    fastCamData.tileOffsetY = 0;
+    vkCtx.updateCameraData(fastCamData);
+    vkCtx.dispatchFastFullFrame(width, height);
 
     std::vector<float> guide(size_t(width) * size_t(height) * 5);
     {

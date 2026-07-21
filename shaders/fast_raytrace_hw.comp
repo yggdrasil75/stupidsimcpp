@@ -253,38 +253,17 @@ int voxelTraverse(Ray ray, out HitData hits[MAX_HITS]) {
             float t, tExit;
             vec3 n;
             if (rayCubeIntersect(ray, points[ptIdx], t, tExit, n) && t >= 0.0 && t <= cam.maxDist) {
-                if (hitCount < MAX_HITS) {
-                    hits[hitCount].id = ptIdx;
-                    hits[hitCount].t = t;
-                    hits[hitCount].tExit = tExit;
-                    hits[hitCount].normal = n;
-                    hitCount++;
-                } else {
-                    int maxIdx = 0;
-                    float maxT = hits[0].t;
-                    for (int i = 1; i < MAX_HITS; i++) {
-                        if (hits[i].t > maxT) {
-                            maxT = hits[i].t;
-                            maxIdx = i;
-                        }
-                    }
-                    if (t < maxT) {
-                        hits[maxIdx].id = ptIdx;
-                        hits[maxIdx].t = t;
-                        hits[maxIdx].tExit = tExit;
-                        hits[maxIdx].normal = n;
-                    }
+                if (hitCount == MAX_HITS && t >= hits[MAX_HITS - 1].t) continue;
+                int slot = min(hitCount, MAX_HITS - 1);
+                while (slot > 0 && hits[slot - 1].t > t) {
+                    hits[slot] = hits[slot - 1];
+                    slot--;
                 }
-            }
-        }
-    }
-    
-    for (int i = 0; i < hitCount - 1; i++) {
-        for (int j = 0; j < hitCount - i - 1; j++) {
-            if (hits[j].t > hits[j + 1].t) {
-                HitData temp = hits[j];
-                hits[j] = hits[j + 1];
-                hits[j + 1] = temp;
+                hits[slot].id = ptIdx;
+                hits[slot].t = t;
+                hits[slot].tExit = tExit;
+                hits[slot].normal = n;
+                if (hitCount < MAX_HITS) hitCount++;
             }
         }
     }
@@ -381,29 +360,22 @@ bool nearestHit(vec3 origin, vec3 dir, float maxT, int skipObjId,
             if (pt.objectId == skipObjId) continue;
             float t, tExit; vec3 n;
             if (rayCubeIntersect(ray, pt, t, tExit, n) && t > 1e-4 && t < maxT) {
-                if (count < MAX_HITS) {
-                    hitIdx[count] = ptIdx; hitT[count] = t; hitN[count] = n; count++;
-                } else {
-                    int   fi = 0; float ft = hitT[0];
-                    for (int k = 1; k < MAX_HITS; k++) if (hitT[k] > ft) { ft = hitT[k]; fi = k; }
-                    if (t < ft) { hitIdx[fi] = ptIdx; hitT[fi] = t; hitN[fi] = n; }
+                if (count == MAX_HITS && t >= hitT[MAX_HITS - 1]) continue;
+                int slot = min(count, MAX_HITS - 1);
+                while (slot > 0 && hitT[slot - 1] > t) {
+                    hitT[slot] = hitT[slot - 1];
+                    hitIdx[slot] = hitIdx[slot - 1];
+                    hitN[slot] = hitN[slot - 1];
+                    slot--;
                 }
+                hitIdx[slot] = ptIdx; hitT[slot] = t; hitN[slot] = n;
+                if (count < MAX_HITS) count++;
             }
         }
     }
 
     tintOut = vec3(1.0);
     if (count == 0) { tOut = maxT; return false; }
-
-    for (int i = 0; i < count - 1; i++) {
-        int mi = i;
-        for (int j = i + 1; j < count; j++) if (hitT[j] < hitT[mi]) mi = j;
-        if (mi != i) {
-            float tt = hitT[i]; hitT[i] = hitT[mi]; hitT[mi] = tt;
-            int   ii = hitIdx[i]; hitIdx[i] = hitIdx[mi]; hitIdx[mi] = ii;
-            vec3  nn = hitN[i]; hitN[i] = hitN[mi]; hitN[mi] = nn;
-        }
-    }
 
     for (int i = 0; i < count; i++) {
         vec4 alb = unpackRGBA8(points[hitIdx[i]].color);

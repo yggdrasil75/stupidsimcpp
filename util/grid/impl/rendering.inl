@@ -184,6 +184,7 @@ struct GpuContext {
     VkShaderModule wfShadeShader = VK_NULL_HANDLE;
     VkShaderModule wfShadowShader = VK_NULL_HANDLE;
     VkShaderModule wfFinalizeShader = VK_NULL_HANDLE;
+    VkShaderModule aabbBuildShader = VK_NULL_HANDLE;
 
     VkPipelineLayout fastPipelineLayout = VK_NULL_HANDLE;
     VkPipelineLayout pbrPipelineLayout = VK_NULL_HANDLE;
@@ -191,6 +192,7 @@ struct GpuContext {
     VkPipelineLayout blendPipelineLayout = VK_NULL_HANDLE;
     VkPipelineLayout guidedCoeffPipelineLayout = VK_NULL_HANDLE;
     VkPipelineLayout wfPipelineLayout = VK_NULL_HANDLE;
+    VkPipelineLayout aabbBuildPipeLayout = VK_NULL_HANDLE;
 
     VkPipeline fastPipeline = VK_NULL_HANDLE;
     VkPipeline pbrPipeline = VK_NULL_HANDLE;
@@ -203,6 +205,7 @@ struct GpuContext {
     VkPipeline wfShadePipe = VK_NULL_HANDLE;
     VkPipeline wfShadowPipe = VK_NULL_HANDLE;
     VkPipeline wfFinalizePipe = VK_NULL_HANDLE;
+    VkPipeline aabbBuildPipe = VK_NULL_HANDLE;
 
     VkBuffer fastGBuffer = VK_NULL_HANDLE;
     VkBuffer wfPathBuf = VK_NULL_HANDLE;
@@ -241,13 +244,15 @@ struct GpuContext {
     VkDescriptorSetLayout blendDescLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout guidedCoeffDescLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout wfDescLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout aabbBuildLayout = VK_NULL_HANDLE;
 
-    VkDescriptorSet wfDescSet    = VK_NULL_HANDLE;
+    VkDescriptorSet wfDescSet = VK_NULL_HANDLE;
     VkDescriptorSet fastDescSet = VK_NULL_HANDLE;
     VkDescriptorSet pbrDescSet = VK_NULL_HANDLE;
     VkDescriptorSet smoothDescSet = VK_NULL_HANDLE;
     VkDescriptorSet blendDescSet = VK_NULL_HANDLE;
     VkDescriptorSet guidedCoeffDescSet = VK_NULL_HANDLE;
+    VkDescriptorSet aabbBuildSet = VK_NULL_HANDLE;
 
     VkDeviceMemory fastGBufferMem = VK_NULL_HANDLE;
     VkDeviceMemory wfPathMem = VK_NULL_HANDLE;
@@ -316,6 +321,8 @@ struct GpuContext {
     bool outStagingCoherent = true;
     bool xferStagingCoherent = true;
     bool vctReady = false;
+    bool aabbBuildReady = false;
+    bool aabbBufferHostVisible = false;
 
     int lastBlasOrderingTag = -1;
 
@@ -861,38 +868,119 @@ struct GpuContext {
         return vkGetBufferDeviceAddress(device, &info);
     }
 
-    void buildHardwareAccelerationStructures(const std::vector<GPURenderData>& points, int orderingTag = 0) {
+    void initAabbBuildPipeline() {
+        if (aabbBuildReady) return;
+
+        VkDescriptorSetLayoutBinding b[2]{};
+        b[0] = {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        b[1] = {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 2, b};
+        vkCreateDescriptorSetLayout(device, &li, nullptr, &aabbBuildLayout);
+
+        VkPushConstantRange pcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t)};
+        VkPipelineLayoutCreateInfo pl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        pl.setLayoutCount = 1;
+        pl.pSetLayouts = &aabbBuildLayout;
+        pl.pushConstantRangeCount = 1;
+        pl.pPushConstantRanges = &pcr;
+        vkCreatePipelineLayout(device, &pl, nullptr, &aabbBuildPipeLayout);
+
+        aabbBuildShader = createShaderModule(device, "./bin/aabb_build.spv");
+        VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        ci.stage.pName = "main";
+        ci.stage.module = aabbBuildShader;
+        ci.layout = aabbBuildPipeLayout;
+        vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &ci, nullptr, &aabbBuildPipe);
+
+        VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        ai.descriptorPool = descriptorPool;
+        ai.descriptorSetCount = 1;
+        ai.pSetLayouts = &aabbBuildLayout;
+        vkAllocateDescriptorSets(device, &ai, &aabbBuildSet);
+
+        aabbBuildReady = true;
+    }
+
+    ///@brief Records the AABB fill into cmd; the caller submits it with the AS build.
+    void recordAabbBuild(VkCommandBuffer cmd, VkBuffer srcPoints, uint32_t numPrimitives) {
+        initAabbBuildPipeline();
+
+        VkDescriptorBufferInfo bInfos[2] = {
+            {srcPoints,  0, VK_WHOLE_SIZE},
+            {aabbBuffer, 0, VK_WHOLE_SIZE}
+        };
+        VkWriteDescriptorSet writes[2]{};
+        for (int i = 0; i < 2; ++i) {
+            writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[i].dstSet = aabbBuildSet;
+            writes[i].dstBinding = i;
+            writes[i].descriptorCount = 1;
+            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[i].pBufferInfo = &bInfos[i];
+        }
+        vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
+
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, aabbBuildPipe);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, aabbBuildPipeLayout,
+                                0, 1, &aabbBuildSet, 0, nullptr);
+        vkCmdPushConstants(cmd, aabbBuildPipeLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+                           0, sizeof(uint32_t), &numPrimitives);
+        vkCmdDispatch(cmd, (numPrimitives + 63) / 64, 1, 1);
+
+        // AABB writes must land before the AS build reads them.
+        VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                             0, 1, &barrier, 0, nullptr, 0, nullptr);
+    }
+
+    void buildHardwareAccelerationStructures(const std::vector<GPURenderData>& points, int orderingTag = 0,
+                                             VkBuffer srcPointBuffer = VK_NULL_HANDLE) {
         if (points.empty()) return;
 
         const uint32_t numPrimitives = static_cast<uint32_t>(points.size());
         bool doFullBuild = (!blasTopologyValid) || (numPrimitives != lastBlasPrimCount)
                         || (orderingTag != lastBlasOrderingTag);
-        std::vector<VkAabbPositionsKHR> aabbs(numPrimitives);
-        for (uint32_t i = 0; i < numPrimitives; ++i) {
-            float halfSize = points[i].size * 0.5f;
-            aabbs[i].minX = points[i].position.x() - halfSize;
-            aabbs[i].minY = points[i].position.y() - halfSize;
-            aabbs[i].minZ = points[i].position.z() - halfSize;
-            aabbs[i].maxX = points[i].position.x() + halfSize;
-            aabbs[i].maxY = points[i].position.y() + halfSize;
-            aabbs[i].maxZ = points[i].position.z() + halfSize;
-        }
 
         uint32_t aabbSize = numPrimitives * sizeof(VkAabbPositionsKHR);
-        if (aabbSize > currentAabbCap) {
+        const bool gpuFill = (srcPointBuffer != VK_NULL_HANDLE);
+        if (aabbSize > currentAabbCap || aabbBufferHostVisible == gpuFill || !aabbBuffer) {
             if (aabbBuffer) {
                 vkDestroyBuffer(device, aabbBuffer, nullptr);
                 vkFreeMemory(device, aabbMem, nullptr);
             }
-            createBufferWithAddress(device, aabbSize, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, 
-                                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, aabbBuffer, aabbMem);
+            VkBufferUsageFlags usage = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
+                                     | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+            VkMemoryPropertyFlags props = gpuFill
+                ? VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+                : (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            createBufferWithAddress(device, aabbSize, usage, props, aabbBuffer, aabbMem);
             currentAabbCap = aabbSize;
+            aabbBufferHostVisible = !gpuFill;
+            blasTopologyValid = false;
+            doFullBuild = true;
         }
 
-        void* data;
-        vkMapMemory(device, aabbMem, 0, aabbSize, 0, &data);
-        memcpy(data, aabbs.data(), aabbSize);
-        vkUnmapMemory(device, aabbMem);
+        if (!gpuFill) {
+            std::vector<VkAabbPositionsKHR> aabbs(numPrimitives);
+            for (uint32_t i = 0; i < numPrimitives; ++i) {
+                float halfSize = points[i].size * 0.5f;
+                aabbs[i].minX = points[i].position.x() - halfSize;
+                aabbs[i].minY = points[i].position.y() - halfSize;
+                aabbs[i].minZ = points[i].position.z() - halfSize;
+                aabbs[i].maxX = points[i].position.x() + halfSize;
+                aabbs[i].maxY = points[i].position.y() + halfSize;
+                aabbs[i].maxZ = points[i].position.z() + halfSize;
+            }
+            void* data;
+            vkMapMemory(device, aabbMem, 0, aabbSize, 0, &data);
+            memcpy(data, aabbs.data(), aabbSize);
+            vkUnmapMemory(device, aabbMem);
+        }
 
         VkAccelerationStructureGeometryKHR blasGeom{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
         blasGeom.geometryType = VK_GEOMETRY_TYPE_AABBS_KHR;
@@ -952,6 +1040,7 @@ struct GpuContext {
                                 VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, 
                                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, asInstanceBuffer, asInstanceMem);
         
+        void* data;
         vkMapMemory(device, asInstanceMem, 0, sizeof(VkAccelerationStructureInstanceKHR), 0, &data);
         memcpy(data, &tlasInstance, sizeof(VkAccelerationStructureInstanceKHR));
         vkUnmapMemory(device, asInstanceMem);
@@ -1007,6 +1096,7 @@ struct GpuContext {
         VkBuffer scratchBuffer = asScratchBuffer;
 
         executeSingleTimeCommands([&](VkCommandBuffer cmd) {
+            if (gpuFill) recordAabbBuild(cmd, srcPointBuffer, numPrimitives);
             blasBuildInfo.dstAccelerationStructure = blas;
             blasBuildInfo.scratchData.deviceAddress = getBufferDeviceAddress(scratchBuffer);
             VkAccelerationStructureBuildRangeInfoKHR blasOffset{};
@@ -1053,6 +1143,30 @@ struct GpuContext {
         } else {
             framesSinceFullBuild++;
         }
+    }
+
+    ///@brief Dispatches the fast pipeline over the whole frame on a reused fence.
+    void dispatchFastFullFrame(int width, int height) {
+        VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        vkBeginCommandBuffer(commandBuffer, &beginInfo);
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, fastPipeline);
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, fastPipelineLayout,
+                                0, 1, &fastDescSet, 0, nullptr);
+        vkCmdDispatch(commandBuffer, (width + 7) / 8, (height + 7) / 8, 1);
+        vkEndCommandBuffer(commandBuffer);
+
+        VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &commandBuffer;
+
+        if (renderFence == VK_NULL_HANDLE) {
+            VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+            vkCreateFence(device, &fenceInfo, nullptr, &renderFence);
+        } else {
+            vkResetFences(device, 1, &renderFence);
+        }
+        vkQueueSubmit(queue, 1, &submitInfo, renderFence);
+        vkWaitForFences(device, 1, &renderFence, VK_TRUE, UINT64_MAX);
     }
 
     void updateFogBuffer(const std::vector<GPUFogVolume>& vols) {
@@ -1178,7 +1292,7 @@ struct GpuContext {
                                 points.empty() ? nullptr : points.data(), dataSize, allocSize, 
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
-        buildHardwareAccelerationStructures(points, 1);
+        buildHardwareAccelerationStructures(points, 1, fastPointBuffer);
 
         VkDescriptorBufferInfo bInfos[8] = { 
             {nodeBuffer, 0, VK_WHOLE_SIZE}, 

@@ -39,9 +39,9 @@ endif
 CXXFLAGS = $(BASE_CXXFLAGS) $(SIMD_CXXFLAGS) 
 
 # Source files
-SRC := $(SRC_DIR)/ptest.cpp
+# SRC := $(SRC_DIR)/ptest.cpp
 # SRC := $(SRC_DIR)/naturetest.cpp
-# SRC := $(SRC_DIR)/materialtest.cpp
+SRC := $(SRC_DIR)/materialtest.cpp
 SRC += $(IMGUI_DIR)/imgui.cpp $(IMGUI_DIR)/imgui_demo.cpp $(IMGUI_DIR)/imgui_draw.cpp $(IMGUI_DIR)/imgui_tables.cpp $(IMGUI_DIR)/imgui_widgets.cpp
 SRC += $(IMGUI_DIR)/backends/imgui_impl_glfw.cpp $(IMGUI_DIR)/backends/imgui_impl_opengl3.cpp
 SRC += $(SRC_DIR)/stb_image.cpp
@@ -55,7 +55,7 @@ GLSLC := glslc --target-env=vulkan1.3
 
 SHADER_SRCS := $(SHADER_DIR)/fast_raytrace_hw.comp $(SHADER_DIR)/smooth.comp $(SHADER_DIR)/blend.comp
 SHADER_SRCS += $(SHADER_DIR)/wf_init.comp $(SHADER_DIR)/wf_args.comp $(SHADER_DIR)/wf_extend.comp $(SHADER_DIR)/wf_shade.comp $(SHADER_DIR)/wf_shadow.comp $(SHADER_DIR)/wf_finalize.comp
-SHADER_SRCS += $(SHADER_DIR)/vct_mip.comp $(SHADER_DIR)/vct_voxelize.comp $(SHADER_DIR)/guided_coeff.comp
+SHADER_SRCS += $(SHADER_DIR)/vct_mip.comp $(SHADER_DIR)/vct_voxelize.comp $(SHADER_DIR)/guided_coeff.comp $(SHADER_DIR)/aabb_build.comp
 SHADER_SPVS := $(patsubst $(SHADER_DIR)/%.comp,$(BIN_DIR)/%.spv,$(SHADER_SRCS))
 
 $(shell mkdir -p $(OBJ_DIR))

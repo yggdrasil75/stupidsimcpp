@@ -350,11 +350,13 @@ int voxelTraverse(vec3 ro, vec3 rd, vec3 invD, float maxDist,
     while (rayQueryProceedEXT(rq)) {
         if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionAABBEXT) {
             int ptIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
+            GPURenderData cand = points[ptIdx];
+            if (dot(abs(cand.position - ro), abs(rd)) - cand.size * 0.8660254 > tBest) continue;
             float t;
             vec3 n;
             vec3 hp;
             float tEx;
-            if (rayCubeIntersect(ro, rd, invD, points[ptIdx], t, n, hp, tEx) && t >= 0.0 && t < tBest) {
+            if (rayCubeIntersect(ro, rd, invD, cand, t, n, hp, tEx) && t >= 0.0 && t < tBest) {
                 rayQueryGenerateIntersectionEXT(rq, t);
                 tBest = t;
                 outNormal = n;
@@ -403,6 +405,7 @@ vec3 shadowTransmit(vec3 ro, vec3 rd, vec3 invD, float maxDist, int lightPtIdx) 
             int ptIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
             if (ptIdx == lightPtIdx) continue;
             GPURenderData pt = points[ptIdx];
+            if (dot(abs(pt.position - ro), abs(rd)) - pt.size * 0.8660254 > tBest) continue;
             vec3 bMin = pt.position - pt.size * 0.5;
             vec3 bMax = pt.position + pt.size * 0.5;
             vec3 t0 = (bMin - ro) * invD;
