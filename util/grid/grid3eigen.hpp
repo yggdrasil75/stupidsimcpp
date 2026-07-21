@@ -2858,9 +2858,45 @@ public:
                 int minSamplesPerPixel = 4);
     frame GameStyleRenderFrame(const Camera& cam, int height, int width,
                 frame::colormap colorformat = frame::colormap::RGB);
+
+    ///@brief Records and submits a blended frame, returning without waiting
+    InFlightFrame beginBlendedRenderFrameVulkan(const Camera& cam, int height, int width, float pbrScale = 0.5f,
+                frame::colormap colorformat = frame::colormap::RGB, int samplesPerPixel = 1,
+                int maxBounces = 4, bool globalIllumination = false, bool useLod = true);
+    ///@brief Waits on a submitted blended frame and reads its pixels back
+    frame endBlendedRenderFrameVulkan(InFlightFrame& pending);
+
+    ///@brief Records and submits a superblended frame, returning without waiting
+    InFlightFrame beginSuperBlendedRenderFrameVulkan(const Camera& cam, int height, int width, float ptScale = 0.25f,
+                frame::colormap colorformat = frame::colormap::RGB, int samplesPerPixel = 100,
+                int maxBounces = 4, bool globalIllumination = true, bool useLod = false,
+                int minSamplesPerPixel = 4);
+    ///@brief Waits on a submitted superblended frame and reads its pixels back
+    frame endSuperBlendedRenderFrameVulkan(InFlightFrame& pending);
+
+    ///@brief Records and submits a gamestyle frame, returning without waiting
+    InFlightFrame beginGameStyleRenderFrame(const Camera& cam, int height, int width,
+                frame::colormap colorformat = frame::colormap::RGB);
+    ///@brief Waits on a submitted gamestyle frame and reads its pixels back
+    frame endGameStyleRenderFrame(InFlightFrame& pending);
+
     frame fastRenderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB);
+
+    ///@brief Records and submits a fast frame, returning without waiting
+    ///@return Handle to pass to endFastRenderFrameVulkan
+    InFlightFrame beginFastRenderFrameVulkan(const Camera& cam, int height, int width,
+                frame::colormap colorformat = frame::colormap::RGB);
+    ///@brief Waits on a submitted fast frame and reads its pixels back
+    frame endFastRenderFrameVulkan(InFlightFrame& pending);
     frame renderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB,
         int samplesPerPixel = 2, int maxBounces = 4, bool globalIllumination = false, bool useLod = true);
+
+    ///@brief Records and submits an offline frame, returning without waiting
+    InFlightFrame beginRenderFrameVulkan(const Camera& cam, int height, int width,
+        frame::colormap colorformat = frame::colormap::RGB,
+        int samplesPerPixel = 2, int maxBounces = 4, bool globalIllumination = false, bool useLod = true);
+    ///@brief Waits on a submitted offline frame and reads its pixels back
+    frame endRenderFrameVulkan(InFlightFrame& pending);
     void stepPhysics(float dt);
     void stepRigidLattice(float dt, std::vector<std::shared_ptr<NodeData>>& rigidNodes,
                           const std::vector<std::vector<PhysicsMaterial_>>& fastMats, size_t fastMatsSize);

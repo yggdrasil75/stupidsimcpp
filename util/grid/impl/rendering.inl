@@ -61,6 +61,14 @@ struct RenderBuffer_ {
     }
 };
 
+struct InFlightFrame {
+    int width = 0;
+    int height = 0;
+    size_t outSize = 0;
+    frame::colormap colorformat = frame::colormap::RGB;
+    bool pending = false;
+};
+
 #ifdef VULKAN_SUPPORT
 static PFN_vkGetAccelerationStructureBuildSizesKHR pfn_vkGetAccelerationStructureBuildSizesKHR = nullptr;
 static PFN_vkCreateAccelerationStructureKHR pfn_vkCreateAccelerationStructureKHR = nullptr;
@@ -171,6 +179,7 @@ struct GpuContext {
     VkCommandPool commandPool = VK_NULL_HANDLE;
     VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
     VkFence renderFence = VK_NULL_HANDLE;
+    VkFence postFence = VK_NULL_HANDLE;
     VkCommandBuffer wfCmd[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
     VkFence wfFence[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
     
@@ -317,6 +326,10 @@ struct GpuContext {
 
     bool initialized = false;
     bool blasTopologyValid = false;
+    bool pbrPointsResident = false;
+    bool fastPointsResident = false;
+    bool fastFrameInFlight = false;
+    bool postPassInFlight = false;
     bool outMemCoherent = true;
     bool outStagingCoherent = true;
     bool xferStagingCoherent = true;
@@ -1145,8 +1158,13 @@ struct GpuContext {
         }
     }
 
-    ///@brief Dispatches the fast pipeline over the whole frame on a reused fence.
-    void dispatchFastFullFrame(int width, int height) {
+    ///@brief Records and submits the fast pipeline over the whole frame, no wait.
+    void submitFastFullFrame(int width, int height) {
+        if (fastFrameInFlight) {
+            vkWaitForFences(device, 1, &renderFence, VK_TRUE, UINT64_MAX);
+            fastFrameInFlight = false;
+        }
+
         VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         vkBeginCommandBuffer(commandBuffer, &beginInfo);
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, fastPipeline);
@@ -1166,7 +1184,20 @@ struct GpuContext {
             vkResetFences(device, 1, &renderFence);
         }
         vkQueueSubmit(queue, 1, &submitInfo, renderFence);
+        fastFrameInFlight = true;
+    }
+
+    ///@brief Waits on the frame submitted by submitFastFullFrame.
+    void awaitFastFullFrame() {
+        if (!fastFrameInFlight) return;
         vkWaitForFences(device, 1, &renderFence, VK_TRUE, UINT64_MAX);
+        fastFrameInFlight = false;
+    }
+
+    ///@brief Dispatches the fast pipeline over the whole frame on a reused fence.
+    void dispatchFastFullFrame(int width, int height) {
+        submitFastFullFrame(width, height);
+        awaitFastFullFrame();
     }
 
     void updateFogBuffer(const std::vector<GPUFogVolume>& vols) {
@@ -1393,7 +1424,7 @@ struct GpuContext {
         copyBuffer(device, outBuffer, fastGBuffer, fastOutSize);
     }
 
-    void dispatchSmoothPasses(int width, int height, int samples, int iters, bool toFinal) {
+    void dispatchSmoothPasses(int width, int height, int samples, int iters, bool toFinal, bool deferFinalWait = false) {
         uint32_t finalSize = width * height * 3 * sizeof(float);
         if(finalSize > currentFinalOutCap) {
             if(finalOutBuffer) {
@@ -1460,8 +1491,15 @@ struct GpuContext {
             VkFence fence;
             vkCreateFence(device, &fenceInfo, nullptr, &fence);
             vkQueueSubmit(queue, 1, &submitInfo, fence);
-            vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
-            vkDestroyFence(device, fence, nullptr);
+            if (finalPass && deferFinalWait) {
+                awaitPostPass();
+                if (postFence != VK_NULL_HANDLE) vkDestroyFence(device, postFence, nullptr);
+                postFence = fence;
+                postPassInFlight = true;
+            } else {
+                vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
+                vkDestroyFence(device, fence, nullptr);
+            }
 
             if (!finalPass) { VkBuffer tmp = src; src = dst; dst = tmp; }
         }
@@ -1471,7 +1509,15 @@ struct GpuContext {
         dispatchSmoothPasses(width, height, samples, 4, true);
     }
 
-    void dispatchBlend(int width, int height, int lowW, int lowH, float pbrScale, int samples) {
+    ///@brief dispatchSmooth that returns before the final pass completes.
+    void submitSmooth(int width, int height, int samples) {
+        dispatchSmoothPasses(width, height, samples, 4, true, true);
+    }
+
+    ///@brief Guided-filter blend of the PT and guide buffers into finalOutBuffer.
+    ///@param deferWait Return before the pass completes; collect with awaitPostPass
+    void dispatchBlend(int width, int height, int lowW, int lowH, float pbrScale, int samples,
+                       bool deferWait = false) {
         uint32_t finalSize = width * height * 3 * sizeof(float);
         if(finalSize > currentFinalOutCap) {
             if(finalOutBuffer) { 
@@ -1544,12 +1590,32 @@ struct GpuContext {
         submitInfo.commandBufferCount = 1;  
         submitInfo.pCommandBuffers = &commandBuffer;
 
-        VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO}; 
-        VkFence fence; 
-        vkCreateFence(device, &fenceInfo, nullptr, &fence);
-        vkQueueSubmit(queue, 1, &submitInfo, fence); 
-        vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX); 
-        vkDestroyFence(device, fence, nullptr);
+        if (!deferWait) {
+            VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+            VkFence fence;
+            vkCreateFence(device, &fenceInfo, nullptr, &fence);
+            vkQueueSubmit(queue, 1, &submitInfo, fence);
+            vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
+            vkDestroyFence(device, fence, nullptr);
+            return;
+        }
+
+        if (postFence == VK_NULL_HANDLE) {
+            VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+            vkCreateFence(device, &fenceInfo, nullptr, &postFence);
+        } else {
+            awaitPostPass();
+            vkResetFences(device, 1, &postFence);
+        }
+        vkQueueSubmit(queue, 1, &submitInfo, postFence);
+        postPassInFlight = true;
+    }
+
+    ///@brief Waits on the trailing smooth/blend submit, if one is outstanding.
+    void awaitPostPass() {
+        if (!postPassInFlight) return;
+        vkWaitForFences(device, 1, &postFence, VK_TRUE, UINT64_MAX);
+        postPassInFlight = false;
     }
 
 struct WFPushConstants {
@@ -1788,7 +1854,6 @@ void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel
         }
 
         vkEndCommandBuffer(cmd);
-        vkWaitForFences(device, 1, &wfFence[slot ^ 1], VK_TRUE, UINT64_MAX);
         VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
         si.commandBufferCount = 1;
         si.pCommandBuffers = &cmd;

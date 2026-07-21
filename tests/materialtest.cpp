@@ -14,6 +14,7 @@
 #include "../util/grid/grid3physics.cpp"
 #include "../util/output/frame.hpp"
 #include "../util/output/bmpwriter.hpp"
+#include "../util/output/framewriter.hpp"
 #include "../util/output/aviwriter.hpp"
 #include "../util/output/y4mwriter.hpp"
 #include "../util/timing_decorator.hpp"
@@ -361,14 +362,14 @@ int main() {
     octree.setMaxDistance(4096);
 
     // 3. Setup rendering loop
-    int width = 1920;
-    int height = 1080;
+    int width = 512;
+    int height = 512;
     
     const float fps = 60.0f;
     const float durationPerSegment = 10.0f;
     const int framesPerSegment = static_cast<int>(fps * durationPerSegment);
-    const int samples = 100;
-    const int blendedsamples = 300;
+    const int samples = 10;
+    const int blendedsamples = 30;
     const float blendedfactor = 0.65;
     const int videosamples = 300;
     const int bounces = 8;
@@ -408,56 +409,180 @@ int main() {
     };
 
     Eigen::Vector3f target(0.0f, 0.0f, 0.5f);
+    Grid::FrameWriter writer(2, 8);
 
-    for (const auto& view : views) {
+
+    // for (const auto& view : views) {
+    //     ScopedFunctionTimer meh("CPU fast section");
+    //     std::cout << "\nRendering view from " << view.name << " direction (CPU Fast Pass)..." << std::endl;
+    //
+    //     Camera cam;
+    //     cam.origin = view.origin;
+    //     cam.direction = (target - view.origin).normalized();
+    //     cam.up = view.up;
+    //
+    //     frame cpuout = octree.fastRenderFrame(cam, height, width, frame::colormap::RGB);
+    //     writer.enqueue(std::move(cpuout), "output/fast_cpurender_" + view.name + ".bmp");
+    // }
+    // writer.drain();
+    // FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
+
+    {
         ScopedFunctionTimer meh("Fast section");
-        std::cout << "\nRendering view from " << view.name << " direction (Fast Pass)..." << std::endl;
-        
-        Camera cam;
-        cam.origin = view.origin;
-        cam.direction = (target - view.origin).normalized();
-        cam.up = view.up;
-        
-        // frame cpuout = octree.fastRenderFrame(cam, height, width, frame::colormap::RGB);
-        // std::string cpufilename = "output/fast_cpurender_" + view.name + ".bmp";
-        // BMPWriter::saveBMP(cpufilename, cpuout);
-        
-        frame out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
-        std::string filename = "output/fast_vulkanrender_" + view.name + ".bmp";
-        // out.compressFrameLZ78();
-        // out.decompress();
-        BMPWriter::saveBMP(filename, out);
+        Grid::InFlightFrame inflight;
+        std::string pendingName;
+        bool havePending = false;
 
-        frame gameOut = octree.GameStyleRenderFrame(cam, height, width, frame::colormap::RGB);
-        std::string gameFilename = "output/gameready_vulkanrender_" + view.name + ".bmp";
-        BMPWriter::saveBMP(gameFilename, gameOut);
+        for (const auto& view : views) {
+            std::cout << "\nRendering view from " << view.name << " direction (Fast Pass)..." << std::endl;
+
+            Camera cam;
+            cam.origin = view.origin;
+            cam.direction = (target - view.origin).normalized();
+            cam.up = view.up;
+
+            Grid::InFlightFrame next = octree.beginFastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
+            if (havePending) {
+                frame prev = octree.endFastRenderFrameVulkan(inflight);
+                writer.enqueue(std::move(prev), "output/fast_vulkanrender_" + pendingName + ".bmp");
+            }
+            inflight = next;
+            pendingName = view.name;
+            havePending = true;
+        }
+        if (havePending) {
+            frame prev = octree.endFastRenderFrameVulkan(inflight);
+            writer.enqueue(std::move(prev), "output/fast_vulkanrender_" + pendingName + ".bmp");
+        }
     }
+    writer.drain();
     FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
 
-    for (const auto& view : views) {
-        ScopedFunctionTimer meh("Slow Section");
-        std::cout << "\nRendering view from " << view.name << " direction (Slow "<< samples <<" Samples Pass)..." << std::endl;
-        
-        Camera cam;
-        cam.origin = view.origin;
-        cam.direction = (target - view.origin).normalized();
-        cam.up = view.up;
-        
-        frame out = octree.renderFrameVulkan(cam, height, width, frame::colormap::RGB, samples, bounces, false, true);
-        std::string filename = "output/slow_vulkanrender_" + view.name + ".bmp";
-        BMPWriter::saveBMP(filename, out);
-        std::cout << "slow done" << std::endl;
+    {
+        ScopedFunctionTimer meh("Gamestyle section");
+        Grid::InFlightFrame inflight;
+        std::string pendingName;
+        bool havePending = false;
 
-        out = octree.superBlendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, blendedsamples, bounces, false, true);
-        filename = "output/slow_superblendrender_" + view.name + ".bmp";
-        BMPWriter::saveBMP(filename, out);
-        std::cout << "super blended done" << std::endl;
+        for (const auto& view : views) {
+            std::cout << "\nRendering view from " << view.name << " direction (Gamestyle Pass)..." << std::endl;
 
-        out = octree.blendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, blendedsamples, bounces, false, true);
-        filename = "output/slow_blendrender_" + view.name + ".bmp";
-        BMPWriter::saveBMP(filename, out);
-        std::cout << "blended done" << std::endl;
+            Camera cam;
+            cam.origin = view.origin;
+            cam.direction = (target - view.origin).normalized();
+            cam.up = view.up;
+
+            Grid::InFlightFrame next = octree.beginGameStyleRenderFrame(cam, height, width, frame::colormap::RGB);
+            if (havePending) {
+                frame prev = octree.endGameStyleRenderFrame(inflight);
+                writer.enqueue(std::move(prev), "output/gameready_vulkanrender_" + pendingName + ".bmp");
+            }
+            inflight = next;
+            pendingName = view.name;
+            havePending = true;
+        }
+        if (havePending) {
+            frame prev = octree.endGameStyleRenderFrame(inflight);
+            writer.enqueue(std::move(prev), "output/gameready_vulkanrender_" + pendingName + ".bmp");
+        }
     }
+    writer.drain();
+    FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
+
+    {
+        ScopedFunctionTimer meh("Slow Section");
+        Grid::InFlightFrame inflight;
+        std::string pendingName;
+        bool havePending = false;
+
+        for (const auto& view : views) {
+            std::cout << "\nRendering view from " << view.name << " direction (Slow " << samples << " Samples Pass)..." << std::endl;
+
+            Camera cam;
+            cam.origin = view.origin;
+            cam.direction = (target - view.origin).normalized();
+            cam.up = view.up;
+
+            Grid::InFlightFrame next = octree.beginRenderFrameVulkan(cam, height, width, frame::colormap::RGB, samples, bounces, false, true);
+            if (havePending) {
+                frame prev = octree.endRenderFrameVulkan(inflight);
+                writer.enqueue(std::move(prev), "output/slow_vulkanrender_" + pendingName + ".bmp");
+            }
+            inflight = next;
+            pendingName = view.name;
+            havePending = true;
+            std::cout << "slow submitted" << std::endl;
+        }
+        if (havePending) {
+            frame prev = octree.endRenderFrameVulkan(inflight);
+            writer.enqueue(std::move(prev), "output/slow_vulkanrender_" + pendingName + ".bmp");
+        }
+    }
+    writer.drain();
+    FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
+
+    {
+        ScopedFunctionTimer meh("Superblend Section");
+        Grid::InFlightFrame inflight;
+        std::string pendingName;
+        bool havePending = false;
+
+        for (const auto& view : views) {
+            std::cout << "\nRendering view from " << view.name << " direction (Superblend Pass)..." << std::endl;
+
+            Camera cam;
+            cam.origin = view.origin;
+            cam.direction = (target - view.origin).normalized();
+            cam.up = view.up;
+
+            Grid::InFlightFrame next = octree.beginSuperBlendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, blendedsamples, bounces, false, true);
+            if (havePending) {
+                frame prev = octree.endSuperBlendedRenderFrameVulkan(inflight);
+                writer.enqueue(std::move(prev), "output/slow_superblendrender_" + pendingName + ".bmp");
+            }
+            inflight = next;
+            pendingName = view.name;
+            havePending = true;
+            std::cout << "super blended submitted" << std::endl;
+        }
+        if (havePending) {
+            frame prev = octree.endSuperBlendedRenderFrameVulkan(inflight);
+            writer.enqueue(std::move(prev), "output/slow_superblendrender_" + pendingName + ".bmp");
+        }
+    }
+    writer.drain();
+    FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
+
+    {
+        ScopedFunctionTimer meh("Blend Section");
+        Grid::InFlightFrame inflight;
+        std::string pendingName;
+        bool havePending = false;
+
+        for (const auto& view : views) {
+            std::cout << "\nRendering view from " << view.name << " direction (Blend Pass)..." << std::endl;
+
+            Camera cam;
+            cam.origin = view.origin;
+            cam.direction = (target - view.origin).normalized();
+            cam.up = view.up;
+
+            Grid::InFlightFrame next = octree.beginBlendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, blendedsamples, bounces, false, true);
+            if (havePending) {
+                frame prev = octree.endBlendedRenderFrameVulkan(inflight);
+                writer.enqueue(std::move(prev), "output/slow_blendrender_" + pendingName + ".bmp");
+            }
+            inflight = next;
+            pendingName = view.name;
+            havePending = true;
+            std::cout << "blended submitted" << std::endl;
+        }
+        if (havePending) {
+            frame prev = octree.endBlendedRenderFrameVulkan(inflight);
+            writer.enqueue(std::move(prev), "output/slow_blendrender_" + pendingName + ".bmp");
+        }
+    }
+    writer.drain();
     FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
 
     std::vector<frame> videoFrames;
@@ -497,8 +622,7 @@ int main() {
     //         frame out = octree.superBlendedRenderFrameVulkan(cam, height * 2, width * 2, blendedfactor, frame::colormap::RGB, videosamples, bounces, false);
     //         // frame out = octree.renderFrameVulkan(cam, height, width, frame::colormap::RGB, videosamples, bounces, false, true);
     //         // videoFrames.push_back(std::move(out));
-    //         std::string debugFilename = "output/materialframes/debug_material_" + std::to_string(frameCounter) + ".bmp";
-    //         BMPWriter::saveBMP(debugFilename, out);
+    //         writer.enqueue(std::move(out), "output/materialframes/debug_material_" + std::to_string(frameCounter) + ".bmp");
     //     }
     // }
     // FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
@@ -592,8 +716,7 @@ int main() {
     //         // fluidVideoFrames.push_back(out);
 
     //         // saving to video is dumb so just gonna export here and then convert.
-    //         std::string debugFilename = "output/fluidframes/debug_fluid_" + std::to_string(fluidframeCounter) + ".bmp";
-    //         BMPWriter::saveBMP(debugFilename, out);
+    //         writer.enqueue(std::move(out), "output/fluidframes/debug_fluid_" + std::to_string(fluidframeCounter) + ".bmp");
     //     }
     // }
 
@@ -605,5 +728,8 @@ int main() {
     
     // std::cout << "\nAll renders complete!" << std::endl;
     // FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
+
+    writer.shutdown();
+    std::cout << "frames written: " << writer.writtenCount() << std::endl;
     return 0;
 }

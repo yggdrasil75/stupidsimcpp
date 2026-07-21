@@ -387,6 +387,128 @@ static void mortonSortIndices(const std::vector<size_t>& indices, const Vec3& bo
     mortonRadixSort(out, scratch);
 }
 
+///@brief Fingerprint of a built point set, used to decide if the cache is stale
+static uint64_t hashRenderPoints(const void* data, size_t bytes) {
+    // TIME_FUNCTION;
+    uint64_t h = 1469598103934665603ull;
+    const uint64_t* words = static_cast<const uint64_t*>(data);
+    const size_t nWords = bytes / sizeof(uint64_t);
+    for (size_t i = 0; i < nWords; ++i) {
+        h ^= words[i];
+        h *= 1099511628211ull;
+    }
+    const uint8_t* tail = static_cast<const uint8_t*>(data) + nWords * sizeof(uint64_t);
+    for (size_t i = 0; i < bytes % sizeof(uint64_t); ++i) {
+        h ^= tail[i];
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
+///@brief Geometry-only products of the render prologue, reused across frames
+struct SceneCache {
+    std::vector<GPURenderData> gpuPoints;
+    std::vector<uint32_t> gpuLights;
+    Vec3 boundsMin = Vec3::Zero();
+    Vec3 boundsMax = Vec3::Ones();
+    int emissiveCount = 0;
+    uint64_t pointHash = 0;
+    uint64_t materialHash = 0;
+    bool sorted = false;
+    bool valid = false;
+};
+
+///@brief Rebuilds the cached point set only when the tree contents changed
+///@param buffer Freshly built render buffer for this frame
+///@param wantSort Morton-order the points (PBR paths) or keep tree order (fast path)
+///@param expandByRadius Grow bounds by each point's half size (fast/VCT paths)
+///@param cache Cache to fill or reuse
+///@return true when the cache was rebuilt, false when the previous one was reused
+template<typename BufferT>
+static bool refreshSceneCache(const BufferT& buffer, bool wantSort, bool expandByRadius,
+                              SceneCache& cache) {
+    //TIME_FUNCTION;
+    const size_t pointBytes = buffer.points.size() * sizeof(buffer.points[0]);
+    const uint64_t pHash = buffer.points.empty() ? 0
+                         : hashRenderPoints(buffer.points.data(), pointBytes);
+    const size_t matBytes = buffer.materials.size() * sizeof(buffer.materials[0]);
+    const uint64_t mHash = buffer.materials.empty() ? 0
+                         : hashRenderPoints(buffer.materials.data(), matBytes);
+
+    if (cache.valid && cache.pointHash == pHash && cache.materialHash == mHash
+        && cache.sorted == wantSort) {
+        return false;
+    }
+
+    std::vector<bool> isLodPoint(buffer.points.size(), false);
+    for (const auto& n : buffer.nodes) {
+        if (n.lodPoint != -1) isLodPoint[n.lodPoint] = true;
+    }
+
+    Vec3 globalMin = Vec3::Constant(std::numeric_limits<float>::max());
+    Vec3 globalMax = Vec3::Constant(std::numeric_limits<float>::lowest());
+
+    std::vector<size_t> validIndices;
+    validIndices.reserve(buffer.points.size());
+    for (size_t i = 0; i < buffer.points.size(); ++i) {
+        if (isLodPoint[i]) continue;
+        const auto& p = buffer.points[i];
+        validIndices.push_back(i);
+        if (expandByRadius) {
+            const Vec3 h = Vec3::Constant(p.size * 0.5f);
+            globalMin = globalMin.cwiseMin(p.position - h);
+            globalMax = globalMax.cwiseMax(p.position + h);
+        } else {
+            globalMin = globalMin.cwiseMin(p.position);
+            globalMax = globalMax.cwiseMax(p.position);
+        }
+    }
+    if (globalMin.x() > globalMax.x()) {
+        globalMin.setZero();
+        globalMax.setOnes();
+    }
+
+    cache.gpuPoints.clear();
+    cache.gpuLights.clear();
+    cache.gpuPoints.reserve(validIndices.size());
+
+    if (wantSort) {
+        std::vector<PointSort> sortedPoints;
+        mortonSortIndices(validIndices, globalMin, globalMax,
+                          [&](size_t idx) { return buffer.points[idx].position; },
+                          sortedPoints);
+        for (const auto& sp : sortedPoints) {
+            const auto& p = buffer.points[sp.idx];
+            cache.gpuPoints.push_back({p.position, p.size, packRGBA8(p.color),
+                                       p.materialIdx, p.objectId});
+            if (buffer.materials[p.materialIdx].chromaticity != 0u) {
+                cache.gpuLights.push_back(cache.gpuPoints.size() - 1);
+            }
+        }
+    } else {
+        for (const size_t idx : validIndices) {
+            const auto& p = buffer.points[idx];
+            cache.gpuPoints.push_back({p.position, p.size, packRGBA8(p.color),
+                                       p.materialIdx, p.objectId});
+            if (buffer.materials[p.materialIdx].chromaticity != 0u) {
+                cache.gpuLights.push_back(cache.gpuPoints.size() - 1);
+            }
+        }
+    }
+
+    cache.emissiveCount = static_cast<int>(cache.gpuLights.size());
+    if (cache.gpuPoints.empty()) cache.gpuPoints.push_back(GPURenderData{});
+    if (cache.gpuLights.empty()) cache.gpuLights.push_back(0);
+
+    cache.boundsMin = globalMin;
+    cache.boundsMax = globalMax;
+    cache.pointHash = pHash;
+    cache.materialHash = mHash;
+    cache.sorted = wantSort;
+    cache.valid = true;
+    return true;
+}
+
 static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData& camTemplate,
                                       int samplesPerPixel, int maxBounces, int sampleOffset, size_t pixFloats, size_t bufBytes,
                                       bool buffersPreSeeded = false) {
@@ -532,9 +654,11 @@ static void uploadFogVolumes(GpuContext& vkCtx, GPUCameraData& camData,
 }
 
 template<typename T>
-frame Octree<T>::renderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat, int samplesPerPixel,
+InFlightFrame Octree<T>::beginRenderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat, int samplesPerPixel,
                 int maxBounces, bool globalIllumination, bool useLod) {
     TIME_FUNCTION;
+    vkCtx.awaitPostPass();
+    vkCtx.awaitFastFullFrame();
     updateStreaming(cam);
     optimize();
     thread_local RenderBuffer tl_buffer;
@@ -552,47 +676,11 @@ frame Octree<T>::renderFrameVulkan(const Camera& cam, int height, int width, fra
         ctx.updateSellmeierBuffer(*sellLUT, SELL_LUT_WAVELENGTHS, sellRows);
     }
 
-    std::vector<bool> isLodPoint(tl_buffer.points.size(), false);
-    for(const auto& n : tl_buffer.nodes) {
-        if(n.lodPoint != -1) isLodPoint[n.lodPoint] = true;
-    }
-
-    Vec3 globalMin = Vec3::Constant(std::numeric_limits<float>::max());
-    Vec3 globalMax = Vec3::Constant(std::numeric_limits<float>::lowest());
-    
-    std::vector<size_t> validIndices;
-    validIndices.reserve(tl_buffer.points.size());
-    for(size_t i = 0; i < tl_buffer.points.size(); ++i) {
-        if(isLodPoint[i]) continue;
-        validIndices.push_back(i);
-        globalMin = globalMin.cwiseMin(tl_buffer.points[i].position);
-        globalMax = globalMax.cwiseMax(tl_buffer.points[i].position);
-    }
-    
-    std::vector<PointSort> sortedPoints;
-    mortonSortIndices(validIndices, globalMin, globalMax,
-                      [&](size_t idx) { return tl_buffer.points[idx].position; },
-                      sortedPoints);
-
-    std::vector<GPURenderData> gpuPoints;
-    std::vector<uint32_t> gpuLights;
-    gpuPoints.reserve(sortedPoints.size());
-    
-    for(const auto& sp : sortedPoints) {
-        const auto& p = tl_buffer.points[sp.idx];
-        
-        gpuPoints.push_back({
-            p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId
-        });
-
-        if (tl_buffer.materials[p.materialIdx].chromaticity != 0u) {
-            gpuLights.push_back(gpuPoints.size() - 1);
-        }
-    }
-
-    int emissiveCount = gpuLights.size();
-    if(gpuPoints.empty()) gpuPoints.push_back(GPURenderData{});
-    if(gpuLights.empty()) gpuLights.push_back(0);
+    thread_local SceneCache tl_scene;
+    const bool sceneChanged = refreshSceneCache(tl_buffer, true, false, tl_scene);
+    const std::vector<GPURenderData>& gpuPoints = tl_scene.gpuPoints;
+    const std::vector<uint32_t>& gpuLights = tl_scene.gpuLights;
+    const int emissiveCount = tl_scene.emissiveCount;
 
     float aspect = static_cast<float>(width) / height;
     float fovRad = cam.fovRad();
@@ -619,18 +707,36 @@ frame Octree<T>::renderFrameVulkan(const Camera& cam, int height, int width, fra
         uploadFogVolumes(ctx, camData, fogVolumes_);
         ctx.updateCommonBuffers(outSize, camData);
         ctx.updateSkyboxBuffer(skyData);
-        ctx.updateLightBuffer(gpuLights);
-        ctx.updatePBRBuffers(gpuPoints);
+        if (sceneChanged || !ctx.pbrPointsResident) {
+            ctx.updateLightBuffer(gpuLights);
+            ctx.updatePBRBuffers(gpuPoints);
+            ctx.pbrPointsResident = true;
+        }
     }
 
     runWavefrontTilesMultiGPU(width, height, camData, samplesPerPixel, maxBounces, 0, pixFloats, outSize);
 
     frameCounter_++;
 
-    vkCtx.dispatchSmooth(width, height, samplesPerPixel);
+    vkCtx.submitSmooth(width, height, samplesPerPixel);
 
-    frame outFrame(width, height, colorformat);
-    std::vector<float> colorBuffer(width * height * 3);
+    InFlightFrame pending;
+    pending.width = width;
+    pending.height = height;
+    pending.outSize = outSize;
+    pending.colorformat = colorformat;
+    pending.pending = true;
+    return pending;
+}
+
+template<typename T>
+static frame collectFinalOut(InFlightFrame& pending) {
+    if (!pending.pending) return frame();
+    vkCtx.awaitPostPass();
+    pending.pending = false;
+
+    frame outFrame(pending.width, pending.height, pending.colorformat);
+    std::vector<float> colorBuffer(size_t(pending.width) * size_t(pending.height) * 3);
     void* mappedData;
     vkMapMemory(vkCtx.device, vkCtx.finalOutMem, 0, colorBuffer.size() * sizeof(float), 0, &mappedData);
     memcpy(colorBuffer.data(), mappedData, colorBuffer.size() * sizeof(float));
@@ -640,10 +746,26 @@ frame Octree<T>::renderFrameVulkan(const Camera& cam, int height, int width, fra
     return outFrame;
 }
 
+
 template<typename T>
-frame Octree<T>::fastRenderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat) {
+frame Octree<T>::endRenderFrameVulkan(InFlightFrame& pending) {
+    TIME_FUNCTION;
+    return collectFinalOut<T>(pending);
+}
+
+template<typename T>
+frame Octree<T>::renderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat, int samplesPerPixel,
+                int maxBounces, bool globalIllumination, bool useLod) {
+    InFlightFrame pending = beginRenderFrameVulkan(cam, height, width, colorformat, samplesPerPixel,
+                                                   maxBounces, globalIllumination, useLod);
+    return endRenderFrameVulkan(pending);
+}
+
+template<typename T>
+InFlightFrame Octree<T>::beginFastRenderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat) {
     TIME_FUNCTION;
     ScopedFunctionTimer frfv("fast render frame vulkan startup");
+    vkCtx.awaitFastFullFrame();
     updateStreaming(cam);
     // optimize();
     thread_local RenderBuffer tl_buffer;
@@ -658,46 +780,13 @@ frame Octree<T>::fastRenderFrameVulkan(const Camera& cam, int height, int width,
     vkCtx.updateMaterialBuffer(*gpuMaterials);
     vkCtx.updateSellmeierBuffer(*sellLUT, SELL_LUT_WAVELENGTHS, sellRows);
 
-    std::vector<bool> isLodPoint(tl_buffer.points.size(), false);
-    for(const auto& n : tl_buffer.nodes) {
-        if(n.lodPoint != -1) isLodPoint[n.lodPoint] = true;
-    }
-
-    std::vector<GPURenderData> gpuPoints;
-    std::vector<uint32_t> gpuLights;
-    gpuPoints.reserve(tl_buffer.points.size());
-    Vec3 vctMin = Vec3::Constant(std::numeric_limits<float>::max());
-    Vec3 vctMax = Vec3::Constant(std::numeric_limits<float>::lowest());
-
-    std::vector<size_t> validIndices;
-    validIndices.reserve(tl_buffer.points.size());
-    for(size_t i = 0; i < tl_buffer.points.size(); ++i) {
-        if(isLodPoint[i]) continue;
-        const auto& p = tl_buffer.points[i];
-        validIndices.push_back(i);
-
-        float h = p.size * 0.5f;
-        vctMin = vctMin.cwiseMin(p.position - Vec3::Constant(h));
-        vctMax = vctMax.cwiseMax(p.position + Vec3::Constant(h));
-    }
-    if (vctMin.x() > vctMax.x()) {
-        vctMin.setZero();
-        vctMax.setOnes();
-    }
-
-    for(const size_t idx : validIndices) {
-        const auto& p = tl_buffer.points[idx];
-
-        gpuPoints.push_back({p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId});
-        
-        if (tl_buffer.materials[p.materialIdx].chromaticity != 0u) {
-            gpuLights.push_back(gpuPoints.size() - 1);
-        }
-    }
-
-    int emissiveCount = gpuLights.size();
-    if(gpuPoints.empty()) gpuPoints.push_back(GPURenderData{});
-    if(gpuLights.empty()) gpuLights.push_back(0);
+    thread_local SceneCache tl_fastScene;
+    const bool sceneChanged = refreshSceneCache(tl_buffer, false, true, tl_fastScene);
+    const std::vector<GPURenderData>& gpuPoints = tl_fastScene.gpuPoints;
+    const std::vector<uint32_t>& gpuLights = tl_fastScene.gpuLights;
+    const int emissiveCount = tl_fastScene.emissiveCount;
+    const Vec3 vctMin = tl_fastScene.boundsMin;
+    const Vec3 vctMax = tl_fastScene.boundsMax;
 
     size_t skyW, skyH;
     const std::vector<Eigen::Vector4f>& skyData = getCachedSkyData(skyW, skyH);
@@ -717,41 +806,43 @@ frame Octree<T>::fastRenderFrameVulkan(const Camera& cam, int height, int width,
     size_t outSize = width * height * 5 * sizeof(float);
     vkCtx.updateCommonBuffers(outSize, camData);
     vkCtx.updateSkyboxBuffer(skyData);
-    vkCtx.updateLightBuffer(gpuLights);
-    vkCtx.updateFastBuffers(gpuPoints);
+    if (sceneChanged || !vkCtx.fastPointsResident) {
+        vkCtx.updateLightBuffer(gpuLights);
+        vkCtx.updateFastBuffers(gpuPoints);
+        vkCtx.fastPointsResident = true;
+    }
 
     {
         Vec3 keyLight = (-cam.direction.normalized());
         vkCtx.vctBuildVolume(vkCtx.fastPointBuffer, (uint32_t)gpuPoints.size(), vctMin, vctMax, keyLight, true);
     }
     
-    VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    vkBeginCommandBuffer(vkCtx.commandBuffer, &beginInfo);
-    vkCmdBindPipeline(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.fastPipeline);
-    vkCmdBindDescriptorSets(vkCtx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vkCtx.fastPipelineLayout, 0, 1, &vkCtx.fastDescSet, 0, nullptr);
-    vkCmdDispatch(vkCtx.commandBuffer, (width + 7) / 8, (height + 7) / 8, 1);
-    vkEndCommandBuffer(vkCtx.commandBuffer);
-
-    VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &vkCtx.commandBuffer;
     frfv.stop();
-    if (vkCtx.renderFence == VK_NULL_HANDLE) {
-        VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-        vkCreateFence(vkCtx.device, &fenceInfo, nullptr, &vkCtx.renderFence);
-    } else {
-        vkResetFences(vkCtx.device, 1, &vkCtx.renderFence);
-    }
+    vkCtx.submitFastFullFrame(width, height);
 
-    {
-        vkQueueSubmit(vkCtx.queue, 1, &submitInfo, vkCtx.renderFence);
-        vkWaitForFences(vkCtx.device, 1, &vkCtx.renderFence, VK_TRUE, UINT64_MAX);
-    }
+    InFlightFrame pending;
+    pending.width = width;
+    pending.height = height;
+    pending.outSize = outSize;
+    pending.colorformat = colorformat;
+    pending.pending = true;
+    return pending;
+}
 
-    frame outFrame(width, height, colorformat);
+template<typename T>
+frame Octree<T>::endFastRenderFrameVulkan(InFlightFrame& pending) {
+    TIME_FUNCTION;
+    if (!pending.pending) return frame();
+
+    vkCtx.awaitFastFullFrame();
+    pending.pending = false;
+
+    const int width = pending.width;
+    const int height = pending.height;
+    frame outFrame(width, height, pending.colorformat);
     std::vector<float> colorBuffer(width * height * 3);
 
-    const float* raw = vkCtx.readbackOut(outSize);
+    const float* raw = vkCtx.readbackOut(pending.outSize);
     const int pixelCount = width * height;
     for (int i = 0; i < pixelCount; ++i) {
         int outIdx = i * 3;
@@ -766,9 +857,17 @@ frame Octree<T>::fastRenderFrameVulkan(const Camera& cam, int height, int width,
 }
 
 template<typename T>
-frame Octree<T>::blendedRenderFrameVulkan(const Camera& cam, int height, int width, float pbrScale,
+frame Octree<T>::fastRenderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat) {
+    InFlightFrame pending = beginFastRenderFrameVulkan(cam, height, width, colorformat);
+    return endFastRenderFrameVulkan(pending);
+}
+
+template<typename T>
+InFlightFrame Octree<T>::beginBlendedRenderFrameVulkan(const Camera& cam, int height, int width, float pbrScale,
                 frame::colormap colorformat, int samplesPerPixel, int maxBounces, bool globalIllumination, bool useLod) {
     TIME_FUNCTION;
+    vkCtx.awaitPostPass();
+    vkCtx.awaitFastFullFrame();
     updateStreaming(cam);
     // optimize();
     thread_local RenderBuffer tl_buffer;
@@ -893,24 +992,35 @@ frame Octree<T>::blendedRenderFrameVulkan(const Camera& cam, int height, int wid
     fastCamData.tileOffsetY = 0;
     vkCtx.updateCameraData(fastCamData);
     vkCtx.dispatchFastFullFrame(width, height);
+    vkCtx.dispatchBlend(width, height, lowW, lowH, pbrScale, 1, true);
 
-    frame outFrame(width, height, colorformat);
-    std::vector<float> colorBuffer(width * height * 3);
-    
-    vkCtx.dispatchBlend(width, height, lowW, lowH, pbrScale, 1);
-    
-    void* mappedData;
-    vkMapMemory(vkCtx.device, vkCtx.finalOutMem, 0, colorBuffer.size() * sizeof(float), 0, &mappedData);
-    memcpy(colorBuffer.data(), mappedData, colorBuffer.size() * sizeof(float));
-    vkUnmapMemory(vkCtx.device, vkCtx.finalOutMem);
-
-    outFrame.setData(colorBuffer, frame::colormap::RGB);
-    return outFrame;
+    InFlightFrame pending;
+    pending.width = width;
+    pending.height = height;
+    pending.outSize = size_t(width) * size_t(height) * 5 * sizeof(float);
+    pending.colorformat = colorformat;
+    pending.pending = true;
+    return pending;
 }
 
 template<typename T>
-frame Octree<T>::GameStyleRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat) {
+frame Octree<T>::endBlendedRenderFrameVulkan(InFlightFrame& pending) {
     TIME_FUNCTION;
+    return collectFinalOut<T>(pending);
+}
+
+template<typename T>
+frame Octree<T>::blendedRenderFrameVulkan(const Camera& cam, int height, int width, float pbrScale,
+                frame::colormap colorformat, int samplesPerPixel, int maxBounces, bool globalIllumination, bool useLod) {
+    InFlightFrame pending = beginBlendedRenderFrameVulkan(cam, height, width, pbrScale, colorformat,
+                                                          samplesPerPixel, maxBounces, globalIllumination, useLod);
+    return endBlendedRenderFrameVulkan(pending);
+}
+
+template<typename T>
+InFlightFrame Octree<T>::beginGameStyleRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat) {
+    TIME_FUNCTION;
+    vkCtx.awaitFastFullFrame();
     updateStreaming(cam);
     // optimize();
     thread_local RenderBuffer tl_buffer;
@@ -1009,12 +1119,32 @@ frame Octree<T>::GameStyleRenderFrame(const Camera& cam, int height, int width, 
     fastCamData.tileOffsetX = 0;
     fastCamData.tileOffsetY = 0;
     vkCtx.updateCameraData(fastCamData);
-    vkCtx.dispatchFastFullFrame(width, height);
-    frame outFrame(width, height, colorformat);
+    vkCtx.submitFastFullFrame(width, height);
+
+    InFlightFrame pending;
+    pending.width = width;
+    pending.height = height;
+    pending.outSize = fastOutSize;
+    pending.colorformat = colorformat;
+    pending.pending = true;
+    return pending;
+}
+
+template<typename T>
+frame Octree<T>::endGameStyleRenderFrame(InFlightFrame& pending) {
+    TIME_FUNCTION;
+    if (!pending.pending) return frame();
+
+    vkCtx.awaitFastFullFrame();
+    pending.pending = false;
+
+    const int width = pending.width;
+    const int height = pending.height;
+    frame outFrame(width, height, pending.colorformat);
     std::vector<float> guide(size_t(width) * size_t(height) * 5);
     {
-        const float* raw = vkCtx.readbackOut(fastOutSize);
-        memcpy(guide.data(), raw, fastOutSize);
+        const float* raw = vkCtx.readbackOut(pending.outSize);
+        memcpy(guide.data(), raw, pending.outSize);
     }
 
     std::vector<float> colorBuffer(size_t(width) * size_t(height) * 3);
@@ -1029,10 +1159,18 @@ frame Octree<T>::GameStyleRenderFrame(const Camera& cam, int height, int width, 
 }
 
 template<typename T>
-frame Octree<T>::superBlendedRenderFrameVulkan(const Camera& cam, int height, int width, float ptScale,
+frame Octree<T>::GameStyleRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat) {
+    InFlightFrame pending = beginGameStyleRenderFrame(cam, height, width, colorformat);
+    return endGameStyleRenderFrame(pending);
+}
+
+template<typename T>
+InFlightFrame Octree<T>::beginSuperBlendedRenderFrameVulkan(const Camera& cam, int height, int width, float ptScale,
                 frame::colormap colorformat, int samplesPerPixel, int maxBounces, bool globalIllumination,
                 bool useLod, int minSamplesPerPixel) {
     TIME_FUNCTION;
+    vkCtx.awaitPostPass();
+    vkCtx.awaitFastFullFrame();
     updateStreaming(cam);
     // optimize();
     thread_local RenderBuffer tl_buffer;
@@ -1242,18 +1380,30 @@ frame Octree<T>::superBlendedRenderFrameVulkan(const Camera& cam, int height, in
     vkCtx.updateCommonBuffers(fastOutSize, fastCamData);
     vkCtx.uploadToBuffer(vkCtx.outBuffer, guide.data(), fastOutSize);
 
-    frame outFrame(width, height, colorformat);
-    std::vector<float> colorBuffer(size_t(width) * size_t(height) * 3);
+    vkCtx.dispatchBlend(width, height, lowW, lowH, ptScale, 1, true);
 
-    vkCtx.dispatchBlend(width, height, lowW, lowH, ptScale, 1);
+    InFlightFrame pending;
+    pending.width = width;
+    pending.height = height;
+    pending.outSize = fastOutSize;
+    pending.colorformat = colorformat;
+    pending.pending = true;
+    return pending;
+}
 
-    void* mappedData;
-    vkMapMemory(vkCtx.device, vkCtx.finalOutMem, 0, colorBuffer.size() * sizeof(float), 0, &mappedData);
-    memcpy(colorBuffer.data(), mappedData, colorBuffer.size() * sizeof(float));
-    vkUnmapMemory(vkCtx.device, vkCtx.finalOutMem);
+template<typename T>
+frame Octree<T>::endSuperBlendedRenderFrameVulkan(InFlightFrame& pending) {
+    TIME_FUNCTION;
+    return collectFinalOut<T>(pending);
+}
 
-    outFrame.setData(colorBuffer, frame::colormap::RGB);
-    return outFrame;
+template<typename T>
+frame Octree<T>::superBlendedRenderFrameVulkan(const Camera& cam, int height, int width, float ptScale,
+                frame::colormap colorformat, int samplesPerPixel, int maxBounces, bool globalIllumination,
+                bool useLod, int minSamplesPerPixel) {
+    InFlightFrame pending = beginSuperBlendedRenderFrameVulkan(cam, height, width, ptScale, colorformat,
+                                samplesPerPixel, maxBounces, globalIllumination, useLod, minSamplesPerPixel);
+    return endSuperBlendedRenderFrameVulkan(pending);
 }
 
 }
