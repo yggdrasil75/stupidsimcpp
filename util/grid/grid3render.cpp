@@ -770,13 +770,6 @@ static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData
     vkCtx.uploadToBuffer(vkCtx.adaptiveBuffer, mergedAd.data(), bufBytes);
 }
 
-static void ddgiUpdateIfEnabled(const Camera& cam, int maxBounces) {
-    if (!vkCtx.ddgiVolume.enabled) return;
-    vkCtx.ddgiSyncRenderSettings(maxBounces, 8.0f);
-    vkCtx.ddgiUpdateProbes(maxBounces, cam.origin);
-    vkCtx.ddgiAwaitProbes();
-}
-
 template<typename T>
 static void uploadFogVolumes(GpuContext& vkCtx, GPUCameraData& camData,
                              const std::vector<T>& fogVolumes) {
@@ -855,7 +848,6 @@ InFlightFrame Octree<T>::beginRenderFrameVulkan(const Camera& cam, int height, i
             ctx.pbrPointsResident = true;
         }
     }
-    ddgiUpdateIfEnabled(cam, maxBounces);
 
     runWavefrontTilesMultiGPU(width, height, camData, samplesPerPixel, maxBounces, 0, pixFloats, outSize);
 
@@ -902,27 +894,6 @@ frame Octree<T>::renderFrameVulkan(const Camera& cam, int height, int width, fra
     InFlightFrame pending = beginRenderFrameVulkan(cam, height, width, colorformat, samplesPerPixel,
                                                    maxBounces, globalIllumination, useLod);
     return endRenderFrameVulkan(pending);
-}
-
-template<typename T>
-void Octree<T>::enableDDGI(float spacing) {
-    if (root_ == INVALID_IDX) return;
-    const OctreeNode* r = nodeAt(root_);
-    if (!r) return;
-    BoundingBox b = r->bounds();
-
-    if (spacing <= 0.0f) {
-        Vec3 ext = b.second - b.first;
-        float longest = ext.maxCoeff();
-        spacing = std::clamp(longest / 32.0f, 0.05f, 16.0f);
-    }
-    vkCtx.ddgiConfigure(b.first, b.second, spacing);
-}
-
-template<typename T>
-void Octree<T>::disableDDGI() {
-    vkCtx.ddgiVolume.enabled = 0;
-    vkCtx.ddgiUploadVolume();
 }
 
 template<typename T>
@@ -1128,7 +1099,6 @@ InFlightFrame Octree<T>::beginBlendedRenderFrameVulkan(const Camera& cam, int he
         ctx.updateLightBuffer(gpuLights);
         ctx.updatePBRBuffers(gpuPBRPoints);
     }
-    ddgiUpdateIfEnabled(cam, maxBounces);
 
     runWavefrontTilesMultiGPU(lowW, lowH, pbrCamData, samplesPerPixel, maxBounces, 0, pixFloats, pbrOutSize);
 
@@ -1536,7 +1506,6 @@ InFlightFrame Octree<T>::beginSuperBlendedRenderFrameVulkan(const Camera& cam, i
         ctx.uploadToBuffer(ctx.adaptiveBuffer, adaptiveSeed.data(), adaptiveSeed.size() * sizeof(float));
         ctx.uploadToBuffer(ctx.outBuffer, pixelSeed.data(), pixelSeed.size() * sizeof(float));
     }
-    ddgiUpdateIfEnabled(cam, maxBounces);
 
     runWavefrontTilesMultiGPU(lowW, lowH, pbrCamData, samplesPerPixel, maxBounces, 1, pixFloats, pbrOutSize, true);
     vkCtx.dispatchSmoothPasses(lowW, lowH, samplesPerPixel, 2, false);

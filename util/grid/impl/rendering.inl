@@ -595,8 +595,8 @@ struct GpuContext {
         vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
 
         VkDescriptorPoolSize poolSizes[] = { 
-            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 72},
-            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 16},
+            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 60},
+            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 12},
             {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 6},
             {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 64},
             {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4}
@@ -741,8 +741,6 @@ struct GpuContext {
         initWavefront();
 
         vctInit();
-
-        ddgiInit();
 
         initialized = true;
     }
@@ -1648,8 +1646,8 @@ struct WFPushConstants {
 
 void initWavefront() {
 
-    VkDescriptorSetLayoutBinding b[21] = {};
-    for (int i = 0; i < 21; ++i) {
+    VkDescriptorSetLayoutBinding b[17] = {};
+    for (int i = 0; i < 17; ++i) {
         b[i].binding = i;
         b[i].descriptorCount = 1;
         b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -1657,10 +1655,9 @@ void initWavefront() {
     }
     b[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     b[5].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-    b[20].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 
     VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    li.bindingCount = 21;
+    li.bindingCount = 17;
     li.pBindings = b;
     vkCreateDescriptorSetLayout(device, &li, nullptr, &wfDescLayout);
 
@@ -1726,7 +1723,7 @@ void ensureWavefrontBuffers(uint32_t maxPaths) {
 }
 
 void writeWavefrontDescriptors() {
-    VkDescriptorBufferInfo bi[21] = {};
+    VkDescriptorBufferInfo bi[17] = {};
     bi[0]  = {uboBuffer,      0, VK_WHOLE_SIZE};
     bi[1]  = {pbrPointBuffer, 0, VK_WHOLE_SIZE};
     bi[2]  = {materialBuffer, 0, VK_WHOLE_SIZE};
@@ -1743,21 +1740,17 @@ void writeWavefrontDescriptors() {
     bi[14] = {wfPathHitBuf,   0, VK_WHOLE_SIZE};
     bi[15] = {sellmeierBuffer ? sellmeierBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
     bi[16] = {fogBuffer ? fogBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
-    bi[17] = {ddgiIrradianceBuf ? ddgiIrradianceBuf : materialBuffer, 0, VK_WHOLE_SIZE};
-    bi[18] = {ddgiVisibilityBuf ? ddgiVisibilityBuf : materialBuffer, 0, VK_WHOLE_SIZE};
-    bi[19] = {ddgiRayBuf ? ddgiRayBuf : materialBuffer, 0, VK_WHOLE_SIZE};
-    bi[20] = {ddgiVolumeBuf ? ddgiVolumeBuf : uboBuffer, 0, VK_WHOLE_SIZE};
 
-    VkWriteDescriptorSet w[21] = {};
+    VkWriteDescriptorSet w[17] = {};
     int n = 0;
-    for (int i = 0; i < 21; ++i) {
+    for (int i = 0; i < 17; ++i) {
         if (i == 5) continue;
         w[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         w[n].dstSet = wfDescSet;
         w[n].dstBinding = i;
         w[n].descriptorCount = 1;
-        w[n].descriptorType = (i == 0 || i == 20) ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
-                                                  : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w[n].descriptorType = (i == 0) ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+                                                             : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         w[n].pBufferInfo = &bi[i];
         ++n;
     }
@@ -1889,7 +1882,6 @@ void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel
 }
 
 #include "vct_host.inl"
-#include "ddgi_host.inl"
 
 };
 inline GpuContext vkCtx;

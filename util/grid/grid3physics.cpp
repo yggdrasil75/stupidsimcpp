@@ -354,8 +354,10 @@ void Octree<T>::stepPhysics(float dt) {
 
             if (node->physics.velocity.squaredNorm() < sleepVel2) {
                 node->physics.velocity.setZero();
+                node->setStatic(true);
                 continue;
             }
+            node->setStatic(false);
 
             perMoves[i].node = node;
             perMoves[i].oldPos = node->position;
@@ -524,8 +526,10 @@ void Octree<T>::stepRigidLattice(
 
         if (node->physics.velocity.squaredNorm() < sleepV2) {
             node->physics.velocity.setZero();
+            node->setStatic(true);
             continue;
         }
+        node->setStatic(false);
         moves[i].node = node;
         moves[i].oldPos = node->position;
         moves[i].newPos = node->position + node->physics.velocity * dt;

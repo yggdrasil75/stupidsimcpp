@@ -37,11 +37,6 @@ void main() {
 
     remainingMaxDist -= t;
 
-    bool isProbeRay = (p.i1.w & FLAG_DDGI_RAY) != 0;
-    if (isProbeRay && bounce == 0) {
-        ddgiRayData[uint(p.i1.z) * DDGI_RAY_STRIDE + 1].x = t;
-    }
-
     GPURenderData hitData = points[hitIndex];
     vec3 invD = safe_invDir(dir);
     float tExit;
@@ -56,7 +51,7 @@ void main() {
 
     if (mediumObjId != -1) {
         vec3 segAbs = unpackRGB9E5(materials[hitData.materialIdx].absorption);
-        throughput *= exp(-segAbs * t);   // tune scale to match shadowTransmit
+        throughput *= exp(-segAbs * t);
     }
 
     bool skipSurface = false;
@@ -209,22 +204,6 @@ void main() {
                     shadowQueue[si] = sr;
                 }
             }
-        }
-
-        bool ddgiTerminate = ddgiVolume.state.z != 0 && !isEmissive &&
-                             (isProbeRay ? (bounce >= 1) : (bounce >= 1 && !lastBounceSpecular));
-        if (ddgiTerminate && pdiff > 0.001) {
-            vec3 irr = ddgiSampleIrradiance(hitPoint, offsetNorm, -dir, ddgiVolume);
-            vec3 diffuseAlbedo = albedo.rgb * opacity * (1.0 - metallic);
-            radiance += throughput * diffuseAlbedo * irr;
-
-            p.rad.xyz = radiance;
-            p.u0.y = rng;
-            p.u0.z = grng;
-            p.i1.w &= ~FLAG_ALIVE;
-            pathsHot[slot] = p;
-            pathsHit[slot].misc = -1.0;
-            return;
         }
 
         float r1 = nextFloat(rng);

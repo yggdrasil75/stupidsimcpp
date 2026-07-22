@@ -40,8 +40,7 @@ void main() {
     int hitResult = voxelTraverse(origin, dir, invD, remainingMaxDist, hitIndex, t);
     if (hitResult == 0) t = remainingMaxDist;
 
-    bool isProbeRay = (p.i1.w & FLAG_DDGI_RAY) != 0;
-    bool isPrimary = (bounce == 0 && transp == 0 && volum == 0) && !isProbeRay;
+    bool isPrimary = (bounce == 0 && transp == 0 && volum == 0);
     if (isPrimary) {
         if (hitResult == 1 && hitIndex >= 0 && hitIndex < points.length()) {
             GPURenderData hd = points[hitIndex];

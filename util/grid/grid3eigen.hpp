@@ -46,9 +46,10 @@ namespace Grid {
     // for physics I could make a object class and store in that an index for subobject physic types (ie: skin vs bone vs cartilege all stored in an animal object)
     // I need to make sure that objects are either fully loaded or fully unloaded. I cant have a partially loaded object. so that has to be included in the lazy unload at some point.
     // also need to store relative positions to the object center, both "resting" and "current". 
-    // some rendering options: ddgi
+    // some rendering options: ddgi, restir, svgf
     // the tiles are fixed size, which on 1920x1080 images has the bottom right corner be a very small dispatch. 
-    
+    // probably going to go with restir
+
 
 
 ///@brief A highly optimized sparse voxel Octree tailored for physics, rendering, LOD, and streaming.
@@ -2915,11 +2916,6 @@ public:
     ///@brief Waits on a submitted offline frame and reads its pixels back
     frame endRenderFrameVulkan(InFlightFrame& pending);
 
-    ///@brief Fits a DDGI probe grid over the scene and enables probe lighting
-    ///@param spacing Probe spacing in world units; smaller resolves finer bounce detail
-    void enableDDGI(float spacing = 0.0f);
-    ///@brief Turns probe lighting off without releasing the atlases
-    void disableDDGI();
     void stepPhysics(float dt);
     void stepRigidLattice(float dt, std::vector<std::shared_ptr<NodeData>>& rigidNodes,
                           const std::vector<std::vector<PhysicsMaterial_>>& fastMats, size_t fastMatsSize);

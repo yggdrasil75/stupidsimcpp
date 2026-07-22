@@ -62,8 +62,6 @@ const uint WF_NO_HIT = 0xFFFFFFFFu;
 #define HERO_MASK  (3 << HERO_SHIFT)
 #define GET_HERO(f)    (((f) & HERO_MASK) >> HERO_SHIFT)
 #define SET_HERO(f, h) (((f) & ~HERO_MASK) | (((h) & 3) << HERO_SHIFT))
-#define FLAG_DDGI_RAY 8
-#define DDGI_RAY_STRIDE 2
 
 struct ShadowRay {
     vec4 o_tmax;   // xyz origin, w maxDist
@@ -149,15 +147,6 @@ struct FogVolume {
     vec4 absorb;  // rgb absorption tint
 };
 layout(std430, binding = 16) readonly buffer FogVolumeBuffer { FogVolume fogVolumes[]; };
-
-#include "ddgi_common.glsl"
-
-layout(std430, binding = 17) buffer DDGIIrradianceBuffer { vec4 ddgiIrradiance[]; };
-layout(std430, binding = 18) buffer DDGIVisibilityBuffer { vec4 ddgiVisibility[]; };
-layout(std430, binding = 19) buffer DDGIRayBuffer        { vec4 ddgiRayData[]; };
-layout(binding = 20) uniform DDGIVolumeBuffer            { DDGIVolume ddgiVolume; };
-
-#include "ddgi_sample.glsl"
 
 bool fogClip(vec3 ro, vec3 invD, float tMax, vec4 minB, vec4 maxB, out float t0, out float t1) {
     vec3 tA = (minB.xyz - ro) * invD;

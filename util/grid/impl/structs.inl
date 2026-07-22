@@ -119,6 +119,7 @@ static inline uint32_t packRGBA8(const Eigen::Vector4f& c) {
 static constexpr uint32_t EXTENT_UNIT = 0u; // 1,1,1 packed; fields store count-1
 static constexpr float LATTICE_EPS = 1e-3f; // cell fractions; merge only near-exact grid points
 static constexpr uint32_t EXTENT_MAX  = 1024u;
+static constexpr uint32_t EXTENT_STATIC_BIT = 1u << 30;
 
 ///@brief Packs a per-axis cell count into three 10-bit fields
 ///@param ex Cell span along x, clamped to [1, EXTENT_MAX]

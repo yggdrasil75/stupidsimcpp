@@ -371,7 +371,7 @@ int main() {
     const int samples = 10;
     const int blendedsamples = 30;
     const float blendedfactor = 0.65;
-    const int videosamples = 10;
+    const int videosamples = 250;
     const int bounces = 8;
     const int physicsSubsteps = 10;
     const float physicsDt = 1.0f / fps;
@@ -592,7 +592,6 @@ int main() {
 
     std::cout << "\nStarting video render..." << std::endl;
     std::cout << "Total frames to render: " << totalFrames << std::endl;
-    octree.enableDDGI();
 
     for (size_t i = 0; i < views.size(); ++i) {
         ScopedFunctionTimer meh("Video");
