@@ -49,10 +49,10 @@ void main() {
 
         vec4 acc = vec4(0.0);
         for (int r = 0; r < rays; ++r) {
-            vec3 rd = ddgiRayDir(r, rays, uint(ddgiVolume.state.x));
-            float w = dot(texelDir, rd);
+            vec3 rd = s_rayDirDist[r].yzw;
+            float w = max(0.0, dot(texelDir, rd));
             if (isIrr) {
-                if (w <= 0.0) continue;
+                if (w <= 1e-6) continue;
                 acc += vec4(s_rayRadiance[r].rgb * w, w);
             } else {
                 w = pow(max(0.0, w), sharpness);

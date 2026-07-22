@@ -13,14 +13,18 @@ struct RenderData {
     Eigen::Vector4f color;
     uint32_t materialIdx;
     int objectId;
+    uint32_t extent = EXTENT_UNIT;
 
     const Vec3 boundsMin() const {
-        return (position - Vec3::Constant(0.5 * size));
+        return (position - Vec3::Constant(0.5f * size));
     }
 
     const Vec3 boundsMax() const {
-        return (position + Vec3::Constant(0.5 * size));
+        return (position + Vec3::Constant(0.5f * size)
+                + Vec3::Constant(size).cwiseProduct(unpackExtent(extent) - Vec3::Ones()));
     }
+
+    bool isMerged() const { return extent != EXTENT_UNIT; }
 };
 
 template<typename T>
@@ -47,6 +51,11 @@ struct RenderNode_ {
     }
 };
 
+struct MergeCacheEntry {
+    std::vector<RenderData> boxes;
+    uint32_t sourceCount = 0;
+};
+
 template<typename T>
 struct RenderBuffer_ {
     std::vector<RenderNode_<T>> nodes;
@@ -54,11 +63,15 @@ struct RenderBuffer_ {
     std::vector<RenderMaterial> materials;
     uint32_t defaultMatIdx;
 
+    std::unordered_map<uint32_t, MergeCacheEntry> mergeCache;
+
     void clear() {
         nodes.clear();
         points.clear();
         materials.clear();
     }
+
+    void clearMergeCache() { mergeCache.clear(); }
 };
 
 struct InFlightFrame {
@@ -90,6 +103,7 @@ struct alignas(16) GPURenderData {
     uint32_t color;
     uint32_t materialIdx;
     int objectId;
+    uint32_t extent = EXTENT_UNIT;
 };
 
 struct alignas(16) GPUCameraData {
@@ -983,13 +997,17 @@ struct GpuContext {
         if (!gpuFill) {
             std::vector<VkAabbPositionsKHR> aabbs(numPrimitives);
             for (uint32_t i = 0; i < numPrimitives; ++i) {
-                float halfSize = points[i].size * 0.5f;
-                aabbs[i].minX = points[i].position.x() - halfSize;
-                aabbs[i].minY = points[i].position.y() - halfSize;
-                aabbs[i].minZ = points[i].position.z() - halfSize;
-                aabbs[i].maxX = points[i].position.x() + halfSize;
-                aabbs[i].maxY = points[i].position.y() + halfSize;
-                aabbs[i].maxZ = points[i].position.z() + halfSize;
+                const float halfSize = points[i].size * 0.5f;
+                const Vec3 lo = points[i].position - Vec3::Constant(halfSize);
+                const Vec3 hi = points[i].position + Vec3::Constant(halfSize)
+                    + Vec3::Constant(points[i].size).cwiseProduct(
+                        unpackExtent(points[i].extent) - Vec3::Ones());
+                aabbs[i].minX = lo.x();
+                aabbs[i].minY = lo.y();
+                aabbs[i].minZ = lo.z();
+                aabbs[i].maxX = hi.x();
+                aabbs[i].maxY = hi.y();
+                aabbs[i].maxZ = hi.z();
             }
             void* data;
             vkMapMemory(device, aabbMem, 0, aabbSize, 0, &data);

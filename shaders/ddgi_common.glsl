@@ -13,7 +13,8 @@ struct DDGIVolume {
     vec4 originSpacing;
     ivec4 counts;
     vec4 params;
-    ivec4 state;
+    ivec3 state;
+    float fireflyClamp;
 };
 
 vec3 octToDir(vec2 o) {

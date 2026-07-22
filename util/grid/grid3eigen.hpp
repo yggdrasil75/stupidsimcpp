@@ -46,7 +46,9 @@ namespace Grid {
     // for physics I could make a object class and store in that an index for subobject physic types (ie: skin vs bone vs cartilege all stored in an animal object)
     // I need to make sure that objects are either fully loaded or fully unloaded. I cant have a partially loaded object. so that has to be included in the lazy unload at some point.
     // also need to store relative positions to the object center, both "resting" and "current". 
-    // some rendering options: sgvf (temporal accumulation)
+    // some rendering options: ddgi
+    // the tiles are fixed size, which on 1920x1080 images has the bottom right corner be a very small dispatch. 
+    
 
 
 ///@brief A highly optimized sparse voxel Octree tailored for physics, rendering, LOD, and streaming.
@@ -1601,6 +1603,12 @@ private:
     ///@param localObjects Readonly copy of instantiated object metadata
     void buildRenderNodeAt(uint32_t nodeIndex, RenderBuffer_<T>& buffer, uint32_t nodeIdx, const std::unordered_map<int, std::shared_ptr<GridObject>>& localObjects);
     
+    ///@brief Greedily merges same-material voxels in a leaf into axis-aligned boxes
+    ///@param buffer Render buffer whose tail range is rewritten in place
+    ///@param first Index of the first point contributed by this leaf
+    ///@return Point count remaining after merging
+    uint32_t mergeLeafPoints(RenderBuffer_<T>& buffer, uint32_t first);
+
     ///@brief Rapid DDA-style hierarchical step iterator for extremely fast line intersection logic
     ///@param buffer Renderable linear data footprint mapping tree hierarchy
     ///@param ray Tracing origin direction
@@ -2909,7 +2917,7 @@ public:
 
     ///@brief Fits a DDGI probe grid over the scene and enables probe lighting
     ///@param spacing Probe spacing in world units; smaller resolves finer bounce detail
-    void enableDDGI(float spacing);
+    void enableDDGI(float spacing = 0.0f);
     ///@brief Turns probe lighting off without releasing the atlases
     void disableDDGI();
     void stepPhysics(float dt);

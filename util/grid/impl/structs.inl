@@ -116,6 +116,31 @@ static inline uint32_t packRGBA8(const Eigen::Vector4f& c) {
     return r | (g << 8) | (b << 16) | (a << 24);
 }
 
+static constexpr uint32_t EXTENT_UNIT = 0u; // 1,1,1 packed; fields store count-1
+static constexpr float LATTICE_EPS = 1e-3f; // cell fractions; merge only near-exact grid points
+static constexpr uint32_t EXTENT_MAX  = 1024u;
+
+///@brief Packs a per-axis cell count into three 10-bit fields
+///@param ex Cell span along x, clamped to [1, EXTENT_MAX]
+///@param ey Cell span along y
+///@param ez Cell span along z
+///@return Packed extent, x in bits 0-9, y in 10-19, z in 20-29
+static inline uint32_t packExtent(uint32_t ex, uint32_t ey, uint32_t ez) {
+    uint32_t x = std::clamp(ex, 1u, EXTENT_MAX) - 1u;
+    uint32_t y = std::clamp(ey, 1u, EXTENT_MAX) - 1u;
+    uint32_t z = std::clamp(ez, 1u, EXTENT_MAX) - 1u;
+    return x | (y << 10) | (z << 20);
+}
+
+///@brief Expands a packed extent into per-axis cell counts
+///@param e Packed extent as produced by packExtent
+///@return Cell spans as floats, each at least 1.0f
+static inline Vec3 unpackExtent(uint32_t e) {
+    return Vec3(static_cast<float>((e         & 0x3FFu) + 1u),
+                static_cast<float>(((e >> 10) & 0x3FFu) + 1u),
+                static_cast<float>(((e >> 20) & 0x3FFu) + 1u));
+}
+
 static inline uint32_t packMaterialProps(float roughness, float metallic, uint32_t sellmeierRow) {
     uint32_t r8 = static_cast<uint32_t>(std::clamp(roughness, 0.0f, 1.0f) * 255.0f);
     uint32_t m8 = static_cast<uint32_t>(std::clamp(metallic, 0.0f, 1.0f) * 255.0f);

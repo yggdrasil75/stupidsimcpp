@@ -23,8 +23,15 @@ struct GPURenderData {
     uint color;
     uint materialIdx;
     int  objectId;
-    uint padding;
+    uint extent;
 };
+
+vec3 unpackExtent(uint e) {
+    return vec3(float((e & 0x3FFu) + 1u), float(((e >> 10) & 0x3FFu) + 1u), float(((e >> 20) & 0x3FFu) + 1u));
+}
+vec3 ptBoundsMin(GPURenderData p) { return p.position - p.size * 0.5; }
+vec3 ptBoundsMax(GPURenderData p) { return p.position + p.size * 0.5 + p.size * (unpackExtent(p.extent) - vec3(1.0)); }
+
 
 struct PathHot {
     vec4 o_tmax;
@@ -318,8 +325,8 @@ vec3 sampleCosHemisphere(vec3 N, float r1, float r2, out float pdfW) {
 
 bool rayCubeIntersect(vec3 ro, vec3 rd, vec3 invD, GPURenderData pt,
                       out float t, out vec3 normal, out vec3 hitPoint, out float tExit) {
-    vec3 bMin = pt.position - pt.size * 0.5;
-    vec3 bMax = pt.position + pt.size * 0.5;
+    vec3 bMin = ptBoundsMin(pt);
+    vec3 bMax = ptBoundsMax(pt);
     vec3 t0 = (bMin - ro) * invD;
     vec3 t1 = (bMax - ro) * invD;
     vec3 tmin3 = min(t0, t1);
@@ -359,9 +366,8 @@ int voxelTraverse(vec3 ro, vec3 rd, vec3 invD, float maxDist,
         if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionAABBEXT) {
             int ptIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
             GPURenderData cand = points[ptIdx];
-            vec3 half3 = vec3(cand.size * 0.5f);
-            vec3 t0 = (cand.position - half3 - ro) * invD;
-            vec3 t1 = (cand.position + half3 - ro) * invD;
+            vec3 t0 = (ptBoundsMin(cand) - ro) * invD;
+            vec3 t1 = (ptBoundsMax(cand) - ro) * invD;
             vec3 tmin3 = min(t0, t1);
             vec3 tmax3 = max(t0, t1);
             float tMin = max(max(tmin3.x, tmin3.y), tmin3.z);
@@ -415,9 +421,8 @@ vec3 shadowTransmit(vec3 ro, vec3 rd, vec3 invD, float maxDist, int lightPtIdx) 
             int ptIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
             if (ptIdx == lightPtIdx) continue;
             GPURenderData pt = points[ptIdx];
-            vec3 half3 = vec3(pt.size * 0.5f);
-            vec3 t0 = (pt.position - half3 - ro) * invD;
-            vec3 t1 = (pt.position + half3 - ro) * invD;
+            vec3 t0 = (ptBoundsMin(pt) - ro) * invD;
+            vec3 t1 = (ptBoundsMax(pt) - ro) * invD;
             vec3 tmin3 = min(t0, t1);
             vec3 tmax3 = max(t0, t1);
             float tEntry = max(max(tmin3.x, tmin3.y), tmin3.z);

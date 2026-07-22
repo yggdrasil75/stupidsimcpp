@@ -7,8 +7,14 @@ struct GPURenderData {
     uint color;
     uint materialIdx;
     int  objectId;
-    uint padding;
+    uint extent;
 };
+
+vec3 unpackExtent(uint e) {
+    return vec3(float((e & 0x3FFu) + 1u), float(((e >> 10) & 0x3FFu) + 1u), float(((e >> 20) & 0x3FFu) + 1u));
+}
+vec3 ptBoundsMin(GPURenderData p) { return p.position - p.size * 0.5; }
+vec3 ptBoundsMax(GPURenderData p) { return p.position + p.size * 0.5 + p.size * (unpackExtent(p.extent) - vec3(1.0)); }
 
 layout(std430, binding = 0) readonly buffer PointBuffer { GPURenderData points[]; };
 
@@ -67,9 +73,8 @@ void main() {
         radiance = albedo.rgb * (0.35 + 0.65 * halfLambert);
     }
 
-    float halfpoint = pt.size * 0.5;
-    vec3 bmin = pt.position - vec3(halfpoint);
-    vec3 bmax = pt.position + vec3(halfpoint);
+    vec3 bmin = ptBoundsMin(pt);
+    vec3 bmax = ptBoundsMax(pt);
 
     ivec3 cmin = ivec3(floor((bmin - vp.volMin) * vp.invVoxelSize));
     ivec3 cmax = ivec3(floor((bmax - vp.volMin) * vp.invVoxelSize));

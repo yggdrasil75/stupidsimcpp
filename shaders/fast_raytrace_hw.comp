@@ -30,8 +30,15 @@ struct GPURenderData {
     uint color;
     uint materialIdx;
     int objectId;
-    uint padding2;
+    uint extent;
 };
+
+vec3 unpackExtent(uint e) {
+    return vec3(float((e & 0x3FFu) + 1u), float(((e >> 10) & 0x3FFu) + 1u), float(((e >> 20) & 0x3FFu) + 1u));
+}
+vec3 ptBoundsMin(GPURenderData p) { return p.position - p.size * 0.5; }
+vec3 ptBoundsMax(GPURenderData p) { return p.position + p.size * 0.5 + p.size * (unpackExtent(p.extent) - vec3(1.0)); }
+
 
 layout(std430, binding = 1) readonly buffer PointBuffer { GPURenderData points[]; };
 layout(std430, binding = 2) writeonly buffer OutputBuffer { float pixels[]; };
@@ -171,8 +178,8 @@ bool rayBoxIntersect(Ray ray, vec3 bMin, vec3 bMax, out float tMin, out float tM
 }
 
 bool rayCubeIntersect(Ray ray, GPURenderData pt, out float t, out float tExitOut, out vec3 normal) {
-    vec3 bMin = pt.position - pt.size * 0.5;
-    vec3 bMax = pt.position + pt.size * 0.5;
+    vec3 bMin = ptBoundsMin(pt);
+    vec3 bMax = ptBoundsMax(pt);
 
     float tMin, tMax;
     if (!rayBoxIntersect(ray, bMin, bMax, tMin, tMax) || tMax < 0.0) return false;
@@ -289,7 +296,8 @@ bool pickLight(vec3 pos, int selfObjId, out vec3 ldir, out float ldist,
         vec3 emitCol = unpackRGB9E5(materials[lp.materialIdx].chromaticity);
         vec3 e = max(emitCol, unpackRGBA8(lp.color).rgb * emitCol);
         float lum = dot(e, vec3(0.2126, 0.7152, 0.0722));
-        float score = lum * lp.size * lp.size / distSq;
+        vec3 lpe = unpackExtent(lp.extent);
+        float score = lum * lp.size * lp.size * max(lpe.x * lpe.y, max(lpe.y * lpe.z, lpe.x * lpe.z)) / distSq;
         if (score > bestScore) {
             bestScore = score;
             found = true;
@@ -298,7 +306,7 @@ bool pickLight(vec3 pos, int selfObjId, out vec3 ldir, out float ldist,
             ldist = d;
             emit = e;
             lightObjId = lp.objectId;
-            lightSize = lp.size;
+            lightSize = lp.size * max(lpe.x, max(lpe.y, lpe.z));
         }
     }
     return found;

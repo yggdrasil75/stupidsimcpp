@@ -3,6 +3,8 @@
 #extension GL_GOOGLE_include_directive : require
 #include "wf_common.glsl"
 
+float lum(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+
 void main() {
     uint gid = gl_GlobalInvocationID.x;
     if (ddgiVolume.state.z == 0) return;
@@ -14,7 +16,8 @@ void main() {
     if (isInvalid(rad)) rad = vec3(0.0);
 
     float lum = dot(rad, vec3(0.2126, 0.7152, 0.0722));
-    if (lum > 8.0) rad *= 8.0 / lum;
+    float clampMax = ddgiVolume.fireflyClamp;
+    if (clampMax > 0.0 && lum > clampMax) rad *= clampMax / lum;
 
     ddgiRayData[gid * DDGI_RAY_STRIDE + 0] = vec4(rad, 0.0);
 }

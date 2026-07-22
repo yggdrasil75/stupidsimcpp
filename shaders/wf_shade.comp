@@ -39,7 +39,7 @@ void main() {
 
     bool isProbeRay = (p.i1.w & FLAG_DDGI_RAY) != 0;
     if (isProbeRay && bounce == 0) {
-        ddgiRayData[uint(p.i1.z) * DDGI_RAY_STRIDE + 1] = vec4(t, 0.0, 0.0, 0.0);
+        ddgiRayData[uint(p.i1.z) * DDGI_RAY_STRIDE + 1].x = t;
     }
 
     GPURenderData hitData = points[hitIndex];
@@ -212,7 +212,7 @@ void main() {
         }
 
         bool ddgiTerminate = ddgiVolume.state.z != 0 && !isEmissive &&
-                             (isProbeRay ? (bounce == 0) : (bounce >= 1 && !lastBounceSpecular));
+                             (isProbeRay ? (bounce >= 1) : (bounce >= 1 && !lastBounceSpecular));
         if (ddgiTerminate && pdiff > 0.001) {
             vec3 irr = ddgiSampleIrradiance(hitPoint, offsetNorm, -dir, ddgiVolume);
             vec3 diffuseAlbedo = albedo.rgb * opacity * (1.0 - metallic);

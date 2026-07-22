@@ -51,11 +51,27 @@ void Octree<T>::buildRenderNodeAt(uint32_t nodeIndex, RenderBuffer_<T>& buffer, 
             rd.materialIdx = (pt->renderMatIdx < buffer.defaultMatIdx) ? pt->renderMatIdx : buffer.defaultMatIdx;
             
             rd.objectId = pt->objectId;
+            rd.extent = EXTENT_UNIT;
             buffer.points.push_back(rd);
         }
     }
 
-    rnode.pointCount = static_cast<uint32_t>(buffer.points.size() - rnode.firstPoint);
+    const uint32_t rawCount = static_cast<uint32_t>(buffer.points.size()) - rnode.firstPoint;
+    auto cacheIt = buffer.mergeCache.find(nodeIndex);
+    const bool cacheUsable = !node->isDirty() && cacheIt != buffer.mergeCache.end()
+                             && cacheIt->second.sourceCount == rawCount;
+    if (cacheUsable) {
+        buffer.points.resize(rnode.firstPoint);
+        for (const RenderData& b : cacheIt->second.boxes) buffer.points.push_back(b);
+        rnode.pointCount = static_cast<uint32_t>(cacheIt->second.boxes.size());
+    } else {
+        rnode.pointCount = mergeLeafPoints(buffer, rnode.firstPoint);
+        MergeCacheEntry entry;
+        entry.sourceCount = rawCount;
+        entry.boxes.assign(buffer.points.begin() + rnode.firstPoint, buffer.points.end());
+        buffer.mergeCache[nodeIndex] = std::move(entry);
+        if (isLoaded) const_cast<OctreeNode_<T>*>(node)->setDirty(false);
+    }
     
     rnode.lodPoint = -1;
     auto lodData = lodOf(nodeIndex);
@@ -68,7 +84,8 @@ void Octree<T>::buildRenderNodeAt(uint32_t nodeIndex, RenderBuffer_<T>& buffer, 
         ld.materialIdx = (lodData->renderMatIdx < buffer.defaultMatIdx)
                              ? lodData->renderMatIdx : buffer.defaultMatIdx;
 
-        ld.objectId = lodData->objectId; 
+        ld.objectId = lodData->objectId;
+        ld.extent = EXTENT_UNIT; 
         rnode.lodPoint = static_cast<int32_t>(buffer.points.size());
         buffer.points.push_back(ld);
     }
@@ -101,6 +118,121 @@ void Octree<T>::buildRenderNodeAt(uint32_t nodeIndex, RenderBuffer_<T>& buffer, 
     buffer.nodes[nodeIdx] = rnode;
 }
 
+struct MergeCell {
+    uint32_t src;
+    uint32_t claimedBy;
+};
+
+using MergeLattice = std::unordered_map<std::array<int64_t, 3>, MergeCell, Vec3i64Hash>;
+
+///@brief Tests whether a spanX-by-spanY slab at base is free and matches the seed
+static bool slabMatches(const MergeLattice& lattice, const std::vector<RenderData>& pts, uint32_t first,
+                        const RenderData& seed, const std::array<int64_t, 3>& base,
+                        int64_t spanX, int64_t spanY) {
+    for (int64_t dy = 0; dy < spanY; ++dy) {
+        for (int64_t dx = 0; dx < spanX; ++dx) {
+            auto it = lattice.find({base[0] + dx, base[1] + dy, base[2]});
+            if (it == lattice.end() || it->second.claimedBy != INVALID_IDX) return false;
+            const RenderData& p = pts[first + it->second.src];
+            if (p.materialIdx != seed.materialIdx || p.objectId != seed.objectId
+                || !p.color.isApprox(seed.color)) return false;
+        }
+    }
+    return true;
+}
+
+///@brief Marks a spanX-by-spanY slab at base as owned, after slabMatches approved it
+static void claimSlab(MergeLattice& lattice, const std::array<int64_t, 3>& base,
+                      int64_t spanX, int64_t spanY, uint32_t owner) {
+    for (int64_t dy = 0; dy < spanY; ++dy) {
+        for (int64_t dx = 0; dx < spanX; ++dx) {
+            lattice[{base[0] + dx, base[1] + dy, base[2]}].claimedBy = owner;
+        }
+    }
+}
+
+template<typename T>
+uint32_t Octree<T>::mergeLeafPoints(RenderBuffer_<T>& buffer, uint32_t first) {
+    const uint32_t count = static_cast<uint32_t>(buffer.points.size()) - first;
+    if (count < 2) return count;
+
+    const float cell = buffer.points[first].size;
+    if (cell <= 0.0f) return count;
+    Vec3 lo = buffer.points[first].position;
+    for (uint32_t i = 1; i < count; ++i) {
+        const RenderData& p = buffer.points[first + i];
+        if (p.size != cell) return count;
+        lo = lo.cwiseMin(p.position);
+    }
+
+    const float invCell = 1.0f / cell;
+    std::unordered_map<std::array<int64_t, 3>, MergeCell, Vec3i64Hash> lattice;
+    lattice.reserve(count * 2);
+    std::vector<std::array<int64_t, 3>> coords(count);
+
+    std::vector<uint32_t> passthrough;
+    for (uint32_t i = 0; i < count; ++i) {
+        const Vec3 rel = (buffer.points[first + i].position - lo) * invCell;
+        coords[i] = {static_cast<int64_t>(std::llround(rel.x())),
+                     static_cast<int64_t>(std::llround(rel.y())),
+                     static_cast<int64_t>(std::llround(rel.z()))};
+        const Vec3 snapped(static_cast<float>(coords[i][0]), static_cast<float>(coords[i][1]),
+                           static_cast<float>(coords[i][2]));
+        if ((rel - snapped).cwiseAbs().maxCoeff() > LATTICE_EPS) {
+            passthrough.push_back(i);
+            continue;
+        }
+        if (!lattice.emplace(coords[i], MergeCell{i, INVALID_IDX}).second) {
+            passthrough.push_back(i);
+        }
+    }
+
+    std::vector<RenderData> merged;
+    merged.reserve(count);
+
+    for (uint32_t i = 0; i < count; ++i) {
+        auto seedIt = lattice.find(coords[i]);
+        if (seedIt == lattice.end() || seedIt->second.src != i) continue;
+        MergeCell& self = seedIt->second;
+        if (self.claimedBy != INVALID_IDX) continue;
+
+        const RenderData& seed = buffer.points[first + i];
+        const std::array<int64_t, 3> c = coords[i];
+        const uint32_t owner = static_cast<uint32_t>(merged.size());
+        self.claimedBy = owner;
+
+        const int64_t lim = static_cast<int64_t>(EXTENT_MAX);
+        int64_t ex = 1, ey = 1, ez = 1;
+
+        while (ex < lim && slabMatches(lattice, buffer.points, first, seed,
+                                       {c[0] + ex, c[1], c[2]}, 1, 1)) {
+            claimSlab(lattice, {c[0] + ex, c[1], c[2]}, 1, 1, owner);
+            ex++;
+        }
+        while (ey < lim && slabMatches(lattice, buffer.points, first, seed,
+                                       {c[0], c[1] + ey, c[2]}, ex, 1)) {
+            claimSlab(lattice, {c[0], c[1] + ey, c[2]}, ex, 1, owner);
+            ey++;
+        }
+        while (ez < lim && slabMatches(lattice, buffer.points, first, seed,
+                                       {c[0], c[1], c[2] + ez}, ex, ey)) {
+            claimSlab(lattice, {c[0], c[1], c[2] + ez}, ex, ey, owner);
+            ez++;
+        }
+
+        RenderData box = seed;
+        box.extent = packExtent(static_cast<uint32_t>(ex), static_cast<uint32_t>(ey),
+                                static_cast<uint32_t>(ez));
+        merged.push_back(box);
+    }
+
+    for (uint32_t i : passthrough) merged.push_back(buffer.points[first + i]);
+
+    buffer.points.resize(first);
+    for (const RenderData& b : merged) buffer.points.push_back(b);
+    return static_cast<uint32_t>(merged.size());
+}
+
 template<typename T>
 std::vector<RenderData*> Octree<T>::fastVoxelTraverse(const RenderBuffer_<T>& buffer, const Ray& ray, float maxDist) {
     std::vector<RenderData*> hits;
@@ -131,6 +263,9 @@ std::vector<RenderData*> Octree<T>::fastVoxelTraverse(const RenderBuffer_<T>& bu
             if (!node.isLoaded && node.originalNode != INVALID_IDX) {
                 ensureLoaded(node.originalNode, true);
             }
+
+            if (node.isLoaded && node.pointCount == 0 && node.lodPoint == -1
+                && (node.isLeaf || node.childMask == 0)) continue;
 
             if (!node.isLeaf && node.lodPoint != -1) {
                 float dist = (node.center - ray.origin).norm();
@@ -480,7 +615,7 @@ static bool refreshSceneCache(const BufferT& buffer, bool wantSort, bool expandB
         for (const auto& sp : sortedPoints) {
             const auto& p = buffer.points[sp.idx];
             cache.gpuPoints.push_back({p.position, p.size, packRGBA8(p.color),
-                                       p.materialIdx, p.objectId});
+                                       p.materialIdx, p.objectId, p.extent});
             if (buffer.materials[p.materialIdx].chromaticity != 0u) {
                 cache.gpuLights.push_back(cache.gpuPoints.size() - 1);
             }
@@ -489,7 +624,7 @@ static bool refreshSceneCache(const BufferT& buffer, bool wantSort, bool expandB
         for (const size_t idx : validIndices) {
             const auto& p = buffer.points[idx];
             cache.gpuPoints.push_back({p.position, p.size, packRGBA8(p.color),
-                                       p.materialIdx, p.objectId});
+                                       p.materialIdx, p.objectId, p.extent});
             if (buffer.materials[p.materialIdx].chromaticity != 0u) {
                 cache.gpuLights.push_back(cache.gpuPoints.size() - 1);
             }
@@ -635,6 +770,13 @@ static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData
     vkCtx.uploadToBuffer(vkCtx.adaptiveBuffer, mergedAd.data(), bufBytes);
 }
 
+static void ddgiUpdateIfEnabled(const Camera& cam, int maxBounces) {
+    if (!vkCtx.ddgiVolume.enabled) return;
+    vkCtx.ddgiSyncRenderSettings(maxBounces, 8.0f);
+    vkCtx.ddgiUpdateProbes(maxBounces, cam.origin);
+    vkCtx.ddgiAwaitProbes();
+}
+
 template<typename T>
 static void uploadFogVolumes(GpuContext& vkCtx, GPUCameraData& camData,
                              const std::vector<T>& fogVolumes) {
@@ -713,7 +855,7 @@ InFlightFrame Octree<T>::beginRenderFrameVulkan(const Camera& cam, int height, i
             ctx.pbrPointsResident = true;
         }
     }
-    if (vkCtx.ddgiVolume.enabled) vkCtx.ddgiUpdateProbes(maxBounces);
+    ddgiUpdateIfEnabled(cam, maxBounces);
 
     runWavefrontTilesMultiGPU(width, height, camData, samplesPerPixel, maxBounces, 0, pixFloats, outSize);
 
@@ -768,6 +910,12 @@ void Octree<T>::enableDDGI(float spacing) {
     const OctreeNode* r = nodeAt(root_);
     if (!r) return;
     BoundingBox b = r->bounds();
+
+    if (spacing <= 0.0f) {
+        Vec3 ext = b.second - b.first;
+        float longest = ext.maxCoeff();
+        spacing = std::clamp(longest / 32.0f, 0.05f, 16.0f);
+    }
     vkCtx.ddgiConfigure(b.first, b.second, spacing);
 }
 
@@ -933,10 +1081,10 @@ InFlightFrame Octree<T>::beginBlendedRenderFrameVulkan(const Camera& cam, int he
         const auto& p = tl_buffer.points[sp.idx];
         
         gpuPBRPoints.push_back({
-            p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId
+            p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId, p.extent
         });
         gpuFastPoints.push_back({
-            p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId
+            p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId, p.extent
         });
 
         if (tl_buffer.materials[p.materialIdx].chromaticity != 0u) {
@@ -980,6 +1128,7 @@ InFlightFrame Octree<T>::beginBlendedRenderFrameVulkan(const Camera& cam, int he
         ctx.updateLightBuffer(gpuLights);
         ctx.updatePBRBuffers(gpuPBRPoints);
     }
+    ddgiUpdateIfEnabled(cam, maxBounces);
 
     runWavefrontTilesMultiGPU(lowW, lowH, pbrCamData, samplesPerPixel, maxBounces, 0, pixFloats, pbrOutSize);
 
@@ -1084,7 +1233,7 @@ InFlightFrame Octree<T>::beginGameStyleRenderFrame(const Camera& cam, int height
         const auto& p = tl_buffer.points[sp.idx];
 
         gpuFastPoints.push_back({
-            p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId
+            p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId, p.extent
         });
 
         if (tl_buffer.materials[p.materialIdx].chromaticity != 0u) {
@@ -1239,10 +1388,10 @@ InFlightFrame Octree<T>::beginSuperBlendedRenderFrameVulkan(const Camera& cam, i
         const auto& p = tl_buffer.points[sp.idx];
 
         gpuPBRPoints.push_back({
-            p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId
+            p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId, p.extent
         });
         gpuFastPoints.push_back({
-            p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId
+            p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId, p.extent
         });
 
         if (tl_buffer.materials[p.materialIdx].chromaticity != 0u) {
@@ -1387,6 +1536,7 @@ InFlightFrame Octree<T>::beginSuperBlendedRenderFrameVulkan(const Camera& cam, i
         ctx.uploadToBuffer(ctx.adaptiveBuffer, adaptiveSeed.data(), adaptiveSeed.size() * sizeof(float));
         ctx.uploadToBuffer(ctx.outBuffer, pixelSeed.data(), pixelSeed.size() * sizeof(float));
     }
+    ddgiUpdateIfEnabled(cam, maxBounces);
 
     runWavefrontTilesMultiGPU(lowW, lowH, pbrCamData, samplesPerPixel, maxBounces, 1, pixFloats, pbrOutSize, true);
     vkCtx.dispatchSmoothPasses(lowW, lowH, samplesPerPixel, 2, false);

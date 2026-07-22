@@ -1,6 +1,3 @@
-// Dynamic diffuse global illumination probe volume, host half.
-// Mirrors the layout in shaders/ddgi_common.glsl -- keep the two in sync.
-
 static constexpr int DDGI_IRR_RES    = 8;
 static constexpr int DDGI_VIS_RES    = 16;
 static constexpr int DDGI_IRR_BORDER = DDGI_IRR_RES + 2;
@@ -22,28 +19,34 @@ struct alignas(16) GPUDDGIVolume {
     int32_t frameIndex;
     int32_t raysPerProbe;
     int32_t enabled;
-    int32_t ddgiPad0;
+    float fireflyClamp;
 };
 
-VkBuffer       ddgiIrradianceBuf = VK_NULL_HANDLE;
+VkBuffer ddgiIrradianceBuf = VK_NULL_HANDLE;
 VkDeviceMemory ddgiIrradianceMem = VK_NULL_HANDLE;
-VkBuffer       ddgiVisibilityBuf = VK_NULL_HANDLE;
+VkBuffer ddgiVisibilityBuf = VK_NULL_HANDLE;
 VkDeviceMemory ddgiVisibilityMem = VK_NULL_HANDLE;
-VkBuffer       ddgiRayBuf        = VK_NULL_HANDLE;
-VkDeviceMemory ddgiRayMem        = VK_NULL_HANDLE;
-VkBuffer       ddgiVolumeBuf     = VK_NULL_HANDLE;
-VkDeviceMemory ddgiVolumeMem     = VK_NULL_HANDLE;
+VkBuffer ddgiRayBuf = VK_NULL_HANDLE;
+VkDeviceMemory ddgiRayMem = VK_NULL_HANDLE;
+VkBuffer ddgiVolumeBuf = VK_NULL_HANDLE;
+VkDeviceMemory ddgiVolumeMem = VK_NULL_HANDLE;
 
-VkShaderModule ddgiTraceShader  = VK_NULL_HANDLE;
-VkShaderModule ddgiBlendShader  = VK_NULL_HANDLE;
+VkShaderModule ddgiTraceShader = VK_NULL_HANDLE;
+VkShaderModule ddgiBlendShader = VK_NULL_HANDLE;
 VkShaderModule ddgiGatherShader = VK_NULL_HANDLE;
-VkPipeline     ddgiTracePipe    = VK_NULL_HANDLE;
-VkPipeline     ddgiBlendPipe    = VK_NULL_HANDLE;
-VkPipeline     ddgiGatherPipe   = VK_NULL_HANDLE;
+VkPipeline ddgiTracePipe = VK_NULL_HANDLE;
+VkPipeline ddgiBlendPipe = VK_NULL_HANDLE;
+VkPipeline ddgiGatherPipe = VK_NULL_HANDLE;
 
+VkCommandBuffer ddgiCmd = VK_NULL_HANDLE;
+VkFence ddgiFence = VK_NULL_HANDLE;
+bool ddgiSubmitted = false;
 GPUDDGIVolume ddgiVolume{};
 uint32_t ddgiProbeCap = 0;
 bool ddgiResident = false;
+Vec3 ddgiPrevCamPos = Vec3::Zero();
+bool ddgiPrevCamValid = false;
+int ddgiProbeBounces = 2;
 
 ///@brief Fits a probe grid to a world bounding box at the requested spacing
 ///@param minB Volume minimum corner
@@ -51,7 +54,6 @@ bool ddgiResident = false;
 ///@param spacing Uniform probe spacing in world units
 void ddgiConfigure(const Vec3& minB, const Vec3& maxB, float spacing) {
     Vec3 extent = maxB - minB;
-    // One probe past each edge so surfaces on the boundary still trilinerp.
     int cx = std::max(2, static_cast<int>(std::ceil(extent.x() / spacing)) + 1);
     int cy = std::max(2, static_cast<int>(std::ceil(extent.y() / spacing)) + 1);
     int cz = std::max(2, static_cast<int>(std::ceil(extent.z() / spacing)) + 1);
@@ -67,10 +69,9 @@ void ddgiConfigure(const Vec3& minB, const Vec3& maxB, float spacing) {
     ddgiVolume.normalBias = spacing * 0.15f;
     ddgiVolume.viewBias = spacing * 0.1f;
     ddgiVolume.frameIndex = 0;
-    // Must not exceed DDGI_PROBE_RAYS; ddgi_blend stages rays in a shared array
-    // sized by that constant. Raise both together if you want more rays.
     ddgiVolume.raysPerProbe = DDGI_PROBE_RAYS;
     ddgiVolume.enabled = 1;
+    ddgiVolume.fireflyClamp = 8.0f;
     ddgiResident = false;
 }
 
@@ -105,10 +106,8 @@ void ddgiEnsureBuffers() {
     }
 
     ddgiProbeCap = probes;
-    ddgiVolume.frameIndex = 0;   // atlases are undefined until first blend
+    ddgiVolume.frameIndex = 0;
 
-    // Zero the atlases so the hysteresis branch sees w == 0 and takes the
-    // first-frame path instead of blending against garbage.
     VkCommandBufferBeginInfo zbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     zbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(commandBuffer, &zbi);
@@ -137,8 +136,6 @@ void ddgiInit() {
     ddgiBlendShader  = createShaderModule(device, "./bin/ddgi_blend.spv");
     ddgiGatherShader = createShaderModule(device, "./bin/ddgi_gather.spv");
 
-    // Shares the wavefront descriptor layout and push constants; probe passes
-    // are just extra stages over the same bindings.
     VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
     ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -152,14 +149,31 @@ void ddgiInit() {
     ci.stage.module = ddgiGatherShader;
     vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &ci, nullptr, &ddgiGatherPipe);
 }
+void ddgiSyncRenderSettings(int maxBounces, float clampMax) {
+    ddgiVolume.fireflyClamp = clampMax;
+    ddgiProbeBounces = std::max(1, maxBounces);
+}
 
 ///@brief Traces and blends one probe update frame
 ///@param maxBounces Bounce budget for probe rays (2 is usually enough)
-void ddgiUpdateProbes(int maxBounces) {
+void ddgiUpdateProbes(int maxBounces, const Vec3& camPos) {
     TIME_FUNCTION;
     if (!ddgiVolume.enabled || ddgiVolume.probeCount == 0) return;
 
     ddgiEnsureBuffers();
+    float warmup = (ddgiVolume.frameIndex < 30) ? 0.85f : 0.97f;
+
+    float motionH = 0.97f;
+    if (ddgiPrevCamValid) {
+        float moved = (camPos - ddgiPrevCamPos).norm();
+        float t = std::clamp(moved / std::max(1e-4f, ddgiVolume.spacing), 0.0f, 1.0f);
+        motionH = 0.97f + (0.80f - 0.97f) * t;
+    }
+    ddgiPrevCamPos = camPos;
+    ddgiPrevCamValid = true;
+
+    ddgiVolume.hysteresis = std::min(warmup, motionH);
+
     ddgiUploadVolume();
 
     uint32_t rayCount = uint32_t(ddgiVolume.probeCount) * uint32_t(ddgiVolume.raysPerProbe);
@@ -168,13 +182,25 @@ void ddgiUpdateProbes(int maxBounces) {
 
     const uint32_t WG = 64;
     uint32_t rayGroups = (rayCount + WG - 1) / WG;
-    // Probe rays terminate into the cache after one diffuse bounce, so they
-    // need far fewer iterations than a camera path.
-    int maxIters = maxBounces + 4;
+    int maxIters = ddgiProbeBounces + 4;
+
+    if (ddgiCmd == VK_NULL_HANDLE) {
+        VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        cai.commandPool = commandPool;
+        cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cai.commandBufferCount = 1;
+        vkAllocateCommandBuffers(device, &cai, &ddgiCmd);
+        VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        fi.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+        vkCreateFence(device, &fi, nullptr, &ddgiFence);
+    }
+
+    vkWaitForFences(device, 1, &ddgiFence, VK_TRUE, UINT64_MAX);
+    vkResetFences(device, 1, &ddgiFence);
 
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    VkCommandBuffer cmd = commandBuffer;
+    VkCommandBuffer cmd = ddgiCmd;
     vkBeginCommandBuffer(cmd, &bi);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                             wfPipelineLayout, 0, 1, &wfDescSet, 0, nullptr);
@@ -219,13 +245,11 @@ void ddgiUpdateProbes(int maxBounces) {
         parity ^= 1;
     }
 
-    // Harvest after the loop drains so late NEE credits are included.
     wfBind(cmd, ddgiGatherPipe);
     wfPush(cmd, parity, 0, 0);
     vkCmdDispatch(cmd, rayGroups, 1, 1);
     wfBarrier(cmd);
 
-    // One workgroup per probe, stage 0 irradiance / stage 1 visibility.
     wfBind(cmd, ddgiBlendPipe);
     wfPush(cmd, 0, 0, 0);
     vkCmdDispatch(cmd, uint32_t(ddgiVolume.probeCount), 1, 1);
@@ -239,10 +263,16 @@ void ddgiUpdateProbes(int maxBounces) {
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.commandBufferCount = 1;
     si.pCommandBuffers = &cmd;
-    vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE);
-    vkQueueWaitIdle(queue);
+    vkQueueSubmit(queue, 1, &si, ddgiFence);
+    ddgiSubmitted = true;
 
     ddgiVolume.frameIndex++;
     ddgiResident = true;
     ddgiUploadVolume();
+}
+
+void ddgiAwaitProbes() {
+    if (!ddgiSubmitted || ddgiFence == VK_NULL_HANDLE) return;
+    vkWaitForFences(device, 1, &ddgiFence, VK_TRUE, UINT64_MAX);
+    ddgiSubmitted = false;
 }

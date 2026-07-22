@@ -85,7 +85,7 @@ vec3 ddgiSampleIrradiance(vec3 P, vec3 N, vec3 V, DDGIVolume vol) {
 
     if (sumW <= 1e-6) return vec3(0.0);
     vec3 result = sumIrr / sumW;
-    return result * result * (2.0 * PI);
+    return result * result;
 }
 
 #endif
