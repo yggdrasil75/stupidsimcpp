@@ -723,6 +723,8 @@ static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData
                 GPUCameraData cd = camTemplate;
                 cd.tileOffsetX = ct.x();
                 cd.tileOffsetY = ct.y();
+                cd.tileW = ct.z();
+                cd.tileH = ct.w();
                 cd.currentSampleOffset = 1;
                 cd.dispatchSamples = 1;
                 ctx.updateCameraData(cd);
@@ -768,6 +770,8 @@ static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData
                 GPUCameraData cd = camTemplate;
                 cd.tileOffsetX = t.x();
                 cd.tileOffsetY = t.y();
+                cd.tileW = t.z();
+                cd.tileH = t.w();
                 cd.currentSampleOffset = sampleOffset;
                 cd.dispatchSamples = myCount;
                 gpuFleet.ctx(g).updateCameraData(cd);

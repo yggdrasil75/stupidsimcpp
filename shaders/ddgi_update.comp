@@ -1,0 +1,133 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : require
+#include "wf_common.glsl"
+
+shared vec3 sRadiance[DDGI_RAYS];
+shared vec3 sDir[DDGI_RAYS];
+shared float sDist[DDGI_RAYS];
+vec3 probeRayDir(int i, int count, uint seed) {
+    float phi = 2.399963229728653 * float(i);
+    float z = 1.0 - (2.0 * float(i) + 1.0) / float(count);
+    float r = sqrt(max(0.0, 1.0 - z * z));
+    float jitter = float(seed & 0xFFFFu) / 65535.0 * 6.2831853;
+    return normalize(vec3(r * cos(phi + jitter), r * sin(phi + jitter), z));
+}
+
+void main() {
+    int probe = int(gl_WorkGroupID.x);
+    int rayIdx = int(gl_LocalInvocationID.x);
+    int probeCount = cam.ddgiProbesX * cam.ddgiProbesY * cam.ddgiProbesZ;
+    if (probe >= probeCount) return;
+
+    ivec3 probeCoord = ivec3(probe % cam.ddgiProbesX,
+                     (probe / cam.ddgiProbesX) % cam.ddgiProbesY,
+                     probe / (cam.ddgiProbesX * cam.ddgiProbesY));
+    vec3 probePos = ddgiProbePosition(probeCoord);
+
+    uint rng = pcg_hash(uint(probe) * 9781u + pcg_hash(cam.frameCount));
+    vec3 dir = probeRayDir(rayIdx, DDGI_RAYS, pcg_hash(cam.frameCount));
+    vec3 invD = safe_invDir(dir);
+
+    int hitIndex;
+    float t;
+    int hitResult = voxelTraverse(probePos, dir, invD, cam.maxDist, hitIndex, t);
+
+    vec3 radiance = vec3(0.0);
+    float dist = cam.maxDist;
+
+    if (hitResult != 1 || hitIndex < 0 || hitIndex >= points.length()) {
+        radiance = sampleSkybox(dir);
+    } else {
+        dist = t;
+        GPURenderData hp = points[hitIndex];
+        vec4 albedo = unpackRGBA8(hp.color);
+        GPUMaterial hm = materials[hp.materialIdx];
+
+        float tHit, tExit;
+        vec3 nrm, hitPoint;
+        rayCubeIntersect(probePos, dir, invD, hp, tHit, nrm, hitPoint, tExit);
+        if (dot(dir, nrm) > 0.0) nrm = -nrm;
+
+        vec3 emit = unpackRGB9E5(hm.chromaticity);
+        radiance = albedo.rgb * emit;
+
+        if (cam.emissiveCount > 0) {
+            int li = int(nextFloat(rng) * float(cam.emissiveCount)) % cam.emissiveCount;
+            uint lightIdx = emissiveIndices[li];
+            if (lightIdx < uint(points.length())) {
+                GPURenderData lp = points[lightIdx];
+                vec3 toL = lp.position - hitPoint;
+                float d2 = max(dot(toL, toL), 1e-4);
+                float dL = sqrt(d2);
+                vec3 L = toL / dL;
+                float ndl = max(0.0, dot(nrm, L));
+                if (ndl > 0.0) {
+                    vec3 sInvD = safe_invDir(L);
+                    int sIdx;
+                    float sT;
+                    int occl = voxelTraverse(hitPoint + nrm * 1e-3, L, sInvD, dL - 1e-2, sIdx, sT);
+                    if (occl != 1 || sIdx == int(lightIdx)) {
+                        vec4 la = unpackRGBA8(lp.color);
+                        GPUMaterial lm = materials[lp.materialIdx];
+                        vec3 Le = la.rgb * unpackRGB9E5(lm.chromaticity);
+                        radiance += albedo.rgb * Le * ndl / d2
+                                    * float(cam.emissiveCount) / PI;
+                    }
+                }
+            }
+        }
+
+        radiance += albedo.rgb * ddgiIrradianceAt(hitPoint, nrm, dir) / PI;
+    }
+
+    sRadiance[rayIdx] = radiance;
+    sDir[rayIdx] = dir;
+    sDist[rayIdx] = dist;
+    barrier();
+
+    int irrTexels = cam.ddgiIrrRes * cam.ddgiIrrRes;
+    int depthTexels = cam.ddgiDepthRes * cam.ddgiDepthRes;
+
+    for (int texel = rayIdx; texel < irrTexels; texel += DDGI_RAYS) {
+        ivec2 tc = ivec2(texel % cam.ddgiIrrRes, texel / cam.ddgiIrrRes);
+        vec3 texelDir = octDecode((vec2(tc) + 0.5) / float(cam.ddgiIrrRes));
+
+        vec3 sum = vec3(0.0);
+        float wSum = 0.0;
+        for (int r = 0; r < DDGI_RAYS; ++r) {
+            float w = max(0.0, dot(texelDir, sDir[r]));
+            if (w <= 0.0) continue;
+            sum += sRadiance[r] * w;
+            wSum += w;
+        }
+        vec3 result = (wSum > 0.0) ? (sum / wSum) : vec3(0.0);
+
+        int o = probe * irrTexels + tc.y * cam.ddgiIrrRes + tc.x;
+        vec3 prev = ddgiIrradiance[o].rgb;
+        float hyst = (ddgiIrradiance[o].a > 0.0) ? DDGI_HYSTERESIS : 0.0;
+        ddgiIrradiance[o] = vec4(mix(result, prev, hyst), 1.0);
+    }
+
+    for (int texel = rayIdx; texel < depthTexels; texel += DDGI_RAYS) {
+        ivec2 tc = ivec2(texel % cam.ddgiDepthRes, texel / cam.ddgiDepthRes);
+        vec3 texelDir = octDecode((vec2(tc) + 0.5) / float(cam.ddgiDepthRes));
+
+        vec2 sum = vec2(0.0);
+        float wSum = 0.0;
+        for (int r = 0; r < DDGI_RAYS; ++r) {
+            float w = max(0.0, dot(texelDir, sDir[r]));
+            w = pow(w, cam.ddgiDepthSharpness);
+            if (w <= 1e-6) continue;
+            float d = min(sDist[r], cam.maxDist);
+            sum += vec2(d, d * d) * w;
+            wSum += w;
+        }
+        vec2 result = (wSum > 0.0) ? (sum / wSum) : vec2(cam.maxDist, cam.maxDist * cam.maxDist);
+
+        int o = probe * depthTexels + tc.y * cam.ddgiDepthRes + tc.x;
+        vec2 prev = ddgiDepth[o];
+        float hyst = (prev.x > 0.0) ? DDGI_HYSTERESIS : 0.0;
+        ddgiDepth[o] = mix(result, prev, hyst);
+    }
+}

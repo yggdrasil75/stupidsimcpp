@@ -5,6 +5,11 @@
             "deviceKey": 18263765934953416600,
             "tileTarget": 256,
             "mpixPerMs": 9.56961e-05
+        },
+        {
+            "deviceKey": 16442706356754783291,
+            "tileTarget": 640,
+            "mpixPerMs": 0.0803775
         }
     ]
 }
