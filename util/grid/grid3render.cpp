@@ -661,14 +661,12 @@ static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData
             GPUCameraData cd = camTemplate;
             cd.tileOffsetX = t.x();
             cd.tileOffsetY = t.y();
+            cd.tileW = t.z();
+            cd.tileH = t.w();
             cd.currentSampleOffset = sampleOffset;
             cd.dispatchSamples = samplesPerPixel;
             vkCtx.updateCameraData(cd);
             vkCtx.dispatchWavefront(t.z(), t.w(), maxBounces, samplesPerPixel, start);
-            cd.tileOffsetX = t.x();
-            cd.tileOffsetY = t.y();
-            cd.tileW = t.z();
-            cd.tileH = t.w();
         }
         return;
     }

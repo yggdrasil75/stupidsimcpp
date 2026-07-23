@@ -6,11 +6,11 @@
 void main() {
     uint gid = gl_GlobalInvocationID.x;
 
-    int tileW = min(512, cam.width  - cam.tileOffsetX);
-    int tileH = min(512, cam.height - cam.tileOffsetY);
+    int tileW = cam.tileW;
+    int tileH = cam.tileH;
     if (tileW <= 0 || tileH <= 0) return;
     uint tilePixels = uint(tileW) * uint(tileH);
-    if (gid >= tilePixels) return;
+    //if (gid >= tilePixels) return;
 
     ivec2 local = ivec2(int(gid) % tileW, int(gid) / tileW);
     ivec2 coord = local + ivec2(cam.tileOffsetX, cam.tileOffsetY);
