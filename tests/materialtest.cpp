@@ -371,7 +371,7 @@ int main() {
     const int samples = 100;
     const int blendedsamples = 300;
     const float blendedfactor = 0.65;
-    const int videosamples = 300;
+    const int videosamples = 500;
     const int bounces = 8;
     const int physicsSubsteps = 10;
     const float physicsDt = 1.0f / fps;
