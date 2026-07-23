@@ -81,6 +81,7 @@ struct InFlightFrame {
     size_t outSize = 0;
     frame::colormap colorformat = frame::colormap::RGB;
     bool pending = false;
+    uint32_t slot = 0;
 };
 
 #ifdef VULKAN_SUPPORT
@@ -216,10 +217,17 @@ struct GpuContext {
     uint32_t queueFamilyIndex = 0;
     VkCommandPool commandPool = VK_NULL_HANDLE;
     VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
-    VkFence renderFence = VK_NULL_HANDLE;
     VkFence postFence = VK_NULL_HANDLE;
     VkCommandBuffer wfCmd[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
     VkFence wfFence[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    static constexpr uint32_t FRAME_SLOTS = 2;
+    VkCommandBuffer frameCmd[FRAME_SLOTS] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkFence frameFence[FRAME_SLOTS] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    void* frameStagingMapped[FRAME_SLOTS] = {nullptr, nullptr};
+    bool frameStagingCoherent[FRAME_SLOTS] = {true, true};
+    uint32_t frameStagingCap[FRAME_SLOTS] = {0, 0};
+    bool frameSlotInFlight[FRAME_SLOTS] = {false, false};
+    uint32_t nextFrameSlot = 0;
     
     VkShaderModule fastShader = VK_NULL_HANDLE;
     VkShaderModule smoothShader = VK_NULL_HANDLE;
@@ -289,6 +297,7 @@ struct GpuContext {
     VkBuffer worldCacheBuffer = VK_NULL_HANDLE;
     VkBuffer ddgiIrradianceBuffer = VK_NULL_HANDLE;
     VkBuffer ddgiDepthBuffer = VK_NULL_HANDLE;
+    VkBuffer frameStaging[FRAME_SLOTS] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
 
     VkDescriptorSetLayout fastDescLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout pbrDescLayout = VK_NULL_HANDLE;
@@ -339,6 +348,7 @@ struct GpuContext {
     VkDeviceMemory worldCacheMem = VK_NULL_HANDLE;
     VkDeviceMemory ddgiIrradianceMem = VK_NULL_HANDLE;
     VkDeviceMemory ddgiDepthMem = VK_NULL_HANDLE;
+    VkDeviceMemory frameStagingMem[FRAME_SLOTS] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
     
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
     
@@ -376,7 +386,6 @@ struct GpuContext {
     bool blasTopologyValid = false;
     bool pbrPointsResident = false;
     bool fastPointsResident = false;
-    bool fastFrameInFlight = false;
     bool postPassInFlight = false;
     bool outMemCoherent = true;
     bool outStagingCoherent = true;
@@ -446,6 +455,35 @@ struct GpuContext {
         allocInfo.memoryTypeIndex = typeIdx;
         vkAllocateMemory(device, &allocInfo, nullptr, &bufferMemory);
         vkBindBufferMemory(device, buffer, bufferMemory, 0);
+    }
+    void ensureFrameSlot(uint32_t slot, VkDeviceSize outSize) {
+        if (frameCmd[slot] == VK_NULL_HANDLE) {
+            VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+            ai.commandPool = commandPool;
+            ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            ai.commandBufferCount = 1;
+            vkAllocateCommandBuffers(device, &ai, &frameCmd[slot]);
+        }
+        if (frameFence[slot] == VK_NULL_HANDLE) {
+            VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+            vkCreateFence(device, &fi, nullptr, &frameFence[slot]);
+        }
+        if (outSize > frameStagingCap[slot]) {
+            if (frameSlotInFlight[slot]) {
+                vkWaitForFences(device, 1, &frameFence[slot], VK_TRUE, UINT64_MAX);
+                frameSlotInFlight[slot] = false;
+            }
+            if (frameStaging[slot]) {
+                vkUnmapMemory(device, frameStagingMem[slot]);
+                vkDestroyBuffer(device, frameStaging[slot], nullptr);
+                vkFreeMemory(device, frameStagingMem[slot], nullptr);
+                frameStagingMapped[slot] = nullptr;
+            }
+            createReadbackBuffer(device, primaryDevice, outSize, frameStaging[slot],
+                                 frameStagingMem[slot], frameStagingCoherent[slot]);
+            vkMapMemory(device, frameStagingMem[slot], 0, VK_WHOLE_SIZE, 0, &frameStagingMapped[slot]);
+            frameStagingCap[slot] = (uint32_t)outSize;
+        }
     }
 
     void createBuffer(VkDevice& device, VkPhysicalDevice& PhDevice, VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties,
@@ -785,6 +823,32 @@ struct GpuContext {
             vkFreeMemory(device, mm, nullptr);
             bf = VK_NULL_HANDLE;
         }
+    }
+
+    void destroyFrameSlots() {
+        for (uint32_t i = 0; i < FRAME_SLOTS; ++i) {
+            if (frameSlotInFlight[i] && frameFence[i] != VK_NULL_HANDLE) {
+                vkWaitForFences(device, 1, &frameFence[i], VK_TRUE, UINT64_MAX);
+                frameSlotInFlight[i] = false;
+            }
+            if (frameStaging[i]) {
+                vkUnmapMemory(device, frameStagingMem[i]);
+                vkDestroyBuffer(device, frameStaging[i], nullptr);
+                vkFreeMemory(device, frameStagingMem[i], nullptr);
+                frameStaging[i] = VK_NULL_HANDLE;
+                frameStagingMapped[i] = nullptr;
+                frameStagingCap[i] = 0;
+            }
+            if (frameFence[i] != VK_NULL_HANDLE) {
+                vkDestroyFence(device, frameFence[i], nullptr);
+                frameFence[i] = VK_NULL_HANDLE;
+            }
+            if (frameCmd[i] != VK_NULL_HANDLE) {
+                vkFreeCommandBuffers(device, commandPool, 1, &frameCmd[i]);
+                frameCmd[i] = VK_NULL_HANDLE;
+            }
+        }
+        nextFrameSlot = 0;
     }
 
     void executeSingleTimeCommands(std::function<void(VkCommandBuffer)> action) {
@@ -1211,45 +1275,92 @@ struct GpuContext {
     }
 
     ///@brief Records and submits the fast pipeline over the whole frame, no wait.
-    void submitFastFullFrame(int width, int height) {
-        if (fastFrameInFlight) {
-            vkWaitForFences(device, 1, &renderFence, VK_TRUE, UINT64_MAX);
-            fastFrameInFlight = false;
+    ///@return The slot index this frame was submitted on; pass it to awaitFastFullFrame.
+    uint32_t submitFastFullFrame(int width, int height, VkDeviceSize outSize) {
+        const uint32_t slot = nextFrameSlot;
+        nextFrameSlot = (nextFrameSlot + 1) % FRAME_SLOTS;
+
+        ensureFrameSlot(slot, outSize);
+
+        if (frameSlotInFlight[slot]) {
+            vkWaitForFences(device, 1, &frameFence[slot], VK_TRUE, UINT64_MAX);
+            frameSlotInFlight[slot] = false;
         }
+        vkResetFences(device, 1, &frameFence[slot]);
+
+        VkCommandBuffer cmd = frameCmd[slot];
+        vkResetCommandBuffer(cmd, 0);
 
         VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-        vkBeginCommandBuffer(commandBuffer, &beginInfo);
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, fastPipeline);
-        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, fastPipelineLayout,
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(cmd, &beginInfo);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, fastPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, fastPipelineLayout,
                                 0, 1, &fastDescSet, 0, nullptr);
-        vkCmdDispatch(commandBuffer, (width + 7) / 8, (height + 7) / 8, 1);
-        vkEndCommandBuffer(commandBuffer);
+        vkCmdDispatch(cmd, (width + 7) / 8, (height + 7) / 8, 1);
+
+        VkBufferMemoryBarrier toXfer{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+        toXfer.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        toXfer.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        toXfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toXfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toXfer.buffer = outBuffer;
+        toXfer.offset = 0;
+        toXfer.size = VK_WHOLE_SIZE;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                             0, nullptr, 1, &toXfer, 0, nullptr);
+
+        VkBufferCopy copyRegion{};
+        copyRegion.size = outSize;
+        vkCmdCopyBuffer(cmd, outBuffer, frameStaging[slot], 1, &copyRegion);
+
+        VkBufferMemoryBarrier toHost{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+        toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        toHost.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toHost.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toHost.buffer = frameStaging[slot];
+        toHost.offset = 0;
+        toHost.size = VK_WHOLE_SIZE;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_HOST_BIT, 0,
+                             0, nullptr, 1, &toHost, 0, nullptr);
+
+        vkEndCommandBuffer(cmd);
 
         VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
         submitInfo.commandBufferCount = 1;
-        submitInfo.pCommandBuffers = &commandBuffer;
+        submitInfo.pCommandBuffers = &cmd;
+        vkQueueSubmit(queue, 1, &submitInfo, frameFence[slot]);
+        frameSlotInFlight[slot] = true;
+        return slot;
+    }
 
-        if (renderFence == VK_NULL_HANDLE) {
-            VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-            vkCreateFence(device, &fenceInfo, nullptr, &renderFence);
-        } else {
-            vkResetFences(device, 1, &renderFence);
+    void awaitFastFullFrame(uint32_t slot) {
+        if (slot >= FRAME_SLOTS || !frameSlotInFlight[slot]) return;
+        vkWaitForFences(device, 1, &frameFence[slot], VK_TRUE, UINT64_MAX);
+        frameSlotInFlight[slot] = false;
+    }
+
+    void awaitAllFastFrames() {
+        for (uint32_t i = 0; i < FRAME_SLOTS; ++i) awaitFastFullFrame(i);
+    }
+
+    const float* readbackSlot(uint32_t slot) {
+        if (slot >= FRAME_SLOTS || !frameStagingMapped[slot]) return nullptr;
+        if (!frameStagingCoherent[slot]) {
+            VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+            range.memory = frameStagingMem[slot];
+            range.offset = 0;
+            range.size = VK_WHOLE_SIZE;
+            vkInvalidateMappedMemoryRanges(device, 1, &range);
         }
-        vkQueueSubmit(queue, 1, &submitInfo, renderFence);
-        fastFrameInFlight = true;
+        return static_cast<const float*>(frameStagingMapped[slot]);
     }
 
-    ///@brief Waits on the frame submitted by submitFastFullFrame.
-    void awaitFastFullFrame() {
-        if (!fastFrameInFlight) return;
-        vkWaitForFences(device, 1, &renderFence, VK_TRUE, UINT64_MAX);
-        fastFrameInFlight = false;
-    }
-
-    ///@brief Dispatches the fast pipeline over the whole frame on a reused fence.
-    void dispatchFastFullFrame(int width, int height) {
-        submitFastFullFrame(width, height);
-        awaitFastFullFrame();
+    void dispatchFastFullFrame(int width, int height, VkDeviceSize outSize) {
+        awaitFastFullFrame(submitFastFullFrame(width, height, outSize));
     }
 
     void updateFogBuffer(const std::vector<GPUFogVolume>& vols) {

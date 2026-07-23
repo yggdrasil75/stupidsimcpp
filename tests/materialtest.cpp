@@ -464,14 +464,14 @@ int main() {
     octree.setMaxDistance(4096);
 
     // 3. Setup rendering loop
-    int width = 512;
-    int height = 512;
+    int width = 1920;
+    int height = 1080;
     
     const float fps = 60.0f;
     const float durationPerSegment = 10.0f;
     const int framesPerSegment = static_cast<int>(fps * durationPerSegment);
-    const int samples = 10;
-    const int blendedsamples = 30;
+    const int samples = 100;
+    const int blendedsamples = 300;
     const float blendedfactor = 0.65;
     const int videosamples = 500;
     const int bounces = 8;

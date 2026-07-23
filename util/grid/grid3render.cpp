@@ -826,7 +826,7 @@ InFlightFrame Octree<T>::beginRenderFrameVulkan(const Camera& cam, int height, i
                 int maxBounces, bool globalIllumination, bool useLod) {
     TIME_FUNCTION;
     vkCtx.awaitPostPass();
-    vkCtx.awaitFastFullFrame();
+    vkCtx.awaitAllFastFrames();
     updateStreaming(cam);
     optimize();
     thread_local RenderBuffer tl_buffer;
@@ -933,7 +933,6 @@ template<typename T>
 InFlightFrame Octree<T>::beginFastRenderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat) {
     TIME_FUNCTION;
     // ScopedFunctionTimer frfv("fast render frame vulkan startup");
-    vkCtx.awaitFastFullFrame();
     updateStreaming(cam);
     // optimize();
     thread_local RenderBuffer tl_buffer;
@@ -972,6 +971,7 @@ InFlightFrame Octree<T>::beginFastRenderFrameVulkan(const Camera& cam, int heigh
     };
 
     size_t outSize = width * height * 5 * sizeof(float);
+    // vkCtx.awaitAllFastFrames();
     vkCtx.updateCommonBuffers(outSize, camData);
     vkCtx.updateSkyboxBuffer(skyData);
     if (sceneChanged || !vkCtx.fastPointsResident) {
@@ -986,7 +986,7 @@ InFlightFrame Octree<T>::beginFastRenderFrameVulkan(const Camera& cam, int heigh
     }
     
     // frfv.stop();
-    vkCtx.submitFastFullFrame(width, height);
+    const uint32_t slot = vkCtx.submitFastFullFrame(width, height, outSize);
 
     InFlightFrame pending;
     pending.width = width;
@@ -994,6 +994,7 @@ InFlightFrame Octree<T>::beginFastRenderFrameVulkan(const Camera& cam, int heigh
     pending.outSize = outSize;
     pending.colorformat = colorformat;
     pending.pending = true;
+    pending.slot = slot;
     return pending;
 }
 
@@ -1002,7 +1003,7 @@ frame Octree<T>::endFastRenderFrameVulkan(InFlightFrame& pending) {
     TIME_FUNCTION;
     if (!pending.pending) return frame();
 
-    vkCtx.awaitFastFullFrame();
+    vkCtx.awaitFastFullFrame(pending.slot);
     pending.pending = false;
 
     const int width = pending.width;
@@ -1010,7 +1011,8 @@ frame Octree<T>::endFastRenderFrameVulkan(InFlightFrame& pending) {
     frame outFrame(width, height, pending.colorformat);
     std::vector<float> colorBuffer(width * height * 3);
 
-    const float* raw = vkCtx.readbackOut(pending.outSize);
+    const float* raw = vkCtx.readbackSlot(pending.slot);
+    if (!raw) return frame();
     const int pixelCount = width * height;
     for (int i = 0; i < pixelCount; ++i) {
         int outIdx = i * 3;
@@ -1035,7 +1037,7 @@ InFlightFrame Octree<T>::beginBlendedRenderFrameVulkan(const Camera& cam, int he
                 frame::colormap colorformat, int samplesPerPixel, int maxBounces, bool globalIllumination, bool useLod) {
     TIME_FUNCTION;
     vkCtx.awaitPostPass();
-    vkCtx.awaitFastFullFrame();
+    vkCtx.awaitAllFastFrames();
     updateStreaming(cam);
     // optimize();
     thread_local RenderBuffer tl_buffer;
@@ -1159,7 +1161,7 @@ InFlightFrame Octree<T>::beginBlendedRenderFrameVulkan(const Camera& cam, int he
     fastCamData.tileOffsetX = 0;
     fastCamData.tileOffsetY = 0;
     vkCtx.updateCameraData(fastCamData);
-    vkCtx.dispatchFastFullFrame(width, height);
+    vkCtx.dispatchFastFullFrame(width, height, fastOutSize);
     vkCtx.dispatchBlend(width, height, lowW, lowH, pbrScale, 1, true);
 
     InFlightFrame pending;
@@ -1188,7 +1190,6 @@ frame Octree<T>::blendedRenderFrameVulkan(const Camera& cam, int height, int wid
 template<typename T>
 InFlightFrame Octree<T>::beginGameStyleRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat) {
     TIME_FUNCTION;
-    vkCtx.awaitFastFullFrame();
     updateStreaming(cam);
     // optimize();
     thread_local RenderBuffer tl_buffer;
@@ -1263,6 +1264,7 @@ InFlightFrame Octree<T>::beginGameStyleRenderFrame(const Camera& cam, int height
 
     size_t skyW, skyH;
     const std::vector<Eigen::Vector4f>& skyData = getCachedSkyData(skyW, skyH);
+    vkCtx.awaitAllFastFrames();
     vkCtx.updateSkyboxBuffer(skyData);
 
     GPUCameraData fastCamData = {
@@ -1287,7 +1289,7 @@ InFlightFrame Octree<T>::beginGameStyleRenderFrame(const Camera& cam, int height
     fastCamData.tileOffsetX = 0;
     fastCamData.tileOffsetY = 0;
     vkCtx.updateCameraData(fastCamData);
-    vkCtx.submitFastFullFrame(width, height);
+    const uint32_t slot = vkCtx.submitFastFullFrame(width, height, fastOutSize);
 
     InFlightFrame pending;
     pending.width = width;
@@ -1295,6 +1297,7 @@ InFlightFrame Octree<T>::beginGameStyleRenderFrame(const Camera& cam, int height
     pending.outSize = fastOutSize;
     pending.colorformat = colorformat;
     pending.pending = true;
+    pending.slot = slot;
     return pending;
 }
 
@@ -1303,7 +1306,7 @@ frame Octree<T>::endGameStyleRenderFrame(InFlightFrame& pending) {
     TIME_FUNCTION;
     if (!pending.pending) return frame();
 
-    vkCtx.awaitFastFullFrame();
+    vkCtx.awaitFastFullFrame(pending.slot);
     pending.pending = false;
 
     const int width = pending.width;
@@ -1311,8 +1314,8 @@ frame Octree<T>::endGameStyleRenderFrame(InFlightFrame& pending) {
     frame outFrame(width, height, pending.colorformat);
     std::vector<float> guide(size_t(width) * size_t(height) * 5);
     {
-        const float* raw = vkCtx.readbackOut(pending.outSize);
-        memcpy(guide.data(), raw, pending.outSize);
+        const float* raw = vkCtx.readbackSlot(pending.slot);
+        if (raw) memcpy(guide.data(), raw, pending.outSize);
     }
 
     std::vector<float> colorBuffer(size_t(width) * size_t(height) * 3);
@@ -1338,7 +1341,7 @@ InFlightFrame Octree<T>::beginSuperBlendedRenderFrameVulkan(const Camera& cam, i
                 bool useLod, int minSamplesPerPixel) {
     TIME_FUNCTION;
     vkCtx.awaitPostPass();
-    vkCtx.awaitFastFullFrame();
+    vkCtx.awaitAllFastFrames();
     updateStreaming(cam);
     // optimize();
     thread_local RenderBuffer tl_buffer;
@@ -1450,12 +1453,13 @@ InFlightFrame Octree<T>::beginSuperBlendedRenderFrameVulkan(const Camera& cam, i
     fastCamData.tileOffsetX = 0;
     fastCamData.tileOffsetY = 0;
     vkCtx.updateCameraData(fastCamData);
-    vkCtx.dispatchFastFullFrame(width, height);
+    const uint32_t guideSlot = vkCtx.submitFastFullFrame(width, height, fastOutSize);
+    vkCtx.awaitFastFullFrame(guideSlot);
 
     std::vector<float> guide(size_t(width) * size_t(height) * 5);
     {
-        const float* raw = vkCtx.readbackOut(fastOutSize);
-        memcpy(guide.data(), raw, fastOutSize);
+        const float* raw = vkCtx.readbackSlot(guideSlot);
+        if (raw) memcpy(guide.data(), raw, fastOutSize);
     }
 
     int minS = std::clamp(minSamplesPerPixel, 1, samplesPerPixel);
