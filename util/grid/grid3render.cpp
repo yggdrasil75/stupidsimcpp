@@ -648,27 +648,15 @@ static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData
                                       int samplesPerPixel, int maxBounces, int sampleOffset, size_t pixFloats, size_t bufBytes,
                                       bool buffersPreSeeded = false) {
     // TIME_FUNCTION;
-    constexpr int tileTarget = 1024;
-    const int nx = (width + tileTarget - 1) / tileTarget;
-    const int ny = (height + tileTarget - 1) / tileTarget;
-
     using Tile = Eigen::Matrix<int, 4, 1>;
-    std::vector<Tile> tiles;
-    tiles.reserve(nx * ny);
-    for (int j = 0; j < ny; ++j) {
-        const int y0 = j * height / ny;
-        const int y1 = (j + 1) * height / ny;
-        for (int i = 0; i < nx; ++i) {
-            const int x0 = i * width / nx;
-            const int x1 = (i + 1) * width / nx;
-            tiles.push_back({x0, y0, x1 - x0, y1 - y0});
-        }
-    }
+
+    gpuFleet.probeTileTargets(camTemplate);
 
     int start = 0;
     const size_t nGPU = gpuFleet.count();
 
     if (nGPU <= 1) {
+        const std::vector<Tile> tiles = buildTiles(width, height, vkCtx.tileTarget());
         for (const auto& t : tiles) {
             GPUCameraData cd = camTemplate;
             cd.tileOffsetX = t.x();
@@ -700,7 +688,12 @@ static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData
     bool needCalib = false;
     for (size_t g = 0; g < nGPU; ++g) needCalib |= (speedEMA[g] <= 0.0);
     if (needCalib) {
-        const Tile& ct = tiles[tiles.size() / 2];
+        int calibTarget = TILE_MAX;
+        for (size_t g = 0; g < nGPU; ++g) {
+            calibTarget = std::min(calibTarget, gpuFleet.ctx(g).tileTarget());
+        }
+        const std::vector<Tile> calibTiles = buildTiles(width, height, calibTarget);
+        const Tile& ct = calibTiles[calibTiles.size() / 2];
         std::vector<std::thread> calib;
         for (size_t g = 0; g < nGPU; ++g) {
             calib.emplace_back([&, g] {
@@ -748,7 +741,8 @@ static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData
         if (myCount <= 0) continue;
         workers.emplace_back([&, g, myStart, myCount] {
             auto t0 = std::chrono::steady_clock::now();
-            for (const auto& t : tiles) {
+            const std::vector<Tile> myTiles = buildTiles(width, height, gpuFleet.ctx(g).tileTarget());
+            for (const auto& t : myTiles) {
                 GPUCameraData cd = camTemplate;
                 cd.tileOffsetX = t.x();
                 cd.tileOffsetY = t.y();

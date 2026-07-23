@@ -191,6 +191,76 @@ void createCheckerBox(Grid::Octree<int>& octree, const Eigen::Vector3f& center, 
     }
 }
 
+size_t createWaterDrop(Grid::Octree<int>& octree, const Eigen::Vector3f& center, float radius,
+                       int count, int oid, float totalMass = 0.1f) {
+    static std::mt19937 rng(9001);
+    std::uniform_real_distribution<float> jitter(-0.15f, 0.15f);
+
+    auto teardropRadiusAt = [](float t) -> float {
+        if (t < 0.0f || t > 1.0f) return 0.0f;
+        return std::sqrt(std::max(0.0f, 1.0f - t * t)) * (1.0f - t * 0.55f);
+    };
+
+    const float halfHeight = radius;
+    const float maxWidth = radius * 0.85f;
+
+    float dropVolume = 0.0f;
+    {
+        const int slices = 512;
+        const float dz = (2.0f * halfHeight) / slices;
+        for (int i = 0; i < slices; ++i) {
+            float t = (i + 0.5f) / slices;
+            float r = teardropRadiusAt(t) * maxWidth;
+            dropVolume += 3.14159265f * r * r * dz;
+        }
+    }
+
+    const float voxelSize = std::cbrt(dropVolume / static_cast<float>(count)) * 0.93f;
+    const float step = voxelSize;
+
+    struct Cand { Eigen::Vector3f pos; float rank; };
+    std::vector<Cand> candidates;
+
+    for (float z = -halfHeight; z <= halfHeight; z += step) {
+        float t = (z + halfHeight) / (2.0f * halfHeight);
+        float rAtZ = teardropRadiusAt(t) * maxWidth;
+        if (rAtZ <= 0.0f) continue;
+
+        for (float x = -rAtZ; x <= rAtZ; x += step) {
+            for (float y = -rAtZ; y <= rAtZ; y += step) {
+                if (x * x + y * y > rAtZ * rAtZ) continue;
+                Eigen::Vector3f local(x + jitter(rng) * step, y + jitter(rng) * step, z + jitter(rng) * step);
+                float radial = std::sqrt(x * x + y * y);
+                float depth = radial / std::max(rAtZ, 1e-6f);
+                candidates.push_back({local, depth});
+            }
+        }
+    }
+
+    if (static_cast<int>(candidates.size()) > count) {
+        std::nth_element(candidates.begin(), candidates.begin() + count, candidates.end(),
+                         [](const Cand& a, const Cand& b) { return a.rank < b.rank; });
+        candidates.resize(count);
+    }
+
+    const float perVoxelMass = totalMass / std::max<size_t>(1, candidates.size());
+
+    Eigen::Vector3f cWater(0.85f, 0.92f, 1.0f);
+    Eigen::Vector3f waterAbsorp(0.06f, 0.02f, 0.01f);
+
+    for (const auto& c : candidates) {
+        Eigen::Vector3f pos = center + c.pos;
+        octree.insert(1, pos, true, cWater, voxelSize, true, oid, 0.0f,
+                      0.02f, 0.0f, 0.92f, 1.333f, waterAbsorp,
+                      Grid::BodyType::FLUID, perVoxelMass);
+        octree.setSellmeier(pos,
+            Eigen::Vector3f(5.684027565e-1f, 1.726177391e-1f, 2.086189578e-2f).cast<Eigen::half>(),
+            Eigen::Vector3f(5.101829712e-3f, 1.821153936e-2f, 2.620722293e-2f).cast<Eigen::half>());
+    }
+
+    return candidates.size();
+}
+
 enum class TargetState {
     FLUID,
     GAS,
@@ -243,6 +313,9 @@ int main() {
     createCheckerBox(octree, Eigen::Vector3f(-7.1f,  0.0f, 3.5f), Eigen::Vector3f(0.2f, 14.4f, 8.0f), cLightGray, cDarkGray, chkSize); // -X
     createCheckerBox(octree, Eigen::Vector3f( 0.0f,  7.1f, 3.5f), Eigen::Vector3f(14.0f, 0.2f, 8.0f), cLightGray, cDarkGray, chkSize); // +Y
     createCheckerBox(octree, Eigen::Vector3f( 0.0f, -7.1f, 3.5f), Eigen::Vector3f(14.0f, 0.2f, 8.0f), cLightGray, cDarkGray, chkSize); // -Y
+    
+    const Eigen::Vector3f leakPoint(0.0f, 5.4f, 7.3f);
+    const float leakRadius = 0.35f;
     {
         Eigen::Vector3f ceilingCenter(0.0f, 0.0f, 7.4f);
         Eigen::Vector3f ceilingSize(14.4f, 14.4f, 0.2f);
@@ -258,15 +331,44 @@ int main() {
         Eigen::Vector3f cBlack(0.01f, 0.01f, 0.01f);
         Eigen::Vector3f cWhite(1.0f, 1.0f, 1.0f);
 
+        auto inLeakHole = [&](float x, float y) {
+            float dx = x - leakPoint.x();
+            float dy = y - leakPoint.y();
+            return (dx * dx + dy * dy) <= (leakRadius * leakRadius);
+        };
+
         for (float x = minCeiling.x(); x <= maxCeiling.x(); x += step) {
             for (float y = minCeiling.y(); y <= maxCeiling.y(); y += step) {
                 for (float z = minCeiling.z(); z <= maxCeiling.z(); z += step) {
                     bool isLightArea = (x >= minLight.x() && x <= maxLight.x() &&
                                         y >= minLight.y() && y <= maxLight.y());
                     
-                    if (!isLightArea) {
+                    if (!isLightArea && !inLeakHole(x, y)) {
                         Eigen::Vector3f pos(x, y, z);
                         octree.insert(1, pos, true, cBlack, step, true, 100, 0.0f, 0.8f, 0.2f, 1.0f, 1.45f, Eigen::Vector3f::Zero(), Grid::BodyType::STATIC, 1.0f);
+                    }
+                }
+            }
+        }
+
+        {
+            Eigen::Vector3f cWetStain(0.16f, 0.13f, 0.10f);
+            float rimOuter = leakRadius * 2.2f;
+            for (float x = leakPoint.x() - rimOuter; x <= leakPoint.x() + rimOuter; x += lightStep) {
+                for (float y = leakPoint.y() - rimOuter; y <= leakPoint.y() + rimOuter; y += lightStep) {
+                    float dx = x - leakPoint.x();
+                    float dy = y - leakPoint.y();
+                    float d = std::sqrt(dx * dx + dy * dy);
+                    if (d < leakRadius || d > rimOuter) continue;
+
+                    float wet = 1.0f - (d - leakRadius) / (rimOuter - leakRadius);
+                    float n = smoothNoise(x, y, 0.0f, 18.0f);
+                    Eigen::Vector3f albedo = cBlack * (1.0f - wet) + cWetStain * wet;
+                    float roughness = 0.8f * (1.0f - wet * 0.7f) + 0.05f * n;
+
+                    for (float z = minCeiling.z(); z <= maxCeiling.z(); z += lightStep) {
+                        Eigen::Vector3f pos(x, y, z);
+                        octree.insert(1, pos, true, albedo, lightStep, true, 100, 0.0f, roughness, 0.1f, 0.0f, 1.45f, Eigen::Vector3f::Zero(), Grid::BodyType::STATIC, 1.0f);
                     }
                 }
             }
@@ -362,14 +464,14 @@ int main() {
     octree.setMaxDistance(4096);
 
     // 3. Setup rendering loop
-    int width = 1920;
-    int height = 1080;
+    int width = 512;
+    int height = 512;
     
     const float fps = 60.0f;
     const float durationPerSegment = 10.0f;
     const int framesPerSegment = static_cast<int>(fps * durationPerSegment);
-    const int samples = 100;
-    const int blendedsamples = 300;
+    const int samples = 10;
+    const int blendedsamples = 30;
     const float blendedfactor = 0.65;
     const int videosamples = 500;
     const int bounces = 8;
@@ -585,166 +687,138 @@ int main() {
     writer.drain();
     FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
 
-    std::vector<frame> videoFrames;
-    const int totalFrames = framesPerSegment * views.size();
-    videoFrames.reserve(totalFrames);
-    int frameCounter = 0;
+    // std::vector<frame> videoFrames;
+    // const int totalFrames = framesPerSegment * views.size();
+    // videoFrames.reserve(totalFrames);
+    // int frameCounter = 0;
 
-    std::cout << "\nStarting video render..." << std::endl;
-    std::cout << "Total frames to render: " << totalFrames << std::endl;
+    // std::cout << "\nStarting video render..." << std::endl;
+    // std::cout << "Total frames to render: " << totalFrames << std::endl;
 
-    for (size_t i = 0; i < views.size(); ++i) {
-        ScopedFunctionTimer meh("Video");
-        const View& startView = views[i];
-        const View& endView = views[(i + 1) % views.size()]; // Loop back to the first view at the end
-        Grid::InFlightFrame inflight;
-        std::string pendingName;
-        bool havePending = false;
-
-        std::cout << "\nAnimating segment: " << startView.name << " -> " << endView.name << std::endl;
-
-        for (int j = 0; j < framesPerSegment; ++j) {
-            if (frameCounter < -1) {
-                frameCounter++;
-                continue;
-            }
-            frameCounter++;
-            float t = static_cast<float>(j) / static_cast<float>(framesPerSegment);
-
-            Eigen::Vector3f currentOrigin = startView.origin * (1.0f - t) + endView.origin * t;
-            
-            Eigen::Vector3f currentUp = (startView.up * (1.0f - t) + endView.up * t).normalized();
-            
-            Camera cam;
-            cam.origin = currentOrigin;
-            cam.up = currentUp;
-            cam.direction = (target - cam.origin).normalized();
-            
-            // std::cout << "Rendering video frame " << frameCounter << "/" << totalFrames << "..." << std::endl;
-            // frame out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
-            Grid::InFlightFrame next = octree.beginSuperBlendedRenderFrameVulkan(cam, height * 2, width * 2, blendedfactor, frame::colormap::RGB, videosamples, bounces, false);
-            if (havePending) {
-                frame prev = octree.endSuperBlendedRenderFrameVulkan(inflight);
-                writer.enqueue(std::move(prev), "output/materialframes/debug_material_" + pendingName + ".bmp");
-            }
-            inflight = next;
-            pendingName = std::to_string(frameCounter);
-            havePending = true;
-
-            // frame out = octree.superBlendedRenderFrameVulkan(cam, height * 2, width * 2, blendedfactor, frame::colormap::RGB, videosamples, bounces, false);
-            // frame out = octree.renderFrameVulkan(cam, height, width, frame::colormap::RGB, videosamples, bounces, false, true);
-            // videoFrames.push_back(std::move(out));
-            // writer.enqueue(std::move(out), "output/materialframes/debug_material_" + std::to_string(frameCounter) + ".bmp");
-        }
-        if (havePending) {
-            frame prev = octree.endSuperBlendedRenderFrameVulkan(inflight);
-            writer.enqueue(std::move(prev), "output/materialframes/debug_material_" + pendingName + ".bmp");
-        }
-    }
-    writer.drain();
-    FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
-
-    // // std::cout << "\nAll frames rendered. Saving video file..." << std::endl;
-    // // std::string videoFilename = "output/material_test_video.y4m";
-    
-    // // y4mWriter::save(videoFilename, videoFrames, fps);
-    // // if (AVIWriter::saveAVIFromCompressedFrames(videoFilename, std::move(videoFrames), width, height, fps)) {
-    // //     std::cout << "Video saved successfully to " << videoFilename << std::endl;
-    // // } else {
-    // //     std::cerr << "Error: Failed to save video!" << std::endl;
-    // // }
-
-    // std::cout << "\nStarting DYNAMIC FLUID video render (Time flows!)..." << std::endl;
-    
-    // std::vector<frame> fluidVideoFrames;
-
-    // fluidVideoFrames.reserve(totalFluidFrames);
-    // int fluidframeCounter = 0;
-    // int framesPerView = totalFluidFrames / views.size();
-
-    // std::vector<std::weak_ptr<Grid::Octree<int>::NodeData>> trackedWater = octree.getWeakNodesByObjectId(5);
-
-    // Camera cam;
-    // cam.fov = 100;
     // for (size_t i = 0; i < views.size(); ++i) {
-    //     ScopedFunctionTimer meh("Fluid");
+    //     ScopedFunctionTimer meh("Video");
     //     const View& startView = views[i];
     //     const View& endView = views[(i + 1) % views.size()]; // Loop back to the first view at the end
+    //     Grid::InFlightFrame inflight;
+    //     std::string pendingName;
+    //     bool havePending = false;
 
     //     std::cout << "\nAnimating segment: " << startView.name << " -> " << endView.name << std::endl;
 
-    //     for (int j = 0; j < framesPerView; ++j) {
-    //         fluidframeCounter++;
+    //     for (int j = 0; j < framesPerSegment; ++j) {
+    //         if (frameCounter < -1) {
+    //             frameCounter++;
+    //             continue;
+    //         }
+    //         frameCounter++;
+    //         float t = static_cast<float>(j) / static_cast<float>(framesPerSegment);
+
+    //         Eigen::Vector3f currentOrigin = startView.origin * (1.0f - t) + endView.origin * t;
             
-    //         // Check if it's time to melt a block
-    //         for (const auto& event : timeline) {
-    //             if (fluidframeCounter == event.frameTrigger) {
-    //                 std::cout << ">>> TRIGGERING STATE CHANGE for Object ID: " << event.objectId << std::endl;
-
-    //                 if (event.targetState == TargetState::GAS) {
-    //                     // size_t cells = octree.vaporize(event.objectId, event.gasColor,
-    //                     //                                event.gasAbsorption, event.gasMassScale);
-    //                     // std::cout << "    vaporized " << cells << " voxels into gas" << std::endl;
-    //                 } else {
-    //                     Grid::BodyType targetType;
-    //                     switch(event.targetState) {
-    //                         case TargetState::FLUID: targetType = Grid::BodyType::FLUID; break;
-    //                         case TargetState::RIGID: targetType = Grid::BodyType::RIGID; break;
-    //                         default:                 targetType = Grid::BodyType::FLUID; break;
-    //                     }
-    //                     octree.makeObjectFluid(event.objectId, event.mass, targetType);
-
-    //                     if (event.isMoltenMetal) {
-    //                         // Make metals glow slightly when molten and adjust PBR values
-    //                         octree.setMaterialByObjectId(event.objectId, 1.5f, 0.2f, 1.0f);
-    //                     }
-    //                 }
-    //                 // octree.markPhysicsCollidersDirty();
-    //             }
-    //         }
-
-    //         // if (fluidframeCounter >= 10 && fluidframeCounter <= 200) {
-    //         //     for (auto& wp : trackedWater) {
-    //         //         if (auto sp = wp.lock()) {
-    //         //             sp->size += 0.0005f;
-    //         //             sp->physics.mass += 0.0005f;
-    //         //         }
-    //         //     }
-    //         // }
-
-    //         // Step physics
-    //         for (int s = 0; s < physicsSubsteps; ++s) {
-    //             octree.stepPhysics(subDt);
-    //         }
-
-    //         // Interpolate camera
-    //         float t = static_cast<float>(j) / static_cast<float>(framesPerView);
-    //         cam.origin = startView.origin * (1.0f - t) + endView.origin * t;
-    //         cam.up = (startView.up * (1.0f - t) + endView.up * t).normalized();
+    //         Eigen::Vector3f currentUp = (startView.up * (1.0f - t) + endView.up * t).normalized();
+            
+    //         Camera cam;
+    //         cam.origin = currentOrigin;
+    //         cam.up = currentUp;
     //         cam.direction = (target - cam.origin).normalized();
             
-    //         std::cout << "Rendering video frame " << fluidframeCounter << "/" << totalFluidFrames << "..." << std::endl;
-
-    //         // 3. Render
+    //         // std::cout << "Rendering video frame " << frameCounter << "/" << totalFrames << "..." << std::endl;
     //         // frame out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
-    //         frame out = octree.blendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, videosamples, bounces, false, true);
+    //         Grid::InFlightFrame next = octree.beginSuperBlendedRenderFrameVulkan(cam, height * 2, width * 2, blendedfactor, frame::colormap::RGB, videosamples, bounces, false);
+    //         if (havePending) {
+    //             frame prev = octree.endSuperBlendedRenderFrameVulkan(inflight);
+    //             writer.enqueue(std::move(prev), "output/materialframes/debug_material_" + pendingName + ".bmp");
+    //         }
+    //         inflight = next;
+    //         pendingName = std::to_string(frameCounter);
+    //         havePending = true;
 
-    //         // frame out = octree.renderFrameVulkan(cam, height, width, frame::colormap::RGB, videosamples, bounces, true, false);
-    //         // fluidVideoFrames.push_back(out);
-
-    //         // saving to video is dumb so just gonna export here and then convert.
-    //         writer.enqueue(std::move(out), "output/fluidframes/debug_fluid_" + std::to_string(fluidframeCounter) + ".bmp");
+    //         // frame out = octree.superBlendedRenderFrameVulkan(cam, height * 2, width * 2, blendedfactor, frame::colormap::RGB, videosamples, bounces, false);
+    //         // frame out = octree.renderFrameVulkan(cam, height, width, frame::colormap::RGB, videosamples, bounces, false, true);
+    //         // videoFrames.push_back(std::move(out));
+    //         // writer.enqueue(std::move(out), "output/materialframes/debug_material_" + std::to_string(frameCounter) + ".bmp");
+    //     }
+    //     if (havePending) {
+    //         frame prev = octree.endSuperBlendedRenderFrameVulkan(inflight);
+    //         writer.enqueue(std::move(prev), "output/materialframes/debug_material_" + pendingName + ".bmp");
     //     }
     // }
-
-    // // std::string fluidVideoFilename = "output/material_fluid_video.y4m";
-    // // y4mWriter::save(fluidVideoFilename, fluidVideoFrames, fps);
-    // // if (AVIWriter::saveAVIFromCompressedFrames(fluidVideoFilename, std::move(fluidVideoFrames), width, height, fps)) {
-    // //     std::cout << "Fluid Simulation video saved to " << fluidVideoFilename << std::endl;
-    // // }
-    
-    // std::cout << "\nAll renders complete!" << std::endl;
+    // writer.drain();
     // FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
+
+    std::cout << "\nStarting LEAKY CEILING drip simulation..." << std::endl;
+
+    const int   dripObjectId   = 200;
+    const int   dripVoxelCount = 100;
+    const float dripRadius     = 0.5f;
+    const float dripMass       = 0.08f;
+
+    Eigen::Vector3f dripSpawn(leakPoint.x(), leakPoint.y(), leakPoint.z() - dripRadius * 0.9f);
+
+    size_t placed = createWaterDrop(octree, dripSpawn, dripRadius, dripVoxelCount, dripObjectId, dripMass);
+    std::cout << "Spawned water drop with " << placed << " voxels at ("
+              << dripSpawn.x() << ", " << dripSpawn.y() << ", " << dripSpawn.z() << ")" << std::endl;
+
+    octree.markPhysicsCollidersDirty();
+
+    const float dripDuration   = 8.0f;
+    const int totalDripFrames = static_cast<int>(fps * dripDuration);
+    const int releaseFrame = static_cast<int>(fps * 2.5f);
+
+    std::vector<std::weak_ptr<Grid::Octree<int>::NodeData>> dropVoxels =
+        octree.getWeakNodesByObjectId(dripObjectId);
+
+    Camera dripCam;
+    dripCam.fov = 70;
+    dripCam.origin = Eigen::Vector3f(3.2f, 2.0f, 4.2f);
+    dripCam.up = Eigen::Vector3f(0.0f, 0.0f, 1.0f);
+    Eigen::Vector3f dripTarget(leakPoint.x(), leakPoint.y(), 3.0f);
+    dripCam.direction = (dripTarget - dripCam.origin).normalized();
+
+    {
+        Grid::InFlightFrame dripInflight;
+        std::string dripPending;
+        bool dripHavePending = false;
+
+        for (int f = 1; f <= totalDripFrames; ++f) {
+            if (f < releaseFrame) {
+                for (auto& wp : dropVoxels) {
+                    if (auto sp = wp.lock()) {
+                        sp->physics.velocity = Eigen::Vector3f::Zero();
+                        sp->physics.force = Eigen::Vector3f::Zero();
+                        sp->size += 0.00035f;
+                    }
+                }
+            } else {
+                if (f == releaseFrame) {
+                    std::cout << ">>> Drop released from ceiling at frame " << f << std::endl;
+                }
+                for (int s = 0; s < physicsSubsteps; ++s) {
+                    octree.stepPhysics(subDt);
+                }
+            }
+
+            Grid::InFlightFrame next = octree.beginSuperBlendedRenderFrameVulkan(
+                dripCam, height * 2, width * 2, blendedfactor, frame::colormap::RGB, videosamples, bounces, false);
+
+            if (dripHavePending) {
+                frame prev = octree.endSuperBlendedRenderFrameVulkan(dripInflight);
+                writer.enqueue(std::move(prev), "output/dripframes/debug_drip_" + dripPending + ".bmp");
+            }
+            dripInflight = next;
+            dripPending = std::to_string(f);
+            dripHavePending = true;
+        }
+
+        if (dripHavePending) {
+            frame prev = octree.endSuperBlendedRenderFrameVulkan(dripInflight);
+            writer.enqueue(std::move(prev), "output/dripframes/debug_drip_" + dripPending + ".bmp");
+        }
+    }
+
+    writer.drain();
+    std::cout << "\nDrip simulation complete." << std::endl;
+    FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
 
     writer.shutdown();
     std::cout << "frames written: " << writer.writtenCount() << std::endl;

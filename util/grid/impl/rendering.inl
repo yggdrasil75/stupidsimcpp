@@ -143,11 +143,8 @@ struct alignas(16) GPUCameraData {
     int tileH;
     int pad0;
 };
+#include "dispatchprobe.inl"
 
-//change:
-//remove minb/maxb.
-//set position and radius.
-//make fog spherical volume?
 struct alignas(16) GPUFogVolume {
     Vec3 minB;
     float density;
@@ -1883,22 +1880,106 @@ void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel
 
 }
 
+TileProfile tileProfile;
+
+double probeTileEdge(int edge, const GPUCameraData& cam) {
+    GPUCameraData cd = cam;
+    cd.tileOffsetX = 0;
+    cd.tileOffsetY = 0;
+    cd.tileW = edge;
+    cd.tileH = edge;
+    cd.currentSampleOffset = 0;
+    cd.dispatchSamples = 1;
+    updateCameraData(cd);
+
+    for (int i = 0; i < PROBE_WARMUP; ++i) {
+        dispatchWavefront(edge, edge, PROBE_BOUNCES, 1, 0);
+    }
+
+    const double mpix = static_cast<double>(edge) * static_cast<double>(edge) / 1.0e6;
+    double best = 0.0;
+    for (int i = 0; i < PROBE_REPEATS; ++i) {
+        const auto t0 = std::chrono::steady_clock::now();
+        dispatchWavefront(edge, edge, PROBE_BOUNCES, 1, 0);
+        const double ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - t0).count();
+        best = std::max(best, mpix / std::max(ms, 1.0e-3));
+    }
+    return best;
+}
+
+void probeTileTarget(const GPUCameraData& cam) {
+    if (tileProfile.probed) return;
+
+    const uint64_t key = deviceKeyOf(primaryDevice);
+    TileProfile cached;
+    if (tileProfileStore.find(key, cached)) {
+        tileProfile = cached;
+        return;
+    }
+
+    const int seed = seedTileTarget(primaryDevice);
+    const int ceiling = memoryCeilingTileEdge(primaryDevice);
+    const int hiEdge = quantizeTileEdge(std::min(seed * 2, ceiling));
+
+    int lo = TILE_MIN / TILE_QUANTUM;
+    int hi = std::max(hiEdge / TILE_QUANTUM, lo + 1);
+    int bestQ = lo;
+    double bestT = 0.0;
+
+    while (hi - lo > PROBE_BRACKET) {
+        const int a = lo + static_cast<int>((hi - lo) * PROBE_LO_SPLIT);
+        const int b = lo + static_cast<int>((hi - lo) * PROBE_HI_SPLIT);
+        if (a == b) break;
+        const double ta = probeTileEdge(a * TILE_QUANTUM, cam);
+        const double tb = probeTileEdge(b * TILE_QUANTUM, cam);
+        if (ta > bestT) {
+            bestT = ta;
+            bestQ = a;
+        }
+        if (tb > bestT) {
+            bestT = tb;
+            bestQ = b;
+        }
+        if (ta < tb) lo = a;
+        else hi = b;
+    }
+    for (int q = lo; q <= hi; ++q) {
+        const double t = probeTileEdge(q * TILE_QUANTUM, cam);
+        if (t > bestT) {
+            bestT = t;
+            bestQ = q;
+        }
+    }
+
+    tileProfile.deviceKey = key;
+    tileProfile.tileTarget = quantizeTileEdge(bestQ * TILE_QUANTUM);
+    tileProfile.mpixPerMs = bestT;
+    tileProfile.probed = true;
+    tileProfileStore.put(tileProfile);
+    tileProfileStore.save();
+}
+
+int tileTarget() const {
+    if (tileProfile.probed) return tileProfile.tileTarget;
+    return seedTileTarget(primaryDevice);
+}
+
 #include "vct_host.inl"
 
 };
 inline GpuContext vkCtx;
 
 struct GpuFleet {
-    VkInstance instance = VK_NULL_HANDLE;                 // shared, fleet-owned
-    std::vector<GpuContext*> gpus;                        // [0] == &vkCtx
-    std::vector<std::unique_ptr<GpuContext>> owned;       // secondaries
+    VkInstance instance = VK_NULL_HANDLE;
+    std::vector<GpuContext*> gpus;
+    std::vector<std::unique_ptr<GpuContext>> owned;
     bool initialized = false;
     bool multiEnabled = true;
 
     size_t count() const { return gpus.size(); }
     GpuContext& ctx(size_t i) { return *gpus[i]; }
 
-    // Convenience views if you want bare handles (e.g. for external interop).
     std::vector<VkDevice> devices() const {
         std::vector<VkDevice> v; v.reserve(gpus.size());
         for (auto* g : gpus) v.push_back(g->device);
@@ -1911,8 +1992,6 @@ struct GpuFleet {
     }
 
     VkInstance ensureInstance() {
-        // Adopt an instance already created by vkCtx (e.g. a fast-path render
-        // ran first); otherwise create the one shared instance here.
         if (instance != VK_NULL_HANDLE) return instance;
         if (vkCtx.initialized && vkCtx.instance != VK_NULL_HANDLE) {
             instance = vkCtx.instance;
@@ -1946,21 +2025,18 @@ struct GpuFleet {
         std::stable_sort(cands.begin(), cands.end(),
                          [](const Cand& a, const Cand& b) { return a.score > b.score; });
 
-        // If any real GPU is present, drop the CPU/fallback (score <= 1) devices.
         if (!cands.empty() && cands.front().score >= 2) {
             cands.erase(std::remove_if(cands.begin(), cands.end(),
                         [](const Cand& c) { return c.score <= 1; }), cands.end());
         }
         if (!multiEnabled && cands.size() > 1) cands.resize(1);
 
-        // Primary context (vkCtx). Keep its device if already initialized.
         if (!vkCtx.initialized) {
             vkCtx.init(cands.empty() ? VK_NULL_HANDLE : cands.front().dev, instance);
         }
         if (!cands.empty()) vkCtx.score = cands.front().score;
         gpus.push_back(&vkCtx);
 
-        // Secondary contexts for the remaining distinct devices.
         for (auto& c : cands) {
             if (c.dev == vkCtx.primaryDevice) continue;
             auto g = std::make_unique<GpuContext>();
@@ -1970,6 +2046,16 @@ struct GpuFleet {
             owned.push_back(std::move(g));
         }
     }
+    void probeTileTargets(const GPUCameraData& cam) {
+        if (tileProbed) return;
+        tileProbed = true;
+        tileProfileStore.load();
+        for (size_t g = 0; g < gpus.size(); ++g) {
+            gpus[g]->probeTileTarget(cam);
+        }
+    }
+
+    bool tileProbed = false;
 };
 inline GpuFleet gpuFleet;
 #endif

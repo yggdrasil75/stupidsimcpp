@@ -1,0 +1,10 @@
+{
+    "version": 1,
+    "devices": [
+        {
+            "deviceKey": 18263765934953416600,
+            "tileTarget": 256,
+            "mpixPerMs": 9.56961e-05
+        }
+    ]
+}

@@ -4,6 +4,7 @@
 #include "../../eigen/Eigen/Dense"
 #include "../timing_decorator.hpp"
 #include "../output/frame.hpp"
+#include "../jsonhelper.hpp"
 #include "camera.hpp"
 #include <vector>
 #include <array>
