@@ -9,6 +9,8 @@ const float DIST_EPSILON = 1e-4;
 
 const int MAX_TRANSPARENT_BOUNCES = 12;
 const int MAX_VOLUMETRIC_BOUNCES  = 8;
+#define DDGI_RAYS 64
+const float DDGI_HYSTERESIS = 0.97;
 
 struct GPUMaterial {
     uint chromaticity;
@@ -29,6 +31,11 @@ struct GPURenderData {
 vec3 unpackExtent(uint e) {
     return vec3(float((e & 0x3FFu) + 1u), float(((e >> 10) & 0x3FFu) + 1u), float(((e >> 20) & 0x3FFu) + 1u));
 }
+
+const uint EXTENT_STATIC_BIT = 1u << 30;
+const uint EXTENT_REUSE_BIT  = 1u << 31;
+bool extentIsStatic(uint e)    { return (e & EXTENT_STATIC_BIT) != 0u; }
+bool extentIsReusable(uint e)  { return (e & EXTENT_REUSE_BIT) != 0u; }
 vec3 ptBoundsMin(GPURenderData p) { return p.position - p.size * 0.5; }
 vec3 ptBoundsMax(GPURenderData p) { return p.position + p.size * 0.5 + p.size * (unpackExtent(p.extent) - vec3(1.0)); }
 
@@ -120,7 +127,22 @@ layout(binding = 0) uniform CameraData {
     int fogVolumeCount;
     int tileW;
     int tileH;
-    int camPad0;
+    int wcEnabled;
+    uint wcCapacity;
+    uint wcFrame;
+    int wcMaxAge;
+    vec3 wcOrigin;
+    float wcInvCellSize;
+    vec3 ddgiOrigin;
+    float ddgiEnabled;
+    vec3 ddgiSpacing;
+    float ddgiNormalBias;
+    int ddgiProbesX;
+    int ddgiProbesY;
+    int ddgiProbesZ;
+    int ddgiIrrRes;
+    int ddgiDepthRes;
+    float ddgiDepthSharpness;
 } cam;
 bool adaptiveEnabled() { return cam.dispatchSamples >= cam.targetSamples; }
 
@@ -140,8 +162,6 @@ layout(std430, binding = 13) buffer CounterBuf{ Counters ctr; };
 layout(std430, binding = 14) buffer PathHitBuffer { PathHit pathsHit[]; };
 layout(std430, binding = 15) readonly buffer SellmeierBuffer { float sellmeierLUT[]; };
 
-// World-space participating-media boxes (dust/haze/mist). Constant density
-// inside each box; stack boxes for gradients. See Octree::addFogVolume.
 struct FogVolume {
     vec4 minB;    // xyz min corner, w = extinction sigma_t per world unit
     vec4 maxB;    // xyz max corner
@@ -149,6 +169,162 @@ struct FogVolume {
     vec4 absorb;  // rgb absorption tint
 };
 layout(std430, binding = 16) readonly buffer FogVolumeBuffer { FogVolume fogVolumes[]; };
+
+struct WorldCacheEntry {
+    uint key;
+    uint frame;
+    uint sampleCount;
+    uint pad0;
+    vec3 irradiance;
+    float pad1;
+};
+layout(std430, binding = 17) buffer WorldCacheBuffer { WorldCacheEntry worldCache[]; };
+
+const uint WC_INVALID_KEY = 0u;
+
+uint wcQuantizeNormal(vec3 n) {
+    vec3 a = abs(n);
+    uint major = 0u;
+    if (a.y > a.x && a.y >= a.z) major = 1u;
+    else if (a.z > a.x && a.z > a.y) major = 2u;
+    return major * 2u + (n[major] < 0.0 ? 1u : 0u);
+}
+
+uint wcKey(ivec3 c, uint nb) {
+    uint h = uint(c.x) * 73856093u;
+    h ^= uint(c.y) * 19349663u;
+    h ^= uint(c.z) * 83492791u;
+    h ^= nb * 0x9e3779b9u;
+    h ^= h >> 16;
+    return h == WC_INVALID_KEY ? 1u : h;
+}
+
+ivec3 wcCell(vec3 p) {
+    return ivec3(floor((p - cam.wcOrigin) * cam.wcInvCellSize));
+}
+
+uint wcSlot(uint key) {
+    return key & (cam.wcCapacity - 1u);
+}
+
+bool wcLookup(vec3 p, vec3 n, out vec3 outIrradiance) {
+    outIrradiance = vec3(0.0);
+    if (cam.wcEnabled == 0 || cam.wcCapacity == 0u) return false;
+    uint key = wcKey(wcCell(p), wcQuantizeNormal(n));
+    WorldCacheEntry e = worldCache[wcSlot(key)];
+    if (e.key != key || e.sampleCount == 0u) return false;
+    if (int(cam.wcFrame - e.frame) > cam.wcMaxAge) return false;
+    outIrradiance = e.irradiance;
+    return true;
+}
+
+void wcStore(vec3 p, vec3 n, vec3 radiance) {
+    if (cam.wcEnabled == 0 || cam.wcCapacity == 0u) return;
+    uint key = wcKey(wcCell(p), wcQuantizeNormal(n));
+    uint slot = wcSlot(key);
+    uint prev = atomicCompSwap(worldCache[slot].key, WC_INVALID_KEY, key);
+    if (prev != WC_INVALID_KEY && prev != key) {
+        if (int(cam.wcFrame - worldCache[slot].frame) <= cam.wcMaxAge) return;
+        atomicExchange(worldCache[slot].key, key);
+        worldCache[slot].sampleCount = 0u;
+        worldCache[slot].irradiance = vec3(0.0);
+    }
+    uint c = atomicAdd(worldCache[slot].sampleCount, 1u) + 1u;
+    float w = 1.0 / float(min(c, 64u));
+    worldCache[slot].irradiance = mix(worldCache[slot].irradiance, radiance, w);
+    worldCache[slot].frame = cam.wcFrame;
+}
+
+layout(std430, binding = 18) buffer DDGIIrradianceBuffer { vec4 ddgiIrradiance[]; };
+layout(std430, binding = 19) buffer DDGIDepthBuffer { vec2 ddgiDepth[]; };
+
+vec2 octEncode(vec3 d) {
+    d /= (abs(d.x) + abs(d.y) + abs(d.z));
+    vec2 o = d.xy;
+    if (d.z < 0.0) {
+        o = (1.0 - abs(d.yx)) * vec2(d.x >= 0.0 ? 1.0 : -1.0, d.y >= 0.0 ? 1.0 : -1.0);
+    }
+    return o * 0.5 + 0.5;
+}
+
+vec3 octDecode(vec2 f) {
+    f = f * 2.0 - 1.0;
+    vec3 d = vec3(f.x, f.y, 1.0 - abs(f.x) - abs(f.y));
+    float t = max(-d.z, 0.0);
+    d.x += (d.x >= 0.0) ? -t : t;
+    d.y += (d.y >= 0.0) ? -t : t;
+    return normalize(d);
+}
+
+int ddgiProbeIndex(ivec3 c) {
+    return (c.z * cam.ddgiProbesY + c.y) * cam.ddgiProbesX + c.x;
+}
+
+vec3 ddgiProbePosition(ivec3 c) {
+    return cam.ddgiOrigin + vec3(c) * cam.ddgiSpacing;
+}
+
+vec3 ddgiSampleIrradiance(int probe, vec3 dir) {
+    vec2 uv = octEncode(dir) * float(cam.ddgiIrrRes - 1);
+    ivec2 t = ivec2(clamp(uv, vec2(0.0), vec2(float(cam.ddgiIrrRes - 1))));
+    int base = probe * cam.ddgiIrrRes * cam.ddgiIrrRes;
+    return ddgiIrradiance[base + t.y * cam.ddgiIrrRes + t.x].rgb;
+}
+
+vec2 ddgiSampleDepth(int probe, vec3 dir) {
+    vec2 uv = octEncode(dir) * float(cam.ddgiDepthRes - 1);
+    ivec2 t = ivec2(clamp(uv, vec2(0.0), vec2(float(cam.ddgiDepthRes - 1))));
+    int base = probe * cam.ddgiDepthRes * cam.ddgiDepthRes;
+    return ddgiDepth[base + t.y * cam.ddgiDepthRes + t.x];
+}
+
+vec3 ddgiIrradianceAt(vec3 p, vec3 n, vec3 viewDir) {
+    if (cam.ddgiProbesX <= 0 || cam.ddgiProbesY <= 0 || cam.ddgiProbesZ <= 0) return vec3(0.0);
+
+    vec3 biased = p + (-viewDir) * cam.ddgiNormalBias;
+
+    vec3 grid = (biased - cam.ddgiOrigin) / cam.ddgiSpacing;
+    ivec3 baseCell = ivec3(floor(grid));
+    vec3 frac = grid - vec3(baseCell);
+
+    ivec3 maxCell = ivec3(cam.ddgiProbesX, cam.ddgiProbesY, cam.ddgiProbesZ) - 1;
+    if (any(lessThan(baseCell, ivec3(-1))) || any(greaterThan(baseCell, maxCell))) return vec3(0.0);
+
+    vec3 sum = vec3(0.0);
+    float wSum = 0.0;
+
+    for (int i = 0; i < 8; ++i) {
+        ivec3 offs = ivec3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
+        ivec3 c = clamp(baseCell + offs, ivec3(0), maxCell);
+        vec3 probePos = ddgiProbePosition(c);
+        vec3 toProbe = probePos - biased;
+        float dist = length(toProbe);
+        vec3 dirToProbe = (dist > 1e-6) ? (toProbe / dist) : n;
+
+        vec3 tri = mix(1.0 - frac, frac, vec3(offs));
+        float w = tri.x * tri.y * tri.z;
+
+        float ndl = dot(n, dirToProbe);
+        w *= max(0.0, (ndl + 1.0) * 0.5);
+
+        vec2 md = ddgiSampleDepth(ddgiProbeIndex(c), -dirToProbe);
+        float mean = md.x;
+        float variance = abs(md.x * md.x - md.y);
+        if (dist > mean) {
+            float d = dist - mean;
+            float cheb = variance / (variance + d * d);
+            cheb = max(cheb * cheb * cheb, 0.0);
+            w *= cheb;
+        }
+
+        if (w < 1e-4) continue;
+        sum += ddgiSampleIrradiance(ddgiProbeIndex(c), n) * w;
+        wSum += w;
+    }
+
+    if (wSum <= 0.0) return vec3(0.0);
+    return sum / wSum;
+}
 
 bool fogClip(vec3 ro, vec3 invD, float tMax, vec4 minB, vec4 maxB, out float t0, out float t1) {
     vec3 tA = (minB.xyz - ro) * invD;
@@ -403,7 +579,7 @@ int getMediumVoxelAt(vec3 hitPoint, vec3 normal, int targetObjectId, int ignoreI
 vec3 shadowTransmit(vec3 ro, vec3 rd, vec3 invD, float maxDist, int lightPtIdx) {
     rayQueryEXT rq;
     rayQueryInitializeEXT(rq, tlas, gl_RayFlagsNoneEXT, 0xFF, ro, 0.0f, rd, maxDist);
-    float tBest = maxDist;   // shrinking committed-hit bound (see voxelTraverse)
+    float tBest = maxDist;
     vec3 transmittance = vec3(1.0);
     if (cam.invFogRange > 0.0) transmittance *= exp(-vec3(cam.invFogRange) * maxDist);
 

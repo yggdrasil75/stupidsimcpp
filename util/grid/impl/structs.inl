@@ -28,6 +28,24 @@ static constexpr uint8_t KEEPLOADED_BIT = 1 << 5;
 
 static constexpr uint8_t OBJ_ALLOW_PARTIAL_UNLOAD_BIT = 1 << 0;
 
+static constexpr uint8_t REUSE_SETTLE_FRAMES = 3;
+static constexpr float REUSE_MAX_TRANSMISSION = 0.05f;
+static constexpr float REUSE_MIN_ROUGHNESS = 0.25f;
+
+static constexpr uint32_t WC_INVALID_KEY = 0u;
+static constexpr int WC_MAX_AGE = 32;
+static constexpr uint32_t WC_CAPACITY = 1u << 20;
+
+static constexpr int DDGI_IRR_RES = 8;
+static constexpr int DDGI_DEPTH_RES = 16;
+static constexpr int DDGI_RAYS_PER_PROBE = 64;
+static constexpr int DDGI_PROBES_X = 16;
+static constexpr int DDGI_PROBES_Y = 8;
+static constexpr int DDGI_PROBES_Z = 16;
+static constexpr float DDGI_HYSTERESIS = 0.97f;
+static constexpr float DDGI_DEPTH_SHARPNESS = 50.0f;
+static constexpr float DDGI_NORMAL_BIAS = 0.25f;
+
 static constexpr int SELL_LUT_WAVELENGTHS = 32;
 static constexpr int SELL_LUT_SECONDARY   = 8;
 static constexpr float SELL_LMIN = 0.380f; // um
@@ -120,6 +138,20 @@ static constexpr uint32_t EXTENT_UNIT = 0u; // 1,1,1 packed; fields store count-
 static constexpr float LATTICE_EPS = 1e-3f; // cell fractions; merge only near-exact grid points
 static constexpr uint32_t EXTENT_MAX  = 1024u;
 static constexpr uint32_t EXTENT_STATIC_BIT = 1u << 30;
+static constexpr uint32_t EXTENT_REUSE_BIT  = 1u << 31;
+
+static inline bool extentIsStatic(uint32_t e) {
+    return (e & EXTENT_STATIC_BIT) != 0u;
+}
+static inline uint32_t extentSetStatic(uint32_t e, bool v) {
+    return v ? (e | EXTENT_STATIC_BIT) : (e & ~EXTENT_STATIC_BIT);
+}
+static inline bool extentIsReusable(uint32_t e) {
+    return (e & EXTENT_REUSE_BIT) != 0u;
+}
+static inline uint32_t extentSetReusable(uint32_t e, bool v) {
+    return v ? (e | EXTENT_REUSE_BIT) : (e & ~EXTENT_REUSE_BIT);
+}
 
 ///@brief Packs a per-axis cell count into three 10-bit fields
 ///@param ex Cell span along x, clamped to [1, EXTENT_MAX]
@@ -131,6 +163,24 @@ static inline uint32_t packExtent(uint32_t ex, uint32_t ey, uint32_t ez) {
     uint32_t y = std::clamp(ey, 1u, EXTENT_MAX) - 1u;
     uint32_t z = std::clamp(ez, 1u, EXTENT_MAX) - 1u;
     return x | (y << 10) | (z << 20);
+}
+
+static inline uint32_t quantizeNormal(const Vec3& n) {
+    uint32_t major = 0;
+    Vec3 a = n.cwiseAbs();
+    if (a.y() > a.x() && a.y() >= a.z()) major = 1;
+    else if (a.z() > a.x() && a.z() > a.y()) major = 2;
+    const uint32_t sign = (n[major] < 0.0f) ? 1u : 0u;
+    return major * 2u + sign;
+}
+
+static inline uint32_t worldCacheKey(int64_t cx, int64_t cy, int64_t cz, uint32_t nb) {
+    uint32_t h = static_cast<uint32_t>(cx) * 73856093u;
+    h ^= static_cast<uint32_t>(cy) * 19349663u;
+    h ^= static_cast<uint32_t>(cz) * 83492791u;
+    h ^= nb * 0x9e3779b9u;
+    h ^= h >> 16;
+    return h == WC_INVALID_KEY ? 1u : h;
 }
 
 ///@brief Expands a packed extent into per-axis cell counts
@@ -705,21 +755,23 @@ struct NodeData_ {
     uint32_t renderMatIdx;
     uint16_t physMatIdx;
     std::atomic<uint8_t> flags;
+    std::atomic<uint8_t> settledFrames;
     PhysicsState_<T> physics;
 
     NodeData_(const T& data, const Vec3& pos, bool visible, const Eigen::Vector4f& color, float size = 0.01f,
                 bool active = true, int objectId = -1, uint32_t rIdx = 0, uint16_t pIdx = 0, bool staticbit = 0) 
             : data(data), position(pos), objectId(objectId), size(size), 
-                color(color), renderMatIdx(rIdx), physMatIdx(pIdx), flags(0) {
+                color(color), renderMatIdx(rIdx), physMatIdx(pIdx), flags(0), settledFrames(0) {
         setActive(active);
         setVisible(visible);
         setStatic(staticbit);
     }
     
-    NodeData_() : objectId(-1), size(0.0f), color(Eigen::Vector4f::Zero()), renderMatIdx(0), physMatIdx(0), flags(0) {}
+    NodeData_() : objectId(-1), size(0.0f), color(Eigen::Vector4f::Zero()), renderMatIdx(0), physMatIdx(0), flags(0), settledFrames(0) {}
 
     NodeData_(const NodeData_& other) : data(other.data), position(other.position), objectId(other.objectId), size(other.size),
-            color(other.color), renderMatIdx(other.renderMatIdx), physMatIdx(other.physMatIdx), flags(other.flags.load(std::memory_order_relaxed)), physics(other.physics) {}
+            color(other.color), renderMatIdx(other.renderMatIdx), physMatIdx(other.physMatIdx), flags(other.flags.load(std::memory_order_relaxed)),
+            settledFrames(other.settledFrames.load(std::memory_order_relaxed)), physics(other.physics) {}
 
     NodeData_& operator=(const NodeData_& other) {
         if (this != &other) {
@@ -732,6 +784,7 @@ struct NodeData_ {
             physMatIdx = other.physMatIdx;
             physics = other.physics;
             flags.store(other.flags.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            settledFrames.store(other.settledFrames.load(std::memory_order_relaxed), std::memory_order_relaxed);
         }
         return *this;
     }
@@ -760,6 +813,19 @@ struct NodeData_ {
     void setStatic(bool v) {
         if (v) flags.fetch_or(STATIC_BIT, std::memory_order_relaxed);
         else flags.fetch_and(~STATIC_BIT, std::memory_order_relaxed);
+    }
+
+    bool isSettled() const {
+        return settledFrames.load(std::memory_order_relaxed) >= REUSE_SETTLE_FRAMES;
+    }
+    
+    void setSettled(bool asleep) {
+        if (!asleep) {
+            settledFrames.store(0, std::memory_order_relaxed);
+            return;
+        }
+        uint8_t s = settledFrames.load(std::memory_order_relaxed);
+        if (s < REUSE_SETTLE_FRAMES) settledFrames.store(s + 1, std::memory_order_relaxed);
     }
     
     Vec3 getHalfSize() const {

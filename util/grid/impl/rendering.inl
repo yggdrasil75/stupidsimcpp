@@ -24,7 +24,7 @@ struct RenderData {
                 + Vec3::Constant(size).cwiseProduct(unpackExtent(extent) - Vec3::Ones()));
     }
 
-    bool isMerged() const { return extent != EXTENT_UNIT; }
+    bool isMerged() const { return (extent & ~(EXTENT_STATIC_BIT | EXTENT_REUSE_BIT)) != EXTENT_UNIT; }
 };
 
 template<typename T>
@@ -54,6 +54,7 @@ struct RenderNode_ {
 struct MergeCacheEntry {
     std::vector<RenderData> boxes;
     uint32_t sourceCount = 0;
+    uint32_t reuseSignature = 0;
 };
 
 template<typename T>
@@ -141,9 +142,33 @@ struct alignas(16) GPUCameraData {
     int fogVolumeCount;
     int tileW;
     int tileH;
-    int pad0;
+    int wcEnabled;
+    uint32_t wcCapacity;
+    uint32_t wcFrame;
+    int wcMaxAge;
+    Vec3 wcOrigin;
+    float wcInvCellSize;
+    Vec3 ddgiOrigin;
+    float ddgiEnabled;
+    Vec3 ddgiSpacing;
+    float ddgiNormalBias;
+    int ddgiProbesX;
+    int ddgiProbesY;
+    int ddgiProbesZ;
+    int ddgiIrrRes;
+    int ddgiDepthRes;
+    float ddgiDepthSharpness;
 };
 #include "dispatchprobe.inl"
+
+struct alignas(16) GPUWorldCacheEntry {
+    uint32_t key;
+    uint32_t frame;
+    uint32_t sampleCount;
+    uint32_t pad0;
+    Vec3 irradiance;
+    float pad1;
+};
 
 struct alignas(16) GPUFogVolume {
     Vec3 minB;
@@ -207,6 +232,7 @@ struct GpuContext {
     VkShaderModule wfShadowShader = VK_NULL_HANDLE;
     VkShaderModule wfFinalizeShader = VK_NULL_HANDLE;
     VkShaderModule aabbBuildShader = VK_NULL_HANDLE;
+    VkShaderModule ddgiUpdateShader = VK_NULL_HANDLE;
 
     VkPipelineLayout fastPipelineLayout = VK_NULL_HANDLE;
     VkPipelineLayout pbrPipelineLayout = VK_NULL_HANDLE;
@@ -228,6 +254,7 @@ struct GpuContext {
     VkPipeline wfShadowPipe = VK_NULL_HANDLE;
     VkPipeline wfFinalizePipe = VK_NULL_HANDLE;
     VkPipeline aabbBuildPipe = VK_NULL_HANDLE;
+    VkPipeline ddgiUpdatePipe = VK_NULL_HANDLE;
 
     VkBuffer fastGBuffer = VK_NULL_HANDLE;
     VkBuffer wfPathBuf = VK_NULL_HANDLE;
@@ -259,6 +286,9 @@ struct GpuContext {
     VkBuffer tlasBuffer = VK_NULL_HANDLE;
     VkBuffer smoothScratchBuffer = VK_NULL_HANDLE;
     VkBuffer sellmeierBuffer = VK_NULL_HANDLE;
+    VkBuffer worldCacheBuffer = VK_NULL_HANDLE;
+    VkBuffer ddgiIrradianceBuffer = VK_NULL_HANDLE;
+    VkBuffer ddgiDepthBuffer = VK_NULL_HANDLE;
 
     VkDescriptorSetLayout fastDescLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout pbrDescLayout = VK_NULL_HANDLE;
@@ -306,6 +336,9 @@ struct GpuContext {
     VkDeviceMemory tlasMem = VK_NULL_HANDLE;
     VkDeviceMemory smoothScratchMem = VK_NULL_HANDLE;
     VkDeviceMemory sellmeierMem = VK_NULL_HANDLE;
+    VkDeviceMemory worldCacheMem = VK_NULL_HANDLE;
+    VkDeviceMemory ddgiIrradianceMem = VK_NULL_HANDLE;
+    VkDeviceMemory ddgiDepthMem = VK_NULL_HANDLE;
     
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
     
@@ -336,6 +369,8 @@ struct GpuContext {
     uint32_t currentSellmeierCap = 0;
     uint32_t sellmeierWidth = 0;
     uint32_t sellmeierRows = 0;
+    uint32_t worldCacheCap = 0;
+    uint32_t ddgiProbeCap = 0;
 
     bool initialized = false;
     bool blasTopologyValid = false;
@@ -594,7 +629,7 @@ struct GpuContext {
         vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
 
         VkDescriptorPoolSize poolSizes[] = { 
-            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 60},
+            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 72},
             {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 12},
             {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 6},
             {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 64},
@@ -1644,9 +1679,8 @@ struct WFPushConstants {
 
 
 void initWavefront() {
-
-    VkDescriptorSetLayoutBinding b[17] = {};
-    for (int i = 0; i < 17; ++i) {
+    VkDescriptorSetLayoutBinding b[20] = {};
+    for (int i = 0; i < 20; ++i) {
         b[i].binding = i;
         b[i].descriptorCount = 1;
         b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -1656,7 +1690,7 @@ void initWavefront() {
     b[5].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
 
     VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    li.bindingCount = 17;
+    li.bindingCount = 20;
     li.pBindings = b;
     vkCreateDescriptorSetLayout(device, &li, nullptr, &wfDescLayout);
 
@@ -1674,11 +1708,11 @@ void initWavefront() {
     pli.pPushConstantRanges = &pcr;
     vkCreatePipelineLayout(device, &pli, nullptr, &wfPipelineLayout);
 
-    wfInitShader     = createShaderModule(device, "./bin/wf_init.spv");
-    wfArgsShader     = createShaderModule(device, "./bin/wf_args.spv");
-    wfExtendShader   = createShaderModule(device, "./bin/wf_extend.spv");
-    wfShadeShader    = createShaderModule(device, "./bin/wf_shade.spv");
-    wfShadowShader   = createShaderModule(device, "./bin/wf_shadow.spv");
+    wfInitShader = createShaderModule(device, "./bin/wf_init.spv");
+    wfArgsShader = createShaderModule(device, "./bin/wf_args.spv");
+    wfExtendShader = createShaderModule(device, "./bin/wf_extend.spv");
+    wfShadeShader = createShaderModule(device, "./bin/wf_shade.spv");
+    wfShadowShader = createShaderModule(device, "./bin/wf_shadow.spv");
     wfFinalizeShader = createShaderModule(device, "./bin/wf_finalize.spv");
 
     auto makePipe = [&](VkShaderModule m, VkPipeline& out) {
@@ -1696,6 +1730,63 @@ void initWavefront() {
     makePipe(wfShadeShader,    wfShadePipe);
     makePipe(wfShadowShader,   wfShadowPipe);
     makePipe(wfFinalizeShader, wfFinalizePipe);
+
+    ddgiUpdateShader = createShaderModule(device, "./bin/ddgi_update.spv");
+    if (ddgiUpdateShader != VK_NULL_HANDLE) makePipe(ddgiUpdateShader, ddgiUpdatePipe);
+}
+
+void ensureWorldCache(uint32_t capacity) {
+    uint32_t cap = 1u;
+    while (cap < capacity) cap <<= 1;
+    if (worldCacheBuffer && cap <= worldCacheCap) return;
+    destroyBuffer(device, worldCacheBuffer, worldCacheMem);
+    const VkDeviceSize bytes = VkDeviceSize(cap) * sizeof(GPUWorldCacheEntry);
+    createBuffer(device, primaryDevice, bytes,
+                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, worldCacheBuffer, worldCacheMem);
+    worldCacheCap = cap;
+    clearWorldCache();
+}
+
+void clearWorldCache() {
+    if (!worldCacheBuffer) return;
+    const VkDeviceSize bytes = VkDeviceSize(worldCacheCap) * sizeof(GPUWorldCacheEntry);
+    executeSingleTimeCommands([&](VkCommandBuffer cmd) {
+        vkCmdFillBuffer(cmd, worldCacheBuffer, 0, bytes, 0u);
+    });
+}
+
+void ensureDDGIBuffers(uint32_t probeCount) {
+    if (ddgiIrradianceBuffer && probeCount <= ddgiProbeCap) return;
+    destroyBuffer(device, ddgiIrradianceBuffer, ddgiIrradianceMem);
+    destroyBuffer(device, ddgiDepthBuffer, ddgiDepthMem);
+
+    const VkDeviceSize irrBytes = VkDeviceSize(probeCount) * DDGI_IRR_RES * DDGI_IRR_RES * 4 * sizeof(float);
+    const VkDeviceSize depthBytes = VkDeviceSize(probeCount) * DDGI_DEPTH_RES * DDGI_DEPTH_RES * 2 * sizeof(float);
+    const VkBufferUsageFlags use = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+
+    createBuffer(device, primaryDevice, irrBytes, use, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                 ddgiIrradianceBuffer, ddgiIrradianceMem);
+    createBuffer(device, primaryDevice, depthBytes, use, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                 ddgiDepthBuffer, ddgiDepthMem);
+    ddgiProbeCap = probeCount;
+
+    executeSingleTimeCommands([&](VkCommandBuffer cmd) {
+        vkCmdFillBuffer(cmd, ddgiIrradianceBuffer, 0, irrBytes, 0u);
+        vkCmdFillBuffer(cmd, ddgiDepthBuffer, 0, depthBytes, 0u);
+    });
+}
+
+void dispatchDDGIUpdate(uint32_t probeCount) {
+    if (!ddgiUpdatePipe || probeCount == 0) return;
+    executeSingleTimeCommands([&](VkCommandBuffer cmd) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ddgiUpdatePipe);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                wfPipelineLayout, 0, 1, &wfDescSet, 0, nullptr);
+        WFPushConstants pc{0, 0, 0, 0};
+        vkCmdPushConstants(cmd, wfPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, probeCount, 1, 1);
+    });
 }
 
 void ensureWavefrontBuffers(uint32_t maxPaths) {
@@ -1722,7 +1813,7 @@ void ensureWavefrontBuffers(uint32_t maxPaths) {
 }
 
 void writeWavefrontDescriptors() {
-    VkDescriptorBufferInfo bi[17] = {};
+    VkDescriptorBufferInfo bi[20] = {};
     bi[0]  = {uboBuffer,      0, VK_WHOLE_SIZE};
     bi[1]  = {pbrPointBuffer, 0, VK_WHOLE_SIZE};
     bi[2]  = {materialBuffer, 0, VK_WHOLE_SIZE};
@@ -1739,10 +1830,13 @@ void writeWavefrontDescriptors() {
     bi[14] = {wfPathHitBuf,   0, VK_WHOLE_SIZE};
     bi[15] = {sellmeierBuffer ? sellmeierBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
     bi[16] = {fogBuffer ? fogBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
+    bi[17] = {worldCacheBuffer ? worldCacheBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
+    bi[18] = {ddgiIrradianceBuffer ? ddgiIrradianceBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
+    bi[19] = {ddgiDepthBuffer ? ddgiDepthBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
 
-    VkWriteDescriptorSet w[17] = {};
+    VkWriteDescriptorSet w[20] = {};
     int n = 0;
-    for (int i = 0; i < 17; ++i) {
+    for (int i = 0; i < 20; ++i) {
         if (i == 5) continue;
         w[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         w[n].dstSet = wfDescSet;
@@ -1791,6 +1885,8 @@ void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel
     uint32_t maxPaths = uint32_t(tileW) * uint32_t(tileH);
     if (maxPaths == 0 || samplesPerPixel <= 0) return;
     ensureWavefrontBuffers(maxPaths);
+    ensureWorldCache(WC_CAPACITY);
+    ensureDDGIBuffers(uint32_t(DDGI_PROBES_X * DDGI_PROBES_Y * DDGI_PROBES_Z));
     writeWavefrontDescriptors();
 
     const uint32_t WG = 64;

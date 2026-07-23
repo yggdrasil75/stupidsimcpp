@@ -25,6 +25,13 @@ void Octree<T>::buildRender(RenderBuffer_<T>& buffer) {
     buildRenderNodeAt(root_, buffer, 0, localObjects);
 }
 
+static inline bool reuseEligible(const RenderMaterial& mat, float alpha) {
+    if ((1.0f - alpha) > REUSE_MAX_TRANSMISSION) return false;
+    if (mat.roughness < REUSE_MIN_ROUGHNESS) return false;
+    if (mat.metallic > 0.5f && mat.roughness < 0.5f) return false;
+    return true;
+}
+
 template<typename T>
 void Octree<T>::buildRenderNodeAt(uint32_t nodeIndex, RenderBuffer_<T>& buffer, uint32_t nodeIdx, const std::unordered_map<int, std::shared_ptr<GridObject>>& localObjects) {
     const OctreeNode_<T>* node = nodeAt(nodeIndex);
@@ -52,11 +59,23 @@ void Octree<T>::buildRenderNodeAt(uint32_t nodeIndex, RenderBuffer_<T>& buffer, 
             
             rd.objectId = pt->objectId;
             rd.extent = EXTENT_UNIT;
+
+            const bool settled = pt->isSettled();
+            rd.extent = extentSetStatic(rd.extent, settled);
+            rd.extent = extentSetReusable(rd.extent,
+                            settled && reuseEligible(buffer.materials[rd.materialIdx], rd.color.w()));
             buffer.points.push_back(rd);
         }
     }
 
     const uint32_t rawCount = static_cast<uint32_t>(buffer.points.size()) - rnode.firstPoint;
+    uint32_t reuseSig = 0;
+    for (uint32_t i = 0; i < rawCount; ++i) {
+        const uint32_t bits = buffer.points[rnode.firstPoint + i].extent
+                                & (EXTENT_STATIC_BIT | EXTENT_REUSE_BIT);
+        reuseSig ^= (bits >> 30) + 0x9e3779b9u + (reuseSig << 6) + (reuseSig >> 2);
+    }
+
     auto cacheIt = buffer.mergeCache.find(nodeIndex);
     const bool cacheUsable = !node->isDirty() && cacheIt != buffer.mergeCache.end()
                              && cacheIt->second.sourceCount == rawCount;
@@ -68,6 +87,7 @@ void Octree<T>::buildRenderNodeAt(uint32_t nodeIndex, RenderBuffer_<T>& buffer, 
         rnode.pointCount = mergeLeafPoints(buffer, rnode.firstPoint);
         MergeCacheEntry entry;
         entry.sourceCount = rawCount;
+        entry.reuseSignature = reuseSig;
         entry.boxes.assign(buffer.points.begin() + rnode.firstPoint, buffer.points.end());
         buffer.mergeCache[nodeIndex] = std::move(entry);
         if (isLoaded) const_cast<OctreeNode_<T>*>(node)->setDirty(false);
@@ -85,7 +105,7 @@ void Octree<T>::buildRenderNodeAt(uint32_t nodeIndex, RenderBuffer_<T>& buffer, 
                              ? lodData->renderMatIdx : buffer.defaultMatIdx;
 
         ld.objectId = lodData->objectId;
-        ld.extent = EXTENT_UNIT; 
+        ld.extent = EXTENT_UNIT;
         rnode.lodPoint = static_cast<int32_t>(buffer.points.size());
         buffer.points.push_back(ld);
     }
@@ -136,6 +156,8 @@ static bool slabMatches(const MergeLattice& lattice, const std::vector<RenderDat
             const RenderData& p = pts[first + it->second.src];
             if (p.materialIdx != seed.materialIdx || p.objectId != seed.objectId
                 || !p.color.isApprox(seed.color)) return false;
+            if (extentIsStatic(p.extent) != extentIsStatic(seed.extent)
+                    || extentIsReusable(p.extent) != extentIsReusable(seed.extent)) return false;
         }
     }
     return true;
@@ -223,6 +245,8 @@ uint32_t Octree<T>::mergeLeafPoints(RenderBuffer_<T>& buffer, uint32_t first) {
         RenderData box = seed;
         box.extent = packExtent(static_cast<uint32_t>(ex), static_cast<uint32_t>(ey),
                                 static_cast<uint32_t>(ez));
+        box.extent = extentSetStatic(box.extent, extentIsStatic(seed.extent));
+        box.extent = extentSetReusable(box.extent, extentIsReusable(seed.extent));
         merged.push_back(box);
     }
 
@@ -1499,6 +1523,35 @@ InFlightFrame Octree<T>::beginSuperBlendedRenderFrameVulkan(const Camera& cam, i
 
     size_t pixFloats = lowW * lowH * 5;
     size_t pbrOutSize = pixFloats * sizeof(float);
+
+    float wcCell = 0.0f;
+    for (const auto& p : tl_buffer.points) {
+        if (p.size > 0.0f && (wcCell == 0.0f || p.size < wcCell)) wcCell = p.size;
+    }
+    if (wcCell <= 0.0f) wcCell = 1.0f;
+    pbrCamData.wcEnabled = globalIllumination ? 1 : 0;
+    pbrCamData.wcOrigin = globalMin;
+    pbrCamData.wcInvCellSize = 1.0f / wcCell;
+    pbrCamData.wcCapacity = WC_CAPACITY;
+    pbrCamData.wcFrame = frameCounter_;
+    pbrCamData.wcMaxAge = WC_MAX_AGE;
+
+    Vec3 ddgiExt = globalMax - globalMin;
+    for (int i = 0; i < 3; ++i) if (ddgiExt[i] <= 1e-6f) ddgiExt[i] = 1.0f;
+    Vec3 ddgiSpacing(ddgiExt.x() / float(DDGI_PROBES_X - 1),
+                     ddgiExt.y() / float(DDGI_PROBES_Y - 1),
+                     ddgiExt.z() / float(DDGI_PROBES_Z - 1));
+    pbrCamData.ddgiEnabled = (globalIllumination) ? 1.0f : 0.0f;
+    pbrCamData.ddgiOrigin = globalMin;
+    pbrCamData.ddgiSpacing = ddgiSpacing;
+    pbrCamData.ddgiNormalBias = DDGI_NORMAL_BIAS * ddgiSpacing.minCoeff();
+    pbrCamData.ddgiProbesX = DDGI_PROBES_X;
+    pbrCamData.ddgiProbesY = DDGI_PROBES_Y;
+    pbrCamData.ddgiProbesZ = DDGI_PROBES_Z;
+    pbrCamData.ddgiIrrRes = DDGI_IRR_RES;
+    pbrCamData.ddgiDepthRes = DDGI_DEPTH_RES;
+    pbrCamData.ddgiDepthSharpness = DDGI_DEPTH_SHARPNESS;
+
     for (size_t g = 0; g < gpuFleet.count(); ++g) {
         auto& ctx = gpuFleet.ctx(g);
         uploadFogVolumes(ctx, pbrCamData, fogVolumes_);
@@ -1510,6 +1563,13 @@ InFlightFrame Octree<T>::beginSuperBlendedRenderFrameVulkan(const Camera& cam, i
         ctx.updatePBRBuffers(gpuPBRPoints);
         ctx.uploadToBuffer(ctx.adaptiveBuffer, adaptiveSeed.data(), adaptiveSeed.size() * sizeof(float));
         ctx.uploadToBuffer(ctx.outBuffer, pixelSeed.data(), pixelSeed.size() * sizeof(float));
+    }
+
+    if (globalIllumination) {
+        vkCtx.ensureWorldCache(WC_CAPACITY);
+        vkCtx.ensureDDGIBuffers(uint32_t(DDGI_PROBES_X * DDGI_PROBES_Y * DDGI_PROBES_Z));
+        vkCtx.writeWavefrontDescriptors();
+        vkCtx.dispatchDDGIUpdate(uint32_t(DDGI_PROBES_X * DDGI_PROBES_Y * DDGI_PROBES_Z));
     }
 
     runWavefrontTilesMultiGPU(lowW, lowH, pbrCamData, samplesPerPixel, maxBounces, 1, pixFloats, pbrOutSize, true);

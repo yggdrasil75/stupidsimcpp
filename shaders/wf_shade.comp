@@ -237,6 +237,24 @@ void main() {
             }
             lastBounceSpecular = true;
         } else if (r_type < pspec + pdiff) {
+            // bool terminateIntoProbes = (cam.ddgiEnabled != 0.0) && (bounce >= 1)
+            //                            && extentIsReusable(hitData.extent);
+            bool terminateIntoProbes = false;
+            if (terminateIntoProbes) {
+                vec3 E = ddgiIrradianceAt(hitPoint, offsetNorm, dir);
+                if (dot(E, E) <= 0.0) {
+                    terminateIntoProbes = false; // fall through and keep tracing
+                } else {
+                    radiance += throughput * albedo.rgb * (vec3(1.0) - F) * E / PI;
+                    p.rad.xyz = radiance;
+                    p.u0.y = rng;
+                    p.u0.z = grng;
+                    p.i1.w &= ~FLAG_ALIVE;
+                    pathsHot[slot] = p;
+                    pathsHit[slot].misc = -1.0;
+                    return;
+                }
+            }
             float r3 = nextFloat(rng), r4 = nextFloat(rng);
             float Phid = 2.0 * PI * r3, rD = sqrt(r4);
             vec3 L_local = vec3(rD * cos(Phid), rD * sin(Phid), sqrt(max(0.0, 1.0 - r4)));
