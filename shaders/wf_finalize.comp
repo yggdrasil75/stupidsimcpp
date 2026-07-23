@@ -5,9 +5,9 @@
 
 void main() {
     uint gid = gl_GlobalInvocationID.x;
-
-    int tileW = min(512, cam.width  - cam.tileOffsetX);
-    int tileH = min(512, cam.height - cam.tileOffsetY);
+    
+    int tileW = cam.tileW;
+    int tileH = cam.tileH;
     if (tileW <= 0 || tileH <= 0) return;
     if (gid >= uint(tileW) * uint(tileH)) return;
 

@@ -139,6 +139,8 @@ struct alignas(16) GPUCameraData {
     int sellWidth;
     int sellSecondary;
     int fogVolumeCount;
+    int tileW;
+    int tileH;
     int pad0;
 };
 

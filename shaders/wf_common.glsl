@@ -118,6 +118,8 @@ layout(binding = 0) uniform CameraData {
     int sellWidth;
     int sellSecondary;
     int fogVolumeCount;
+    int tileW;
+    int tileH;
     int camPad0;
 } cam;
 bool adaptiveEnabled() { return cam.dispatchSamples >= cam.targetSamples; }
