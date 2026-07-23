@@ -648,13 +648,22 @@ static void runWavefrontTilesMultiGPU(int width, int height, const GPUCameraData
                                       int samplesPerPixel, int maxBounces, int sampleOffset, size_t pixFloats, size_t bufBytes,
                                       bool buffersPreSeeded = false) {
     // TIME_FUNCTION;
-    constexpr int tileW = 512, tileH = 512;
+    constexpr int tileTarget = 1024;
+    const int nx = (width + tileTarget - 1) / tileTarget;
+    const int ny = (height + tileTarget - 1) / tileTarget;
 
     using Tile = Eigen::Matrix<int, 4, 1>;
     std::vector<Tile> tiles;
-    for (int y = 0; y < height; y += tileH)
-        for (int x = 0; x < width; x += tileW)
-            tiles.push_back({x, y, std::min(tileW, width - x), std::min(tileH, height - y)});
+    tiles.reserve(nx * ny);
+    for (int j = 0; j < ny; ++j) {
+        const int y0 = j * height / ny;
+        const int y1 = (j + 1) * height / ny;
+        for (int i = 0; i < nx; ++i) {
+            const int x0 = i * width / nx;
+            const int x1 = (i + 1) * width / nx;
+            tiles.push_back({x0, y0, x1 - x0, y1 - y0});
+        }
+    }
 
     int start = 0;
     const size_t nGPU = gpuFleet.count();
