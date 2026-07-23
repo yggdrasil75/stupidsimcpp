@@ -816,6 +816,8 @@ struct NodeData_ {
     }
 
     bool isSettled() const {
+        if (physics.velocity.squaredNorm() <= 0.0f
+            && (flags.load(std::memory_order_relaxed) & STATIC_BIT)) return true;
         return settledFrames.load(std::memory_order_relaxed) >= REUSE_SETTLE_FRAMES;
     }
     

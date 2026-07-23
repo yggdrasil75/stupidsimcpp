@@ -60,7 +60,6 @@ void main() {
             skipSurface = true;
             mediumVoxelIdx = hitIndex;
         } else {
-            // Pass the exact hit point and face normal
             int nextVoxelIdx = getMediumVoxelAt(hitPoint, normal, mediumObjId, hitIndex);
             if (nextVoxelIdx != -1) {
                 skipSurface = true;
@@ -91,7 +90,6 @@ void main() {
 
         roughness = max(roughness, pathRoughness);
         pathRoughness = max(pathRoughness, roughness);
-        //pathRoughness = min(pathRoughness + 0.15, 1.0);
 
         vec3 emitted = albedo.rgb * emittanceRGB;
         if (isEmissive && entering == 1) {
@@ -100,7 +98,8 @@ void main() {
                 float area = hitData.size * hitData.size;
                 float distSq = t * t;
                 float solidAngle = min(area / max(distSq, area * 0.25), 2.0 * PI);
-                float lightPdfW = 1.0 / max(1e-6, solidAngle * float(cam.emissiveCount));
+                float mEff = float(max(1, min(RESTIR_CANDIDATES, cam.emissiveCount)));
+                float lightPdfW = mEff / max(1e-6, solidAngle * float(cam.emissiveCount));
                 wB = misWeight(prevPdf, lightPdfW);
             }
             vec3 addE = throughput * emitted * wB;
@@ -156,14 +155,99 @@ void main() {
         bool neeDone = (cam.emissiveCount > 0 && entering == 1 && !isEmissive && (pspec + pdiff) > 0.001);
 
         if (neeDone) {
-            int lightIdx = clamp(int(nextFloat(grng) * float(cam.emissiveCount)), 0, cam.emissiveCount - 1);
-            uint emissivePtIdx = emissiveIndices[lightIdx];
-            if (emissivePtIdx != uint(hitIndex)) {
+            vec3 shadowOrigin = hitPoint + offsetNorm * DIST_EPSILON;
+
+            Reservoir res;
+            res.key = 0u;
+            res.lightIdx = 0u;
+            res.wSum = 0.0;
+            res.M = 0.0;
+            res.W = 0.0;
+            res.targetPdf = 0.0;
+            res.frame = cam.wcFrame;
+            res.pad0 = 0u;
+
+            int candidates = (RESTIR_ENABLE != 0) ? min(RESTIR_CANDIDATES, cam.emissiveCount) : 1;
+            for (int ci = 0; ci < candidates; ++ci) {
+                int li = clamp(int(nextFloat(grng) * float(cam.emissiveCount)), 0, cam.emissiveCount - 1);
+                uint cIdx = emissiveIndices[li];
+                if (cIdx == uint(hitIndex)) continue;
+
+                GPURenderData cp = points[cIdx];
+                GPUMaterial cm = materials[cp.materialIdx];
+                vec3 toC = cp.position - shadowOrigin;
+                float cDistSq = dot(toC, toC);
+                float cDist = sqrt(max(cDistSq, 1e-8));
+                vec3 cL = toC / cDist;
+                float cNdotL = dot(offsetNorm, cL);
+                if (cNdotL <= 0.0) continue;
+
+                vec4 cAlb = unpackRGBA8(cp.color);
+                vec3 cEmit = cAlb.rgb * unpackRGB9E5(cm.chromaticity);
+                float cArea = cp.size * cp.size;
+                float cG = clampedGeometry(cNdotL, cDistSq, cArea);
+                vec3 cH = normalize(V + cL);
+                float cVdotH = max(0.0, dot(V, cH));
+                float cNdotH = max(0.0, dot(offsetNorm, cH));
+                vec3 cF = F0 + (vec3(1.0) - F0) * pow(1.0 - min(1.0, cVdotH), 5.0);
+                vec3 cDiff = albedo.rgb * (vec3(1.0) - cF) / PI;
+                float cD = ggxD(cNdotH, alpha2);
+                float cGs = smith(NdotV, alpha2) * smith(cNdotL, alpha2);
+                vec3 cSpec = cF * (cD * cGs / max(1e-5, 4.0 * NdotV * cNdotL));
+                vec3 cBrdf = cDiff * opacity * (1.0 - metallic) + cSpec;
+                float pHat = reservoirTarget(cEmit * cBrdf * cG);
+                float w = pHat * float(cam.emissiveCount);
+                reservoirUpdate(res, cIdx, w, pHat, rng);
+            }
+            reservoirFinalize(res);
+
+            uint rslot = reservoirSlot(hitPoint, offsetNorm);
+            if (cam.wcEnabled != 0 && extentIsReusable(hitData.extent)) {
+                Reservoir prev = reservoirs[rslot];
+                bool live = (prev.M > 0.0)
+                            && (int(cam.wcFrame - prev.frame) <= cam.wcMaxAge)
+                            && (prev.lightIdx < uint(points.length()));
+                if (live) {
+                    GPURenderData pp = points[prev.lightIdx];
+                    GPUMaterial pm = materials[pp.materialIdx];
+                    vec3 toP = pp.position - shadowOrigin;
+                    float pDistSq = dot(toP, toP);
+                    float pDist = sqrt(max(pDistSq, 1e-8));
+                    vec3 pL = toP / pDist;
+                    float pNdotL = dot(offsetNorm, pL);
+                    if (pNdotL > 0.0) {
+                        vec4 pAlb = unpackRGBA8(pp.color);
+                        vec3 pEmit = pAlb.rgb * unpackRGB9E5(pm.chromaticity);
+                        float pArea = pp.size * pp.size;
+                        float pG = clampedGeometry(pNdotL, pDistSq, pArea);
+                        vec3 pH = normalize(V + pL);
+                        float pVdotH = max(0.0, dot(V, pH));
+                        float pNdotH = max(0.0, dot(offsetNorm, pH));
+                        vec3 pF = F0 + (vec3(1.0) - F0) * pow(1.0 - min(1.0, pVdotH), 5.0);
+                        vec3 pDiff = albedo.rgb * (vec3(1.0) - pF) / PI;
+                        float pD = ggxD(pNdotH, alpha2);
+                        float pGs = smith(NdotV, alpha2) * smith(pNdotL, alpha2);
+                        vec3 pSpec = pF * (pD * pGs / max(1e-5, 4.0 * NdotV * pNdotL));
+                        vec3 pBrdf = pDiff * opacity * (1.0 - metallic) + pSpec;
+                        float pHatPrev = reservoirTarget(pEmit * pBrdf * pG);
+                        Reservoir hist = prev;
+                        hist.M = min(hist.M, RESTIR_M_CAP);
+                        reservoirMerge(res, hist, pHatPrev, rng);
+                        reservoirFinalize(res);
+                    }
+                }
+                Reservoir store = res;
+                store.key = wcKey(wcCell(hitPoint), wcQuantizeNormal(offsetNorm));
+                store.frame = cam.wcFrame;
+                reservoirs[rslot] = store;
+            }
+
+            if (res.W > 0.0 && res.targetPdf > 0.0 && res.lightIdx < uint(points.length())) {
+                uint emissivePtIdx = res.lightIdx;
                 GPURenderData lightPt = points[emissivePtIdx];
                 GPUMaterial lightMat = materials[lightPt.materialIdx];
                 vec3 jitter = vec3(nextFloat(rng), nextFloat(rng), nextFloat(rng)) - 0.5;
                 vec3 lightPos = lightPt.position + jitter * (lightPt.size * 0.8);
-                vec3 shadowOrigin = hitPoint + offsetNorm * DIST_EPSILON;
                 vec3 toLight = lightPos - shadowOrigin;
                 float distSq = dot(toLight, toLight);
                 float distToLight = sqrt(distSq);
@@ -174,7 +258,6 @@ void main() {
                     vec4 lightAlbedo = unpackRGBA8(lightPt.color);
                     vec3 lightEmission = lightAlbedo.rgb * unpackRGB9E5(lightMat.chromaticity);
                     float area = lightPt.size * lightPt.size;
-                    float solidAngle = min(area / max(distSq, area * 0.25), 2.0 * PI);
                     vec3 H_nee = normalize(V + L);
                     float NdotH_nee = max(0.0, dot(offsetNorm, H_nee));
                     float VdotH_nee = max(0.0, dot(V, H_nee));
@@ -185,12 +268,13 @@ void main() {
                     vec3 specBRDF = F_nee * (Dn * Gn / max(1e-5, 4.0 * NdotV * NdotL));
                     vec3 evalBRDF = diffuseBRDF * opacity * (1.0 - metallic) + specBRDF;
 
-                    float lightPdfW = 1.0 / max(1e-6, solidAngle * float(cam.emissiveCount));
-                    float bPdf = bsdfPdfW(offsetNorm, V, L, alpha2, pspec, pdiff);
-                    float wL = misWeight(lightPdfW, bPdf);
-
-                    vec3 contrib = lightEmission * evalBRDF * NdotL * solidAngle
-                                 * float(cam.emissiveCount) * wL;
+                    float Gterm = clampedGeometry(NdotL, distSq, area);
+                    float solidAngleN = min(area / max(distSq, area * 0.25), 2.0 * PI);
+                    float mEffN = float(max(1, min(RESTIR_CANDIDATES, cam.emissiveCount)));
+                    float lightPdfN = mEffN / max(1e-6, solidAngleN * float(cam.emissiveCount));
+                    float bPdfN = bsdfPdfW(offsetNorm, V, L, alpha2, pspec, pdiff);
+                    float wL = misWeight(lightPdfN, bPdfN);
+                    vec3 contrib = lightEmission * evalBRDF * Gterm * res.W * wL;
 
                     ShadowRay sr;
                     sr.o_tmax   = vec4(shadowOrigin, shadowMaxDist);
@@ -237,13 +321,12 @@ void main() {
             }
             lastBounceSpecular = true;
         } else if (r_type < pspec + pdiff) {
-            // bool terminateIntoProbes = (cam.ddgiEnabled != 0.0) && (bounce >= 1)
-            //                            && extentIsReusable(hitData.extent);
-            bool terminateIntoProbes = false;
+            bool terminateIntoProbes = (cam.ddgiEnabled != 0.0) && (bounce >= 1)
+                                       && extentIsReusable(hitData.extent);
             if (terminateIntoProbes) {
                 vec3 E = ddgiIrradianceAt(hitPoint, offsetNorm, dir);
                 if (dot(E, E) <= 0.0) {
-                    terminateIntoProbes = false; // fall through and keep tracing
+                    terminateIntoProbes = false;
                 } else {
                     radiance += throughput * albedo.rgb * (vec3(1.0) - F) * E / PI;
                     p.rad.xyz = radiance;

@@ -490,6 +490,73 @@ vec3 sampleCosHemisphere(vec3 N, float r1, float r2, out float pdfW) {
     return normalize(d);
 }
 
+
+struct Reservoir {
+    uint key;
+    uint lightIdx;
+    float wSum;
+    float M;
+    float W;
+    float targetPdf;
+    uint frame;
+    uint pad0;
+};
+layout(std430, binding = 20) buffer ReservoirBuffer { Reservoir reservoirs[]; };
+
+const float RESTIR_M_CAP = 20.0;
+const int RESTIR_CANDIDATES = 32;
+const float RESTIR_G_MAX = 1.0;
+#define RESTIR_ENABLE 1
+
+float reservoirTarget(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+bool reservoirUpdate(inout Reservoir r, uint lightIdx, float w, float pHat, inout uint rng) {
+    if (w <= 0.0) {
+        r.M += 1.0;
+        return false;
+    }
+    r.wSum += w;
+    r.M += 1.0;
+    if (nextFloat(rng) < w / r.wSum) {
+        r.lightIdx = lightIdx;
+        r.targetPdf = pHat;
+        return true;
+    }
+    return false;
+}
+
+void reservoirFinalize(inout Reservoir r) {
+    if (r.targetPdf <= 0.0 || r.M <= 0.0) {
+        r.W = 0.0;
+        return;
+    }
+    r.W = r.wSum / (r.M * r.targetPdf);
+}
+
+void reservoirMerge(inout Reservoir dst, Reservoir src, float pHatAtDst, inout uint rng) {
+    if (src.M <= 0.0 || src.W <= 0.0) return;
+    float w = pHatAtDst * src.W * src.M;
+    if (w <= 0.0) { return; }
+    dst.wSum += w;
+    dst.M += src.M;
+    if (nextFloat(rng) < w / dst.wSum) {
+        dst.lightIdx = src.lightIdx;
+        dst.targetPdf = pHatAtDst;
+    }
+}
+
+float clampedGeometry(float ndl, float distSq, float area) {
+    float g = ndl * area / max(distSq, 1e-6);
+    return min(g, RESTIR_G_MAX);
+}
+
+uint reservoirSlot(vec3 p, vec3 n) {
+    uint key = wcKey(wcCell(p), wcQuantizeNormal(n));
+    return key & (cam.wcCapacity - 1u);
+}
+
 bool rayCubeIntersect(vec3 ro, vec3 rd, vec3 invD, GPURenderData pt,
                       out float t, out vec3 normal, out vec3 hitPoint, out float tExit) {
     vec3 bMin = ptBoundsMin(pt);

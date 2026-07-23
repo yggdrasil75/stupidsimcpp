@@ -1575,6 +1575,7 @@ InFlightFrame Octree<T>::beginSuperBlendedRenderFrameVulkan(const Camera& cam, i
 
     if (globalIllumination) {
         vkCtx.ensureWorldCache(WC_CAPACITY);
+        vkCtx.ensureReservoirs(WC_CAPACITY);
         vkCtx.ensureDDGIBuffers(uint32_t(DDGI_PROBES_X * DDGI_PROBES_Y * DDGI_PROBES_Z));
         vkCtx.writeWavefrontDescriptors();
         vkCtx.dispatchDDGIUpdate(uint32_t(DDGI_PROBES_X * DDGI_PROBES_Y * DDGI_PROBES_Z));

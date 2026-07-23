@@ -171,6 +171,17 @@ struct alignas(16) GPUWorldCacheEntry {
     float pad1;
 };
 
+struct alignas(16) GPUReservoir {
+    uint32_t key;
+    uint32_t lightIdx;
+    float wSum;
+    float M;
+    float W;
+    float targetPdf;
+    uint32_t frame;
+    uint32_t pad0;
+};
+
 struct alignas(16) GPUFogVolume {
     Vec3 minB;
     float density;
@@ -381,6 +392,9 @@ struct GpuContext {
     uint32_t sellmeierRows = 0;
     uint32_t worldCacheCap = 0;
     uint32_t ddgiProbeCap = 0;
+    VkBuffer reservoirBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory reservoirMem = VK_NULL_HANDLE;
+    uint32_t reservoirCap = 0;
 
     bool initialized = false;
     bool blasTopologyValid = false;
@@ -667,7 +681,7 @@ struct GpuContext {
         vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
 
         VkDescriptorPoolSize poolSizes[] = { 
-            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 72},
+            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 80},
             {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 12},
             {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 6},
             {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 64},
@@ -1790,8 +1804,8 @@ struct WFPushConstants {
 
 
 void initWavefront() {
-    VkDescriptorSetLayoutBinding b[20] = {};
-    for (int i = 0; i < 20; ++i) {
+    VkDescriptorSetLayoutBinding b[21] = {};
+    for (int i = 0; i < 21; ++i) {
         b[i].binding = i;
         b[i].descriptorCount = 1;
         b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -1801,7 +1815,7 @@ void initWavefront() {
     b[5].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
 
     VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    li.bindingCount = 20;
+    li.bindingCount = 21;
     li.pBindings = b;
     vkCreateDescriptorSetLayout(device, &li, nullptr, &wfDescLayout);
 
@@ -1867,6 +1881,21 @@ void clearWorldCache() {
     });
 }
 
+void ensureReservoirs(uint32_t capacity) {
+    uint32_t cap = 1u;
+    while (cap < capacity) cap <<= 1;
+    if (reservoirBuffer && cap <= reservoirCap) return;
+    destroyBuffer(device, reservoirBuffer, reservoirMem);
+    const VkDeviceSize bytes = VkDeviceSize(cap) * sizeof(GPUReservoir);
+    createBuffer(device, primaryDevice, bytes,
+                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, reservoirBuffer, reservoirMem);
+    reservoirCap = cap;
+    executeSingleTimeCommands([&](VkCommandBuffer cmd) {
+        vkCmdFillBuffer(cmd, reservoirBuffer, 0, bytes, 0u);
+    });
+}
+
 void ensureDDGIBuffers(uint32_t probeCount) {
     if (ddgiIrradianceBuffer && probeCount <= ddgiProbeCap) return;
     destroyBuffer(device, ddgiIrradianceBuffer, ddgiIrradianceMem);
@@ -1924,7 +1953,7 @@ void ensureWavefrontBuffers(uint32_t maxPaths) {
 }
 
 void writeWavefrontDescriptors() {
-    VkDescriptorBufferInfo bi[20] = {};
+    VkDescriptorBufferInfo bi[21] = {};
     bi[0]  = {uboBuffer,      0, VK_WHOLE_SIZE};
     bi[1]  = {pbrPointBuffer, 0, VK_WHOLE_SIZE};
     bi[2]  = {materialBuffer, 0, VK_WHOLE_SIZE};
@@ -1944,10 +1973,11 @@ void writeWavefrontDescriptors() {
     bi[17] = {worldCacheBuffer ? worldCacheBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
     bi[18] = {ddgiIrradianceBuffer ? ddgiIrradianceBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
     bi[19] = {ddgiDepthBuffer ? ddgiDepthBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
+    bi[20] = {reservoirBuffer ? reservoirBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
 
-    VkWriteDescriptorSet w[20] = {};
+    VkWriteDescriptorSet w[21] = {};
     int n = 0;
-    for (int i = 0; i < 20; ++i) {
+    for (int i = 0; i < 21; ++i) {
         if (i == 5) continue;
         w[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         w[n].dstSet = wfDescSet;
@@ -1997,6 +2027,7 @@ void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel
     if (maxPaths == 0 || samplesPerPixel <= 0) return;
     ensureWavefrontBuffers(maxPaths);
     ensureWorldCache(WC_CAPACITY);
+    ensureReservoirs(WC_CAPACITY);
     ensureDDGIBuffers(uint32_t(DDGI_PROBES_X * DDGI_PROBES_Y * DDGI_PROBES_Z));
     writeWavefrontDescriptors();
 
