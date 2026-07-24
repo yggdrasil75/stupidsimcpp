@@ -1,12 +1,4 @@
-// SVGF pass 2: spatial variance estimation for pixels with short history.
-//
-// Pixels that have only just become visible (disocclusion, camera cut, first
-// frame) have too little temporal history for the moment-based variance to
-// mean anything. For those, estimate luminance variance over a bilateral 7x7
-// neighbourhood instead, and scale it up so the a-trous kernel opens wide and
-// tightens as the estimate settles.
-//
-// Colour buffers are in smooth.comp's working layout (see svgf_common.glsl).
+
 #version 450
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 16, local_size_y = 16) in;
@@ -14,19 +6,19 @@ layout(local_size_x = 16, local_size_y = 16) in;
 #include "svgf_common.glsl"
 
 layout(push_constant) uniform Push {
-    int   width;
-    int   height;
+    int width;
+    int height;
     float phiNormal;
     float phiDepth;
-    float histThreshold; // history length below which the spatial estimate is used
+    float histThreshold;
 } pc;
 
-layout(std430, binding = 0) readonly  buffer ColIn   { float colIn[]; };
-layout(std430, binding = 1) writeonly buffer ColOut  { float colOut[]; };
-layout(std430, binding = 2) readonly  buffer HistBuf { float hist[]; };
-layout(std430, binding = 3) readonly  buffer GBuf    { float gbuf[]; };
-layout(std430, binding = 4) readonly  buffer VarIn   { float varIn[]; };
-layout(std430, binding = 5) writeonly buffer VarOut  { float varOut[]; };
+layout(std430, binding = 0) readonly buffer ColIn { float colIn[]; };
+layout(std430, binding = 1) writeonly buffer ColOut { float colOut[]; };
+layout(std430, binding = 2) readonly buffer HistBuf { float hist[]; };
+layout(std430, binding = 3) readonly buffer GBuf { float gbuf[]; };
+layout(std430, binding = 4) readonly buffer VarIn { float varIn[]; };
+layout(std430, binding = 5) writeonly buffer VarOut { float varOut[]; };
 
 vec3 gbufNormal(int idx) {
     int gi = idx * GBUF_STRIDE;
@@ -38,7 +30,6 @@ vec3 gbufAlbedo(int idx) {
     return svgfAlbedoFloor(vec3(gbuf[gi], gbuf[gi + 1], gbuf[gi + 2]));
 }
 
-///@brief Demodulated irradiance, matching smooth.comp's convention.
 vec3 irradianceAt(int idx) {
     int pi = idx * PIX_STRIDE;
     return max(vec3(colIn[pi], colIn[pi + 1], colIn[pi + 2]), vec3(0.0)) / gbufAlbedo(idx);
@@ -55,7 +46,6 @@ void main() {
     float cDepth = colIn[pi + 3];
     float cObj   = colIn[pi + 4];
 
-    // Enough history: the temporal moments are trustworthy, pass through.
     if (hist[idx * HIST_STRIDE + 5] >= pc.histThreshold) {
         colOut[pi]     = colIn[pi];
         colOut[pi + 1] = colIn[pi + 1];
@@ -91,19 +81,19 @@ void main() {
 
         vec3 nColor = irradianceAt(nIdx);
         float l = svgfLum(nColor);
-        sumC  += nColor * w;
+        sumC += nColor * w;
         sumM1 += l * w;
         sumM2 += l * l * w;
-        sumW  += w;
+        sumW += w;
     }
 
     if (sumW <= 1e-6) {
-        colOut[pi]     = colIn[pi];
+        colOut[pi] = colIn[pi];
         colOut[pi + 1] = colIn[pi + 1];
         colOut[pi + 2] = colIn[pi + 2];
         colOut[pi + 3] = cDepth;
         colOut[pi + 4] = cObj;
-        varOut[idx]    = max(varIn[idx], 1.0);
+        varOut[idx] = max(varIn[idx], 1.0);
         return;
     }
 
@@ -114,10 +104,10 @@ void main() {
     float variance = max(0.0, m2 - m1 * m1) * (pc.histThreshold / max(histLen, 1.0));
 
     vec3 modulated = color * gbufAlbedo(idx);
-    colOut[pi]     = modulated.r;
+    colOut[pi] = modulated.r;
     colOut[pi + 1] = modulated.g;
     colOut[pi + 2] = modulated.b;
     colOut[pi + 3] = cDepth;
     colOut[pi + 4] = cObj;
-    varOut[idx]    = max(variance, varIn[idx]);
+    varOut[idx] = max(variance, varIn[idx]);
 }

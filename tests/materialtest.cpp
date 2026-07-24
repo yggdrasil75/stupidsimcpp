@@ -470,10 +470,10 @@ int main() {
     const float fps = 60.0f;
     const float durationPerSegment = 10.0f;
     const int framesPerSegment = static_cast<int>(fps * durationPerSegment);
-    const int samples = 10;
-    const int blendedsamples = 30;
+    const int samples = 100;
+    const int blendedsamples = 300;
     const float blendedfactor = 0.65;
-    const int videosamples = 10;
+    const int videosamples = 100;
     const int bounces = 3;
     const int physicsSubsteps = 10;
     const float physicsDt = 1.0f / fps;

@@ -30,7 +30,8 @@ void main() {
 
     if (adaptiveOn && (done || globalS >= int(reqSamples))) return;
 
-    uint sampleHash = pcg_hash(uint(globalS));
+    uint globalSample = uint(cam.currentSampleOffset) + uint(globalS);
+    uint sampleHash = pcg_hash(globalSample);
     uint rng = pcg_hash(pixelIndex ^ sampleHash);
     uint grng = pcg_hash((pixelIndex * 9781u) ^ (sampleHash + 2654435761u));
 
@@ -38,7 +39,7 @@ void main() {
     float py = (1.0 - 2.0 * (float(coord.y) + nextFloat(rng)) / float(cam.height)) * cam.tanfovy;
     vec3 rayDir = normalize(cam.dir + cam.right * px + cam.up * py);
 
-    int hero = int((uint(globalS) + pixelIndex) % 3u) + 1;
+    int hero = int((globalSample + pixelIndex) % 3u) + 1;
 
     PathHot p;
     p.o_tmax = vec4(cam.origin, cam.maxDist);

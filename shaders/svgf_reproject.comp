@@ -1,9 +1,4 @@
-// SVGF pass 1: temporal reprojection.
-//
-// Reprojects last frame's filtered irradiance into the current frame using the
-// previous camera basis and the world position implied by this frame's depth,
-// then integrates colour and the first two luminance moments with an
-// exponential moving average. Outputs demodulated irradiance + variance.
+
 #version 450
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 16, local_size_y = 16) in;
@@ -11,51 +6,46 @@ layout(local_size_x = 16, local_size_y = 16) in;
 #include "svgf_common.glsl"
 
 layout(push_constant) uniform Push {
-    // Previous frame camera. The three basis rows are the *dual* (reciprocal)
-    // basis of (dir, right, up), computed host-side. Camera::up is not
-    // guaranteed perpendicular to Camera::direction, so the rendering basis is
-    // not orthonormal in general and a plain dot-product inverse is wrong.
-    // The dual basis inverts any independent basis at the same cost.
     float prevOx, prevOy, prevOz;
     float prevIDx, prevIDy, prevIDz;
     float prevIRx, prevIRy, prevIRz;
     float prevIUx, prevIUy, prevIUz;
     float prevTanX, prevTanY;
-    float alpha;         // minimum colour feedback (1.0 = no history)
-    float momentsAlpha;  // minimum moment feedback
+    float alpha;
+    float momentsAlpha;
     int   width;
     int   height;
-    int   samples;       // samples accumulated into the pixel buffer this frame
-    int   reset;         // 1 = discard all history (first frame / resize / cut)
-    int   maxHist;       // history length cap, controls the EMA floor
+    int   samples;
+    int   reset;
+    int   maxHist;
 } pc;
 
 layout(std430, binding = 0) readonly  buffer PixBuf   { float pixels[]; };
 layout(std430, binding = 1) readonly  buffer GBuf     { float gbuf[]; };
 layout(std430, binding = 2) readonly  buffer HistIn   { float histIn[]; };
 layout(std430, binding = 3) writeonly buffer HistOut  { float histOut[]; };
-// Written in smooth.comp's working layout: albedo-modulated radiance, depth,
-// objectId. Keeping one layout means one a-trous shader serves both paths.
 layout(std430, binding = 4) writeonly buffer ColorOut { float colOut[]; };
 layout(std430, binding = 5) readonly  buffer AdaptBuf { float adaptiveData[]; };
 layout(std430, binding = 6) writeonly buffer VarOut   { float varOut[]; };
 
-// Current frame camera. Truncated copy of GPUCameraData: only the leading
-// members are read, so the std140 offsets still line up with the host struct.
 layout(binding = 7) uniform CameraData {
-    vec3  origin;      float lodMinDist;
-    vec3  dir;         float invLodf;
-    vec3  up;          float minVisibility;
-    vec3  right;       float maxDist;
-    vec3  skylight;    float tanfovx;
-    vec3  bgColor;     float tanfovy;
+    vec3  origin;
+    float lodMinDist;
+    vec3  dir;
+    float invLodf;
+    vec3  up;
+    float minVisibility;
+    vec3  right;
+    float maxDist;
+    vec3  skylight;
+    float tanfovx;
+    vec3  bgColor;
+    float tanfovy;
     int   width;
     int   height;
 } cam;
 
 vec3 prevOrigin() { return vec3(pc.prevOx, pc.prevOy, pc.prevOz); }
-// Rows of the inverse of the previous frame's [dir | right | up] matrix.
-// Dotting a view vector with these recovers its coefficients in that basis.
 vec3 prevInvDir()   { return vec3(pc.prevIDx, pc.prevIDy, pc.prevIDz); }
 vec3 prevInvRight() { return vec3(pc.prevIRx, pc.prevIRy, pc.prevIRz); }
 vec3 prevInvUp()    { return vec3(pc.prevIUx, pc.prevIUy, pc.prevIUz); }
@@ -70,7 +60,6 @@ vec3 gbufNormal(int idx) {
     return vec3(gbuf[gi + 3], gbuf[gi + 4], gbuf[gi + 5]);
 }
 
-///@brief Demodulated irradiance for a pixel, i.e. radiance with albedo divided out.
 vec3 loadIrradiance(int idx, float invSamples) {
     int pi = idx * PIX_STRIDE;
     vec3 rad = vec3(pixels[pi], pixels[pi + 1], pixels[pi + 2]) * invSamples;
@@ -78,18 +67,13 @@ vec3 loadIrradiance(int idx, float invSamples) {
     return max(rad, vec3(0.0)) / gbufAlbedo(idx);
 }
 
-///@brief Tests whether history sample `hIdx` may be reused for the current surface.
-///@param expectDist Distance from the previous camera to the current world point.
 bool historyValid(int hIdx, float curObj, vec3 curNormal, float expectDist, bool sky) {
     int hi = hIdx * HIST_STRIDE;
-    if (histIn[hi + 5] <= 0.0) return false;            // never written
-    if (histIn[hi + 7] != curObj) return false;         // different object
+    if (histIn[hi + 5] <= 0.0) return false;
+    if (histIn[hi + 7] != curObj) return false;
     float hDepth = histIn[hi + 6];
     if (sky) return svgfIsSky(hDepth);
     if (svgfIsSky(hDepth)) return false;
-    // Depth is a distance along the previous primary ray, so it is directly
-    // comparable with the distance from the previous eye to this world point.
-    // Geometry that moved between frames fails here, which is what we want.
     if (abs(hDepth - expectDist) > 0.05 * max(expectDist, 0.1)) return false;
     vec3 hN = vec3(histIn[hi + 8], histIn[hi + 9], histIn[hi + 10]);
     if (dot(hN, curNormal) < 0.9) return false;
@@ -115,9 +99,6 @@ void main() {
     vec3  curNrm   = gbufNormal(idx);
     bool  sky      = svgfIsSky(curDepth) || curObj < 0.0;
 
-    // ---- firefly suppression -------------------------------------------------
-    // A single stray path can otherwise be baked into the history for many
-    // frames. Clamp against the local neighbourhood before it ever gets there.
     {
         vec3 nbr = vec3(0.0);
         float nbrW = 0.0;
@@ -140,7 +121,6 @@ void main() {
 
     float curLum = svgfLum(curColor);
 
-    // ---- reproject into the previous frame ----------------------------------
     vec3 histColor = vec3(0.0);
     float histM1 = 0.0, histM2 = 0.0, histLen = 0.0;
     bool found = false;
@@ -150,15 +130,10 @@ void main() {
         float ndcY = (1.0 - 2.0 * (float(y) + 0.5) / float(pc.height)) * cam.tanfovy;
         vec3 rayDir = normalize(cam.dir + cam.right * ndcX + cam.up * ndcY);
 
-        // For sky pixels the world point is at infinity, so reproject the
-        // direction instead. The projection is homogeneous, so this is exact.
         vec3 world = cam.origin + rayDir * min(curDepth, SVGF_SKY_DEPTH);
         vec3 v = sky ? rayDir : (world - prevOrigin());
         float expectDist = sky ? 0.0 : length(v);
 
-        // Coefficients of v in the previous frame's (dir, right, up) basis.
-        // wf_init builds rays as dir + right*px + up*py, so dividing the
-        // right/up coefficients by the dir coefficient inverts that exactly.
         float vz = dot(v, prevInvDir());
         if (vz > 1e-6) {
             float px = (dot(v, prevInvRight()) / vz) / max(pc.prevTanX, 1e-6);
@@ -189,9 +164,6 @@ void main() {
                 sumW      += w;
             }
 
-            // Bilinear taps all rejected (edge of a silhouette, mostly).
-            // Fall back to a 3x3 box so we keep *some* history instead of
-            // restarting the estimator and flashing noise.
             if (sumW <= 0.0) {
                 int cx = int(round(sx));
                 int cy = int(round(sy));
@@ -222,10 +194,7 @@ void main() {
         }
     }
 
-    // ---- temporal integration ------------------------------------------------
     float newLen = found ? min(float(pc.maxHist), histLen + 1.0) : 1.0;
-    // Blend weight never drops below 1/n, so the first n frames form an exact
-    // running mean and only then does the EMA take over.
     float a  = found ? max(pc.alpha,        1.0 / newLen) : 1.0;
     float am = found ? max(pc.momentsAlpha, 1.0 / newLen) : 1.0;
 
@@ -235,25 +204,19 @@ void main() {
 
     float variance = max(0.0, m2 - m1 * m1);
 
-    // The path tracer already tracks per-pixel sample statistics for adaptive
-    // sampling. Use the standard error of this frame's mean as a variance
-    // floor so under-sampled pixels are not mistaken for converged ones after
-    // a couple of temporally-stable frames.
     {
         int ai = idx * PIX_STRIDE;
         float req = adaptiveData[ai + 2];
         float n = (req < 0.0) ? -req : max(1.0, float(pc.samples));
         float mean = adaptiveData[ai] / n;
         float sVar = max(0.0, adaptiveData[ai + 1] / n - mean * mean);
-        float meanVar = sVar / n;                       // variance of the mean
+        float meanVar = sVar / n;
         float albLum = max(svgfLum(albedo), 1e-3);
-        meanVar /= (albLum * albLum);                   // into demodulated units
+        meanVar /= (albLum * albLum);
         // An EMA with weight a has steady-state variance a/(2-a) of the input.
         variance = max(variance, meanVar * a / (2.0 - a));
     }
 
-    // Re-modulate: the a-trous pass demodulates again on read. Depth and
-    // objectId ride along so the filter has its edge-stopping inputs.
     vec3 modulated = outColor * albedo;
     colOut[co]     = modulated.r;
     colOut[co + 1] = modulated.g;
@@ -262,8 +225,6 @@ void main() {
     colOut[co + 4] = curObj;
     varOut[idx]    = variance;
 
-    // Colour slots are overwritten by the first a-trous iteration; everything
-    // else here is what the next frame reprojects against.
     histOut[ho]      = outColor.r;
     histOut[ho + 1]  = outColor.g;
     histOut[ho + 2]  = outColor.b;

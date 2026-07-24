@@ -1291,4 +1291,17 @@ struct Ray {
     }
 };
 
+struct ProgressiveAccum {
+    bool valid = false;
+    int  samples = 0;
+    int  width = 0;
+    int  height = 0;
+    Vec3 camOrigin{0, 0, 0};
+    Vec3 camDir{0, 0, 0};
+    Vec3 camUp{0, 0, 0};
+    float tanfovx = 0.0f;
+    float tanfovy = 0.0f;
+    uint64_t sceneEpoch = ~0ull;
+};
+
 }

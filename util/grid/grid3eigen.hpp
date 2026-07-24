@@ -368,6 +368,14 @@ private:
     ///@brief Incremental counter for keeping track of rendering frames
     std::atomic<uint32_t> frameCounter_{0};
 
+    ProgressiveAccum progAccum_;
+
+    ///@brief Bumped whenever geometry/materials change so accumulation resets.
+    std::atomic<uint64_t> sceneEpoch_{0};
+
+    ///@brief Master switch for cross-frame accumulation (single-GPU path only).
+    bool progressiveAccumEnabled_ = true;
+
     ///@brief Minimum volume threshold for generating LOD blocks
     float minLodVolume_ = 0.0f;
     

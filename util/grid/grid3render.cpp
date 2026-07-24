@@ -868,6 +868,35 @@ InFlightFrame Octree<T>::beginRenderFrameVulkan(const Camera& cam, int height, i
     camData.sellWidth = SELL_LUT_WAVELENGTHS;
     camData.sellSecondary = SELL_LUT_SECONDARY;
 
+    const Vec3 curOrigin = cam.origin;
+    const Vec3 curDir = cam.direction.normalized();
+    const Vec3 curUp = cam.up.normalized();
+    const uint64_t curEpoch = sceneEpoch_.load(std::memory_order_relaxed);
+    const bool singleGPU = gpuFleet.count() <= 1;
+
+    auto sameVec = [](const Vec3& a, const Vec3& b) {
+        return (a - b).squaredNorm() <= 1e-16f;
+    };
+    bool canAccumulate =
+        progressiveAccumEnabled_ && singleGPU && !sceneChanged &&
+        progAccum_.valid &&
+        progAccum_.width == width && progAccum_.height == height &&
+        progAccum_.sceneEpoch == curEpoch &&
+        sameVec(progAccum_.camOrigin, curOrigin) &&
+        sameVec(progAccum_.camDir, curDir) &&
+        sameVec(progAccum_.camUp, curUp) &&
+        progAccum_.tanfovx == camData.tanfovx &&
+        progAccum_.tanfovy == camData.tanfovy;
+
+    const int sampleOffset = canAccumulate ? progAccum_.samples : 0;
+    const int accumulatedSamples = (progressiveAccumEnabled_ && singleGPU) ? 
+                    sampleOffset + samplesPerPixel : samplesPerPixel;
+
+    if (progressiveAccumEnabled_ && singleGPU) {
+        camData.currentSampleOffset = sampleOffset;
+        camData.targetSamples = accumulatedSamples + 1;
+    }
+
     size_t pixFloats = width * height * 5;
     size_t outSize = pixFloats * sizeof(float);
     for (size_t g = 0; g < gpuFleet.count(); ++g) {
@@ -882,14 +911,38 @@ InFlightFrame Octree<T>::beginRenderFrameVulkan(const Camera& cam, int height, i
         }
     }
 
-    runWavefrontTilesMultiGPU(width, height, camData, samplesPerPixel, maxBounces, 0, pixFloats, outSize);
+    if (canAccumulate) {
+        vkCtx.restoreAccum(outSize);
+    }
+
+    runWavefrontTilesMultiGPU(width, height, camData, samplesPerPixel, maxBounces,
+                              sampleOffset, pixFloats, outSize);
+
+    if (progressiveAccumEnabled_ && singleGPU) {
+        vkCtx.saveAccum(outSize);
+    }
 
     frameCounter_++;
 
-    if (!vkCtx.svgfEnabled || !vkCtx.submitSVGF(width, height, samplesPerPixel, camData)) {
-        vkCtx.submitSmooth(width, height, samplesPerPixel);
+    if (progressiveAccumEnabled_ && singleGPU) {
+        progAccum_.valid = true;
+        progAccum_.samples = accumulatedSamples;
+        progAccum_.width = width;
+        progAccum_.height = height;
+        progAccum_.camOrigin = curOrigin;
+        progAccum_.camDir = curDir;
+        progAccum_.camUp = curUp;
+        progAccum_.tanfovx = camData.tanfovx;
+        progAccum_.tanfovy = camData.tanfovy;
+        progAccum_.sceneEpoch = curEpoch;
+    } else {
+        progAccum_.valid = false;
     }
-    
+
+    if (!vkCtx.svgfEnabled || !vkCtx.submitSVGF(width, height, accumulatedSamples, camData)) {
+        vkCtx.submitSmooth(width, height, accumulatedSamples);
+    }
+
     InFlightFrame pending;
     pending.width = width;
     pending.height = height;

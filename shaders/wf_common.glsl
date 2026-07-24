@@ -34,8 +34,8 @@ vec3 unpackExtent(uint e) {
 
 const uint EXTENT_STATIC_BIT = 1u << 30;
 const uint EXTENT_REUSE_BIT  = 1u << 31;
-bool extentIsStatic(uint e)    { return (e & EXTENT_STATIC_BIT) != 0u; }
-bool extentIsReusable(uint e)  { return (e & EXTENT_REUSE_BIT) != 0u; }
+bool extentIsStatic(uint e) { return (e & EXTENT_STATIC_BIT) != 0u; }
+bool extentIsReusable(uint e) { return (e & EXTENT_REUSE_BIT) != 0u; }
 vec3 ptBoundsMin(GPURenderData p) { return p.position - p.size * 0.5; }
 vec3 ptBoundsMax(GPURenderData p) { return p.position + p.size * 0.5 + p.size * (unpackExtent(p.extent) - vec3(1.0)); }
 
@@ -62,17 +62,17 @@ struct PathHit {
 const uint WF_NO_SLOT = 0xFFFFFFFFu;
 const uint WF_NO_HIT = 0xFFFFFFFFu;
 
-#define PC_GET_BOUNCE(p)  (int((p) & 0xFFu))
-#define PC_GET_TRANS(p)   (int(((p) >> 8u) & 0xFFu))
-#define PC_GET_VOLUM(p)   (int(((p) >> 16u) & 0xFFu))
-#define PC_PACK(b,t,v)    ((uint(b) & 0xFFu) | ((uint(t) & 0xFFu) << 8u) | ((uint(v) & 0xFFu) << 16u))
+#define PC_GET_BOUNCE(p) (int((p) & 0xFFu))
+#define PC_GET_TRANS(p) (int(((p) >> 8u) & 0xFFu))
+#define PC_GET_VOLUM(p) (int(((p) >> 16u) & 0xFFu))
+#define PC_PACK(b,t,v) ((uint(b) & 0xFFu) | ((uint(t) & 0xFFu) << 8u) | ((uint(v) & 0xFFu) << 16u))
 
 #define FLAG_SPECULAR 1
 #define FLAG_HITFOUND 2
-#define FLAG_ALIVE    4
+#define FLAG_ALIVE 4
 #define HERO_SHIFT 5
-#define HERO_MASK  (3 << HERO_SHIFT)
-#define GET_HERO(f)    (((f) & HERO_MASK) >> HERO_SHIFT)
+#define HERO_MASK (3 << HERO_SHIFT)
+#define GET_HERO(f) (((f) & HERO_MASK) >> HERO_SHIFT)
 #define SET_HERO(f, h) (((f) & ~HERO_MASK) | (((h) & 3) << HERO_SHIFT))
 
 struct ShadowRay {

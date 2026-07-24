@@ -248,6 +248,7 @@ struct GpuContext {
     bool frameSlotInFlight[FRAME_SLOTS] = {false, false};
     uint32_t nextFrameSlot = 0;
     VkDeviceSize gbufferCap = 0;
+    VkDeviceSize accumCap = 0;
     
     VkShaderModule fastShader = VK_NULL_HANDLE;
     VkShaderModule smoothShader = VK_NULL_HANDLE;
@@ -295,6 +296,7 @@ struct GpuContext {
     VkBuffer guidedCoeffBuffer = VK_NULL_HANDLE;
     VkBuffer nodeBuffer = VK_NULL_HANDLE;
     VkBuffer outBuffer = VK_NULL_HANDLE;
+    VkBuffer accumBuffer = VK_NULL_HANDLE;
     VkBuffer uboBuffer = VK_NULL_HANDLE;
     VkBuffer fastPointBuffer = VK_NULL_HANDLE;
     VkBuffer pbrPointBuffer = VK_NULL_HANDLE;
@@ -371,6 +373,7 @@ struct GpuContext {
     VkDeviceMemory ddgiDepthMem = VK_NULL_HANDLE;
     VkDeviceMemory frameStagingMem[FRAME_SLOTS] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
     VkDeviceMemory gbufferMem = VK_NULL_HANDLE;
+    VkDeviceMemory accumMem = VK_NULL_HANDLE;
     
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
     
@@ -435,10 +438,10 @@ struct GpuContext {
         float tanfovy = 1.0f;
     } svgfPrevCam;
 
-    float svgfAlpha = 0.2f;
-    float svgfMomentsAlpha = 0.2f;
-    int svgfMaxHistory = 32;
-    int svgfIterations = 5;
+    float svgfAlpha = 0.0009f;
+    float svgfMomentsAlpha = 0.0009f;
+    int svgfMaxHistory = 1024;
+    int svgfIterations = 7;
     bool svgfEnabled = true;
 
     bool initialized = false;
@@ -1550,6 +1553,31 @@ struct GpuContext {
         vkMapMemory(device, uboMem, 0, uboSize, 0, &data);
         memcpy(data, &camData, uboSize);
         vkUnmapMemory(device, uboMem);
+    }
+
+    ///@brief Ensure accumBuffer can hold `size` bytes (device-local, copy src/dst).
+    void ensureAccumBuffer(VkDeviceSize size) {
+        if (size <= accumCap && accumBuffer) return;
+        if (accumBuffer) {
+            vkDestroyBuffer(device, accumBuffer, nullptr);
+            vkFreeMemory(device, accumMem, nullptr);
+        }
+        createBuffer(device, primaryDevice, size,
+                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, accumBuffer, accumMem);
+        accumCap = size;
+    }
+
+    ///@brief Park the raw radiance sum currently in outBuffer for reuse next frame.
+    void saveAccum(VkDeviceSize size) {
+        ensureAccumBuffer(size);
+        copyBuffer(device, outBuffer, accumBuffer, size);
+    }
+
+    ///@brief Restore a previously parked sum into outBuffer so wf_finalize adds onto it.
+    void restoreAccum(VkDeviceSize size) {
+        if (!accumBuffer || size > accumCap) return;
+        copyBuffer(device, accumBuffer, outBuffer, size);
     }
 
     const float* readbackOut(VkDeviceSize size) {

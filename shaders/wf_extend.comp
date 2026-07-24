@@ -62,7 +62,6 @@ void main() {
         }
     }
 
-    // ---- participating medium (scatter / absorption) ----
     bool scattered = false;
     if (mediumVoxelIdx != -1) {
         GPURenderData medData = points[mediumVoxelIdx];
@@ -120,7 +119,10 @@ void main() {
             float maxS = max(sigma_t.x, max(sigma_t.y, sigma_t.z));
             if (maxS <= 1e-6) continue;
             float cand = ft0 - log(max(1e-7, 1.0 - nextFloat(rng))) / maxS;
-            if (cand < ft1 && cand < tScatter) { tScatter = cand; fogIdx = i; }
+            if (cand < ft1 && cand < tScatter) {
+                tScatter = cand;
+                fogIdx = i;
+            }
         }
 
         float travelEnd = (fogIdx >= 0) ? tScatter : t;
