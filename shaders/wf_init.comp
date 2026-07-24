@@ -31,7 +31,7 @@ void main() {
     if (adaptiveOn && (done || globalS >= int(reqSamples))) return;
 
     uint sampleHash = pcg_hash(uint(globalS));
-    uint rng  = pcg_hash(pixelIndex ^ sampleHash);
+    uint rng = pcg_hash(pixelIndex ^ sampleHash);
     uint grng = pcg_hash((pixelIndex * 9781u) ^ (sampleHash + 2654435761u));
 
     float px = (2.0 * (float(coord.x) + nextFloat(rng)) / float(cam.width)  - 1.0) * cam.tanfovx;
@@ -41,18 +41,36 @@ void main() {
     int hero = int((uint(globalS) + pixelIndex) % 3u) + 1;
 
     PathHot p;
-    p.o_tmax    = vec4(cam.origin, cam.maxDist);
+    p.o_tmax = vec4(cam.origin, cam.maxDist);
     p.dir_rough = vec4(rayDir, 0.0);
-    p.thp       = vec4(heroMask(hero) * 3.0, 0.0);
-    p.rad       = vec4(0.0, 0.0, 0.0, LARGE);
-    p.u0        = uvec4(pixelIndex, rng, grng, PC_PACK(0, 0, 0));
-    p.i1        = ivec4(-1, -1, -1, SET_HERO(FLAG_SPECULAR | FLAG_ALIVE, hero));
+    p.thp = vec4(heroMask(hero) * 3.0, 0.0);
+    p.rad = vec4(0.0, 0.0, 0.0, LARGE);
+    p.u0 = uvec4(pixelIndex, rng, grng, PC_PACK(0, 0, 0));
+    p.i1 = ivec4(-1, -1, -1, SET_HERO(FLAG_SPECULAR | FLAG_ALIVE, hero));
     pathsHot[gid] = p;
 
     pathsHit[gid].t        = 0.0;
     pathsHit[gid].hitIndex = WF_NO_HIT;
     pathsHit[gid].misc     = -1.0;
     pathsHit[gid].pad      = 0.0;
+    pathsHit[gid].neeSlot = WF_NO_SLOT;
+    pathsHit[gid].varLight = 0.0;
+    pathsHit[gid].varBsdf = 0.0;
+    pathsHit[gid].pad2 = 0.0;
+
+    if (firstEver) {
+        uint gi = pixelIndex * uint(GBUF_STRIDE);
+        if (gi + uint(GBUF_STRIDE) <= uint(gbuf.length())) {
+            gbuf[gi + 0u] = 1.0;
+            gbuf[gi + 1u] = 1.0;
+            gbuf[gi + 2u] = 1.0;
+            gbuf[gi + 3u] = 0.0;
+            gbuf[gi + 4u] = 0.0;
+            gbuf[gi + 5u] = 0.0;
+            gbuf[gi + 6u] = 0.0;
+            gbuf[gi + 7u] = 0.0;
+        }
+    }
 
     uint slot = atomicAdd(ctr.extendCount, 1u);
     if (pc.parity == 0) extendA[slot] = gid;

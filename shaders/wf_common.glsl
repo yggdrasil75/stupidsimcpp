@@ -50,11 +50,16 @@ struct PathHot {
 };
 
 struct PathHit {
-    float t;        // hit distance
-    uint  hitIndex; // point index (WF_NO_HIT when none)
-    float misc;     // carried MIS pdf (-1.0 when unset)
+    float t;
+    uint  hitIndex;
+    float misc;
     float pad;
+    uint  neeSlot;
+    float varLight;
+    float varBsdf;
+    float pad2;
 };
+const uint WF_NO_SLOT = 0xFFFFFFFFu;
 const uint WF_NO_HIT = 0xFFFFFFFFu;
 
 #define PC_GET_BOUNCE(p)  (int((p) & 0xFFu))
@@ -71,12 +76,12 @@ const uint WF_NO_HIT = 0xFFFFFFFFu;
 #define SET_HERO(f, h) (((f) & ~HERO_MASK) | (((h) & 3) << HERO_SHIFT))
 
 struct ShadowRay {
-    vec4 o_tmax;   // xyz origin, w maxDist
-    vec3 dir;      // shadow ray direction
-    uint slot;     // path slot to credit
-    vec3 contrib;  // unshadowed contribution
-    uint lightIdx; // emissive point index (skipped as occluder)
-    vec3 thp;      // path throughput
+    vec4 o_tmax;
+    vec3 dir;
+    uint slot;
+    vec3 contrib;
+    uint lightIdx;
+    vec3 thp;
     uint pad;
 };
 
@@ -146,27 +151,27 @@ layout(binding = 0) uniform CameraData {
 } cam;
 bool adaptiveEnabled() { return cam.dispatchSamples >= cam.targetSamples; }
 
-layout(std430, binding = 1) readonly buffer PointBuffer    { GPURenderData points[]; };
+layout(std430, binding = 1) readonly buffer PointBuffer { GPURenderData points[]; };
 layout(std430, binding = 2) readonly buffer MaterialBuffer { GPUMaterial materials[]; };
-layout(std430, binding = 3) readonly buffer SkyboxBuffer   { vec4 skyPixels[]; };
-layout(std430, binding = 4) readonly buffer LightBuffer    { uint emissiveIndices[]; };
+layout(std430, binding = 3) readonly buffer SkyboxBuffer { vec4 skyPixels[]; };
+layout(std430, binding = 4) readonly buffer LightBuffer { uint emissiveIndices[]; };
 layout(binding = 5) uniform accelerationStructureEXT tlas;
-layout(std430, binding = 6) buffer OutputBuffer   { float pixels[]; };
+layout(std430, binding = 6) buffer OutputBuffer { float pixels[]; };
 layout(std430, binding = 7) buffer AdaptiveBuffer { float adaptiveData[]; };
-layout(std430, binding = 8) buffer PathHotBuffer  { PathHot pathsHot[]; };
-layout(std430, binding = 9)  buffer ExtendA   { uint extendA[]; };
-layout(std430, binding = 10) buffer ExtendB   { uint extendB[]; };
-layout(std430, binding = 11) buffer ShadeQ    { uint shadeQueue[]; };
-layout(std430, binding = 12) buffer ShadowQ   { ShadowRay shadowQueue[]; };
+layout(std430, binding = 8) buffer PathHotBuffer { PathHot pathsHot[]; };
+layout(std430, binding = 9)  buffer ExtendA { uint extendA[]; };
+layout(std430, binding = 10) buffer ExtendB { uint extendB[]; };
+layout(std430, binding = 11) buffer ShadeQ { uint shadeQueue[]; };
+layout(std430, binding = 12) buffer ShadowQ { ShadowRay shadowQueue[]; };
 layout(std430, binding = 13) buffer CounterBuf{ Counters ctr; };
 layout(std430, binding = 14) buffer PathHitBuffer { PathHit pathsHit[]; };
 layout(std430, binding = 15) readonly buffer SellmeierBuffer { float sellmeierLUT[]; };
 
 struct FogVolume {
-    vec4 minB;    // xyz min corner, w = extinction sigma_t per world unit
-    vec4 maxB;    // xyz max corner
-    vec4 scatter; // rgb scattering albedo tint
-    vec4 absorb;  // rgb absorption tint
+    vec4 minB;
+    vec4 maxB;
+    vec4 scatter;
+    vec4 absorb;
 };
 layout(std430, binding = 16) readonly buffer FogVolumeBuffer { FogVolume fogVolumes[]; };
 
@@ -451,19 +456,55 @@ float ggxD(float NdotH, float alpha2) {
     return alpha2 / max(1e-12, PI * d * d);
 }
 
+void branchlessONB(vec3 n, out vec3 t, out vec3 b) {
+    float s = (n.z >= 0.0) ? 1.0 : -1.0;
+    float a = -1.0 / (s + n.z);
+    float ab = n.x * n.y * a;
+    t = vec3(1.0 + s * n.x * n.x * a, s * ab, -s * n.x);
+    b = vec3(ab, s + n.y * n.y * a, -n.y);
+}
+
+vec3 sampleGGXVNDFLocal(vec3 Ve, float alpha, float u1, float u2) {
+    vec3 Vh = normalize(vec3(alpha * Ve.x, alpha * Ve.y, Ve.z));
+    float phi = 2.0 * PI * u1;
+    float z = fma(1.0 - u2, 1.0 + Vh.z, -Vh.z);
+    float sinTheta = sqrt(clamp(1.0 - z * z, 0.0, 1.0));
+    vec3 c = vec3(sinTheta * cos(phi), sinTheta * sin(phi), z);
+    vec3 Nh = c + Vh;
+    return normalize(vec3(alpha * Nh.x, alpha * Nh.y, Nh.z));
+}
+
+float vndfReflectPdf(float NdotV, float NdotH, float alpha2) {
+    return smith(NdotV, alpha2) * ggxD(NdotH, alpha2) / max(1e-6, 4.0 * NdotV);
+}
+
 float bsdfPdfW(vec3 N, vec3 V, vec3 L, float alpha2, float pspec, float pdiff) {
     float NdotL = dot(N, L);
     if (NdotL <= 0.0) return 0.0;
+    float NdotV = max(1e-4, dot(N, V));
     vec3 H = normalize(V + L);
     float NdotH = max(0.0, dot(N, H));
-    float VdotH = max(1e-5, dot(V, H));
-    float pdfSpec = ggxD(NdotH, alpha2) * NdotH / (4.0 * VdotH);
+    float pdfSpec = vndfReflectPdf(NdotV, NdotH, alpha2);
     float pdfDiff = NdotL / PI;
     return pspec * pdfSpec + pdiff * pdfDiff;
 }
 
 float misWeight(float a, float b) {
     return (a <= 0.0) ? 0.0 : a / (a + b);
+}
+
+#define RESTIR_VARIANCE_AWARE_MIS 1
+
+float misWeightVA(float pA, float vA, float pB, float vB) {
+#if RESTIR_VARIANCE_AWARE_MIS
+    if (pA <= 0.0) return 0.0;
+    if (pB <= 0.0) return 1.0;
+    float a = pA / max(vA, 1e-8);
+    float b = pB / max(vB, 1e-8);
+    return a / (a + b);
+#else
+    return misWeight(pA, pB);
+#endif
 }
 
 vec3 sampleSkybox(vec3 d) {
@@ -490,6 +531,63 @@ vec3 sampleCosHemisphere(vec3 N, float r1, float r2, out float pdfW) {
     return normalize(d);
 }
 
+uint wcTick() {
+    const uint WC_TICK_STRIDE = 1024u;
+    return cam.wcFrame * WC_TICK_STRIDE + uint(clamp(pc.sampleIndex, 0, int(WC_TICK_STRIDE) - 1));
+}
+
+void lightDominantFace(GPURenderData lp, vec3 refPoint, out int axis, out float sgn) {
+    vec3 bMin = ptBoundsMin(lp);
+    vec3 bMax = ptBoundsMax(lp);
+    vec3 ext  = max(bMax - bMin, vec3(1e-6));
+    vec3 d    = refPoint - (bMin + bMax) * 0.5;
+    vec3 ad = abs(d) / ext;
+    axis = (ad.x >= ad.y && ad.x >= ad.z) ? 0 : ((ad.y >= ad.z) ? 1 : 2);
+    sgn  = (d[axis] >= 0.0) ? 1.0 : -1.0;
+}
+
+void lightSampleFace(GPURenderData lp, vec3 refPoint, float u1, float u2,
+                     out vec3 pos, out vec3 nrm, out float area) {
+    vec3 bMin = ptBoundsMin(lp);
+    vec3 bMax = ptBoundsMax(lp);
+    vec3 ext  = max(bMax - bMin, vec3(1e-6));
+    int axis;
+    float sgn;
+    lightDominantFace(lp, refPoint, axis, sgn);
+    int a1 = (axis + 1) % 3;
+    int a2 = (axis + 2) % 3;
+
+    nrm = vec3(0.0);
+    nrm[axis] = sgn;
+    pos = vec3(0.0);
+    pos[axis] = (sgn > 0.0) ? bMax[axis] : bMin[axis];
+    pos[a1] = bMin[a1] + u1 * ext[a1];
+    pos[a2] = bMin[a2] + u2 * ext[a2];
+    area = max(ext[a1] * ext[a2], 1e-12);
+}
+
+float lightFaceArea(GPURenderData lp, vec3 refPoint, out vec3 nrm) {
+    vec3 bMin = ptBoundsMin(lp);
+    vec3 bMax = ptBoundsMax(lp);
+    vec3 ext  = max(bMax - bMin, vec3(1e-6));
+    int axis;
+    float sgn;
+    lightDominantFace(lp, refPoint, axis, sgn);
+    nrm = vec3(0.0);
+    nrm[axis] = sgn;
+    return max(ext[(axis + 1) % 3] * ext[(axis + 2) % 3], 1e-12);
+}
+
+float lightPdfW(float area, float distSq, float cosAtLight, int lightCount) {
+    if (cosAtLight <= 1e-6 || area <= 0.0 || lightCount <= 0) return 0.0;
+    return distSq / (cosAtLight * area * float(lightCount));
+}
+
+const float RESTIR_G_MAX = 1e6;
+float geometryTerm(float ndl, float cosAtLight, float distSq) {
+    if (ndl <= 0.0 || cosAtLight <= 0.0) return 0.0;
+    return min(ndl * cosAtLight / max(distSq, 1e-8), RESTIR_G_MAX);
+}
 
 struct Reservoir {
     uint key;
@@ -499,25 +597,121 @@ struct Reservoir {
     float W;
     float targetPdf;
     uint frame;
-    uint pad0;
+    uint nrmPacked;
+
+    float posX;
+    float posY;
+    float posZ;
+    float roughness;
+
+    uint albedoPacked;
+    uint metalPacked;
+    float varLight;
+    float varBsdf;
 };
 layout(std430, binding = 20) buffer ReservoirBuffer { Reservoir reservoirs[]; };
 
-const float RESTIR_M_CAP = 1024.0;
-const int RESTIR_CANDIDATES = 32;
-const float RESTIR_G_MAX = 1.0;
+const int GBUF_STRIDE = 8;
+layout(std430, binding = 21) buffer GBufferBuffer { float gbuf[]; };
+
+const float RESTIR_M_CAP = 32.0;
+const int RESTIR_CANDIDATES = 8;
+const int RESTIR_SPATIAL_TAPS = 3;
+const int RESTIR_MAX_SOURCES  = 2 + RESTIR_SPATIAL_TAPS;
+
+uint packNormalOct(vec3 n) {
+    vec2 e = octEncode(normalize(n));
+    return (uint(clamp(e.x, 0.0, 1.0) * 65535.0) & 0xFFFFu)
+         | ((uint(clamp(e.y, 0.0, 1.0) * 65535.0) & 0xFFFFu) << 16u);
+}
+
+vec3 unpackNormalOct(uint p) {
+    vec2 e = vec2(float(p & 0xFFFFu), float((p >> 16u) & 0xFFFFu)) / 65535.0;
+    return octDecode(e);
+}
+
+uint packRGBA8f(vec4 c) {
+    uvec4 q = uvec4(clamp(c, vec4(0.0), vec4(1.0)) * 255.0 + 0.5);
+    return q.x | (q.y << 8u) | (q.z << 16u) | (q.w << 24u);
+}
+
+struct SurfCtx {
+    vec3  pos;
+    vec3  n;
+    vec3  V;
+    vec3  albedo;
+    vec3  F0;
+    float alpha2;
+    float opacity;
+    float metallic;
+    float valid;
+};
+
+SurfCtx surfFromReservoir(Reservoir r) {
+    SurfCtx s;
+    s.pos = vec3(r.posX, r.posY, r.posZ);
+    s.n   = unpackNormalOct(r.nrmPacked);
+    vec4 a = unpackRGBA8(r.albedoPacked);
+    s.albedo   = a.rgb;
+    s.opacity  = a.a;
+    s.metallic = float(r.metalPacked & 0xFFu) / 255.0;
+    s.F0 = mix(vec3(0.04), s.albedo, s.metallic);
+    float alpha = max(1e-5, r.roughness * r.roughness);
+    s.alpha2 = alpha * alpha;
+    s.V = s.n;
+    s.opacity = a.a;
+    s.valid = 1.0;
+    return s;
+}
+
+float reservoirTargetAt(SurfCtx s, uint lightIdx) {
+    if (s.valid == 0.0) return 0.0;
+    if (lightIdx >= uint(points.length())) return 0.0;
+    GPURenderData lp = points[lightIdx];
+    GPUMaterial  lm  = materials[lp.materialIdx];
+    if (lm.chromaticity == 0u) return 0.0;
+
+    vec3 lnrm;
+    float area = lightFaceArea(lp, s.pos, lnrm);
+    vec3 bMin = ptBoundsMin(lp), bMax = ptBoundsMax(lp);
+    vec3 lpos = (bMin + bMax) * 0.5 + lnrm * (0.5 * abs(dot(bMax - bMin, lnrm)));
+
+    vec3 to = lpos - s.pos;
+    float d2 = dot(to, to);
+    if (d2 < 1e-12) return 0.0;
+    float d = sqrt(d2);
+    vec3 L = to / d;
+
+    float ndl = dot(s.n, L);
+    if (ndl <= 0.0) return 0.0;
+    float cosAtLight = max(0.0, dot(lnrm, -L));
+    float G = geometryTerm(ndl, cosAtLight, d2);
+    if (G <= 0.0) return 0.0;
+
+    vec4 la = unpackRGBA8(lp.color);
+    vec3 Le = la.rgb * unpackRGB9E5(lm.chromaticity);
+
+    float NdotV = max(1e-4, dot(s.n, s.V));
+    vec3 H = normalize(s.V + L);
+    float NdotH = max(0.0, dot(s.n, H));
+    float VdotH = max(0.0, dot(s.V, H));
+    vec3 F = s.F0 + (vec3(1.0) - s.F0) * pow(1.0 - min(1.0, VdotH), 5.0);
+    vec3 diff = s.albedo * (vec3(1.0) - F) / PI * s.opacity * (1.0 - s.metallic);
+    float D = ggxD(NdotH, s.alpha2);
+    float Gs = smith(NdotV, s.alpha2) * smith(ndl, s.alpha2);
+    vec3 spec = F * (D * Gs / max(1e-5, 4.0 * NdotV * ndl));
+
+    return dot(Le * (diff + spec) * G, vec3(0.2126, 0.7152, 0.0722));
+}
 
 float reservoirTarget(vec3 c) {
     return dot(c, vec3(0.2126, 0.7152, 0.0722));
 }
 
 bool reservoirUpdate(inout Reservoir r, uint lightIdx, float w, float pHat, inout uint rng) {
-    if (w <= 0.0) {
-        r.M += 1.0;
-        return false;
-    }
-    r.wSum += w;
     r.M += 1.0;
+    if (w <= 0.0) return false;
+    r.wSum += w;
     if (nextFloat(rng) < w / r.wSum) {
         r.lightIdx = lightIdx;
         r.targetPdf = pHat;
@@ -534,31 +728,97 @@ void reservoirFinalize(inout Reservoir r) {
     r.W = r.wSum / (r.M * r.targetPdf);
 }
 
-void reservoirMerge(inout Reservoir dst, Reservoir src, float pHatAtDst, inout uint rng) {
-    if (src.M <= 0.0 || src.W <= 0.0) return;
-    float w = pHatAtDst * src.W * src.M;
-    if (w <= 0.0) { return; }
-    dst.wSum += w;
-    dst.M += src.M;
-    if (nextFloat(rng) < w / dst.wSum) {
-        dst.lightIdx = src.lightIdx;
-        dst.targetPdf = pHatAtDst;
-    }
-}
-
-float clampedGeometry(float ndl, float distSq, float area) {
-    float g = ndl * area / max(distSq, 1e-6);
-    return min(g, RESTIR_G_MAX);
-}
-
-uint wcTick() {
-    const uint WC_TICK_STRIDE = 1024u;
-    return cam.wcFrame * WC_TICK_STRIDE + uint(clamp(pc.sampleIndex, 0, int(WC_TICK_STRIDE) - 1));
+void reservoirInit(out Reservoir r) {
+    r.key = 0u;
+    r.lightIdx = 0u;
+    r.wSum = 0.0;
+    r.M = 0.0;
+    r.W = 0.0;
+    r.targetPdf = 0.0;
+    r.frame = 0u;
+    r.nrmPacked = 0u;
+    r.posX = 0.0;
+    r.posY = 0.0;
+    r.posZ = 0.0;
+    r.roughness = 0.0;
+    r.albedoPacked = 0u;
+    r.metalPacked = 0u;
+    r.varLight = 0.0;
+    r.varBsdf = 0.0;
 }
 
 uint reservoirSlot(vec3 p, vec3 n, out uint outKey) {
     outKey = wcKey(wcCell(p), wcQuantizeNormal(n));
     return wcSlot(outKey);
+}
+
+bool reservoirFetch(vec3 p, vec3 n, vec3 planeP, vec3 planeN, float planeTol,
+                    out Reservoir r) {
+    reservoirInit(r);
+    if (cam.wcCapacity == 0u) return false;
+    uint key;
+    uint slot = reservoirSlot(p, n, key);
+    Reservoir e = reservoirs[slot];
+    if (e.key != key) return false;
+    if (e.M <= 0.0 || e.W <= 0.0 || e.targetPdf <= 0.0) return false;
+    if (int(wcTick() - e.frame) > cam.wcMaxAge) return false;
+    if (e.lightIdx >= uint(points.length())) return false;
+    vec3 en = unpackNormalOct(e.nrmPacked);
+    if (dot(en, planeN) < 0.906) return false;
+    vec3 ep = vec3(e.posX, e.posY, e.posZ);
+    if (abs(dot(ep - planeP, planeN)) > planeTol) return false;
+    r = e;
+    return true;
+}
+
+void reservoirCombineGRIS(out Reservoir dst,
+                          Reservoir srcR[RESTIR_MAX_SOURCES],
+                          SurfCtx srcS[RESTIR_MAX_SOURCES],
+                          int count, inout uint rng) {
+    reservoirInit(dst);
+    if (count <= 0) return;
+
+    for (int j = 0; j < count; ++j) {
+        if (srcR[j].M <= 0.0) continue;
+        uint X = srcR[j].lightIdx;
+
+        float pvals[RESTIR_MAX_SOURCES];
+        float denom = 0.0;
+        for (int i = 0; i < count; ++i) {
+            pvals[i] = (srcR[i].M > 0.0) ? reservoirTargetAt(srcS[i], X) : 0.0;
+            denom += srcR[i].M * pvals[i];
+        }
+
+        dst.M += srcR[j].M;
+        if (denom <= 0.0 || srcR[j].W <= 0.0) continue;
+
+        float mj = srcR[j].M * pvals[j] / denom;
+        float w  = mj * pvals[0] * srcR[j].W;
+        if (w <= 0.0) continue;
+
+        dst.wSum += w;
+        if (nextFloat(rng) < w / dst.wSum) {
+            dst.lightIdx  = X;
+            dst.targetPdf = pvals[0];
+        }
+    }
+
+    dst.W = (dst.targetPdf > 0.0) ? dst.wSum / dst.targetPdf : 0.0;
+}
+
+const float VA_EMA = 0.05;
+const float VA_FLOOR = 1e-6;
+
+void vaUpdateLight(uint slot, float moment) {
+    if (slot == WF_NO_SLOT || cam.wcCapacity == 0u) return;
+    float prev = max(reservoirs[slot].varLight, VA_FLOOR);
+    reservoirs[slot].varLight = mix(prev, max(moment, VA_FLOOR), VA_EMA);
+}
+
+void vaUpdateBsdf(uint slot, float moment) {
+    if (slot == WF_NO_SLOT || cam.wcCapacity == 0u) return;
+    float prev = max(reservoirs[slot].varBsdf, VA_FLOOR);
+    reservoirs[slot].varBsdf = mix(prev, max(moment, VA_FLOOR), VA_EMA);
 }
 
 bool rayCubeIntersect(vec3 ro, vec3 rd, vec3 invD, GPURenderData pt,
@@ -588,9 +848,9 @@ bool rayCubeIntersect(vec3 ro, vec3 rd, vec3 invD, GPURenderData pt,
     vec3 slab = inside ? tmax3 : tmin3;
     float key = inside ? tMax : tMin;
     vec3 mask;
-    if (key == slab.x)      mask = vec3(1.0, 0.0, 0.0);
+    if (key == slab.x) mask = vec3(1.0, 0.0, 0.0);
     else if (key == slab.y) mask = vec3(0.0, 1.0, 0.0);
-    else                    mask = vec3(0.0, 0.0, 1.0);
+    else mask = vec3(0.0, 0.0, 1.0);
     normal = (inside ? -sgn : sgn) * mask;
     return true;
 }

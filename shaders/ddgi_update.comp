@@ -76,12 +76,17 @@ void main() {
                 uint lightIdx = emissiveIndices[li];
                 if (lightIdx < uint(points.length())) {
                     GPURenderData lp = points[lightIdx];
-                    vec3 toL = lp.position - hitPoint;
-                    float d2 = max(dot(toL, toL), 1e-4);
+                    vec3 lpos, lnrm;
+                    float larea;
+                    lightSampleFace(lp, hitPoint, nextFloat(rng), nextFloat(rng),
+                                    lpos, lnrm, larea);
+                    vec3 toL = lpos - hitPoint;
+                    float d2 = max(dot(toL, toL), 1e-8);
                     float dL = sqrt(d2);
                     vec3 L = toL / dL;
                     float ndl = max(0.0, dot(nrm, L));
-                    if (ndl > 0.0) {
+                    float cosAtLight = max(0.0, dot(lnrm, -L));
+                    if (ndl > 0.0 && cosAtLight > 0.0) {
                         vec3 sInvD = safe_invDir(L);
                         int sIdx;
                         float sT;
@@ -90,9 +95,9 @@ void main() {
                             vec4 la = unpackRGBA8(lp.color);
                             GPUMaterial lm = materials[lp.materialIdx];
                             vec3 Le = la.rgb * unpackRGB9E5(lm.chromaticity);
-                            float G = clampedGeometry(ndl, d2, lp.size * lp.size);
+                            float G = geometryTerm(ndl, cosAtLight, d2);
                             radiance += albedo.rgb * Le * G
-                                        * float(cam.emissiveCount) / PI;
+                                        * (float(cam.emissiveCount) * larea) / PI;
                         }
                     }
                 }

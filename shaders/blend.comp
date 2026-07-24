@@ -1,6 +1,16 @@
 #version 450
 layout(local_size_x = 16, local_size_y = 16) in;
 
+#define BMFR_ORDER 1
+
+#if BMFR_ORDER == 2
+  #define BMFR_K 7
+#else
+  #define BMFR_K 4
+#endif
+
+const int COEFF_STRIDE = 24;
+
 layout(push_constant) uniform Push {
     int width;
     int height;
@@ -10,15 +20,21 @@ layout(push_constant) uniform Push {
     int samples;
 } pc;
 
-layout(std430, binding = 0) readonly buffer FastBuf { float fastData[]; };  // full res, 5-stride
-layout(std430, binding = 1) readonly buffer PBRBuf  { float pbrData[]; };   // low res, 5-stride
-layout(std430, binding = 2) writeonly buffer OutBuf { float outData[]; };   // full res, 3-stride
-layout(std430, binding = 3) readonly buffer CoeffBuf { float coeff[]; };    // low res, 6-stride
+layout(std430, binding = 0) readonly buffer FastBuf { float fastData[]; };
+layout(std430, binding = 1) readonly buffer PBRBuf  { float pbrData[]; };
+layout(std430, binding = 2) writeonly buffer OutBuf { float outData[]; };
+layout(std430, binding = 3) readonly buffer CoeffBuf { float coeff[]; };
 
-void fetchCoeff(int lx, int ly, out vec3 a, out vec3 b) {
-    int i = (ly * pc.lowW + lx) * 6;
-    a = vec3(coeff[i], coeff[i + 1], coeff[i + 2]);
-    b = vec3(coeff[i + 3], coeff[i + 4], coeff[i + 5]);
+void buildFeatures(vec3 g, out float phi[BMFR_K]) {
+    phi[0] = 1.0;
+    phi[1] = g.r;
+    phi[2] = g.g;
+    phi[3] = g.b;
+#if BMFR_ORDER == 2
+    phi[4] = g.r * g.r;
+    phi[5] = g.g * g.g;
+    phi[6] = g.b * g.b;
+#endif
 }
 
 void main() {
@@ -33,7 +49,6 @@ void main() {
 
     float invSamples = 1.0 / max(1.0, float(pc.samples));
 
-    // Continuous low-res coordinate of this full-res pixel.
     float flx = (float(x) + 0.5) * pc.pbrScale - 0.5;
     float fly = (float(y) + 0.5) * pc.pbrScale - 0.5;
     int lx0 = int(floor(flx));
@@ -42,9 +57,13 @@ void main() {
     float fy = fly - float(ly0);
 
     float sumW = 0.0;
-    vec3 sumA = vec3(0.0), sumB = vec3(0.0);
+    float sumT[BMFR_K][3];
+    for (int k = 0; k < BMFR_K; ++k) {
+        sumT[k][0] = 0.0;
+        sumT[k][1] = 0.0;
+        sumT[k][2] = 0.0;
+    }
 
-    // 2x2 edge-aware bilinear taps.
     for (int j = 0; j <= 1; ++j)
     for (int i = 0; i <= 1; ++i) {
         int nx = clamp(lx0 + i, 0, pc.lowW - 1);
@@ -59,12 +78,15 @@ void main() {
         float wB = (i == 0 ? 1.0 - fx : fx) * (j == 0 ? 1.0 - fy : fy);
         float w = max(wB, 1e-4) * wZ;
 
-        vec3 a, b;
-        fetchCoeff(nx, ny, a, b);
-        sumW += w; sumA += a * w; sumB += b * w;
+        int ci = (ny * pc.lowW + nx) * COEFF_STRIDE;
+        for (int k = 0; k < BMFR_K; ++k) {
+            sumT[k][0] += coeff[ci + k * 3 + 0] * w;
+            sumT[k][1] += coeff[ci + k * 3 + 1] * w;
+            sumT[k][2] += coeff[ci + k * 3 + 2] * w;
+        }
+        sumW += w;
     }
 
-    // Fallback 1: widen the search with a Gaussian window, same-object only.
     if (sumW == 0.0 && fastObj != -1) {
         int clx = int(round(float(x) * pc.pbrScale));
         int cly = int(round(float(y) * pc.pbrScale));
@@ -75,20 +97,30 @@ void main() {
             int pIdx = (ny * pc.lowW + nx) * 5;
             if (int(pbrData[pIdx + 4]) != fastObj) continue;
             float w = exp(-float(dx * dx + dy * dy) / (2.0 * 1.5 * 1.5));
-            vec3 a, b;
-            fetchCoeff(nx, ny, a, b);
-            sumW += w; sumA += a * w; sumB += b * w;
+            int ci = (ny * pc.lowW + nx) * COEFF_STRIDE;
+            for (int k = 0; k < BMFR_K; ++k) {
+                sumT[k][0] += coeff[ci + k * 3 + 0] * w;
+                sumT[k][1] += coeff[ci + k * 3 + 1] * w;
+                sumT[k][2] += coeff[ci + k * 3 + 2] * w;
+            }
+            sumW += w;
         }
     }
     
     int outIdx = (y * pc.width + x) * 3;
     vec3 result;
     if (sumW > 0.0) {
-        vec3 a = sumA / sumW;
-        vec3 b = sumB / sumW;
-        result = a * guideC + b;
+        float invW = 1.0 / sumW;
+        float phi[BMFR_K];
+        buildFeatures(guideC, phi);
+        result = vec3(0.0);
+        for (int k = 0; k < BMFR_K; ++k) {
+            result.r += sumT[k][0] * invW * phi[k];
+            result.g += sumT[k][1] * invW * phi[k];
+            result.b += sumT[k][2] * invW * phi[k];
+        }
+        result = max(result, vec3(0.0));
     } else {
-        // Nothing of this object in the path trace at all: keep the guide.
         result = guideC;
     }
     outData[outIdx]     = clamp(result.r, 0.0, 1.0);

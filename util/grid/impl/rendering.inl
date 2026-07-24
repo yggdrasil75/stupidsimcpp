@@ -91,10 +91,10 @@ static PFN_vkCmdBuildAccelerationStructuresKHR pfn_vkCmdBuildAccelerationStructu
 static PFN_vkDestroyAccelerationStructureKHR pfn_vkDestroyAccelerationStructureKHR = nullptr;
 static PFN_vkGetAccelerationStructureDeviceAddressKHR pfn_vkGetAccelerationStructureDeviceAddressKHR = nullptr;
 static constexpr uint32_t VCT_RES = 128;
-static constexpr uint32_t WF_PATH_STRIDE   = 6 * 4 * sizeof(float);
-static constexpr uint32_t WF_PATHHIT_STRIDE= 1 * 4 * sizeof(float);
+static constexpr uint32_t WF_PATH_STRIDE = 6 * 4 * sizeof(float);
+static constexpr uint32_t WF_PATHHIT_STRIDE= 2 * 4 * sizeof(float);
 static constexpr uint32_t WF_SHADOW_STRIDE = 4 * 4 * sizeof(float);
-static constexpr uint32_t WF_COUNTER_SIZE  = 16 * sizeof(uint32_t);
+static constexpr uint32_t WF_COUNTER_SIZE = 16 * sizeof(uint32_t);
 static constexpr VkDeviceSize WF_OFF_EXTEND_ARGS = 16;
 static constexpr VkDeviceSize WF_OFF_SHADE_ARGS  = 32;
 static constexpr VkDeviceSize WF_OFF_SHADOW_ARGS = 48;
@@ -179,7 +179,15 @@ struct alignas(16) GPUReservoir {
     float W;
     float targetPdf;
     uint32_t frame;
-    uint32_t pad0;
+    uint32_t nrmPacked;
+    float posX;
+    float posY;
+    float posZ;
+    float roughness;
+    uint32_t albedoPacked;
+    uint32_t metalPacked;
+    float varLight;
+    float varBsdf;
 };
 
 struct alignas(16) GPUFogVolume {
@@ -239,6 +247,7 @@ struct GpuContext {
     uint32_t frameStagingCap[FRAME_SLOTS] = {0, 0};
     bool frameSlotInFlight[FRAME_SLOTS] = {false, false};
     uint32_t nextFrameSlot = 0;
+    VkDeviceSize gbufferCap = 0;
     
     VkShaderModule fastShader = VK_NULL_HANDLE;
     VkShaderModule smoothShader = VK_NULL_HANDLE;
@@ -309,6 +318,7 @@ struct GpuContext {
     VkBuffer ddgiIrradianceBuffer = VK_NULL_HANDLE;
     VkBuffer ddgiDepthBuffer = VK_NULL_HANDLE;
     VkBuffer frameStaging[FRAME_SLOTS] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkBuffer gbufferBuffer = VK_NULL_HANDLE;
 
     VkDescriptorSetLayout fastDescLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout pbrDescLayout = VK_NULL_HANDLE;
@@ -360,6 +370,7 @@ struct GpuContext {
     VkDeviceMemory ddgiIrradianceMem = VK_NULL_HANDLE;
     VkDeviceMemory ddgiDepthMem = VK_NULL_HANDLE;
     VkDeviceMemory frameStagingMem[FRAME_SLOTS] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkDeviceMemory gbufferMem = VK_NULL_HANDLE;
     
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
     
@@ -412,7 +423,6 @@ struct GpuContext {
 
     void* outStagingMapped = nullptr;
     void* xferStagingMapped = nullptr;
-
 
     uint32_t findMemoryType(VkPhysicalDevice& phDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties) {
         VkPhysicalDeviceMemoryProperties memProperties;
@@ -681,7 +691,7 @@ struct GpuContext {
         vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
 
         VkDescriptorPoolSize poolSizes[] = { 
-            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 80},
+            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 96},
             {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 12},
             {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 6},
             {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 64},
@@ -734,14 +744,14 @@ struct GpuContext {
         vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &fastDescLayout);
         vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &pbrDescLayout);
 
-        VkDescriptorSetLayoutBinding smBindings[3] = {};
-        for(int i=0; i<3; i++) {
+        VkDescriptorSetLayoutBinding smBindings[4] = {};
+        for(int i=0; i<4; i++) {
             smBindings[i].binding = i;
             smBindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             smBindings[i].descriptorCount = 1;
             smBindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         }
-        VkDescriptorSetLayoutCreateInfo smLayoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 3, smBindings};
+        VkDescriptorSetLayoutCreateInfo smLayoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 4, smBindings};
         vkCreateDescriptorSetLayout(device, &smLayoutInfo, nullptr, &smoothDescLayout);
 
         VkDescriptorSetLayoutBinding blBindings[4] = {};
@@ -1413,6 +1423,7 @@ struct GpuContext {
 
     void updateCommonBuffers(size_t outSize, GPUCameraData& camData) {
         size_t allocSize = (size_t)256;
+        ensureGBuffer(uint32_t(camData.width), uint32_t(camData.height));
         
         // Use device local memory for nodes (critical for tree traversal performance)
         updateDeviceLocalBuffer(nodeBuffer, nodeMem, currentNodesCap, 
@@ -1552,7 +1563,7 @@ struct GpuContext {
         for(int i=0; i<updateCount; i++) {
             writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[i].dstSet = pbrDescSet;
-            writes[i].dstBinding = (i >= 6) ? i + 1 : i; 
+            writes[i].dstBinding = (i >= 6) ? i + 1 : i;
             writes[i].descriptorCount = 1;
             writes[i].descriptorType = (i==3) ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             writes[i].pBufferInfo = &bInfos[i];
@@ -1563,12 +1574,18 @@ struct GpuContext {
             VkDescriptorImageInfo si{vctSampler, vctSampleView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
             VkDescriptorBufferInfo bi{vctParamBuf, 0, VK_WHOLE_SIZE};
             VkWriteDescriptorSet vw[2]{};
-            vw[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}; vw[0].dstSet = pbrDescSet;
-            vw[0].dstBinding = 9; vw[0].descriptorCount = 1;
-            vw[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; vw[0].pImageInfo = &si;
-            vw[1] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}; vw[1].dstSet = pbrDescSet;
-            vw[1].dstBinding = 10; vw[1].descriptorCount = 1;
-            vw[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; vw[1].pBufferInfo = &bi;
+            vw[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            vw[0].dstSet = pbrDescSet;
+            vw[0].dstBinding = 9;
+            vw[0].descriptorCount = 1;
+            vw[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            vw[0].pImageInfo = &si;
+            vw[1] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            vw[1].dstSet = pbrDescSet;
+            vw[1].dstBinding = 10;
+            vw[1].descriptorCount = 1;
+            vw[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            vw[1].pBufferInfo = &bi;
             vkUpdateDescriptorSets(device, 2, vw, 0, nullptr);
         }
     }
@@ -1601,7 +1618,7 @@ struct GpuContext {
         copyBuffer(device, outBuffer, fastGBuffer, fastOutSize);
     }
 
-    void dispatchSmoothPasses(int width, int height, int samples, int iters, bool toFinal, bool deferFinalWait = false) {
+    void dispatchSmoothPasses(int width, int height, int samples, int iters, bool toFinal, bool deferFinalWait = false, int useAlbedo = 1) {
         uint32_t finalSize = width * height * 3 * sizeof(float);
         if(finalSize > currentFinalOutCap) {
             if(finalOutBuffer) {
@@ -1632,13 +1649,14 @@ struct GpuContext {
             int step = 1 << it;
             VkBuffer outBuf = finalPass ? finalOutBuffer : dst;
 
-            VkDescriptorBufferInfo bInfos[3] = {
+            VkDescriptorBufferInfo bInfos[4] = {
                 {src, 0, VK_WHOLE_SIZE},
                 {outBuf, 0, VK_WHOLE_SIZE},
-                {adaptiveBuffer, 0, VK_WHOLE_SIZE}
+                {adaptiveBuffer, 0, VK_WHOLE_SIZE},
+                {gbufferBuffer ? gbufferBuffer : adaptiveBuffer, 0, VK_WHOLE_SIZE}
             };
-            VkWriteDescriptorSet writes[3] = {};
-            for(int i=0; i<3; i++) {
+            VkWriteDescriptorSet writes[4] = {};
+            for(int i=0; i<4; i++) {
                 writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
                 writes[i].dstSet = smoothDescSet;
                 writes[i].dstBinding = i;
@@ -1646,15 +1664,15 @@ struct GpuContext {
                 writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
                 writes[i].pBufferInfo = &bInfos[i];
             }
-            vkUpdateDescriptorSets(device, 3, writes, 0, nullptr);
+            vkUpdateDescriptorSets(device, 4, writes, 0, nullptr);
 
             VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
             vkBeginCommandBuffer(commandBuffer, &beginInfo);
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, smoothPipeline);
             vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, smoothPipelineLayout, 0, 1, &smoothDescSet, 0, nullptr);
 
-            struct { int w, h, s, step, finalPass; } pc = {
-                width, height, samples, step, finalPass ? 1 : 0
+            struct { int w, h, s, step, finalPass, useAlbedo; } pc = {
+                width, height, samples, step, finalPass ? 1 : 0, useAlbedo
             };
             vkCmdPushConstants(commandBuffer, smoothPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
             vkCmdDispatch(commandBuffer, (width + 15) / 16, (height + 15) / 16, 1);
@@ -1678,7 +1696,11 @@ struct GpuContext {
                 vkDestroyFence(device, fence, nullptr);
             }
 
-            if (!finalPass) { VkBuffer tmp = src; src = dst; dst = tmp; }
+            if (!finalPass) {
+                VkBuffer tmp = src;
+                src = dst;
+                dst = tmp;
+            }
         }
     }
 
@@ -1698,15 +1720,14 @@ struct GpuContext {
         uint32_t finalSize = width * height * 3 * sizeof(float);
         if(finalSize > currentFinalOutCap) {
             if(finalOutBuffer) { 
-                vkDestroyBuffer(device, finalOutBuffer, nullptr); 
-                vkFreeMemory(device, finalOutMem, nullptr); 
+                vkDestroyBuffer(device, finalOutBuffer, nullptr);
+                vkFreeMemory(device, finalOutMem, nullptr);
             }
             createBuffer(device, primaryDevice, finalSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, finalOutBuffer, finalOutMem);
             currentFinalOutCap = finalSize;
         }
 
-        // Per-low-pixel guided-filter coefficients (a.rgb, b.rgb).
-        uint32_t coeffSize = uint32_t(lowW) * uint32_t(lowH) * 6 * sizeof(float);
+        uint32_t coeffSize = uint32_t(lowW) * uint32_t(lowH) * 24 * sizeof(float);
         if (coeffSize > currentGuidedCoeffCap) {
             if (guidedCoeffBuffer) {
                 vkDestroyBuffer(device, guidedCoeffBuffer, nullptr);
@@ -1764,7 +1785,7 @@ struct GpuContext {
         vkEndCommandBuffer(commandBuffer);
 
         VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-        submitInfo.commandBufferCount = 1;  
+        submitInfo.commandBufferCount = 1;
         submitInfo.pCommandBuffers = &commandBuffer;
 
         if (!deferWait) {
@@ -1804,8 +1825,8 @@ struct WFPushConstants {
 
 
 void initWavefront() {
-    VkDescriptorSetLayoutBinding b[21] = {};
-    for (int i = 0; i < 21; ++i) {
+    VkDescriptorSetLayoutBinding b[22] = {};
+    for (int i = 0; i < 22; ++i) {
         b[i].binding = i;
         b[i].descriptorCount = 1;
         b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -1815,7 +1836,7 @@ void initWavefront() {
     b[5].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
 
     VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    li.bindingCount = 21;
+    li.bindingCount = 22;
     li.pBindings = b;
     vkCreateDescriptorSetLayout(device, &li, nullptr, &wfDescLayout);
 
@@ -1896,6 +1917,20 @@ void ensureReservoirs(uint32_t capacity) {
     });
 }
 
+void ensureGBuffer(uint32_t fullW, uint32_t fullH) {
+    VkDeviceSize bytes = VkDeviceSize(fullW) * VkDeviceSize(fullH) * 8 * sizeof(float);
+    if (bytes == 0) return;
+    if (gbufferBuffer && bytes <= gbufferCap) return;
+    destroyBuffer(device, gbufferBuffer, gbufferMem);
+    createBuffer(device, primaryDevice, bytes,
+                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, gbufferBuffer, gbufferMem);
+    gbufferCap = bytes;
+    executeSingleTimeCommands([&](VkCommandBuffer cmd) {
+        vkCmdFillBuffer(cmd, gbufferBuffer, 0, bytes, 0u);
+    });
+}
+
 void ensureDDGIBuffers(uint32_t probeCount) {
     if (ddgiIrradianceBuffer && probeCount <= ddgiProbeCap) return;
     destroyBuffer(device, ddgiIrradianceBuffer, ddgiIrradianceMem);
@@ -1942,42 +1977,43 @@ void ensureWavefrontBuffers(uint32_t maxPaths) {
     const VkBufferUsageFlags store = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     const VkMemoryPropertyFlags devLocal = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
 
-    createBuffer(device, primaryDevice, maxPaths * WF_PATH_STRIDE,    store, devLocal, wfPathBuf,    wfPathMem);
+    createBuffer(device, primaryDevice, maxPaths * WF_PATH_STRIDE, store, devLocal, wfPathBuf, wfPathMem);
     createBuffer(device, primaryDevice, maxPaths * WF_PATHHIT_STRIDE, store, devLocal, wfPathHitBuf, wfPathHitMem);
     createBuffer(device, primaryDevice, maxPaths * sizeof(uint32_t), store, devLocal, wfExtendABuf, wfExtendAMem);
     createBuffer(device, primaryDevice, maxPaths * sizeof(uint32_t), store, devLocal, wfExtendBBuf, wfExtendBMem);
-    createBuffer(device, primaryDevice, maxPaths * sizeof(uint32_t), store, devLocal, wfShadeBuf,   wfShadeMem);
-    createBuffer(device, primaryDevice, maxPaths * WF_SHADOW_STRIDE, store, devLocal, wfShadowBuf,  wfShadowMem);
+    createBuffer(device, primaryDevice, maxPaths * sizeof(uint32_t), store, devLocal, wfShadeBuf, wfShadeMem);
+    createBuffer(device, primaryDevice, maxPaths * WF_SHADOW_STRIDE, store, devLocal, wfShadowBuf, wfShadowMem);
     createBuffer(device, primaryDevice, WF_COUNTER_SIZE, store | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, devLocal, wfCounterBuf, wfCounterMem);
     wfPathCap = maxPaths;
 }
 
 void writeWavefrontDescriptors() {
-    VkDescriptorBufferInfo bi[21] = {};
-    bi[0]  = {uboBuffer,      0, VK_WHOLE_SIZE};
+    VkDescriptorBufferInfo bi[22] = {};
+    bi[0]  = {uboBuffer, 0, VK_WHOLE_SIZE};
     bi[1]  = {pbrPointBuffer, 0, VK_WHOLE_SIZE};
     bi[2]  = {materialBuffer, 0, VK_WHOLE_SIZE};
-    bi[3]  = {skyboxBuffer,   0, VK_WHOLE_SIZE};
-    bi[4]  = {lightBuffer,    0, VK_WHOLE_SIZE};
-    bi[6]  = {outBuffer,      0, VK_WHOLE_SIZE};
+    bi[3]  = {skyboxBuffer, 0, VK_WHOLE_SIZE};
+    bi[4]  = {lightBuffer, 0, VK_WHOLE_SIZE};
+    bi[6]  = {outBuffer, 0, VK_WHOLE_SIZE};
     bi[7]  = {adaptiveBuffer, 0, VK_WHOLE_SIZE};
-    bi[8]  = {wfPathBuf,      0, VK_WHOLE_SIZE};
-    bi[9]  = {wfExtendABuf,   0, VK_WHOLE_SIZE};
-    bi[10] = {wfExtendBBuf,   0, VK_WHOLE_SIZE};
-    bi[11] = {wfShadeBuf,     0, VK_WHOLE_SIZE};
-    bi[12] = {wfShadowBuf,    0, VK_WHOLE_SIZE};
-    bi[13] = {wfCounterBuf,   0, VK_WHOLE_SIZE};
-    bi[14] = {wfPathHitBuf,   0, VK_WHOLE_SIZE};
+    bi[8]  = {wfPathBuf, 0, VK_WHOLE_SIZE};
+    bi[9]  = {wfExtendABuf, 0, VK_WHOLE_SIZE};
+    bi[10] = {wfExtendBBuf, 0, VK_WHOLE_SIZE};
+    bi[11] = {wfShadeBuf, 0, VK_WHOLE_SIZE};
+    bi[12] = {wfShadowBuf, 0, VK_WHOLE_SIZE};
+    bi[13] = {wfCounterBuf, 0, VK_WHOLE_SIZE};
+    bi[14] = {wfPathHitBuf, 0, VK_WHOLE_SIZE};
     bi[15] = {sellmeierBuffer ? sellmeierBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
     bi[16] = {fogBuffer ? fogBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
     bi[17] = {worldCacheBuffer ? worldCacheBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
     bi[18] = {ddgiIrradianceBuffer ? ddgiIrradianceBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
     bi[19] = {ddgiDepthBuffer ? ddgiDepthBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
     bi[20] = {reservoirBuffer ? reservoirBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
+    bi[21] = {gbufferBuffer ? gbufferBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
 
-    VkWriteDescriptorSet w[21] = {};
+    VkWriteDescriptorSet w[22] = {};
     int n = 0;
-    for (int i = 0; i < 21; ++i) {
+    for (int i = 0; i < 22; ++i) {
         if (i == 5) continue;
         w[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         w[n].dstSet = wfDescSet;
@@ -2219,12 +2255,14 @@ struct GpuFleet {
     GpuContext& ctx(size_t i) { return *gpus[i]; }
 
     std::vector<VkDevice> devices() const {
-        std::vector<VkDevice> v; v.reserve(gpus.size());
+        std::vector<VkDevice> v;
+        v.reserve(gpus.size());
         for (auto* g : gpus) v.push_back(g->device);
         return v;
     }
     std::vector<VkPhysicalDevice> physicalDevices() const {
-        std::vector<VkPhysicalDevice> v; v.reserve(gpus.size());
+        std::vector<VkPhysicalDevice> v;
+        v.reserve(gpus.size());
         for (auto* g : gpus) v.push_back(g->primaryDevice);
         return v;
     }
@@ -2254,7 +2292,10 @@ struct GpuFleet {
         std::vector<VkPhysicalDevice> all(deviceCount);
         vkEnumeratePhysicalDevices(instance, &deviceCount, all.data());
 
-        struct Cand { VkPhysicalDevice dev; int score; };
+        struct Cand {
+            VkPhysicalDevice dev;
+            int score;
+        };
         std::vector<Cand> cands;
         for (auto dev : all) {
             int s = GpuContext::scorePhysicalDevice(dev);

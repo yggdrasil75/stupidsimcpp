@@ -31,7 +31,14 @@ void main() {
     float t = pathsHit[slot].t;
     uint hitIndexU = pathsHit[slot].hitIndex;
     float prevPdf = pathsHit[slot].misc;
+    uint prevSlot = pathsHit[slot].neeSlot;
+    float prevVarL = pathsHit[slot].varLight;
+    float prevVarB = pathsHit[slot].varBsdf;
+    vec3 prevVertex = origin;
     float outMisc = -1.0;
+    uint outSlot = WF_NO_SLOT;
+    float outVarL = 0.0;
+    float outVarB = 0.0;
     if (hitIndexU == WF_NO_HIT) return;
     int hitIndex = int(hitIndexU);
 
@@ -91,16 +98,31 @@ void main() {
         roughness = max(roughness, pathRoughness);
         pathRoughness = max(pathRoughness, roughness);
 
+        if (bounce == 0 && transp == 0) {
+            uint gi = p.u0.x * uint(GBUF_STRIDE);
+            if (gi + uint(GBUF_STRIDE) <= uint(gbuf.length())) {
+                float diffuseness = (1.0 - metallic) * opacity;
+                vec3 demod = mix(vec3(1.0), max(albedo.rgb, vec3(0.02)), diffuseness);
+                if (isEmissive) demod = vec3(1.0);
+                gbuf[gi + 0u] = demod.r;
+                gbuf[gi + 1u] = demod.g;
+                gbuf[gi + 2u] = demod.b;
+                gbuf[gi + 3u] = offsetNorm.x;
+                gbuf[gi + 4u] = offsetNorm.y;
+                gbuf[gi + 5u] = offsetNorm.z;
+            }
+        }
+
         vec3 emitted = albedo.rgb * emittanceRGB;
         if (isEmissive && entering == 1) {
             float wB = 1.0;
             if (prevPdf > 0.0 && cam.emissiveCount > 0) {
-                float area = hitData.size * hitData.size;
-                float distSq = t * t;
-                float solidAngle = min(area / max(distSq, area * 0.25), 2.0 * PI);
-                float mEff = float(max(1, min(RESTIR_CANDIDATES, cam.emissiveCount)));
-                float lightPdfW = mEff / max(1e-6, solidAngle * float(cam.emissiveCount));
-                wB = misWeight(prevPdf, lightPdfW);
+                vec3 faceN;
+                float area = lightFaceArea(hitData, prevVertex, faceN);
+                float cosAtLight = dot(faceN, -dir);
+                bool sameFace = dot(faceN, normal) > 0.5;
+                float lp = sameFace ? lightPdfW(area, t * t, cosAtLight, cam.emissiveCount) : 0.0;
+                wB = 1.0 - misWeightVA(lp, prevVarL, prevPdf, prevVarB);
             }
             vec3 addE = throughput * emitted * wB;
             if (bounce > 0) {
@@ -108,6 +130,8 @@ void main() {
                 if (addLum > 64.0) addE *= 64.0 / addLum;
             }
             radiance += addE;
+            float bsdfLum = dot(throughput * emitted, vec3(0.2126, 0.7152, 0.0722));
+            vaUpdateBsdf(prevSlot, bsdfLum * bsdfLum);
         }
 
         vec3 F0 = mix(vec3(0.04), albedo.rgb, metallic);
@@ -122,6 +146,7 @@ void main() {
                 p.i1.w &= ~FLAG_ALIVE;
                 pathsHot[slot] = p;
                 pathsHit[slot].misc = -1.0;
+                pathsHit[slot].neeSlot = WF_NO_SLOT;
                 return;
             }
             throughput /= continueProb;
@@ -132,6 +157,9 @@ void main() {
         float alpha = max(1e-5, roughness * roughness);
         float alpha2 = alpha * alpha;
         float NdotV = max(1e-4, dot(offsetNorm, V));
+
+        vec3 tangent, bitangent;
+        branchlessONB(offsetNorm, tangent, bitangent);
 
         vec3 Fv = F0 + (vec3(1.0) - F0) * pow(1.0 - NdotV, 5.0);
         float pspec = clamp(dot(Fv, vec3(0.333333)), 0.04, 0.96);
@@ -157,15 +185,19 @@ void main() {
         if (neeDone) {
             vec3 shadowOrigin = hitPoint + offsetNorm * DIST_EPSILON;
 
+            SurfCtx cs;
+            cs.pos = shadowOrigin;
+            cs.n = offsetNorm;
+            cs.V = V;
+            cs.albedo = albedo.rgb;
+            cs.F0 = F0;
+            cs.alpha2 = alpha2;
+            cs.opacity = opacity;
+            cs.metallic = metallic;
+            cs.valid = 1.0;
+
             Reservoir res;
-            res.key = 0u;
-            res.lightIdx = 0u;
-            res.wSum = 0.0;
-            res.M = 0.0;
-            res.W = 0.0;
-            res.targetPdf = 0.0;
-            res.frame = wcTick();
-            res.pad0 = 0u;
+            reservoirInit(res);
 
             int candidates = min(RESTIR_CANDIDATES, cam.emissiveCount);
             for (int ci = 0; ci < candidates; ++ci) {
@@ -176,96 +208,121 @@ void main() {
                     continue;
                 }
 
-                GPURenderData cp = points[cIdx];
-                GPUMaterial cm = materials[cp.materialIdx];
-                vec3 toC = cp.position - shadowOrigin;
-                float cDistSq = dot(toC, toC);
-                float cDist = sqrt(max(cDistSq, 1e-8));
-                vec3 cL = toC / cDist;
-                float cNdotL = dot(offsetNorm, cL);
-                if (cNdotL <= 0.0) {
+                float pHat = reservoirTargetAt(cs, cIdx);
+                if (pHat <= 0.0) {
                     res.M += 1.0;
                     continue;
                 }
 
-                vec4 cAlb = unpackRGBA8(cp.color);
-                vec3 cEmit = cAlb.rgb * unpackRGB9E5(cm.chromaticity);
-                float cArea = cp.size * cp.size;
-                float cG = clampedGeometry(cNdotL, cDistSq, cArea);
-                vec3 cH = normalize(V + cL);
-                float cVdotH = max(0.0, dot(V, cH));
-                float cNdotH = max(0.0, dot(offsetNorm, cH));
-                vec3 cF = F0 + (vec3(1.0) - F0) * pow(1.0 - min(1.0, cVdotH), 5.0);
-                vec3 cDiff = albedo.rgb * (vec3(1.0) - cF) / PI;
-                float cD = ggxD(cNdotH, alpha2);
-                float cGs = smith(NdotV, alpha2) * smith(cNdotL, alpha2);
-                vec3 cSpec = cF * (cD * cGs / max(1e-5, 4.0 * NdotV * cNdotL));
-                vec3 cBrdf = cDiff * opacity * (1.0 - metallic) + cSpec;
-                float pHat = reservoirTarget(cEmit * cBrdf * cG);
-                float w = pHat * float(cam.emissiveCount);
-                reservoirUpdate(res, cIdx, w, pHat, rng);
+                GPURenderData cp = points[cIdx];
+                vec3 cfn;
+                float cArea = lightFaceArea(cp, shadowOrigin, cfn);
+                float srcPdf = 1.0 / (float(cam.emissiveCount) * cArea);
+                reservoirUpdate(res, cIdx, pHat / srcPdf, pHat, rng);
             }
             reservoirFinalize(res);
 
-            uint rkey;
-            uint rslot = reservoirSlot(hitPoint, offsetNorm, rkey);
-            if (cam.wcEnabled != 0 && extentIsReusable(hitData.extent)) {
-                Reservoir prev = reservoirs[rslot];
-                bool live = (prev.key == rkey)
-                            && (prev.M > 0.0)
-                            && (int(wcTick() - prev.frame) <= cam.wcMaxAge)
-                            && (prev.lightIdx < uint(points.length()));
-                if (live) {
-                    GPURenderData pp = points[prev.lightIdx];
-                    GPUMaterial pm = materials[pp.materialIdx];
-                    vec3 toP = pp.position - shadowOrigin;
-                    float pDistSq = dot(toP, toP);
-                    float pDist = sqrt(max(pDistSq, 1e-8));
-                    vec3 pL = toP / pDist;
-                    float pNdotL = dot(offsetNorm, pL);
-                    if (pNdotL > 0.0) {
-                        vec4 pAlb = unpackRGBA8(pp.color);
-                        vec3 pEmit = pAlb.rgb * unpackRGB9E5(pm.chromaticity);
-                        float pArea = pp.size * pp.size;
-                        float pG = clampedGeometry(pNdotL, pDistSq, pArea);
-                        vec3 pH = normalize(V + pL);
-                        float pVdotH = max(0.0, dot(V, pH));
-                        float pNdotH = max(0.0, dot(offsetNorm, pH));
-                        vec3 pF = F0 + (vec3(1.0) - F0) * pow(1.0 - min(1.0, pVdotH), 5.0);
-                        vec3 pDiff = albedo.rgb * (vec3(1.0) - pF) / PI;
-                        float pD = ggxD(pNdotH, alpha2);
-                        float pGs = smith(NdotV, alpha2) * smith(pNdotL, alpha2);
-                        vec3 pSpec = pF * (pD * pGs / max(1e-5, 4.0 * NdotV * pNdotL));
-                        vec3 pBrdf = pDiff * opacity * (1.0 - metallic) + pSpec;
-                        float pHatPrev = reservoirTarget(pEmit * pBrdf * pG);
-                        Reservoir hist = prev;
-                        hist.M = min(hist.M, RESTIR_M_CAP);
-                        reservoirMerge(res, hist, pHatPrev, rng);
-                        reservoirFinalize(res);
+            res.nrmPacked = packNormalOct(offsetNorm);
+            res.posX = shadowOrigin.x;
+            res.posY = shadowOrigin.y;
+            res.posZ = shadowOrigin.z;
+            res.roughness = roughness;
+            res.albedoPacked = packRGBA8f(vec4(albedo.rgb, opacity));
+            res.metalPacked = uint(clamp(metallic, 0.0, 1.0) * 255.0 + 0.5);
+
+            bool cacheOn = (cam.wcCapacity > 0u);
+            uint rkey = 0u;
+            uint rslot = 0u;
+            if (cacheOn) {
+                rslot = reservoirSlot(shadowOrigin, offsetNorm, rkey);
+                outSlot = rslot;
+            }
+
+            bool reuseOn = cacheOn && (cam.wcEnabled != 0) && extentIsReusable(hitData.extent);
+            if (reuseOn) {
+                Reservoir srcR[RESTIR_MAX_SOURCES];
+                SurfCtx srcS[RESTIR_MAX_SOURCES];
+                for (int i = 0; i < RESTIR_MAX_SOURCES; ++i) reservoirInit(srcR[i]);
+
+                srcR[0] = res;
+                srcS[0] = cs;
+                int nSrc = 1;
+
+                float cellSize = (cam.wcInvCellSize > 0.0) ? (1.0 / cam.wcInvCellSize) : 1.0;
+                float planeTol = cellSize * 1.5;
+
+                Reservoir tr;
+                if (reservoirFetch(shadowOrigin, offsetNorm, shadowOrigin, offsetNorm, planeTol, tr)) {
+                    tr.M = min(tr.M, RESTIR_M_CAP);
+                    srcR[nSrc] = tr;
+                    srcS[nSrc] = surfFromReservoir(tr);
+                    nSrc++;
+                }
+
+                for (int st = 0; st < RESTIR_SPATIAL_TAPS && nSrc < RESTIR_MAX_SOURCES; ++st) {
+                    vec3 jit = vec3(nextFloat(grng), nextFloat(grng), nextFloat(grng)) * 2.0 - 1.0;
+                    vec3 probe = shadowOrigin + (jit - offsetNorm * dot(jit, offsetNorm)) * cellSize * 1.75;
+                    Reservoir sr;
+                    if (reservoirFetch(probe, offsetNorm, shadowOrigin, offsetNorm, planeTol, sr)) {
+                        sr.M = min(sr.M, RESTIR_M_CAP);
+                        srcR[nSrc] = sr;
+                        srcS[nSrc] = surfFromReservoir(sr);
+                        nSrc++;
                     }
                 }
+
+                if (nSrc > 1) {
+                    Reservoir combined;
+                    reservoirCombineGRIS(combined, srcR, srcS, nSrc, rng);
+                    combined.nrmPacked = res.nrmPacked;
+                    combined.posX = res.posX;
+                    combined.posY = res.posY;
+                    combined.posZ = res.posZ;
+                    combined.roughness = res.roughness;
+                    combined.albedoPacked = res.albedoPacked;
+                    combined.metalPacked = res.metalPacked;
+                    combined.varLight = res.varLight;
+                    combined.varBsdf = res.varBsdf;
+                    res = combined;
+                }
+
                 Reservoir store = res;
                 store.key = rkey;
                 store.frame = wcTick();
+                store.M = min(store.M, RESTIR_M_CAP);
+                store.varLight = max(reservoirs[rslot].varLight, VA_FLOOR);
+                store.varBsdf = max(reservoirs[rslot].varBsdf, VA_FLOOR);
                 reservoirs[rslot] = store;
+            }
+
+            outVarL = 1.0;
+            outVarB = 1.0;
+            if (cacheOn) {
+                outVarL = max(reservoirs[rslot].varLight, VA_FLOOR);
+                outVarB = max(reservoirs[rslot].varBsdf, VA_FLOOR);
             }
 
             if (res.W > 0.0 && res.targetPdf > 0.0 && res.lightIdx < uint(points.length())) {
                 uint emissivePtIdx = res.lightIdx;
                 GPURenderData lightPt = points[emissivePtIdx];
                 GPUMaterial lightMat = materials[lightPt.materialIdx];
-                vec3 jitter = vec3(nextFloat(rng), nextFloat(rng), nextFloat(rng)) - 0.5;
-                vec3 lightPos = lightPt.position + jitter * (lightPt.size * 0.8);
+
+                vec3 lightPos, lightNrm;
+                float area;
+                lightSampleFace(lightPt, shadowOrigin, nextFloat(rng), nextFloat(rng),
+                                lightPos, lightNrm, area);
+
                 vec3 toLight = lightPos - shadowOrigin;
                 float distSq = dot(toLight, toLight);
-                float distToLight = sqrt(distSq);
+                float distToLight = sqrt(max(distSq, 1e-12));
                 vec3 L = toLight / distToLight;
                 float NdotL = dot(offsetNorm, L);
+                float cosAtLight = dot(lightNrm, -L);
                 float shadowMaxDist = distToLight - DIST_EPSILON * 2.0;
-                if (NdotL > 0.0 && shadowMaxDist > 0.0) {
+
+                if (NdotL > 0.0 && cosAtLight > 0.0 && shadowMaxDist > 0.0) {
                     vec4 lightAlbedo = unpackRGBA8(lightPt.color);
                     vec3 lightEmission = lightAlbedo.rgb * unpackRGB9E5(lightMat.chromaticity);
-                    float area = lightPt.size * lightPt.size;
                     vec3 H_nee = normalize(V + L);
                     float NdotH_nee = max(0.0, dot(offsetNorm, H_nee));
                     float VdotH_nee = max(0.0, dot(V, H_nee));
@@ -276,13 +333,16 @@ void main() {
                     vec3 specBRDF = F_nee * (Dn * Gn / max(1e-5, 4.0 * NdotV * NdotL));
                     vec3 evalBRDF = diffuseBRDF * opacity * (1.0 - metallic) + specBRDF;
 
-                    float Gterm = clampedGeometry(NdotL, distSq, area);
-                    float solidAngleN = min(area / max(distSq, area * 0.25), 2.0 * PI);
-                    float mEffN = float(max(1, min(RESTIR_CANDIDATES, cam.emissiveCount)));
-                    float lightPdfN = mEffN / max(1e-6, solidAngleN * float(cam.emissiveCount));
+                    float Gterm = geometryTerm(NdotL, cosAtLight, distSq);
+                    float lightPdfN = lightPdfW(area, distSq, cosAtLight, cam.emissiveCount);
                     float bPdfN = bsdfPdfW(offsetNorm, V, L, alpha2, pspec, pdiff);
-                    float wL = misWeight(lightPdfN, bPdfN);
-                    vec3 contrib = lightEmission * evalBRDF * Gterm * res.W * wL;
+                    float wL = misWeightVA(lightPdfN, outVarL, bPdfN, outVarB);
+                    if (!cacheOn) wL = misWeight(lightPdfN, bPdfN);
+                    vec3 unweighted = lightEmission * evalBRDF * Gterm * res.W;
+                    vec3 contrib = unweighted * wL;
+
+                    float lightLum = dot(unweighted * throughput, vec3(0.2126, 0.7152, 0.0722));
+                    if (cacheOn) vaUpdateLight(rslot, lightLum * lightLum);
 
                     ShadowRay sr;
                     sr.o_tmax   = vec4(shadowOrigin, shadowMaxDist);
@@ -300,13 +360,9 @@ void main() {
 
         float r1 = nextFloat(rng);
         float r2 = nextFloat(rng);
-        float phi = 2.0 * PI * r1;
-        float cosThetaM = sqrt(max(0.0, (1.0 - r2) / (1.0 + (alpha2 - 1.0) * r2)));
-        float sinThetaM = sqrt(max(0.0, 1.0 - cosThetaM * cosThetaM));
-        vec3 up = abs(offsetNorm.z) < 0.999 ? vec3(0, 0, 1) : vec3(1, 0, 0);
-        vec3 tangent = normalize(cross(up, offsetNorm));
-        vec3 bitangent = cross(offsetNorm, tangent);
-        vec3 H = normalize(tangent * sinThetaM * cos(phi) + bitangent * sinThetaM * sin(phi) + offsetNorm * cosThetaM);
+        vec3 Ve = vec3(dot(V, tangent), dot(V, bitangent), dot(V, offsetNorm));
+        vec3 Hl = sampleGGXVNDFLocal(Ve, alpha, r1, r2);
+        vec3 H = normalize(tangent * Hl.x + bitangent * Hl.y + offsetNorm * Hl.z);
         float VdotH = dot(V, H);
         if (VdotH < 0.0) {
             H = -H;
@@ -322,10 +378,8 @@ void main() {
             newDir = normalize(2.0 * VdotH * H - V);
             newOrigin = hitPoint + offsetNorm * DIST_EPSILON;
             float NDotL = dot(offsetNorm, newDir);
-            float NDotH = max(1e-5, dot(offsetNorm, H));
             if (NDotL > 0.0) {
-                float G = smith(NdotV, alpha2) * smith(NDotL, alpha2);
-                weight = F * (G * VdotH / (NdotV * NDotH * pspec));
+                weight = F * (smith(NDotL, alpha2) / pspec);
             }
             lastBounceSpecular = true;
         } else if (r_type < pspec + pdiff) {
@@ -343,6 +397,7 @@ void main() {
                     p.i1.w &= ~FLAG_ALIVE;
                     pathsHot[slot] = p;
                     pathsHit[slot].misc = -1.0;
+                    pathsHit[slot].neeSlot = WF_NO_SLOT;
                     return;
                 }
             }
@@ -370,7 +425,6 @@ void main() {
                 eta = (entering == 1) ? (1.0 / iorH) : iorH;
             }
 
-
             float NDotH = dot(offsetNorm, H);
             float sinThetaT2 = eta * eta * (1.0 - VdotH * VdotH);
             if (sinThetaT2 >= 1.0 || NDotH <= 1e-4) {
@@ -378,8 +432,7 @@ void main() {
                 newOrigin = hitPoint + offsetNorm * DIST_EPSILON;
                 float NDotL = dot(offsetNorm, newDir);
                 if (NDotL > 0.0) {
-                    float G = smith(NdotV, alpha2) * smith(NDotL, alpha2);
-                    weight = dispersionMask * (G * VdotH / (NdotV * NDotH * pTrans));
+                    weight = dispersionMask * (smith(NDotL, alpha2) / pTrans);
                 }
             } else {
                 vec3 L = refract(-V, H, eta);
@@ -389,13 +442,10 @@ void main() {
                 } else {
                     newDir = normalize(L);
                     newOrigin = hitPoint - offsetNorm * DIST_EPSILON;
-                    float LdotH = dot(newDir, H);
                     float NdotL = abs(dot(offsetNorm, newDir));
                     if (NdotL > 1e-4) {
-                        float G = smith(NdotV, alpha2) * smith(NdotL, alpha2);
-                        float denom = eta * VdotH + LdotH;
-                        float jac = (abs(VdotH) * abs(LdotH)) / max(1e-6, denom * denom);
-                        weight = (vec3(1.0) - F) * dispersionMask * (G * jac / max(1e-5, NdotV * NDotH * pTrans));
+                        weight = (vec3(1.0) - F) * dispersionMask
+                               * (smith(NdotL, alpha2) / pTrans);
                     }
                     if (entering == 1) {
                         mediumObjId = hitData.objectId;
@@ -429,6 +479,7 @@ void main() {
             p.i1.w &= ~FLAG_ALIVE;
             pathsHot[slot] = p;
             pathsHit[slot].misc = -1.0;
+            pathsHit[slot].neeSlot = WF_NO_SLOT;
             return;
         }
         origin = newOrigin;
@@ -458,6 +509,9 @@ void main() {
     if (!continuePath) p.i1.w &= ~FLAG_ALIVE;
     pathsHot[slot] = p;
     pathsHit[slot].misc = outMisc;
+    pathsHit[slot].neeSlot = (outMisc > 0.0) ? outSlot : WF_NO_SLOT;
+    pathsHit[slot].varLight = outVarL;
+    pathsHit[slot].varBsdf = outVarB;
 
     if (continuePath) {
         if (!isTransmissionInteraction) {
