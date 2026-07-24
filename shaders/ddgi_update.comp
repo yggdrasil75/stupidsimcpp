@@ -6,13 +6,30 @@
 shared vec3 sRadiance[DDGI_RAYS];
 shared vec3 sDir[DDGI_RAYS];
 shared float sDist[DDGI_RAYS];
-vec3 probeRayDir(int i, int count, uint seed) {
+mat3 probeRotation(uint seed) {
+    // Arvo's method: a random reflection composed with a random z-rotation
+    float u1 = float(pcg_hash(seed) >> 8u) / 16777216.0;
+    float u2 = float(pcg_hash(seed + 1u) >> 8u) / 16777216.0;
+    float u3 = float(pcg_hash(seed + 2u) >> 8u) / 16777216.0;
+
+    float theta = 6.2831853 * u1;
+    float psi = 6.2831853 * u2;
+    float r = sqrt(u3);
+
+    vec3 v = vec3(cos(psi) * r, sin(psi) * r, sqrt(max(0.0, 1.0 - u3)));
+    mat3 H = mat3(1.0) - 2.0 * outerProduct(v, v);
+    mat3 R = mat3( cos(theta), sin(theta), 0.0,
+                  -sin(theta), cos(theta), 0.0,
+                      0.0,    0.0, 1.0);
+    return -H * R;
+}
+vec3 probeRayDir(int i, int count, mat3 rot) {
     float phi = 2.399963229728653 * float(i);
     float z = 1.0 - (2.0 * float(i) + 1.0) / float(count);
     float r = sqrt(max(0.0, 1.0 - z * z));
-    float jitter = float(seed & 0xFFFFu) / 65535.0 * 6.2831853;
-    return normalize(vec3(r * cos(phi + jitter), r * sin(phi + jitter), z));
+    return normalize(rot * vec3(r * cos(phi), r * sin(phi), z));
 }
+
 
 void main() {
     int probe = int(gl_WorkGroupID.x);
@@ -26,7 +43,8 @@ void main() {
     vec3 probePos = ddgiProbePosition(probeCoord);
 
     uint rng = pcg_hash(uint(probe) * 9781u + pcg_hash(cam.frameCount));
-    vec3 dir = probeRayDir(rayIdx, DDGI_RAYS, pcg_hash(cam.frameCount));
+    mat3 rot = probeRotation(pcg_hash(cam.frameCount));
+    vec3 dir = probeRayDir(rayIdx, DDGI_RAYS, rot);
     vec3 invD = safe_invDir(dir);
 
     int hitIndex;
@@ -71,7 +89,8 @@ void main() {
                         vec4 la = unpackRGBA8(lp.color);
                         GPUMaterial lm = materials[lp.materialIdx];
                         vec3 Le = la.rgb * unpackRGB9E5(lm.chromaticity);
-                        radiance += albedo.rgb * Le * ndl / d2
+                        float G = clampedGeometry(ndl, d2, lp.size * lp.size);
+                        radiance += albedo.rgb * Le * G
                                     * float(cam.emissiveCount) / PI;
                     }
                 }

@@ -30,8 +30,9 @@ void main() {
 
     if (adaptiveOn && (done || globalS >= int(reqSamples))) return;
 
-    uint rng = pcg_hash(uint(coord.x) + uint(coord.y) * uint(cam.width) + pcg_hash(uint(globalS)));
-    uint grng = pcg_hash(pixelIndex * 9781u + pcg_hash(uint(globalS)) + 2654435761u);
+    uint sampleHash = pcg_hash(uint(globalS));
+    uint rng  = pcg_hash(pixelIndex ^ sampleHash);
+    uint grng = pcg_hash((pixelIndex * 9781u) ^ (sampleHash + 2654435761u));
 
     float px = (2.0 * (float(coord.x) + nextFloat(rng)) / float(cam.width)  - 1.0) * cam.tanfovx;
     float py = (1.0 - 2.0 * (float(coord.y) + nextFloat(rng)) / float(cam.height)) * cam.tanfovy;

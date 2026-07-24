@@ -171,7 +171,10 @@ void main() {
             for (int ci = 0; ci < candidates; ++ci) {
                 int li = clamp(int(nextFloat(grng) * float(cam.emissiveCount)), 0, cam.emissiveCount - 1);
                 uint cIdx = emissiveIndices[li];
-                if (cIdx == uint(hitIndex)) continue;
+                if (cIdx == uint(hitIndex)) {
+                    res.M += 1.0;
+                    continue;
+                }
 
                 GPURenderData cp = points[cIdx];
                 GPUMaterial cm = materials[cp.materialIdx];
@@ -180,7 +183,10 @@ void main() {
                 float cDist = sqrt(max(cDistSq, 1e-8));
                 vec3 cL = toC / cDist;
                 float cNdotL = dot(offsetNorm, cL);
-                if (cNdotL <= 0.0) continue;
+                if (cNdotL <= 0.0) {
+                    res.M += 1.0;
+                    continue;
+                }
 
                 vec4 cAlb = unpackRGBA8(cp.color);
                 vec3 cEmit = cAlb.rgb * unpackRGB9E5(cm.chromaticity);
@@ -201,10 +207,12 @@ void main() {
             }
             reservoirFinalize(res);
 
-            uint rslot = reservoirSlot(hitPoint, offsetNorm);
+            uint rkey;
+            uint rslot = reservoirSlot(hitPoint, offsetNorm, rkey);
             if (cam.wcEnabled != 0 && extentIsReusable(hitData.extent)) {
                 Reservoir prev = reservoirs[rslot];
-                bool live = (prev.M > 0.0)
+                bool live = (prev.key == rkey)
+                            && (prev.M > 0.0)
                             && (int(cam.wcFrame - prev.frame) <= cam.wcMaxAge)
                             && (prev.lightIdx < uint(points.length()));
                 if (live) {
@@ -237,7 +245,7 @@ void main() {
                     }
                 }
                 Reservoir store = res;
-                store.key = wcKey(wcCell(hitPoint), wcQuantizeNormal(offsetNorm));
+                store.key = rkey;
                 store.frame = cam.wcFrame;
                 reservoirs[rslot] = store;
             }

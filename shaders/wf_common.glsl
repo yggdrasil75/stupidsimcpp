@@ -436,7 +436,7 @@ float nextFloat(inout uint state) {
     state ^= state << 13u;
     state ^= state >> 17u;
     state ^= state << 5u;
-    return float(state & 0xFFFFFFu) / 16777216.0;
+    return float(pcg_hash(state) >> 8u) / 16777216.0;
 }
 
 float smith(float cost, float alpha2) {
@@ -552,9 +552,9 @@ float clampedGeometry(float ndl, float distSq, float area) {
     return min(g, RESTIR_G_MAX);
 }
 
-uint reservoirSlot(vec3 p, vec3 n) {
-    uint key = wcKey(wcCell(p), wcQuantizeNormal(n));
-    return key & (cam.wcCapacity - 1u);
+uint reservoirSlot(vec3 p, vec3 n, out uint outKey) {
+    outKey = wcKey(wcCell(p), wcQuantizeNormal(n));
+    return wcSlot(outKey);
 }
 
 bool rayCubeIntersect(vec3 ro, vec3 rd, vec3 invD, GPURenderData pt,
