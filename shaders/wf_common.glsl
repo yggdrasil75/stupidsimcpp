@@ -9,8 +9,8 @@ const float DIST_EPSILON = 1e-4;
 
 const int MAX_TRANSPARENT_BOUNCES = 12;
 const int MAX_VOLUMETRIC_BOUNCES  = 8;
-#define DDGI_RAYS 64
-const float DDGI_HYSTERESIS = 0.97;
+#define DDGI_RAYS 1024
+const float DDGI_HYSTERESIS = 0.80;
 
 struct GPUMaterial {
     uint chromaticity;
@@ -503,7 +503,7 @@ struct Reservoir {
 };
 layout(std430, binding = 20) buffer ReservoirBuffer { Reservoir reservoirs[]; };
 
-const float RESTIR_M_CAP = 20.0;
+const float RESTIR_M_CAP = 1024.0;
 const int RESTIR_CANDIDATES = 32;
 const float RESTIR_G_MAX = 1.0;
 
@@ -549,6 +549,11 @@ void reservoirMerge(inout Reservoir dst, Reservoir src, float pHatAtDst, inout u
 float clampedGeometry(float ndl, float distSq, float area) {
     float g = ndl * area / max(distSq, 1e-6);
     return min(g, RESTIR_G_MAX);
+}
+
+uint wcTick() {
+    const uint WC_TICK_STRIDE = 1024u;
+    return cam.wcFrame * WC_TICK_STRIDE + uint(clamp(pc.sampleIndex, 0, int(WC_TICK_STRIDE) - 1));
 }
 
 uint reservoirSlot(vec3 p, vec3 n, out uint outKey) {

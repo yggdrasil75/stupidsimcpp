@@ -164,7 +164,7 @@ void main() {
             res.M = 0.0;
             res.W = 0.0;
             res.targetPdf = 0.0;
-            res.frame = cam.wcFrame;
+            res.frame = wcTick();
             res.pad0 = 0u;
 
             int candidates = min(RESTIR_CANDIDATES, cam.emissiveCount);
@@ -213,7 +213,7 @@ void main() {
                 Reservoir prev = reservoirs[rslot];
                 bool live = (prev.key == rkey)
                             && (prev.M > 0.0)
-                            && (int(cam.wcFrame - prev.frame) <= cam.wcMaxAge)
+                            && (int(wcTick() - prev.frame) <= cam.wcMaxAge)
                             && (prev.lightIdx < uint(points.length()));
                 if (live) {
                     GPURenderData pp = points[prev.lightIdx];
@@ -246,7 +246,7 @@ void main() {
                 }
                 Reservoir store = res;
                 store.key = rkey;
-                store.frame = cam.wcFrame;
+                store.frame = wcTick();
                 reservoirs[rslot] = store;
             }
 

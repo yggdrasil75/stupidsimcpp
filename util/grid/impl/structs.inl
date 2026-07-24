@@ -33,16 +33,16 @@ static constexpr float REUSE_MAX_TRANSMISSION = 0.05f;
 static constexpr float REUSE_MIN_ROUGHNESS = 0.25f;
 
 static constexpr uint32_t WC_INVALID_KEY = 0u;
-static constexpr int WC_MAX_AGE = 32;
+static constexpr int WC_MAX_AGE = 1024 * 2000;
 static constexpr uint32_t WC_CAPACITY = 1u << 20;
 
 static constexpr int DDGI_IRR_RES = 8;
 static constexpr int DDGI_DEPTH_RES = 16;
-static constexpr int DDGI_RAYS_PER_PROBE = 64;
+static constexpr int DDGI_RAYS_PER_PROBE = 1024;
 static constexpr int DDGI_PROBES_X = 16;
 static constexpr int DDGI_PROBES_Y = 8;
 static constexpr int DDGI_PROBES_Z = 16;
-static constexpr float DDGI_HYSTERESIS = 0.97f;
+static constexpr float DDGI_HYSTERESIS = 0.80f;
 static constexpr float DDGI_DEPTH_SHARPNESS = 50.0f;
 static constexpr float DDGI_NORMAL_BIAS = 0.25f;
 
@@ -765,6 +765,7 @@ struct NodeData_ {
         setActive(active);
         setVisible(visible);
         setStatic(staticbit);
+        setSettled(staticbit);
     }
     
     NodeData_() : objectId(-1), size(0.0f), color(Eigen::Vector4f::Zero()), renderMatIdx(0), physMatIdx(0), flags(0), settledFrames(0) {}
@@ -801,6 +802,11 @@ struct NodeData_ {
     bool isActiveAndVisible() const {
         return (flags.load(std::memory_order_relaxed) & (ACTIVE_BIT | VISIBLE_BIT)) != (ACTIVE_BIT | VISIBLE_BIT);
     }
+    bool isSettled() const {
+        if (physics.velocity.squaredNorm() <= 0.0f
+            && (flags.load(std::memory_order_relaxed) & STATIC_BIT)) return true;
+        return settledFrames.load(std::memory_order_relaxed) >= REUSE_SETTLE_FRAMES;
+    }
 
     void setActive(bool v) {
         if (v) flags.fetch_or(ACTIVE_BIT, std::memory_order_relaxed);
@@ -814,13 +820,6 @@ struct NodeData_ {
         if (v) flags.fetch_or(STATIC_BIT, std::memory_order_relaxed);
         else flags.fetch_and(~STATIC_BIT, std::memory_order_relaxed);
     }
-
-    bool isSettled() const {
-        if (physics.velocity.squaredNorm() <= 0.0f
-            && (flags.load(std::memory_order_relaxed) & STATIC_BIT)) return true;
-        return settledFrames.load(std::memory_order_relaxed) >= REUSE_SETTLE_FRAMES;
-    }
-    
     void setSettled(bool asleep) {
         if (!asleep) {
             settledFrames.store(0, std::memory_order_relaxed);
