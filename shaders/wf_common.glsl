@@ -506,7 +506,6 @@ layout(std430, binding = 20) buffer ReservoirBuffer { Reservoir reservoirs[]; };
 const float RESTIR_M_CAP = 20.0;
 const int RESTIR_CANDIDATES = 32;
 const float RESTIR_G_MAX = 1.0;
-#define RESTIR_ENABLE 1
 
 float reservoirTarget(vec3 c) {
     return dot(c, vec3(0.2126, 0.7152, 0.0722));

@@ -473,7 +473,7 @@ int main() {
     const int samples = 100;
     const int blendedsamples = 300;
     const float blendedfactor = 0.65;
-    const int videosamples = 500;
+    const int videosamples = 100;
     const int bounces = 8;
     const int physicsSubsteps = 10;
     const float physicsDt = 1.0f / fps;
@@ -637,7 +637,7 @@ int main() {
             cam.direction = (target - view.origin).normalized();
             cam.up = view.up;
 
-            Grid::InFlightFrame next = octree.beginSuperBlendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, blendedsamples, bounces, false, true);
+            Grid::InFlightFrame next = octree.beginSuperBlendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, blendedsamples, bounces, true, true);
             if (havePending) {
                 frame prev = octree.endSuperBlendedRenderFrameVulkan(inflight);
                 writer.enqueue(std::move(prev), "output/slow_superblendrender_" + pendingName + ".bmp");
@@ -724,7 +724,7 @@ int main() {
             
             // std::cout << "Rendering video frame " << frameCounter << "/" << totalFrames << "..." << std::endl;
             // frame out = octree.fastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
-            Grid::InFlightFrame next = octree.beginSuperBlendedRenderFrameVulkan(cam, height * 2, width * 2, blendedfactor, frame::colormap::RGB, videosamples, bounces, false);
+            Grid::InFlightFrame next = octree.beginSuperBlendedRenderFrameVulkan(cam, height * 2, width * 2, blendedfactor, frame::colormap::RGB, videosamples, bounces, true);
             if (havePending) {
                 frame prev = octree.endSuperBlendedRenderFrameVulkan(inflight);
                 writer.enqueue(std::move(prev), "output/materialframes/debug_material_" + pendingName + ".bmp");
@@ -799,7 +799,7 @@ int main() {
             }
 
             Grid::InFlightFrame next = octree.beginSuperBlendedRenderFrameVulkan(
-                dripCam, height * 2, width * 2, blendedfactor, frame::colormap::RGB, videosamples, bounces, false);
+                dripCam, height * 2, width * 2, blendedfactor, frame::colormap::RGB, videosamples, bounces, true);
 
             if (dripHavePending) {
                 frame prev = octree.endSuperBlendedRenderFrameVulkan(dripInflight);

@@ -167,7 +167,7 @@ void main() {
             res.frame = cam.wcFrame;
             res.pad0 = 0u;
 
-            int candidates = (RESTIR_ENABLE != 0) ? min(RESTIR_CANDIDATES, cam.emissiveCount) : 1;
+            int candidates = min(RESTIR_CANDIDATES, cam.emissiveCount);
             for (int ci = 0; ci < candidates; ++ci) {
                 int li = clamp(int(nextFloat(grng) * float(cam.emissiveCount)), 0, cam.emissiveCount - 1);
                 uint cIdx = emissiveIndices[li];
