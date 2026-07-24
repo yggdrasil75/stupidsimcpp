@@ -406,6 +406,40 @@ struct GpuContext {
     VkBuffer reservoirBuffer = VK_NULL_HANDLE;
     VkDeviceMemory reservoirMem = VK_NULL_HANDLE;
     uint32_t reservoirCap = 0;
+    static constexpr int SVGF_HIST_STRIDE = 12;
+    VkShaderModule svgfReprojectShader = VK_NULL_HANDLE;
+    VkShaderModule svgfMomentsShader = VK_NULL_HANDLE;
+    VkPipelineLayout svgfReprojectPipeLayout = VK_NULL_HANDLE;
+    VkPipelineLayout svgfMomentsPipeLayout = VK_NULL_HANDLE;
+    VkPipeline svgfReprojectPipe = VK_NULL_HANDLE;
+    VkPipeline svgfMomentsPipe = VK_NULL_HANDLE;
+    VkDescriptorSetLayout svgfReprojectDescLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout svgfMomentsDescLayout = VK_NULL_HANDLE;
+    VkDescriptorSet svgfReprojectDescSet = VK_NULL_HANDLE;
+    VkDescriptorSet svgfMomentsDescSet = VK_NULL_HANDLE;
+    VkBuffer svgfHistBuffer[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkDeviceMemory svgfHistMem[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkBuffer svgfVarBuffer[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkDeviceMemory svgfVarMem[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    uint32_t svgfHistCap = 0;
+    uint32_t svgfVarCap = 0;
+    int svgfHistSlot = 0;
+    bool svgfHistValid = false;
+    uint32_t svgfWidth = 0, svgfHeight = 0;
+    struct {
+        float origin[3] = {0, 0, 0};
+        float invDir[3] = {0, 0, 1};
+        float invRight[3] = {1, 0, 0};
+        float invUp[3] = {0, 1, 0};
+        float tanfovx = 1.0f;
+        float tanfovy = 1.0f;
+    } svgfPrevCam;
+
+    float svgfAlpha = 0.2f;
+    float svgfMomentsAlpha = 0.2f;
+    int svgfMaxHistory = 32;
+    int svgfIterations = 5;
+    bool svgfEnabled = true;
 
     bool initialized = false;
     bool blasTopologyValid = false;
@@ -585,6 +619,8 @@ struct GpuContext {
         wfShadeShader = createShaderModule(device, "./bin/wf_shade.spv");
         wfShadowShader = createShaderModule(device, "./bin/wf_shadow.spv");
         wfFinalizeShader = createShaderModule(device, "./bin/wf_finalize.spv");
+        svgfReprojectShader = createShaderModule(device, "./bin/svgf_reproject.spv");
+        svgfMomentsShader = createShaderModule(device, "./bin/svgf_moments.spv");
     }
 
     void init(VkPhysicalDevice PhDevice = VK_NULL_HANDLE, VkInstance sharedInstance = VK_NULL_HANDLE) {
@@ -691,7 +727,7 @@ struct GpuContext {
         vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
 
         VkDescriptorPoolSize poolSizes[] = { 
-            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 96},
+            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 128},
             {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 12},
             {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 6},
             {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 64},
@@ -700,7 +736,7 @@ struct GpuContext {
         VkDescriptorPoolCreateInfo poolCreateInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         poolCreateInfo.poolSizeCount = 5;
         poolCreateInfo.pPoolSizes = poolSizes;
-        poolCreateInfo.maxSets = 40;
+        poolCreateInfo.maxSets = 48;
         vkCreateDescriptorPool(device, &poolCreateInfo, nullptr, &descriptorPool);
 
         VkDescriptorSetLayoutBinding bindings[11] = {};
@@ -744,14 +780,14 @@ struct GpuContext {
         vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &fastDescLayout);
         vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &pbrDescLayout);
 
-        VkDescriptorSetLayoutBinding smBindings[4] = {};
-        for(int i=0; i<4; i++) {
+        VkDescriptorSetLayoutBinding smBindings[7] = {};
+        for(int i=0; i<7; i++) {
             smBindings[i].binding = i;
             smBindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             smBindings[i].descriptorCount = 1;
             smBindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         }
-        VkDescriptorSetLayoutCreateInfo smLayoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 4, smBindings};
+        VkDescriptorSetLayoutCreateInfo smLayoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 7, smBindings};
         vkCreateDescriptorSetLayout(device, &smLayoutInfo, nullptr, &smoothDescLayout);
 
         VkDescriptorSetLayoutBinding blBindings[4] = {};
@@ -768,6 +804,22 @@ struct GpuContext {
         VkDescriptorSetLayoutCreateInfo gcLayoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 3, blBindings};
         vkCreateDescriptorSetLayout(device, &gcLayoutInfo, nullptr, &guidedCoeffDescLayout);
 
+        // SVGF reproject: 7 storage buffers + the current camera UBO at binding 7.
+        VkDescriptorSetLayoutBinding svBindings[8] = {};
+        for(int i=0; i<8; i++) {
+            svBindings[i].binding = i;
+            svBindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            svBindings[i].descriptorCount = 1;
+            svBindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        }
+        svBindings[7].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        VkDescriptorSetLayoutCreateInfo srLayoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 8, svBindings};
+        vkCreateDescriptorSetLayout(device, &srLayoutInfo, nullptr, &svgfReprojectDescLayout);
+
+        svBindings[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        VkDescriptorSetLayoutCreateInfo smtLayoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 6, svBindings};
+        vkCreateDescriptorSetLayout(device, &smtLayoutInfo, nullptr, &svgfMomentsDescLayout);
+
         VkDescriptorSetAllocateInfo allocSetInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
         allocSetInfo.descriptorPool = descriptorPool;
         allocSetInfo.descriptorSetCount = 1;
@@ -781,6 +833,10 @@ struct GpuContext {
         vkAllocateDescriptorSets(device, &allocSetInfo, &blendDescSet);
         allocSetInfo.pSetLayouts = &guidedCoeffDescLayout;
         vkAllocateDescriptorSets(device, &allocSetInfo, &guidedCoeffDescSet);
+        allocSetInfo.pSetLayouts = &svgfReprojectDescLayout;
+        vkAllocateDescriptorSets(device, &allocSetInfo, &svgfReprojectDescSet);
+        allocSetInfo.pSetLayouts = &svgfMomentsDescLayout;
+        vkAllocateDescriptorSets(device, &allocSetInfo, &svgfMomentsDescSet);
 
         createAllShaderModules();
 
@@ -791,7 +847,7 @@ struct GpuContext {
         pipelineLayoutInfo.pSetLayouts = &pbrDescLayout;
         vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pbrPipelineLayout);
 
-        VkPushConstantRange smPush{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(int) * 5};
+        VkPushConstantRange smPush{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(int) * 8};
         pipelineLayoutInfo.pSetLayouts = &smoothDescLayout;
         pipelineLayoutInfo.pushConstantRangeCount = 1;
         pipelineLayoutInfo.pPushConstantRanges = &smPush;
@@ -807,6 +863,16 @@ struct GpuContext {
         pipelineLayoutInfo.pSetLayouts = &guidedCoeffDescLayout;
         pipelineLayoutInfo.pPushConstantRanges = &gcPush;
         vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &guidedCoeffPipelineLayout);
+
+        VkPushConstantRange srPush{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(float) * 16 + sizeof(int) * 5};
+        pipelineLayoutInfo.pSetLayouts = &svgfReprojectDescLayout;
+        pipelineLayoutInfo.pPushConstantRanges = &srPush;
+        vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &svgfReprojectPipeLayout);
+
+        VkPushConstantRange smtPush{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(int) * 2 + sizeof(float) * 3};
+        pipelineLayoutInfo.pSetLayouts = &svgfMomentsDescLayout;
+        pipelineLayoutInfo.pPushConstantRanges = &smtPush;
+        vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &svgfMomentsPipeLayout);
 
         VkComputePipelineCreateInfo computePipelineInfo{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
         computePipelineInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -827,6 +893,16 @@ struct GpuContext {
             computePipelineInfo.layout = blendPipelineLayout;
             computePipelineInfo.stage.module = blendShader;
             vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &computePipelineInfo, nullptr, &blendPipeline);
+        }
+        if (svgfReprojectShader) {
+            computePipelineInfo.layout = svgfReprojectPipeLayout;
+            computePipelineInfo.stage.module = svgfReprojectShader;
+            vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &computePipelineInfo, nullptr, &svgfReprojectPipe);
+        }
+        if (svgfMomentsShader) {
+            computePipelineInfo.layout = svgfMomentsPipeLayout;
+            computePipelineInfo.stage.module = svgfMomentsShader;
+            vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &computePipelineInfo, nullptr, &svgfMomentsPipe);
         }
         if (guidedCoeffShader) {
             computePipelineInfo.layout = guidedCoeffPipelineLayout;
@@ -1618,7 +1694,8 @@ struct GpuContext {
         copyBuffer(device, outBuffer, fastGBuffer, fastOutSize);
     }
 
-    void dispatchSmoothPasses(int width, int height, int samples, int iters, bool toFinal, bool deferFinalWait = false, int useAlbedo = 1) {
+    void dispatchSmoothPasses(int width, int height, int samples, int iters, bool toFinal, bool deferFinalWait = false, int useAlbedo = 1,
+                              int varMode = 0, VkBuffer histFeedback = VK_NULL_HANDLE) {
         uint32_t finalSize = width * height * 3 * sizeof(float);
         if(finalSize > currentFinalOutCap) {
             if(finalOutBuffer) {
@@ -1641,6 +1718,17 @@ struct GpuContext {
             currentSmoothScratchCap = scratchSize;
         }
 
+        // Variance ping-pong for the variance-guided luminance weight.
+        uint32_t varSize = width * height * sizeof(float);
+        if (varSize > svgfVarCap) {
+            for (int i = 0; i < 2; ++i) {
+                destroyBuffer(device, svgfVarBuffer[i], svgfVarMem[i]);
+                createBuffer(device, primaryDevice, varSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, svgfVarBuffer[i], svgfVarMem[i]);
+            }
+            svgfVarCap = varSize;
+        }
+
         VkBuffer src = outBuffer;
         VkBuffer dst = smoothScratchBuffer;
 
@@ -1649,14 +1737,17 @@ struct GpuContext {
             int step = 1 << it;
             VkBuffer outBuf = finalPass ? finalOutBuffer : dst;
 
-            VkDescriptorBufferInfo bInfos[4] = {
+            VkDescriptorBufferInfo bInfos[7] = {
                 {src, 0, VK_WHOLE_SIZE},
                 {outBuf, 0, VK_WHOLE_SIZE},
                 {adaptiveBuffer, 0, VK_WHOLE_SIZE},
-                {gbufferBuffer ? gbufferBuffer : adaptiveBuffer, 0, VK_WHOLE_SIZE}
+                {gbufferBuffer ? gbufferBuffer : adaptiveBuffer, 0, VK_WHOLE_SIZE},
+                {svgfVarBuffer[it % 2], 0, VK_WHOLE_SIZE},
+                {svgfVarBuffer[(it + 1) % 2], 0, VK_WHOLE_SIZE},
+                {histFeedback ? histFeedback : adaptiveBuffer, 0, VK_WHOLE_SIZE}
             };
-            VkWriteDescriptorSet writes[4] = {};
-            for(int i=0; i<4; i++) {
+            VkWriteDescriptorSet writes[7] = {};
+            for(int i=0; i<7; i++) {
                 writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
                 writes[i].dstSet = smoothDescSet;
                 writes[i].dstBinding = i;
@@ -1664,15 +1755,16 @@ struct GpuContext {
                 writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
                 writes[i].pBufferInfo = &bInfos[i];
             }
-            vkUpdateDescriptorSets(device, 4, writes, 0, nullptr);
+            vkUpdateDescriptorSets(device, 7, writes, 0, nullptr);
 
             VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
             vkBeginCommandBuffer(commandBuffer, &beginInfo);
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, smoothPipeline);
             vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, smoothPipelineLayout, 0, 1, &smoothDescSet, 0, nullptr);
 
-            struct { int w, h, s, step, finalPass, useAlbedo; } pc = {
-                width, height, samples, step, finalPass ? 1 : 0, useAlbedo
+            struct { int w, h, s, step, finalPass, useAlbedo, varMode, feedbackHist; } pc = {
+                width, height, samples, step, finalPass ? 1 : 0, useAlbedo,
+                varMode, (histFeedback && it == 0) ? 1 : 0
             };
             vkCmdPushConstants(commandBuffer, smoothPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
             vkCmdDispatch(commandBuffer, (width + 15) / 16, (height + 15) / 16, 1);
@@ -1711,6 +1803,163 @@ struct GpuContext {
     ///@brief dispatchSmooth that returns before the final pass completes.
     void submitSmooth(int width, int height, int samples) {
         dispatchSmoothPasses(width, height, samples, 4, true, true);
+    }
+
+    void ensureSVGFBuffers(int width, int height) {
+        uint32_t histSize = width * height * SVGF_HIST_STRIDE * sizeof(float);
+        if (svgfWidth != uint32_t(width) || svgfHeight != uint32_t(height)) {
+            svgfHistValid = false;
+            svgfWidth = width;
+            svgfHeight = height;
+        }
+        if (histSize <= svgfHistCap) return;
+        for (int i = 0; i < 2; ++i) {
+            destroyBuffer(device, svgfHistBuffer[i], svgfHistMem[i]);
+            createBuffer(device, primaryDevice, histSize,
+                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, svgfHistBuffer[i], svgfHistMem[i]);
+        }
+        svgfHistCap = histSize;
+        svgfHistValid = false;
+        // Zeroed history means historyLength == 0, which every validity test rejects.
+        executeSingleTimeCommands([&](VkCommandBuffer cmd) {
+            vkCmdFillBuffer(cmd, svgfHistBuffer[0], 0, histSize, 0u);
+            vkCmdFillBuffer(cmd, svgfHistBuffer[1], 0, histSize, 0u);
+        });
+    }
+
+    ///@brief Drops the temporal history, e.g. on a scene or camera cut.
+    void resetSVGF() { svgfHistValid = false; }
+
+    ///@brief Runs a compute pass on `commandBuffer` and waits for it.
+    void runSVGFPass(VkPipeline pipe, VkPipelineLayout layout, VkDescriptorSet set,
+                     const void* push, uint32_t pushSize, int width, int height) {
+        VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        vkBeginCommandBuffer(commandBuffer, &beginInfo);
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &set, 0, nullptr);
+        vkCmdPushConstants(commandBuffer, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, pushSize, push);
+        vkCmdDispatch(commandBuffer, (width + 15) / 16, (height + 15) / 16, 1);
+        vkEndCommandBuffer(commandBuffer);
+
+        VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &commandBuffer;
+        VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        VkFence fence;
+        vkCreateFence(device, &fenceInfo, nullptr, &fence);
+        vkQueueSubmit(queue, 1, &submitInfo, fence);
+        vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
+        vkDestroyFence(device, fence, nullptr);
+    }
+
+    ///@brief Temporal half of SVGF: reprojection and moment accumulation.
+    ///
+    /// Leaves filtered colour in outBuffer and variance in svgfVarBuffer[0],
+    /// then hands off to dispatchSmoothPasses for the a-trous iterations.
+    ///@return false if the SVGF pipelines are unavailable and nothing was done.
+    bool submitSVGF(int width, int height, int samples, const GPUCameraData& camData) {
+        if (!svgfReprojectPipe || !svgfMomentsPipe || !smoothPipeline) return false;
+        if (width <= 0 || height <= 0) return false;
+
+        int iters = std::clamp(svgfIterations, 1, 8);
+        dispatchSmoothPasses(width, height, samples, 0, false); // allocate scratch/variance
+        ensureSVGFBuffers(width, height);
+        if (!smoothScratchBuffer) return false;
+
+        int histOutSlot = svgfHistSlot;
+        int histInSlot = 1 - svgfHistSlot;
+        VkBuffer histIn = svgfHistBuffer[histInSlot];
+        VkBuffer histOut = svgfHistBuffer[histOutSlot];
+        VkBuffer gbuf = gbufferBuffer ? gbufferBuffer : adaptiveBuffer;
+
+        auto writeSet = [&](VkDescriptorSet set, const VkDescriptorBufferInfo* infos, int count, int uboBinding) {
+            VkWriteDescriptorSet w[8] = {};
+            for (int i = 0; i < count; ++i) {
+                w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                w[i].dstSet = set;
+                w[i].dstBinding = i;
+                w[i].descriptorCount = 1;
+                w[i].descriptorType = (i == uboBinding) ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+                                                        : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                w[i].pBufferInfo = &infos[i];
+            }
+            vkUpdateDescriptorSets(device, count, w, 0, nullptr);
+        };
+
+        // Reproject reads outBuffer and writes the scratch; it samples neighbours
+        // so it cannot write outBuffer in place.
+        VkDescriptorBufferInfo reInfos[8] = {
+            {outBuffer, 0, VK_WHOLE_SIZE},
+            {gbuf, 0, VK_WHOLE_SIZE},
+            {histIn, 0, VK_WHOLE_SIZE},
+            {histOut, 0, VK_WHOLE_SIZE},
+            {smoothScratchBuffer, 0, VK_WHOLE_SIZE},
+            {adaptiveBuffer, 0, VK_WHOLE_SIZE},
+            {svgfVarBuffer[1], 0, VK_WHOLE_SIZE},
+            {uboBuffer, 0, VK_WHOLE_SIZE}
+        };
+        writeSet(svgfReprojectDescSet, reInfos, 8, 7);
+
+        struct {
+            float prevOx, prevOy, prevOz;
+            float prevIDx, prevIDy, prevIDz;
+            float prevIRx, prevIRy, prevIRz;
+            float prevIUx, prevIUy, prevIUz;
+            float prevTanX, prevTanY, alpha, momentsAlpha;
+            int w, h, s, reset, maxHist;
+        } rp = {
+            svgfPrevCam.origin[0], svgfPrevCam.origin[1], svgfPrevCam.origin[2],
+            svgfPrevCam.invDir[0], svgfPrevCam.invDir[1], svgfPrevCam.invDir[2],
+            svgfPrevCam.invRight[0], svgfPrevCam.invRight[1], svgfPrevCam.invRight[2],
+            svgfPrevCam.invUp[0], svgfPrevCam.invUp[1], svgfPrevCam.invUp[2],
+            svgfPrevCam.tanfovx, svgfPrevCam.tanfovy, svgfAlpha, svgfMomentsAlpha,
+            width, height, samples, svgfHistValid ? 0 : 1, std::max(1, svgfMaxHistory)
+        };
+        runSVGFPass(svgfReprojectPipe, svgfReprojectPipeLayout, svgfReprojectDescSet,
+                    &rp, sizeof(rp), width, height);
+
+        // Moments moves colour back into outBuffer so the a-trous chain starts
+        // where dispatchSmoothPasses always starts.
+        VkDescriptorBufferInfo moInfos[6] = {
+            {smoothScratchBuffer, 0, VK_WHOLE_SIZE},
+            {outBuffer, 0, VK_WHOLE_SIZE},
+            {histOut, 0, VK_WHOLE_SIZE},
+            {gbuf, 0, VK_WHOLE_SIZE},
+            {svgfVarBuffer[1], 0, VK_WHOLE_SIZE},
+            {svgfVarBuffer[0], 0, VK_WHOLE_SIZE}
+        };
+        writeSet(svgfMomentsDescSet, moInfos, 6, -1);
+
+        struct { int w, h; float phiNormal, phiDepth, histThreshold; } mp = {
+            width, height, 64.0f, 1.0f, 4.0f
+        };
+        runSVGFPass(svgfMomentsPipe, svgfMomentsPipeLayout, svgfMomentsDescSet,
+                    &mp, sizeof(mp), width, height);
+
+        // samples == 1: reproject already divided by the sample count.
+        dispatchSmoothPasses(width, height, 1, iters, true, true, 1, 1, histOut);
+
+        // Retain the dual basis of this frame's camera for next frame.
+        Vec3 d = camData.dir, r = camData.right, u = camData.up;
+        Vec3 rXu = r.cross(u);
+        float det = d.dot(rXu);
+        bool ok = std::abs(det) > 1e-12f;
+        if (ok) {
+            float inv = 1.0f / det;
+            Vec3 iD = rXu * inv, iR = u.cross(d) * inv, iU = d.cross(r) * inv;
+            for (int i = 0; i < 3; ++i) {
+                svgfPrevCam.origin[i] = camData.origin[i];
+                svgfPrevCam.invDir[i] = iD[i];
+                svgfPrevCam.invRight[i] = iR[i];
+                svgfPrevCam.invUp[i] = iU[i];
+            }
+            svgfPrevCam.tanfovx = camData.tanfovx;
+            svgfPrevCam.tanfovy = camData.tanfovy;
+        }
+        svgfHistSlot = histInSlot;
+        svgfHistValid = ok;
+        return true;
     }
 
     ///@brief Guided-filter blend of the PT and guide buffers into finalOutBuffer.

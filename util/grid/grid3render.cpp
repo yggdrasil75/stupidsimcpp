@@ -886,8 +886,10 @@ InFlightFrame Octree<T>::beginRenderFrameVulkan(const Camera& cam, int height, i
 
     frameCounter_++;
 
-    vkCtx.submitSmooth(width, height, samplesPerPixel);
-
+    if (!vkCtx.svgfEnabled || !vkCtx.submitSVGF(width, height, samplesPerPixel, camData)) {
+        vkCtx.submitSmooth(width, height, samplesPerPixel);
+    }
+    
     InFlightFrame pending;
     pending.width = width;
     pending.height = height;

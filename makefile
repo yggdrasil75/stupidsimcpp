@@ -57,6 +57,7 @@ SHADER_SRCS := $(SHADER_DIR)/fast_raytrace_hw.comp $(SHADER_DIR)/smooth.comp $(S
 SHADER_SRCS += $(SHADER_DIR)/wf_init.comp $(SHADER_DIR)/wf_args.comp $(SHADER_DIR)/wf_extend.comp $(SHADER_DIR)/wf_shade.comp $(SHADER_DIR)/wf_shadow.comp $(SHADER_DIR)/wf_finalize.comp
 SHADER_SRCS += $(SHADER_DIR)/vct_mip.comp $(SHADER_DIR)/vct_voxelize.comp $(SHADER_DIR)/guided_coeff.comp $(SHADER_DIR)/aabb_build.comp
 SHADER_SRCS += $(SHADER_DIR)/ddgi_update.comp
+SHADER_SRCS += $(SHADER_DIR)/svgf_reproject.comp $(SHADER_DIR)/svgf_moments.comp
 SHADER_SPVS := $(patsubst $(SHADER_DIR)/%.comp,$(BIN_DIR)/%.spv,$(SHADER_SRCS))
 
 $(shell mkdir -p $(OBJ_DIR))
@@ -83,6 +84,8 @@ all: $(EXE) $(SHADER_SPVS)
 	@echo "Build complete for $(UNAME_S)"
 
 $(BIN_DIR)/wf_init.spv $(BIN_DIR)/wf_args.spv $(BIN_DIR)/wf_extend.spv $(BIN_DIR)/wf_shade.spv $(BIN_DIR)/wf_shadow.spv $(BIN_DIR)/wf_finalize.spv $(BIN_DIR)/ddgi_update.spv: $(SHADER_DIR)/wf_common.glsl $(SHADER_DIR)/vct_cone.glsl
+
+$(BIN_DIR)/smooth.spv $(BIN_DIR)/svgf_reproject.spv $(BIN_DIR)/svgf_moments.spv: $(SHADER_DIR)/svgf_common.glsl
 
 $(BIN_DIR)/%.spv: $(SHADER_DIR)/%.comp
 	@echo "Compiling shader $< -> $@"
