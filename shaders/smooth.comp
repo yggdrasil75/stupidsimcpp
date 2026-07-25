@@ -1,6 +1,7 @@
 #version 450
 layout(local_size_x = 16, local_size_y = 16) in;
 #define SMOOTH_USE_NORMAL_WEIGHT 1
+#define SMOOTH_NORMAL_POWER 24.0
 
 layout(push_constant) uniform Push {
     int width;
@@ -61,6 +62,30 @@ void main() {
 #endif
 
     int pIdx = y * pc.width + x;
+
+    float blurredVar = -1.0;
+    if (pc.varMode == 1) {
+#if SMOOTH_USE_NORMAL_WEIGHT
+        vec3 preNrm = gbufNormal(x, y);
+#endif
+        float vSum = 0.0;
+        float vW   = 0.0;
+        for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx) {
+            int nx = clamp(x + dx, 0, pc.width - 1);
+            int ny = clamp(y + dy, 0, pc.height - 1);
+            int nPIdx = ny * pc.width + nx;
+            if (inData[nPIdx * 5 + 4] != cObj) continue;
+            float gk = H[dx + 2] * H[dy + 2]; // separable 1-2-1 -> 2D Gaussian
+#if SMOOTH_USE_NORMAL_WEIGHT
+            gk *= pow(max(0.0, dot(preNrm, gbufNormal(nx, ny))), SMOOTH_NORMAL_POWER);
+#endif
+            vSum += max(0.0, varIn[nPIdx]) * gk;
+            vW   += gk;
+        }
+        blurredVar = (vW > 1e-6) ? vSum / vW : max(0.0, varIn[pIdx]);
+    }
+
     float cVar;
     if (pc.varMode == 1) {
         cVar = max(0.0, varIn[pIdx]);
@@ -73,7 +98,8 @@ void main() {
         float albL = max(lum(cAlb), 1e-3);
         cVar = (var / n) / (albL * albL) / float(pc.stepSize);
     }
-    float stdErr = sqrt(cVar);
+    float sigmaVar = (blurredVar >= 0.0) ? blurredVar : cVar;
+    float stdErr = sqrt(sigmaVar);
 
     if (firstIter && pc.varMode == 0) {
         vec3 localAvg = vec3(0.0);
@@ -127,7 +153,7 @@ void main() {
 
         float w = wKernel * wObj * wZ * wL;
 #if SMOOTH_USE_NORMAL_WEIGHT
-        w *= pow(max(0.0, dot(cNrm, gbufNormal(nx, ny))), 64.0);
+        w *= pow(max(0.0, dot(cNrm, gbufNormal(nx, ny))), SMOOTH_NORMAL_POWER);
 #endif
         if (i == 0 && j == 0) {
             nColor = cColor;
@@ -142,7 +168,12 @@ void main() {
     float invW = 1.0 / max(sumW, 1e-6);
     vec3 filtered = sumC * invW;
     vec3 result = filtered * cAlb;
-    varOut[pIdx] = sumV * invW * invW;
+
+    float propVar = sumV * invW * invW;
+    if (pc.varMode == 1 && blurredVar >= 0.0) {
+        propVar = max(propVar, 0.25 * blurredVar);
+    }
+    varOut[pIdx] = propVar;
 
     if (pc.feedbackHist == 1) {
         int hIdx = pIdx * HIST_STRIDE;

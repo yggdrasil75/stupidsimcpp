@@ -828,7 +828,7 @@ InFlightFrame Octree<T>::beginRenderFrameVulkan(const Camera& cam, int height, i
     vkCtx.awaitPostPass();
     vkCtx.awaitAllFastFrames();
     updateStreaming(cam);
-    optimize();
+    // optimize();
     thread_local RenderBuffer tl_buffer;
     buildRender(tl_buffer);
     
@@ -846,6 +846,9 @@ InFlightFrame Octree<T>::beginRenderFrameVulkan(const Camera& cam, int height, i
 
     thread_local SceneCache tl_scene;
     const bool sceneChanged = refreshSceneCache(tl_buffer, true, false, tl_scene);
+    if (sceneChanged) {
+        sceneEpoch_.fetch_add(1, std::memory_order_relaxed);
+    }
     const std::vector<GPURenderData>& gpuPoints = tl_scene.gpuPoints;
     const std::vector<uint32_t>& gpuLights = tl_scene.gpuLights;
     const int emissiveCount = tl_scene.emissiveCount;
@@ -1637,7 +1640,10 @@ InFlightFrame Octree<T>::beginSuperBlendedRenderFrameVulkan(const Camera& cam, i
     }
 
     runWavefrontTilesMultiGPU(lowW, lowH, pbrCamData, samplesPerPixel, maxBounces, 1, pixFloats, pbrOutSize, true);
-    vkCtx.dispatchSmoothPasses(lowW, lowH, samplesPerPixel, 2, false);
+
+    if (!vkCtx.submitSVGF(lowW, lowH, samplesPerPixel, pbrCamData)) {
+        vkCtx.dispatchSmoothPasses(lowW, lowH, samplesPerPixel, 2, false);
+    }
     vkCtx.ensureLowResBuffer(pbrOutSize);
     vkCtx.copyBuffer(vkCtx.device, vkCtx.outBuffer, vkCtx.lowResOutBuffer, pbrOutSize);
 

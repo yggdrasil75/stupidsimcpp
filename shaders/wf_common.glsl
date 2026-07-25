@@ -499,9 +499,13 @@ float misWeightVA(float pA, float vA, float pB, float vB) {
 #if RESTIR_VARIANCE_AWARE_MIS
     if (pA <= 0.0) return 0.0;
     if (pB <= 0.0) return 1.0;
-    float a = pA / max(vA, 1e-8);
-    float b = pB / max(vB, 1e-8);
-    return a / (a + b);
+    float vFloor = max(max(vA, vB) * 1e-3, 1e-8);
+    float a = pA / max(vA, vFloor);
+    float b = pB / max(vB, vFloor);
+    float wVA = a / (a + b);
+    float wBal = misWeight(pA, pB);
+    const float VA_TRUST = 0.5;
+    return mix(wBal, wVA, VA_TRUST);
 #else
     return misWeight(pA, pB);
 #endif
@@ -531,8 +535,8 @@ vec3 sampleCosHemisphere(vec3 N, float r1, float r2, out float pdfW) {
     return normalize(d);
 }
 
+const uint WC_TICK_STRIDE = 1024u;
 uint wcTick() {
-    const uint WC_TICK_STRIDE = 1024u;
     return cam.wcFrame * WC_TICK_STRIDE + uint(clamp(pc.sampleIndex, 0, int(WC_TICK_STRIDE) - 1));
 }
 
@@ -761,7 +765,7 @@ bool reservoirFetch(vec3 p, vec3 n, vec3 planeP, vec3 planeN, float planeTol,
     Reservoir e = reservoirs[slot];
     if (e.key != key) return false;
     if (e.M <= 0.0 || e.W <= 0.0 || e.targetPdf <= 0.0) return false;
-    if (int(wcTick() - e.frame) > cam.wcMaxAge) return false;
+    if (int((wcTick() - e.frame) / WC_TICK_STRIDE) > cam.wcMaxAge) return false;
     if (e.lightIdx >= uint(points.length())) return false;
     vec3 en = unpackNormalOct(e.nrmPacked);
     if (dot(en, planeN) < 0.906) return false;
@@ -777,6 +781,11 @@ void reservoirCombineGRIS(out Reservoir dst,
                           int count, inout uint rng) {
     reservoirInit(dst);
     if (count <= 0) return;
+    float mConf[RESTIR_MAX_SOURCES];
+    float mCap = max(srcR[0].M, 1.0);
+    for (int i = 0; i < count; ++i) {
+        mConf[i] = min(srcR[i].M, mCap);
+    }
 
     for (int j = 0; j < count; ++j) {
         if (srcR[j].M <= 0.0) continue;
@@ -786,13 +795,13 @@ void reservoirCombineGRIS(out Reservoir dst,
         float denom = 0.0;
         for (int i = 0; i < count; ++i) {
             pvals[i] = (srcR[i].M > 0.0) ? reservoirTargetAt(srcS[i], X) : 0.0;
-            denom += srcR[i].M * pvals[i];
+            denom += mConf[i] * pvals[i];
         }
 
         dst.M += srcR[j].M;
         if (denom <= 0.0 || srcR[j].W <= 0.0) continue;
 
-        float mj = srcR[j].M * pvals[j] / denom;
+        float mj = mConf[j] * pvals[j] / denom;
         float w  = mj * pvals[0] * srcR[j].W;
         if (w <= 0.0) continue;
 
@@ -806,7 +815,7 @@ void reservoirCombineGRIS(out Reservoir dst,
     dst.W = (dst.targetPdf > 0.0) ? dst.wSum / dst.targetPdf : 0.0;
 }
 
-const float VA_EMA = 0.05;
+const float VA_EMA = 0.25;
 const float VA_FLOOR = 1e-6;
 
 void vaUpdateLight(uint slot, float moment) {

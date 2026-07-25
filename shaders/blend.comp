@@ -4,12 +4,13 @@ layout(local_size_x = 16, local_size_y = 16) in;
 #define BMFR_ORDER 1
 
 #if BMFR_ORDER == 2
-  #define BMFR_K 7
+  #define BMFR_K 10
 #else
-  #define BMFR_K 4
+  #define BMFR_K 7
 #endif
 
 const int COEFF_STRIDE = 24;
+const int GBUF_STRIDE  = 8;
 
 layout(push_constant) uniform Push {
     int width;
@@ -24,8 +25,14 @@ layout(std430, binding = 0) readonly buffer FastBuf { float fastData[]; };
 layout(std430, binding = 1) readonly buffer PBRBuf  { float pbrData[]; };
 layout(std430, binding = 2) writeonly buffer OutBuf { float outData[]; };
 layout(std430, binding = 3) readonly buffer CoeffBuf { float coeff[]; };
+layout(std430, binding = 4) readonly buffer GBuf { float gbuf[]; };
 
-void buildFeatures(vec3 g, out float phi[BMFR_K]) {
+vec3 gbufNormalFull(int px, int py) {
+    int gi = (py * pc.width + px) * GBUF_STRIDE;
+    return vec3(gbuf[gi + 3], gbuf[gi + 4], gbuf[gi + 5]);
+}
+
+void buildFeatures(vec3 g, vec3 n, out float phi[BMFR_K]) {
     phi[0] = 1.0;
     phi[1] = g.r;
     phi[2] = g.g;
@@ -34,6 +41,13 @@ void buildFeatures(vec3 g, out float phi[BMFR_K]) {
     phi[4] = g.r * g.r;
     phi[5] = g.g * g.g;
     phi[6] = g.b * g.b;
+    phi[7] = n.x;
+    phi[8] = n.y;
+    phi[9] = n.z;
+#else
+    phi[4] = n.x;
+    phi[5] = n.y;
+    phi[6] = n.z;
 #endif
 }
 
@@ -112,7 +126,7 @@ void main() {
     if (sumW > 0.0) {
         float invW = 1.0 / sumW;
         float phi[BMFR_K];
-        buildFeatures(guideC, phi);
+        buildFeatures(guideC, gbufNormalFull(x, y), phi);
         result = vec3(0.0);
         for (int k = 0; k < BMFR_K; ++k) {
             result.r += sumT[k][0] * invW * phi[k];

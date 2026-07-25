@@ -438,9 +438,9 @@ struct GpuContext {
         float tanfovy = 1.0f;
     } svgfPrevCam;
 
-    float svgfAlpha = 0.0009f;
-    float svgfMomentsAlpha = 0.0009f;
-    int svgfMaxHistory = 1024;
+    float svgfAlpha = 0.1f;
+    float svgfMomentsAlpha = 0.1f;
+    int svgfMaxHistory = 32;
     int svgfIterations = 7;
     bool svgfEnabled = true;
 
@@ -793,18 +793,18 @@ struct GpuContext {
         VkDescriptorSetLayoutCreateInfo smLayoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 7, smBindings};
         vkCreateDescriptorSetLayout(device, &smLayoutInfo, nullptr, &smoothDescLayout);
 
-        VkDescriptorSetLayoutBinding blBindings[4] = {};
-        for(int i=0; i<4; i++) {
+        VkDescriptorSetLayoutBinding blBindings[5] = {};
+        for(int i=0; i<5; i++) {
             blBindings[i].binding = i;
             blBindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             blBindings[i].descriptorCount = 1;
             blBindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         }
-        VkDescriptorSetLayoutCreateInfo blLayoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 4, blBindings};
+        VkDescriptorSetLayoutCreateInfo blLayoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 5, blBindings};
         vkCreateDescriptorSetLayout(device, &blLayoutInfo, nullptr, &blendDescLayout);
 
-        // Guided-filter coefficient pass: guide (full), PT (low), coeff out.
-        VkDescriptorSetLayoutCreateInfo gcLayoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 3, blBindings};
+        // Guided-filter coefficient pass: guide (full), PT (low), coeff out, gbuffer.
+        VkDescriptorSetLayoutCreateInfo gcLayoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 4, blBindings};
         vkCreateDescriptorSetLayout(device, &gcLayoutInfo, nullptr, &guidedCoeffDescLayout);
 
         // SVGF reproject: 7 storage buffers + the current camera UBO at binding 7.
@@ -2015,10 +2015,11 @@ struct GpuContext {
             currentGuidedCoeffCap = coeffSize;
         }
 
-        VkDescriptorBufferInfo gcInfos[3] = { {outBuffer, 0, VK_WHOLE_SIZE}, {lowResOutBuffer, 0, VK_WHOLE_SIZE}, {guidedCoeffBuffer, 0, VK_WHOLE_SIZE} };
-        VkDescriptorBufferInfo bInfos[4]  = { {outBuffer, 0, VK_WHOLE_SIZE}, {lowResOutBuffer, 0, VK_WHOLE_SIZE}, {finalOutBuffer, 0, VK_WHOLE_SIZE}, {guidedCoeffBuffer, 0, VK_WHOLE_SIZE} };
-        VkWriteDescriptorSet writes[7] = {};
-        for(int i=0; i<3; i++) {
+        VkBuffer gbuf = gbufferBuffer ? gbufferBuffer : adaptiveBuffer;
+        VkDescriptorBufferInfo gcInfos[4] = { {outBuffer, 0, VK_WHOLE_SIZE}, {lowResOutBuffer, 0, VK_WHOLE_SIZE}, {guidedCoeffBuffer, 0, VK_WHOLE_SIZE}, {gbuf, 0, VK_WHOLE_SIZE} };
+        VkDescriptorBufferInfo bInfos[5]  = { {outBuffer, 0, VK_WHOLE_SIZE}, {lowResOutBuffer, 0, VK_WHOLE_SIZE}, {finalOutBuffer, 0, VK_WHOLE_SIZE}, {guidedCoeffBuffer, 0, VK_WHOLE_SIZE}, {gbuf, 0, VK_WHOLE_SIZE} };
+        VkWriteDescriptorSet writes[9] = {};
+        for(int i=0; i<4; i++) {
             writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[i].dstSet = guidedCoeffDescSet;
             writes[i].dstBinding = i;
@@ -2026,15 +2027,15 @@ struct GpuContext {
             writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             writes[i].pBufferInfo = &gcInfos[i];
         }
-        for(int i=0; i<4; i++) {
-            writes[3 + i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[3 + i].dstSet = blendDescSet;
-            writes[3 + i].dstBinding = i;
-            writes[3 + i].descriptorCount = 1;
-            writes[3 + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            writes[3 + i].pBufferInfo = &bInfos[i];
+        for(int i=0; i<5; i++) {
+            writes[4 + i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[4 + i].dstSet = blendDescSet;
+            writes[4 + i].dstBinding = i;
+            writes[4 + i].descriptorCount = 1;
+            writes[4 + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[4 + i].pBufferInfo = &bInfos[i];
         }
-        vkUpdateDescriptorSets(device, 7, writes, 0, nullptr);
+        vkUpdateDescriptorSets(device, 9, writes, 0, nullptr);
 
         VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         vkBeginCommandBuffer(commandBuffer, &beginInfo);

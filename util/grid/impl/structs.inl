@@ -33,7 +33,7 @@ static constexpr float REUSE_MAX_TRANSMISSION = 0.05f;
 static constexpr float REUSE_MIN_ROUGHNESS = 0.25f;
 
 static constexpr uint32_t WC_INVALID_KEY = 0u;
-static constexpr int WC_MAX_AGE = 1024 * 2000;
+static constexpr int WC_MAX_AGE = 32;
 static constexpr uint32_t WC_CAPACITY = 1u << 20;
 
 static constexpr int DDGI_IRR_RES = 8;
