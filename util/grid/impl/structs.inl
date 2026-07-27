@@ -680,6 +680,22 @@ struct VoxelRel {
     Vec3 relPos;
 };
 
+///@brief Full per-voxel material spec used by detailed primitive insertion.
+struct VoxelMat {
+    Vec3 albedo{0.7f, 0.7f, 0.7f};
+    float emittance = 0.0f;
+    float roughness = 1.0f;
+    float metallic = 0.0f;
+    float transmission = 0.0f;
+    float ior = 1.45f;
+    Vec3 absorption = Vec3::Zero();
+    v3half sellB = v3half::Zero();
+    v3half sellC = v3half::Zero();
+    bool useSellmeier = false;
+    BodyType bType = BodyType::STATIC;
+    float mass = 1.0f;
+};
+
 template<typename T>
 struct GridObject_ {
     int id;

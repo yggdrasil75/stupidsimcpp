@@ -161,6 +161,10 @@ private:
             writeVec4(out, pt->color);
             writeVal(out, pt->renderMatIdx);
             writeVal(out, pt->physMatIdx);
+            writeVec3(out, pt->physics.velocity);
+            writeVec3(out, pt->physics.force);
+            writeVal(out, pt->physics.density);
+            writeVal(out, pt->physics.pressure);
         }
     }
 
@@ -182,6 +186,11 @@ private:
             readVec4(in, pt->color);
             readVal(in, pt->renderMatIdx);
             readVal(in, pt->physMatIdx);
+            readVec3(in, pt->physics.velocity);
+            readVec3(in, pt->physics.force);
+            readVal(in, pt->physics.density);
+            readVal(in, pt->physics.pressure);
+            pt->physics.bondsBuilt = false;
             pts.push_back(pt);
         }
         setPoints(idx, pts);
@@ -2020,6 +2029,367 @@ public:
         node->physics.bondsBuilt = true;
     }
 
+    ///@brief Serializes one object's geometry and inlined materials to a stream.
+    ///@param out Open binary output stream.
+    bool serializeObject(std::ofstream& out, int id) {
+        std::vector<std::shared_ptr<NodeData>> nodes;
+        collectNodesByObjectId(id, nodes);
+        auto obj = getObject(id);
+        if (!obj || nodes.empty()) return false;
+
+        uint32_t omagic = 0x6f626a31;
+        writeVal(out, omagic);
+
+        Vec3 center;
+        SplitPolicy sp;
+        uint8_t oflags;
+        {
+            s_lock objLock(obj->objMutex);
+            center = obj->centerPosition;
+            sp = obj->splitPolicy;
+            oflags = obj->objectFlags;
+        }
+        writeVec3(out, center);
+        writeVal(out, sp);
+        writeVal(out, oflags);
+
+        uint32_t numVox = static_cast<uint32_t>(nodes.size());
+        writeVal(out, numVox);
+        for (const auto& pt : nodes) {
+            writeVec3(out, pt->position - center);
+            writeVal(out, pt->size);
+            writeVec4(out, pt->color);
+            uint8_t f = pt->flags.load(std::memory_order_relaxed);
+            writeVal(out, f);
+            RenderMaterial rmat = getRenderMaterial(pt->renderMatIdx);
+            writeVal(out, rmat);
+            PhysicsMaterial_ pmat = obj->getPhysicsMaterial(pt->physMatIdx);
+            writeVal(out, pmat);
+        }
+        return true;
+    }
+
+    ///@brief Rebuilds an object from a stream, re-centered at placeAt.
+    ///@param newObjectId Target id, or -1 to auto-assign.
+    int deserializeObject(std::ifstream& in, const Vec3& placeAt, int newObjectId = -1) {
+        uint32_t omagic = 0;
+        readVal(in, omagic);
+        if (omagic != 0x6f626a31) {
+            std::cerr << "Invalid object blob header" << std::endl;
+            return -1;
+        }
+        Vec3 origCenter;
+        SplitPolicy sp;
+        uint8_t oflags;
+        readVec3(in, origCenter);
+        readVal(in, sp);
+        readVal(in, oflags);
+        (void)origCenter;
+
+        auto obj = getOrCreateObject(newObjectId);
+        int assignedId = obj->id;
+        {
+            u_lock objLock(obj->objMutex);
+            obj->centerPosition = placeAt;
+            obj->splitPolicy = sp;
+            obj->objectFlags = oflags;
+        }
+
+        uint32_t numVox = 0;
+        readVal(in, numVox);
+        for (uint32_t i = 0; i < numVox; ++i) {
+            Vec3 relPos;
+            float size;
+            Eigen::Vector4f color;
+            uint8_t f;
+            RenderMaterial rmat;
+            PhysicsMaterial_ pmat;
+            readVec3(in, relPos);
+            readVal(in, size);
+            readVec4(in, color);
+            readVal(in, f);
+            readVal(in, rmat);
+            readVal(in, pmat);
+
+            uint32_t rIdx = getOrAddRenderMaterial(rmat);
+            uint16_t pIdx = obj->getOrAddPhysicsMaterial(pmat);
+            Vec3 worldPos = placeAt + relPos;
+
+            bool visible = (f & VISIBLE_BIT) != 0;
+            bool active  = (f & ACTIVE_BIT) != 0;
+            bool staticb = pmat.type == BodyType::STATIC;
+
+            auto pointData = std::make_shared<NodeData>(
+                T{}, worldPos, visible, color, size, active, assignedId, rIdx, pIdx, staticb);
+            {
+                u_lock lock(obj->objMutex);
+                obj->relativeVoxels.push_back({relPos});
+            }
+            if (insertRecursive(root_, pointData, 0)) {
+                this->size++;
+                if (pmat.type != BodyType::STATIC) {
+                    std::lock_guard<std::mutex> lock(physicsMutex_);
+                    activePhysicsNodes_.push_back(pointData);
+                }
+                if (pmat.type == BodyType::RIGID) bondRigidVoxel(pointData);
+            }
+        }
+        return assignedId;
+    }
+
+    ///@brief Saves one object to a standalone file.
+    bool saveObject(int id, const std::string& filename) {
+        std::ofstream out(filename, std::ios::binary);
+        if (!out) return false;
+        if (!serializeObject(out, id)) {
+            std::cerr << "saveObject: object " << id << " not found or empty" << std::endl;
+            return false;
+        }
+        return true;
+    }
+
+    ///@brief Loads a standalone object file, placing it at placeAt.
+    ///@param newObjectId Desired id, or -1 for auto.
+    int loadObject(const std::string& filename, const Vec3& placeAt, int newObjectId = -1) {
+        std::ifstream in(filename, std::ios::binary);
+        if (!in) return -1;
+        return deserializeObject(in, placeAt, newObjectId);
+    }
+
+    ///@brief Inserts a single voxel with a shared material/body config.
+    bool addVoxel(const Vec3& pos, int objectId, Vec3 color, float voxel,
+                  BodyType bType = BodyType::STATIC, float mass = 1.0f,
+                  float emittance = 0.0f, float roughness = 1.0f, float metallic = 0.0f,
+                  float transmission = 0.0f, float ior = 1.45f) {
+        return insert(T{}, pos, true, color, voxel, true, objectId, emittance,
+                      roughness, metallic, transmission, ior, Vec3::Zero(), bType, mass);
+    }
+
+    ///@brief Inserts a single voxel with a full material spec.
+    bool addVoxel(const Vec3& pos, int objectId, float voxel, const VoxelMat& m) {
+        bool ok = insert(T{}, pos, true, m.albedo, voxel, true, objectId, m.emittance,
+                         m.roughness, m.metallic, m.transmission, m.ior, m.absorption, m.bType, m.mass);
+        if (ok && m.useSellmeier) setSellmeier(pos, m.sellB, m.sellC, voxel * 0.25f);
+        return ok;
+    }
+
+    ///@brief Filled or hollow axis-aligned box from a voxel lattice.
+    ///@param dims Full extents in world units.
+    int insertCube(const Vec3& center, const Vec3& dims, float voxel, Vec3 color,
+                   int objectId = -1, bool hollow = false,
+                   BodyType bType = BodyType::STATIC, float mass = 1.0f) {
+        if (voxel <= 0.0f) return -1;
+        auto obj = getOrCreateObject(objectId);
+        int id = obj->id;
+        {
+            u_lock lock(obj->objMutex);
+            obj->centerPosition = center;
+        }
+        Vec3 half = dims * 0.5f;
+        int nx = std::max(1, (int)std::round(dims.x() / voxel));
+        int ny = std::max(1, (int)std::round(dims.y() / voxel));
+        int nz = std::max(1, (int)std::round(dims.z() / voxel));
+        for (int i = 0; i < nx; ++i)
+        for (int j = 0; j < ny; ++j)
+        for (int k = 0; k < nz; ++k) {
+            if (hollow && i > 0 && i < nx - 1 && j > 0 && j < ny - 1 && k > 0 && k < nz - 1)
+                continue;
+            Vec3 p = center - half + Vec3((i + 0.5f) * voxel, (j + 0.5f) * voxel, (k + 0.5f) * voxel);
+            addVoxel(p, id, color, voxel, bType, mass);
+        }
+        return id;
+    }
+
+    ///@brief Filled or hollow sphere from a voxel lattice.
+    ///@param shellThickness Hollow shell thickness, defaults to one voxel.
+    int insertSphere(const Vec3& center, float radius, float voxel, Vec3 color,
+                     int objectId = -1, bool hollow = false, float shellThickness = -1.0f,
+                     BodyType bType = BodyType::STATIC, float mass = 1.0f) {
+        if (voxel <= 0.0f || radius <= 0.0f) return -1;
+        if (shellThickness <= 0.0f) shellThickness = voxel;
+        auto obj = getOrCreateObject(objectId);
+        int id = obj->id;
+        {
+            u_lock lock(obj->objMutex);
+            obj->centerPosition = center;
+        }
+        int n = std::max(1, (int)std::round(radius / voxel));
+        float r2 = radius * radius;
+        float inner = radius - shellThickness;
+        float inner2 = inner * inner;
+        for (int i = -n; i <= n; ++i)
+        for (int j = -n; j <= n; ++j)
+        for (int k = -n; k <= n; ++k) {
+            Vec3 off(i * voxel, j * voxel, k * voxel);
+            float d2 = off.squaredNorm();
+            if (d2 > r2) continue;
+            if (hollow && inner > 0.0f && d2 < inner2) continue;
+            addVoxel(center + off, id, color, voxel, bType, mass);
+        }
+        return id;
+    }
+
+    ///@brief Square-based pyramid from stacked voxel layers.
+    ///@param hollow Keeps only the outer shell of each layer.
+    int insertPyramid(const Vec3& center, float baseSize, float height, float voxel,
+                      Vec3 color, int objectId = -1, bool hollow = false,
+                      BodyType bType = BodyType::STATIC, float mass = 1.0f) {
+        if (voxel <= 0.0f || height <= 0.0f) return -1;
+        auto obj = getOrCreateObject(objectId);
+        int id = obj->id;
+        {
+            u_lock lock(obj->objMutex);
+            obj->centerPosition = center;
+        }
+        int layers = std::max(1, (int)std::round(height / voxel));
+        for (int ly = 0; ly < layers; ++ly) {
+            float t = (float)ly / (float)layers;
+            float layerSize = baseSize * (1.0f - t);
+            int n = std::max(1, (int)std::round(layerSize / voxel));
+            float half = layerSize * 0.5f;
+            float y = -height * 0.5f + (ly + 0.5f) * voxel;
+            for (int i = 0; i < n; ++i)
+            for (int k = 0; k < n; ++k) {
+                if (hollow && i > 0 && i < n - 1 && k > 0 && k < n - 1 && ly != 0)
+                    continue;
+                float x = -half + (i + 0.5f) * voxel;
+                float z = -half + (k + 0.5f) * voxel;
+                addVoxel(center + Vec3(x, y, z), id, color, voxel, bType, mass);
+            }
+        }
+        return id;
+    }
+
+    ///@brief Filled or hollow cylinder along the Y axis.
+    ///@param shellThickness Wall thickness for the hollow variant, defaults to one voxel.
+    int insertCylinder(const Vec3& center, float radius, float height, float voxel,
+                       Vec3 color, int objectId = -1, bool hollow = false,
+                       float shellThickness = -1.0f,
+                       BodyType bType = BodyType::STATIC, float mass = 1.0f) {
+        if (voxel <= 0.0f || radius <= 0.0f || height <= 0.0f) return -1;
+        if (shellThickness <= 0.0f) shellThickness = voxel;
+        auto obj = getOrCreateObject(objectId);
+        int id = obj->id;
+        {
+            u_lock lock(obj->objMutex);
+            obj->centerPosition = center;
+        }
+        int nr = std::max(1, (int)std::round(radius / voxel));
+        int nh = std::max(1, (int)std::round(height / voxel));
+        float r2 = radius * radius;
+        float inner = radius - shellThickness;
+        float inner2 = inner * inner;
+        for (int j = 0; j < nh; ++j) {
+            float y = -height * 0.5f + (j + 0.5f) * voxel;
+            for (int i = -nr; i <= nr; ++i)
+            for (int k = -nr; k <= nr; ++k) {
+                float dx = i * voxel, dz = k * voxel;
+                float d2 = dx * dx + dz * dz;
+                if (d2 > r2) continue;
+                if (hollow && inner > 0.0f && d2 < inner2) continue;
+                addVoxel(center + Vec3(dx, y, dz), id, color, voxel, bType, mass);
+            }
+        }
+        return id;
+    }
+
+    ///@brief Filled or hollow box using a full material spec.
+    int insertCube(const Vec3& center, const Vec3& dims, float voxel, const VoxelMat& mat,
+                   int objectId = -1, bool hollow = false) {
+        if (voxel <= 0.0f) return -1;
+        auto obj = getOrCreateObject(objectId);
+        int id = obj->id;
+        { u_lock lock(obj->objMutex); obj->centerPosition = center; }
+        Vec3 half = dims * 0.5f;
+        int nx = std::max(1, (int)std::round(dims.x() / voxel));
+        int ny = std::max(1, (int)std::round(dims.y() / voxel));
+        int nz = std::max(1, (int)std::round(dims.z() / voxel));
+        for (int i = 0; i < nx; ++i)
+        for (int j = 0; j < ny; ++j)
+        for (int k = 0; k < nz; ++k) {
+            if (hollow && i > 0 && i < nx - 1 && j > 0 && j < ny - 1 && k > 0 && k < nz - 1) continue;
+            Vec3 p = center - half + Vec3((i + 0.5f) * voxel, (j + 0.5f) * voxel, (k + 0.5f) * voxel);
+            addVoxel(p, id, voxel, mat);
+        }
+        return id;
+    }
+
+    ///@brief Filled or hollow sphere using a full material spec.
+    int insertSphere(const Vec3& center, float radius, float voxel, const VoxelMat& mat,
+                     int objectId = -1, bool hollow = false, float shellThickness = -1.0f) {
+        if (voxel <= 0.0f || radius <= 0.0f) return -1;
+        if (shellThickness <= 0.0f) shellThickness = voxel;
+        auto obj = getOrCreateObject(objectId);
+        int id = obj->id;
+        { u_lock lock(obj->objMutex); obj->centerPosition = center; }
+        int n = std::max(1, (int)std::round(radius / voxel));
+        float r2 = radius * radius;
+        float inner = radius - shellThickness;
+        float inner2 = inner * inner;
+        for (int i = -n; i <= n; ++i)
+        for (int j = -n; j <= n; ++j)
+        for (int k = -n; k <= n; ++k) {
+            Vec3 off(i * voxel, j * voxel, k * voxel);
+            float d2 = off.squaredNorm();
+            if (d2 > r2) continue;
+            if (hollow && inner > 0.0f && d2 < inner2) continue;
+            addVoxel(center + off, id, voxel, mat);
+        }
+        return id;
+    }
+
+    ///@brief Square-based pyramid using a full material spec.
+    int insertPyramid(const Vec3& center, float baseSize, float height, float voxel, const VoxelMat& mat,
+                      int objectId = -1, bool hollow = false) {
+        if (voxel <= 0.0f || height <= 0.0f) return -1;
+        auto obj = getOrCreateObject(objectId);
+        int id = obj->id;
+        { u_lock lock(obj->objMutex); obj->centerPosition = center; }
+        int layers = std::max(1, (int)std::round(height / voxel));
+        for (int ly = 0; ly < layers; ++ly) {
+            float t = (float)ly / (float)layers;
+            float layerSize = baseSize * (1.0f - t);
+            int n = std::max(1, (int)std::round(layerSize / voxel));
+            float half = layerSize * 0.5f;
+            float y = -height * 0.5f + (ly + 0.5f) * voxel;
+            for (int i = 0; i < n; ++i)
+            for (int k = 0; k < n; ++k) {
+                if (hollow && i > 0 && i < n - 1 && k > 0 && k < n - 1 && ly != 0) continue;
+                float x = -half + (i + 0.5f) * voxel;
+                float z = -half + (k + 0.5f) * voxel;
+                addVoxel(center + Vec3(x, y, z), id, voxel, mat);
+            }
+        }
+        return id;
+    }
+
+    ///@brief Filled or hollow cylinder using a full material spec.
+    int insertCylinder(const Vec3& center, float radius, float height, float voxel, const VoxelMat& mat,
+                       int objectId = -1, bool hollow = false, float shellThickness = -1.0f) {
+        if (voxel <= 0.0f || radius <= 0.0f || height <= 0.0f) return -1;
+        if (shellThickness <= 0.0f) shellThickness = voxel;
+        auto obj = getOrCreateObject(objectId);
+        int id = obj->id;
+        { u_lock lock(obj->objMutex); obj->centerPosition = center; }
+        int nr = std::max(1, (int)std::round(radius / voxel));
+        int nh = std::max(1, (int)std::round(height / voxel));
+        float r2 = radius * radius;
+        float inner = radius - shellThickness;
+        float inner2 = inner * inner;
+        for (int j = 0; j < nh; ++j) {
+            float y = -height * 0.5f + (j + 0.5f) * voxel;
+            for (int i = -nr; i <= nr; ++i)
+            for (int k = -nr; k <= nr; ++k) {
+                float dx = i * voxel, dz = k * voxel;
+                float d2 = dx * dx + dz * dz;
+                if (d2 > r2) continue;
+                if (hollow && inner > 0.0f && d2 < inner2) continue;
+                addVoxel(center + Vec3(dx, y, dz), id, voxel, mat);
+            }
+        }
+        return id;
+    }
+
     ///@brief Extracts a registered rendering ID profile mapped from coordinates specific location index
     ///@param pos The 3D location to search for component
     ///@param tolerance Permissive distance allowance bounding precise location
@@ -2874,6 +3244,31 @@ public:
         
         return false;
     }
+
+    ///@brief Builds a world-space ray for pixel (px,py) matching the render convention.
+    ///@param outOrigin,outDir Receives the ray origin and normalized direction.
+    void pixelToRay(const Camera& cam, int px, int py, int width, int height, Vec3& outOrigin, Vec3& outDir) const;
+    ///@brief Casts a ray through a screen pixel and reports the hit voxel.
+    bool raycastFromCamera(const Camera& cam, int px, int py, int width, int height, RayHit& hit, float maxDist = 10000.0f);
+    ///@brief Inserts a voxel on the exposed face of the voxel under a pixel.
+    ///@param objectId Target object, or -2 to inherit the hit voxel's object.
+    bool addVoxelAtPixel(const Camera& cam, int px, int py, int width, int height, Vec3 color, int objectId = -2);
+    ///@brief Removes the voxel under a pixel.
+    bool removeVoxelAtPixel(const Camera& cam, int px, int py, int width, int height);
+    ///@brief Subdivides then smooths an object to round its edges.
+    ///@param passes Number of subdivide+smooth iterations.
+    bool roundObject(int objectId, int passes = 1);
+    ///@brief Cuts convex edges of an object over several layers for a rounded bevel.
+    bool bevelObject(int objectId, int layers = 1);
+    ///@brief Flat-cuts the convex edges of an object in a single layer.
+    bool chamferObject(int objectId);
+    ///@brief Fills concave corners of an object to round its inside edges.
+    bool filletObject(int objectId, int layers = 1);
+    ///@brief Extrudes the face under a pixel outward by a number of voxel layers.
+    bool extrudeFace(const Camera& cam, int px, int py, int width, int height, int layers = 1);
+    ///@brief Flattens voxels near a picked point onto the plane of the hit face.
+    ///@param radius World-space radius around the hit point to affect.
+    bool flattenSurface(const Camera& cam, int px, int py, int width, int height, float radius);
 
     frame fastRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB);
     frame blendedRenderFrameVulkan(const Camera& cam, int height, int width, float pbrScale = 0.5f,

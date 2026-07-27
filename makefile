@@ -42,14 +42,19 @@ CXXFLAGS = $(BASE_CXXFLAGS) $(SIMD_CXXFLAGS)
 # SRC := $(SRC_DIR)/ptest.cpp
 # SRC := $(SRC_DIR)/naturetest.cpp
 SRC := $(SRC_DIR)/materialtestv2.cpp
-SRC += $(IMGUI_DIR)/imgui.cpp $(IMGUI_DIR)/imgui_demo.cpp $(IMGUI_DIR)/imgui_draw.cpp $(IMGUI_DIR)/imgui_tables.cpp $(IMGUI_DIR)/imgui_widgets.cpp
-SRC += $(IMGUI_DIR)/backends/imgui_impl_glfw.cpp $(IMGUI_DIR)/backends/imgui_impl_opengl3.cpp
-SRC += $(SRC_DIR)/stb_image.cpp
-SRC += $(GRID_DIR)/grid3render.cpp
-SRC += $(GRID_DIR)/grid3physics.cpp
+SUPPORT_SRC := $(IMGUI_DIR)/imgui.cpp $(IMGUI_DIR)/imgui_demo.cpp $(IMGUI_DIR)/imgui_draw.cpp $(IMGUI_DIR)/imgui_tables.cpp $(IMGUI_DIR)/imgui_widgets.cpp
+SUPPORT_SRC += $(IMGUI_DIR)/backends/imgui_impl_glfw.cpp $(IMGUI_DIR)/backends/imgui_impl_opengl3.cpp
+SUPPORT_SRC += $(SRC_DIR)/stb_image.cpp
+SUPPORT_SRC += $(GRID_DIR)/grid3render.cpp
+SUPPORT_SRC += $(GRID_DIR)/grid3physics.cpp
+SUPPORT_SRC += $(GRID_DIR)/grid3edit.cpp
+SRC += $(SUPPORT_SRC)
+SUPPORT_OBJS = $(addprefix $(OBJ_DIR)/, $(addsuffix .o, $(basename $(notdir $(SUPPORT_SRC)))))
 OBJS = $(addprefix $(OBJ_DIR)/, $(addsuffix .o, $(basename $(notdir $(SRC)))))
+EDITOR_OBJS = $(OBJ_DIR)/editor.o $(SUPPORT_OBJS)
 UNAME_S := $(shell uname -s)
 EXE := $(BIN_DIR)/g2gradc
+EDITOR_EXE := $(BIN_DIR)/editor
 
 GLSLC := glslc --target-env=vulkan1.3
 
@@ -80,7 +85,7 @@ $(OBJ_DIR)/%.o: $(STB_DIR)/%.cpp
 $(OBJ_DIR)/%.o: $(GRID_DIR)/%.cpp
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
-all: $(EXE) $(SHADER_SPVS)
+all: $(EXE) $(EDITOR_EXE) $(SHADER_SPVS)
 	@echo "Build complete for $(UNAME_S)"
 
 $(BIN_DIR)/wf_init.spv $(BIN_DIR)/wf_args.spv $(BIN_DIR)/wf_extend.spv $(BIN_DIR)/wf_shade.spv $(BIN_DIR)/wf_shadow.spv $(BIN_DIR)/wf_finalize.spv $(BIN_DIR)/ddgi_update.spv: $(SHADER_DIR)/wf_common.glsl $(SHADER_DIR)/vct_cone.glsl
@@ -94,5 +99,11 @@ $(BIN_DIR)/%.spv: $(SHADER_DIR)/%.comp
 $(EXE): $(OBJS)
 	$(CXX) -o $@ $^ $(CXXFLAGS) $(LIBS)
 
+$(EDITOR_EXE): $(EDITOR_OBJS)
+	$(CXX) -o $@ $^ $(CXXFLAGS) $(LIBS)
+
+editor: $(EDITOR_EXE) $(SHADER_SPVS)
+	@echo "Editor build complete for $(UNAME_S)"
+
 clean:
-	rm -f $(EXE) $(OBJS) $(SHADER_SPVS)
+	rm -f $(EXE) $(EDITOR_EXE) $(OBJS) $(EDITOR_OBJS) $(SHADER_SPVS)
