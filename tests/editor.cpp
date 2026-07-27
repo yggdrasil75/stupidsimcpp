@@ -68,7 +68,7 @@ struct MatUI {
 
 class EditorUI {
 private:
-    Grid3 grid(Vec3(-64,-64,-64),Vec3(64,64,64), "/tmp/editorstore", 8);
+    Grid3 grid{Vec3(-64,-64,-64),Vec3(64,64,64), "/tmp/editorstore", 8};
     Camera cam;
     RenderSettings rs;
     PrimSettings ps;
