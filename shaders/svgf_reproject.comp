@@ -60,6 +60,11 @@ vec3 gbufNormal(int idx) {
     return vec3(gbuf[gi + 3], gbuf[gi + 4], gbuf[gi + 5]);
 }
 
+float gbufRoughness(int idx) {
+    int gi = idx * GBUF_STRIDE;
+    return svgfRoughness(gbuf[gi + 6]);
+}
+
 vec3 loadIrradiance(int idx, float invSamples) {
     int pi = idx * PIX_STRIDE;
     vec3 rad = vec3(pixels[pi], pixels[pi + 1], pixels[pi + 2]) * invSamples;
@@ -67,16 +72,20 @@ vec3 loadIrradiance(int idx, float invSamples) {
     return max(rad, vec3(0.0)) / gbufAlbedo(idx);
 }
 
-bool historyValid(int hIdx, float curObj, vec3 curNormal, float expectDist, bool sky) {
+bool historyValid(int hIdx, float curObj, vec3 curNormal, float expectDist,
+                  bool sky, float curRough) {
     int hi = hIdx * HIST_STRIDE;
     if (histIn[hi + 5] <= 0.0) return false;
     if (histIn[hi + 7] != curObj) return false;
     float hDepth = histIn[hi + 6];
     if (sky) return svgfIsSky(hDepth);
     if (svgfIsSky(hDepth)) return false;
-    if (abs(hDepth - expectDist) > 0.05 * max(expectDist, 0.1)) return false;
+    bool glossy = svgfIsGlossy(curRough);
+    float depthTol  = glossy ? 0.015 : 0.05;
+    float normalTol = glossy ? 0.98  : 0.90;
+    if (abs(hDepth - expectDist) > depthTol * max(expectDist, 0.1)) return false;
     vec3 hN = vec3(histIn[hi + 8], histIn[hi + 9], histIn[hi + 10]);
-    if (dot(hN, curNormal) < 0.9) return false;
+    if (dot(hN, curNormal) < normalTol) return false;
     return true;
 }
 
@@ -97,9 +106,11 @@ void main() {
     float curDepth = pixels[pi + 3] * invSamples;
     float curObj   = pixels[pi + 4];
     vec3  curNrm   = gbufNormal(idx);
+    float curRough = gbufRoughness(idx);
+    bool  glossy   = svgfIsGlossy(curRough);
     bool  sky      = svgfIsSky(curDepth) || curObj < 0.0;
 
-    {
+    if (!glossy) {
         vec3 nbr = vec3(0.0);
         float nbrW = 0.0;
         for (int dy = -1; dy <= 1; ++dy)
@@ -113,7 +124,9 @@ void main() {
             nbrW += 1.0;
         }
         if (nbrW > 0.0) {
-            float maxLum = svgfLum(nbr / nbrW) * 4.0 + 0.1;
+            float rampUp = clamp((0.60 - curRough) / 0.30, 0.0, 1.0);
+            float clampScale = mix(4.0, 24.0, rampUp);
+            float maxLum = svgfLum(nbr / nbrW) * clampScale + 0.1;
             float cl = svgfLum(curColor);
             if (cl > maxLum) curColor *= maxLum / max(cl, 1e-4);
         }
@@ -153,7 +166,7 @@ void main() {
                 int ny = y0 + j;
                 if (nx < 0 || ny < 0 || nx >= pc.width || ny >= pc.height) continue;
                 int hIdx = ny * pc.width + nx;
-                if (!historyValid(hIdx, curObj, curNrm, expectDist, sky)) continue;
+                if (!historyValid(hIdx, curObj, curNrm, expectDist, sky, curRough)) continue;
                 float w = (i == 0 ? 1.0 - fx : fx) * (j == 0 ? 1.0 - fy : fy);
                 if (w <= 0.0) continue;
                 int hi = hIdx * HIST_STRIDE;
@@ -173,7 +186,7 @@ void main() {
                     int ny = cy + j;
                     if (nx < 0 || ny < 0 || nx >= pc.width || ny >= pc.height) continue;
                     int hIdx = ny * pc.width + nx;
-                    if (!historyValid(hIdx, curObj, curNrm, expectDist, sky)) continue;
+                    if (!historyValid(hIdx, curObj, curNrm, expectDist, sky, curRough)) continue;
                     int hi = hIdx * HIST_STRIDE;
                     histColor += vec3(histIn[hi], histIn[hi + 1], histIn[hi + 2]);
                     histM1    += histIn[hi + 3];
@@ -194,7 +207,10 @@ void main() {
         }
     }
 
-    float newLen = found ? min(float(pc.maxHist), histLen + 1.0) : 1.0;
+    float effMaxHist = glossy
+        ? mix(6.0, float(pc.maxHist), clamp(curRough / 0.30, 0.0, 1.0))
+        : float(pc.maxHist);
+    float newLen = found ? min(effMaxHist, histLen + 1.0) : 1.0;
     float a  = found ? max(pc.alpha,        1.0 / newLen) : 1.0;
     float am = found ? max(pc.momentsAlpha, 1.0 / newLen) : 1.0;
 

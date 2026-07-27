@@ -30,6 +30,11 @@ vec3 gbufAlbedo(int idx) {
     return svgfAlbedoFloor(vec3(gbuf[gi], gbuf[gi + 1], gbuf[gi + 2]));
 }
 
+float gbufRoughness(int idx) {
+    int gi = idx * GBUF_STRIDE;
+    return svgfRoughness(gbuf[gi + 6]);
+}
+
 vec3 irradianceAt(int idx) {
     int pi = idx * PIX_STRIDE;
     return max(vec3(colIn[pi], colIn[pi + 1], colIn[pi + 2]), vec3(0.0)) / gbufAlbedo(idx);
@@ -58,6 +63,8 @@ void main() {
 
     float histLen = hist[idx * HIST_STRIDE + 5];
     vec3  cNrm = gbufNormal(idx);
+    float cRough = gbufRoughness(idx);
+    float phiNormalEff = svgfIsGlossy(cRough) ? pc.phiNormal * mix(4.0, 1.0, clamp(cRough / 0.30, 0.0, 1.0)) : pc.phiNormal;
 
     vec3  sumC = vec3(0.0);
     float sumM1 = 0.0, sumM2 = 0.0, sumW = 0.0;
@@ -76,7 +83,7 @@ void main() {
             float span = pc.phiDepth * float(max(abs(dx), abs(dy))) * max(cDepth, 0.1);
             dz = abs(nDepth - cDepth) / max(span, 1e-3);
         }
-        float w = exp(-dz) * pow(max(0.0, dot(cNrm, gbufNormal(nIdx))), pc.phiNormal);
+        float w = exp(-dz) * pow(max(0.0, dot(cNrm, gbufNormal(nIdx))), phiNormalEff);
         if (w <= 0.0) continue;
 
         vec3 nColor = irradianceAt(nIdx);

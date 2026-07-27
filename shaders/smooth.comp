@@ -42,6 +42,12 @@ vec3 gbufNormal(int px, int py) {
     return vec3(gbuf[gi + 3], gbuf[gi + 4], gbuf[gi + 5]);
 }
 
+float gbufRoughness(int px, int py) {
+    int gi = (py * pc.width + px) * GBUF_STRIDE;
+    if (gi + GBUF_STRIDE > gbuf.length()) return 1.0;
+    return clamp(gbuf[gi + 6], 0.0, 1.0);
+}
+
 void main() {
     int x = int(gl_GlobalInvocationID.x);
     int y = int(gl_GlobalInvocationID.y);
@@ -60,6 +66,8 @@ void main() {
 #if SMOOTH_USE_NORMAL_WEIGHT
     vec3 cNrm = gbufNormal(x, y);
 #endif
+    float cRough = gbufRoughness(x, y);
+    float glossK = 1.0 - clamp(cRough / 0.30, 0.0, 1.0);
 
     int pIdx = y * pc.width + x;
 
@@ -117,14 +125,17 @@ void main() {
         }
         if (localW > 0.0) {
             localAvg /= localW;
-            float maxLum = lum(localAvg) * 3.0 + 0.1;
+            float clampScale = mix(3.0, 20.0, glossK);
+            float maxLum = lum(localAvg) * clampScale + 0.1;
             float cl = lum(cColor);
             if (cl > maxLum) cColor *= maxLum / max(cl, 1e-4);
         }
     }
 
     float cLum = lum(cColor);
-    float lumSigma = 4.0 * stdErr + 1e-3;
+
+    float lumSigma = (4.0 * stdErr + 1e-3) * mix(1.0, 0.15, glossK);
+    float normalPower = mix(SMOOTH_NORMAL_POWER, 128.0, glossK);
 
     vec3 sumC = vec3(0.0);
     float sumV = 0.0;
@@ -153,7 +164,7 @@ void main() {
 
         float w = wKernel * wObj * wZ * wL;
 #if SMOOTH_USE_NORMAL_WEIGHT
-        w *= pow(max(0.0, dot(cNrm, gbufNormal(nx, ny))), SMOOTH_NORMAL_POWER);
+        w *= pow(max(0.0, dot(cNrm, gbufNormal(nx, ny))), normalPower);
 #endif
         if (i == 0 && j == 0) {
             nColor = cColor;

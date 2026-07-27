@@ -101,8 +101,20 @@ void main() {
         if (bounce == 0 && transp == 0) {
             uint gi = p.u0.x * uint(GBUF_STRIDE);
             if (gi + uint(GBUF_STRIDE) <= uint(gbuf.length())) {
-                float diffuseness = (1.0 - metallic) * opacity;
-                vec3 demod = mix(vec3(1.0), max(albedo.rgb, vec3(0.02)), diffuseness);
+                vec3  dV      = normalize(-dir);
+                float dNdotV  = max(1e-3, dot(offsetNorm, dV));
+                vec3  dF0     = mix(vec3(0.04), albedo.rgb, metallic);
+                vec3  dFres   = dF0 + (max(vec3(1.0 - roughness), dF0) - dF0)
+                                      * pow(1.0 - dNdotV, 5.0);
+                vec3  diffResp = albedo.rgb * (vec3(1.0) - dFres)
+                                 * (1.0 - metallic) * opacity;
+                vec3  specResp = dFres;
+                float specLum  = dot(specResp, vec3(0.2126, 0.7152, 0.0722));
+                float diffLum  = dot(diffResp, vec3(0.2126, 0.7152, 0.0722));
+                float wSpec = specLum / max(specLum + diffLum, 1e-4);
+                vec3  demod = mix(diffResp + specResp, specResp,
+                                  clamp(wSpec, 0.0, 1.0));
+                demod = max(demod, vec3(0.02));
                 if (isEmissive) demod = vec3(1.0);
                 gbuf[gi + 0u] = demod.r;
                 gbuf[gi + 1u] = demod.g;
@@ -110,6 +122,8 @@ void main() {
                 gbuf[gi + 3u] = offsetNorm.x;
                 gbuf[gi + 4u] = offsetNorm.y;
                 gbuf[gi + 5u] = offsetNorm.z;
+                gbuf[gi + 6u] = roughness;
+                gbuf[gi + 7u] = 0.0;
             }
         }
 

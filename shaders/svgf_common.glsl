@@ -17,5 +17,7 @@ bool svgfInvalid(vec3 c) {
 }
 
 vec3 svgfAlbedoFloor(vec3 a) { return max(a, vec3(0.02)); }
+float svgfRoughness(float rawSlot6) { return clamp(rawSlot6, 0.0, 1.0); }
+bool  svgfIsGlossy(float roughness) { return roughness < 0.30; }
 
 #endif
