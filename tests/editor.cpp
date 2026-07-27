@@ -27,7 +27,7 @@ enum class RenderMode { FAST_CPU, GAMESTYLE, FAST_VK, BLENDED_VK, SUPERBLENDED_V
 enum class PrimType { CUBE, SPHERE, PYRAMID, CYLINDER };
 
 struct RenderSettings {
-    RenderMode mode = RenderMode::FAST_CPU;
+    RenderMode mode = RenderMode::FAST_VK;
     int width = 640;
     int height = 640;
     float pbrScale = 0.5f;
@@ -68,7 +68,7 @@ struct MatUI {
 
 class EditorUI {
 private:
-    Grid3 grid;
+    Grid3 grid(Vec3(-64,-64,-64),Vec3(64,64,64), "/tmp/editorstore", 8);
     Camera cam;
     RenderSettings rs;
     PrimSettings ps;
@@ -492,7 +492,7 @@ static void glfw_error_callback(int error, const char* description) {
 int main() {
     glfwSetErrorCallback(glfw_error_callback);
     if (!glfwInit()) return -1;
-    const char* glsl_version = "#version 130";
+    const char* glsl_version = "#version 450";
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
 
