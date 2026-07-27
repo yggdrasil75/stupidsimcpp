@@ -2316,6 +2316,64 @@ void writeWavefrontDescriptors() {
     vkUpdateDescriptorSets(device, n, w, 0, nullptr);
 }
 
+void wfBufBarrier(VkCommandBuffer cmd,
+                  const VkBuffer* buffers, uint32_t count,
+                  VkAccessFlags src, VkAccessFlags dst,
+                  VkPipelineStageFlags dstStage) {
+    VkBufferMemoryBarrier bmb[12];
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < count && n < 12; ++i) {
+        if (buffers[i] == VK_NULL_HANDLE) continue;
+        bmb[n] = VkBufferMemoryBarrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+        bmb[n].srcAccessMask = src;
+        bmb[n].dstAccessMask = dst;
+        bmb[n].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bmb[n].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bmb[n].buffer = buffers[i];
+        bmb[n].offset = 0;
+        bmb[n].size = VK_WHOLE_SIZE;
+        ++n;
+    }
+    if (n == 0) return;
+    vkCmdPipelineBarrier(cmd,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, dstStage,
+        0, 0, nullptr, n, bmb, 0, nullptr);
+}
+
+void wfBarrierArgs(VkCommandBuffer cmd) {
+    VkBufferMemoryBarrier bmb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+    bmb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    bmb.dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT |
+                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    bmb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bmb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bmb.buffer = wfCounterBuf;
+    bmb.offset = 0;
+    bmb.size = VK_WHOLE_SIZE;
+    if (wfCounterBuf == VK_NULL_HANDLE) return;
+    vkCmdPipelineBarrier(cmd,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0, 0, nullptr, 1, &bmb, 0, nullptr);
+}
+
+void wfBarrierData(VkCommandBuffer cmd) {
+    const VkBuffer bufs[9] = {
+        wfPathBuf,  wfPathHitBuf,  wfExtendABuf, wfExtendBBuf,
+        wfShadeBuf, wfShadowBuf,   gbufferBuffer,
+        outBuffer,  adaptiveBuffer
+    };
+    wfBufBarrier(cmd, bufs, 9,
+        VK_ACCESS_SHADER_WRITE_BIT,
+        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    const VkBuffer ctr[1] = { wfCounterBuf };
+    wfBufBarrier(cmd, ctr, 1,
+        VK_ACCESS_SHADER_WRITE_BIT,
+        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+}
+
 void wfBarrier(VkCommandBuffer cmd) {
     VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
@@ -2347,7 +2405,7 @@ void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel
 
     const uint32_t WG = 64;
     uint32_t pathGroups = uint32_t((maxPaths + WG - 1) / WG);
-    int maxIters = maxBounces + 24;
+    int maxIters = maxBounces + 2;
 
     const int samplesPerSubmit = 2;
 
@@ -2381,45 +2439,45 @@ void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel
             wfBind(cmd, wfArgsPipe);
             wfPush(cmd, 0, 4, s);
             vkCmdDispatch(cmd, 1, 1, 1);
-            wfBarrier(cmd);
+            wfBarrierData(cmd);
             wfBind(cmd, wfInitPipe);
             wfPush(cmd, 0, 0, s);
             vkCmdDispatch(cmd, pathGroups, 1, 1);
-            wfBarrier(cmd);
+            wfBarrierData(cmd);
             wfBind(cmd, wfArgsPipe);
             wfPush(cmd, 0, 0, s);
             vkCmdDispatch(cmd, 1, 1, 1);
-            wfBarrier(cmd);
+            wfBarrierArgs(cmd);
 
             int parity = 0;
             for (int it = 0; it < maxIters; ++it) {
                 wfBind(cmd, wfExtendPipe);
                 wfPush(cmd, parity, 0, s);
                 vkCmdDispatchIndirect(cmd, wfCounterBuf, WF_OFF_EXTEND_ARGS);
-                wfBarrier(cmd);
+                wfBarrierData(cmd);
                 wfBind(cmd, wfArgsPipe);
                 wfPush(cmd, parity, 1, s);
                 vkCmdDispatch(cmd, 1, 1, 1);
-                wfBarrier(cmd);
+                wfBarrierArgs(cmd);
                 wfBind(cmd, wfShadePipe);
                 wfPush(cmd, parity, 0, s);
                 vkCmdDispatchIndirect(cmd, wfCounterBuf, WF_OFF_SHADE_ARGS);
-                wfBarrier(cmd);
+                wfBarrierData(cmd);
                 wfBind(cmd, wfArgsPipe);
                 wfPush(cmd, parity, 5, s);
                 vkCmdDispatch(cmd, 1, 1, 1);
-                wfBarrier(cmd);
+                wfBarrierArgs(cmd);
                 wfBind(cmd, wfShadowPipe);
                 wfPush(cmd, parity, 0, s);
                 vkCmdDispatchIndirect(cmd, wfCounterBuf, WF_OFF_SHADOW_ARGS);
-                wfBarrier(cmd);
+                wfBarrierData(cmd);
                 parity ^= 1;
             }
 
             wfBind(cmd, wfFinalizePipe);
             wfPush(cmd, parity, 0, s);
             vkCmdDispatch(cmd, pathGroups, 1, 1);
-            wfBarrier(cmd);
+            wfBarrierData(cmd);
         }
 
         vkEndCommandBuffer(cmd);
