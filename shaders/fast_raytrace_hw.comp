@@ -15,7 +15,7 @@ vec3 unpackRGB9E5(uint c) {
 #define PI 3.14159265359
 const float EPS = 1e-8;
 const float LARGE = 1e30;
-#define MAX_HITS 16 
+#define MAX_HITS 64
 
 struct GPUMaterial {
     uint chromaticity;   // RGB9E5
@@ -249,32 +249,74 @@ struct HitData {
     vec3 normal;
 };
 
+int budgetFromAlpha(float a) {
+    if (a >= 0.999) return 1;
+    int b = int(ceil(1.0 / max(a, EPS)));
+    return clamp(b, 1, MAX_HITS);
+}
+
+bool nearestVoxel(Ray ray, out HitData hit) {
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, tlas, gl_RayFlagsNoneEXT, 0xFF, ray.origin, 0.0, ray.dir, cam.maxDist);
+    float tBest = cam.maxDist;
+    int bestIdx = -1;
+    float bestExit = 0.0;
+    vec3 bestN = vec3(0.0);
+    while (rayQueryProceedEXT(rq)) {
+        if (rayQueryGetIntersectionTypeEXT(rq, false) != gl_RayQueryCandidateIntersectionAABBEXT) continue;
+        int ptIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
+        float t, tExit;
+        vec3 n;
+        if (!rayCubeIntersect(ray, points[ptIdx], t, tExit, n)) continue;
+        if (t < 0.0 || t >= tBest) continue;
+        tBest = t;
+        bestIdx = ptIdx;
+        bestExit = tExit;
+        bestN = n;
+    }
+    if (bestIdx < 0) return false;
+    hit.id = bestIdx;
+    hit.t = tBest;
+    hit.tExit = bestExit;
+    hit.normal = bestN;
+    return true;
+}
+
 int voxelTraverse(Ray ray, out HitData hits[MAX_HITS]) {
+    HitData first;
+    if (!nearestVoxel(ray, first)) return 0;
+
+    float nearAlpha = unpackRGBA8(points[first.id].color).a;
+    int budget = budgetFromAlpha(nearAlpha);
+
+    hits[0] = first;
+    if (budget <= 1) return 1;
+
     rayQueryEXT rq;
     rayQueryInitializeEXT(rq, tlas, gl_RayFlagsNoneEXT, 0xFF, ray.origin, 0.0, ray.dir, cam.maxDist);
 
-    int hitCount = 0;
-    while(rayQueryProceedEXT(rq)) {
-        if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionAABBEXT) {
-            int ptIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
-            float t, tExit;
-            vec3 n;
-            if (rayCubeIntersect(ray, points[ptIdx], t, tExit, n) && t >= 0.0 && t <= cam.maxDist) {
-                if (hitCount == MAX_HITS && t >= hits[MAX_HITS - 1].t) continue;
-                int slot = min(hitCount, MAX_HITS - 1);
-                while (slot > 0 && hits[slot - 1].t > t) {
-                    hits[slot] = hits[slot - 1];
-                    slot--;
-                }
-                hits[slot].id = ptIdx;
-                hits[slot].t = t;
-                hits[slot].tExit = tExit;
-                hits[slot].normal = n;
-                if (hitCount < MAX_HITS) hitCount++;
-            }
+    int hitCount = 1;
+    while (rayQueryProceedEXT(rq)) {
+        if (rayQueryGetIntersectionTypeEXT(rq, false) != gl_RayQueryCandidateIntersectionAABBEXT) continue;
+        int ptIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
+        if (ptIdx == first.id) continue;
+        float t, tExit;
+        vec3 n;
+        if (!rayCubeIntersect(ray, points[ptIdx], t, tExit, n)) continue;
+        if (t < first.t || t > cam.maxDist) continue;
+        if (hitCount >= budget && t >= hits[budget - 1].t) continue;
+        int slot = min(hitCount, budget - 1);
+        while (slot > 1 && hits[slot - 1].t > t) {
+            hits[slot] = hits[slot - 1];
+            slot--;
         }
+        hits[slot].id = ptIdx;
+        hits[slot].t = t;
+        hits[slot].tExit = tExit;
+        hits[slot].normal = n;
+        if (hitCount < budget) hitCount++;
     }
-    
+
     return hitCount;
 }
 
@@ -361,30 +403,55 @@ bool nearestHit(vec3 origin, vec3 dir, float maxT, int skipObjId,
     vec3  hitN[MAX_HITS];
     int   count = 0;
 
+    int   nearIdx = -1;
+    float nearT = maxT;
+    vec3  nearN = vec3(0.0);
     while (rayQueryProceedEXT(rq)) {
-        if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionAABBEXT) {
-            int ptIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
+        if (rayQueryGetIntersectionTypeEXT(rq, false) != gl_RayQueryCandidateIntersectionAABBEXT) continue;
+        int ptIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
+        GPURenderData pt = points[ptIdx];
+        if (pt.objectId == skipObjId) continue;
+        float t, tExit; vec3 n;
+        if (!rayCubeIntersect(ray, pt, t, tExit, n)) continue;
+        if (t <= 1e-4 || t >= nearT) continue;
+        nearT = t;
+        nearIdx = ptIdx;
+        nearN = n;
+    }
+    if (nearIdx < 0) { tintOut = vec3(1.0); tOut = maxT; return false; }
+
+    float nearAlpha = unpackRGBA8(points[nearIdx].color).a;
+    int budget = budgetFromAlpha(nearAlpha);
+
+    hitIdx[0] = nearIdx; hitT[0] = nearT; hitN[0] = nearN;
+    count = 1;
+
+    if (budget > 1) {
+        rayQueryEXT rq2;
+        rayQueryInitializeEXT(rq2, tlas, gl_RayFlagsNoneEXT, 0xFF, origin, 0.0, dir, maxT);
+        while (rayQueryProceedEXT(rq2)) {
+            if (rayQueryGetIntersectionTypeEXT(rq2, false) != gl_RayQueryCandidateIntersectionAABBEXT) continue;
+            int ptIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq2, false);
+            if (ptIdx == nearIdx) continue;
             GPURenderData pt = points[ptIdx];
             if (pt.objectId == skipObjId) continue;
             float t, tExit; vec3 n;
-            if (rayCubeIntersect(ray, pt, t, tExit, n) && t > 1e-4 && t < maxT) {
-                if (count == MAX_HITS && t >= hitT[MAX_HITS - 1]) continue;
-                int slot = min(count, MAX_HITS - 1);
-                while (slot > 0 && hitT[slot - 1] > t) {
-                    hitT[slot] = hitT[slot - 1];
-                    hitIdx[slot] = hitIdx[slot - 1];
-                    hitN[slot] = hitN[slot - 1];
-                    slot--;
-                }
-                hitIdx[slot] = ptIdx; hitT[slot] = t; hitN[slot] = n;
-                if (count < MAX_HITS) count++;
+            if (!rayCubeIntersect(ray, pt, t, tExit, n)) continue;
+            if (t < nearT || t >= maxT) continue;
+            if (count >= budget && t >= hitT[budget - 1]) continue;
+            int slot = min(count, budget - 1);
+            while (slot > 1 && hitT[slot - 1] > t) {
+                hitT[slot] = hitT[slot - 1];
+                hitIdx[slot] = hitIdx[slot - 1];
+                hitN[slot] = hitN[slot - 1];
+                slot--;
             }
+            hitIdx[slot] = ptIdx; hitT[slot] = t; hitN[slot] = n;
+            if (count < budget) count++;
         }
     }
 
     tintOut = vec3(1.0);
-    if (count == 0) { tOut = maxT; return false; }
-
     for (int i = 0; i < count; i++) {
         vec4 alb = unpackRGBA8(points[hitIdx[i]].color);
         if (alb.a < FOG_CUTOFF) continue;
