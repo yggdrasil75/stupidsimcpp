@@ -564,6 +564,153 @@ static uint64_t hashRenderPoints(const void* data, size_t bytes) {
     return h;
 }
 
+struct EmissiveCell {
+    uint32_t src;
+    uint32_t claimedBy;
+};
+
+static bool emissiveSlabMatches(const std::unordered_map<std::array<int64_t, 3>, EmissiveCell, Vec3i64Hash>& lattice,
+        const std::vector<GPURenderData>& pts, const std::vector<uint32_t>& cand,
+        const GPURenderData& seed, const std::array<int64_t, 3>& base, int64_t spanX, int64_t spanY) {
+    for (int64_t dy = 0; dy < spanY; ++dy) {
+        for (int64_t dx = 0; dx < spanX; ++dx) {
+            auto it = lattice.find({base[0] + dx, base[1] + dy, base[2]});
+            if (it == lattice.end() || it->second.claimedBy != INVALID_IDX) return false;
+            const GPURenderData& p = pts[cand[it->second.src]];
+            if (p.materialIdx != seed.materialIdx) return false;
+            if (p.size != seed.size) return false;
+            if ((p.extent & ~(EXTENT_STATIC_BIT | EXTENT_REUSE_BIT)) != EXTENT_UNIT) return false;
+            if (extentIsStatic(p.extent) != extentIsStatic(seed.extent) || extentIsReusable(p.extent) != extentIsReusable(seed.extent)) return false;
+        }
+    }
+    return true;
+}
+
+static void emissiveClaimSlab(
+        std::unordered_map<std::array<int64_t, 3>, EmissiveCell, Vec3i64Hash>& lattice,
+        const std::array<int64_t, 3>& base, int64_t spanX, int64_t spanY, uint32_t owner) {
+    for (int64_t dy = 0; dy < spanY; ++dy)
+        for (int64_t dx = 0; dx < spanX; ++dx)
+            lattice[{base[0] + dx, base[1] + dy, base[2]}].claimedBy = owner;
+}
+
+template<typename MaterialT>
+static int mergeEmissiveProxies(std::vector<GPURenderData>& points,
+                                const std::vector<MaterialT>& materials,
+                                std::vector<uint32_t>& outLights) {
+    outLights.clear();
+
+    std::vector<uint32_t> emissive;
+    emissive.reserve(points.size() / 8 + 1);
+    float cellSize = 0.0f;
+    bool mixedSize = false;
+    for (uint32_t i = 0; i < points.size(); ++i) {
+        const GPURenderData& p = points[i];
+        if (p.materialIdx >= materials.size()) continue;
+        if (materials[p.materialIdx].chromaticity == 0u) continue;
+        if ((p.extent & ~(EXTENT_STATIC_BIT | EXTENT_REUSE_BIT)) != EXTENT_UNIT) {
+            outLights.push_back(i);
+            continue;
+        }
+        if (cellSize == 0.0f) cellSize = p.size;
+        else if (p.size != cellSize) mixedSize = true;
+        emissive.push_back(i);
+    }
+
+    if (emissive.size() < 2 || cellSize <= 0.0f || mixedSize) {
+        for (uint32_t idx : emissive) outLights.push_back(idx);
+        return static_cast<int>(outLights.size());
+    }
+
+    Vec3 lo = points[emissive[0]].position;
+    for (uint32_t idx : emissive) lo = lo.cwiseMin(points[idx].position);
+    const float invCell = 1.0f / cellSize;
+
+    std::unordered_map<std::array<int64_t, 3>, EmissiveCell, Vec3i64Hash> lattice;
+    lattice.reserve(emissive.size() * 2);
+    std::vector<std::array<int64_t, 3>> coords(emissive.size());
+    std::vector<uint32_t> passthrough;
+
+    for (uint32_t i = 0; i < emissive.size(); ++i) {
+        const Vec3 rel = (points[emissive[i]].position - lo) * invCell;
+        coords[i] = {static_cast<int64_t>(std::llround(rel.x())),
+                     static_cast<int64_t>(std::llround(rel.y())),
+                     static_cast<int64_t>(std::llround(rel.z()))};
+        const Vec3 snapped(static_cast<float>(coords[i][0]),
+                           static_cast<float>(coords[i][1]),
+                           static_cast<float>(coords[i][2]));
+        if ((rel - snapped).cwiseAbs().maxCoeff() > LATTICE_EPS) {
+            passthrough.push_back(i);
+            continue;
+        }
+        if (!lattice.emplace(coords[i], EmissiveCell{i, INVALID_IDX}).second) {
+            passthrough.push_back(i);
+        }
+    }
+
+    const int64_t lim = static_cast<int64_t>(EXTENT_MAX);
+    std::vector<char> keep(points.size(), 1);
+
+    for (uint32_t i = 0; i < emissive.size(); ++i) {
+        auto seedIt = lattice.find(coords[i]);
+        if (seedIt == lattice.end() || seedIt->second.src != i) continue;
+        if (seedIt->second.claimedBy != INVALID_IDX) continue;
+
+        const uint32_t seedPtIdx = emissive[i];
+        const GPURenderData seed = points[seedPtIdx];
+        const std::array<int64_t, 3> c = coords[i];
+        const uint32_t owner = seedPtIdx;
+        seedIt->second.claimedBy = owner;
+
+        int64_t ex = 1, ey = 1, ez = 1;
+        while (ex < lim && emissiveSlabMatches(lattice, points, emissive, seed,
+                                               {c[0] + ex, c[1], c[2]}, 1, 1)) {
+            emissiveClaimSlab(lattice, {c[0] + ex, c[1], c[2]}, 1, 1, owner);
+            ex++;
+        }
+        while (ey < lim && emissiveSlabMatches(lattice, points, emissive, seed,
+                                               {c[0], c[1] + ey, c[2]}, ex, 1)) {
+            emissiveClaimSlab(lattice, {c[0], c[1] + ey, c[2]}, ex, 1, owner);
+            ey++;
+        }
+        while (ez < lim && emissiveSlabMatches(lattice, points, emissive, seed,
+                                               {c[0], c[1], c[2] + ez}, ex, ey)) {
+            emissiveClaimSlab(lattice, {c[0], c[1], c[2] + ez}, ex, ey, owner);
+            ez++;
+        }
+
+        uint32_t packed = packExtent(static_cast<uint32_t>(ex),
+                                     static_cast<uint32_t>(ey),
+                                     static_cast<uint32_t>(ez));
+        packed = extentSetStatic(packed, extentIsStatic(seed.extent));
+        packed = extentSetReusable(packed, extentIsReusable(seed.extent));
+        points[seedPtIdx].extent = packed;
+        outLights.push_back(seedPtIdx);
+    }
+
+    for (uint32_t i = 0; i < emissive.size(); ++i) {
+        auto it = lattice.find(coords[i]);
+        if (it == lattice.end()) continue;
+        if (it->second.src != i) continue;
+        if (it->second.claimedBy != emissive[i]) keep[emissive[i]] = 0;
+    }
+    for (uint32_t i : passthrough) outLights.push_back(emissive[i]);
+
+    
+    std::vector<uint32_t> remap(points.size(), INVALID_IDX);
+    std::vector<GPURenderData> compact;
+    compact.reserve(points.size());
+    for (uint32_t i = 0; i < points.size(); ++i) {
+        if (!keep[i]) continue;
+        remap[i] = static_cast<uint32_t>(compact.size());
+        compact.push_back(points[i]);
+    }
+    points.swap(compact);
+    for (uint32_t& li : outLights) li = remap[li];
+
+    return static_cast<int>(outLights.size());
+}
+
 ///@brief Geometry-only products of the render prologue, reused across frames
 struct SceneCache {
     std::vector<GPURenderData> gpuPoints;
@@ -640,20 +787,15 @@ static bool refreshSceneCache(const BufferT& buffer, bool wantSort, bool expandB
             const auto& p = buffer.points[sp.idx];
             cache.gpuPoints.push_back({p.position, p.size, packRGBA8(p.color),
                                        p.materialIdx, p.objectId, p.extent});
-            if (buffer.materials[p.materialIdx].chromaticity != 0u) {
-                cache.gpuLights.push_back(cache.gpuPoints.size() - 1);
-            }
         }
     } else {
         for (const size_t idx : validIndices) {
             const auto& p = buffer.points[idx];
             cache.gpuPoints.push_back({p.position, p.size, packRGBA8(p.color),
                                        p.materialIdx, p.objectId, p.extent});
-            if (buffer.materials[p.materialIdx].chromaticity != 0u) {
-                cache.gpuLights.push_back(cache.gpuPoints.size() - 1);
-            }
         }
     }
+    mergeEmissiveProxies(cache.gpuPoints, buffer.materials, cache.gpuLights);
 
     cache.emissiveCount = static_cast<int>(cache.gpuLights.size());
     if (cache.gpuPoints.empty()) cache.gpuPoints.push_back(GPURenderData{});
@@ -1137,24 +1279,17 @@ InFlightFrame Octree<T>::beginBlendedRenderFrameVulkan(const Camera& cam, int he
 
     std::vector<GPURenderData> gpuPBRPoints;
     gpuPBRPoints.reserve(sortedPoints.size());
-    std::vector<GPURenderData> gpuFastPoints;
-    gpuFastPoints.reserve(sortedPoints.size());
     std::vector<uint32_t> gpuLights;
 
     for(const auto& sp : sortedPoints) {
         const auto& p = tl_buffer.points[sp.idx];
-        
         gpuPBRPoints.push_back({
             p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId, p.extent
         });
-        gpuFastPoints.push_back({
-            p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId, p.extent
-        });
-
-        if (tl_buffer.materials[p.materialIdx].chromaticity != 0u) {
-            gpuLights.push_back(gpuPBRPoints.size() - 1);
-        }
     }
+
+    mergeEmissiveProxies(gpuPBRPoints, tl_buffer.materials, gpuLights);
+    std::vector<GPURenderData> gpuFastPoints = gpuPBRPoints;
 
     int emissiveCount = gpuLights.size();
     if(gpuPBRPoints.empty()) gpuPBRPoints.push_back(GPURenderData{});
@@ -1288,8 +1423,6 @@ InFlightFrame Octree<T>::beginGameStyleRenderFrame(const Camera& cam, int height
                       sortedPoints);
     std::vector<GPURenderData> gpuFastPoints;
     gpuFastPoints.reserve(sortedPoints.size());
-    struct LightRef { float power; uint32_t idx; };
-    std::vector<LightRef> lightRefs;
 
     for(const auto& sp : sortedPoints) {
         const auto& p = tl_buffer.points[sp.idx];
@@ -1297,19 +1430,30 @@ InFlightFrame Octree<T>::beginGameStyleRenderFrame(const Camera& cam, int height
         gpuFastPoints.push_back({
             p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId, p.extent
         });
-
-        if (tl_buffer.materials[p.materialIdx].chromaticity != 0u) {
-            Vec3 emit = unpackRGB9E5(tl_buffer.materials[p.materialIdx].chromaticity);
-            float lum = 0.2126f * emit.x() * p.color.x() + 0.7152f * emit.y() * p.color.y() + 0.0722f * emit.z() * p.color.z();
-            lightRefs.push_back({lum * p.size * p.size, (uint32_t)(gpuFastPoints.size() - 1)});
-        }
     }
 
+    std::vector<uint32_t> gpuLights;
+    mergeEmissiveProxies(gpuFastPoints, tl_buffer.materials, gpuLights);
+
+    struct LightRef { float power; uint32_t idx; };
+    std::vector<LightRef> lightRefs;
+    lightRefs.reserve(gpuLights.size());
+    for (uint32_t li : gpuLights) {
+        const GPURenderData& p = gpuFastPoints[li];
+        Vec3 ext = unpackExtent(p.extent);
+        float s2 = p.size * p.size;
+        float fxy = ext.x() * ext.y(), fyz = ext.y() * ext.z(), fxz = ext.x() * ext.z();
+        float faceCells = std::max(fxy, std::max(fyz, fxz));
+        Vec3 emit = unpackRGB9E5(tl_buffer.materials[p.materialIdx].chromaticity);
+        float cr = float(p.color & 0xFFu) / 255.0f;
+        float cg = float((p.color >> 8) & 0xFFu) / 255.0f;
+        float cb = float((p.color >> 16) & 0xFFu) / 255.0f;
+        float lum = 0.2126f * emit.x() * cr + 0.7152f * emit.y() * cg + 0.0722f * emit.z() * cb;
+        lightRefs.push_back({lum * s2 * faceCells, li});
+    }
     std::sort(lightRefs.begin(), lightRefs.end(),
               [](const LightRef& a, const LightRef& b) { return a.power > b.power; });
-    std::vector<uint32_t> gpuLights;
-    gpuLights.reserve(lightRefs.size());
-    for (const auto& lr : lightRefs) gpuLights.push_back(lr.idx);
+    for (size_t k = 0; k < lightRefs.size(); ++k) gpuLights[k] = lightRefs[k].idx;
 
     int emissiveCount = (int)gpuLights.size();
     if(gpuFastPoints.empty()) gpuFastPoints.push_back(GPURenderData{});
@@ -1441,12 +1585,6 @@ InFlightFrame Octree<T>::beginSuperBlendedRenderFrameVulkan(const Camera& cam, i
 
     std::vector<GPURenderData> gpuPBRPoints;
     gpuPBRPoints.reserve(sortedPoints.size());
-    std::vector<GPURenderData> gpuFastPoints;
-    gpuFastPoints.reserve(sortedPoints.size());
-
-
-    struct LightRef { float power; uint32_t idx; };
-    std::vector<LightRef> lightRefs;
 
     for(const auto& sp : sortedPoints) {
         const auto& p = tl_buffer.points[sp.idx];
@@ -1454,24 +1592,31 @@ InFlightFrame Octree<T>::beginSuperBlendedRenderFrameVulkan(const Camera& cam, i
         gpuPBRPoints.push_back({
             p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId, p.extent
         });
-        gpuFastPoints.push_back({
-            p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId, p.extent
-        });
-
-        if (tl_buffer.materials[p.materialIdx].chromaticity != 0u) {
-            Vec3 emit = unpackRGB9E5(tl_buffer.materials[p.materialIdx].chromaticity);
-            float lum = 0.2126f * emit.x() * p.color.x()
-                      + 0.7152f * emit.y() * p.color.y()
-                      + 0.0722f * emit.z() * p.color.z();
-            lightRefs.push_back({lum * p.size * p.size, (uint32_t)(gpuPBRPoints.size() - 1)});
-        }
     }
 
+    std::vector<uint32_t> gpuLights;
+    mergeEmissiveProxies(gpuPBRPoints, tl_buffer.materials, gpuLights);
+    std::vector<GPURenderData> gpuFastPoints = gpuPBRPoints;
+
+    struct LightRef { float power; uint32_t idx; };
+    std::vector<LightRef> lightRefs;
+    lightRefs.reserve(gpuLights.size());
+    for (uint32_t li : gpuLights) {
+        const GPURenderData& p = gpuPBRPoints[li];
+        Vec3 ext = unpackExtent(p.extent);
+        float s2 = p.size * p.size;
+        float fxy = ext.x() * ext.y(), fyz = ext.y() * ext.z(), fxz = ext.x() * ext.z();
+        float faceCells = std::max(fxy, std::max(fyz, fxz));
+        Vec3 emit = unpackRGB9E5(tl_buffer.materials[p.materialIdx].chromaticity);
+        float cr = float(p.color & 0xFFu) / 255.0f;
+        float cg = float((p.color >> 8) & 0xFFu) / 255.0f;
+        float cb = float((p.color >> 16) & 0xFFu) / 255.0f;
+        float lum = 0.2126f * emit.x() * cr + 0.7152f * emit.y() * cg + 0.0722f * emit.z() * cb;
+        lightRefs.push_back({lum * s2 * faceCells, li});
+    }
     std::sort(lightRefs.begin(), lightRefs.end(),
               [](const LightRef& a, const LightRef& b) { return a.power > b.power; });
-    std::vector<uint32_t> gpuLights;
-    gpuLights.reserve(lightRefs.size());
-    for (const auto& lr : lightRefs) gpuLights.push_back(lr.idx);
+    for (size_t k = 0; k < lightRefs.size(); ++k) gpuLights[k] = lightRefs[k].idx;
 
     int emissiveCount = (int)gpuLights.size();
     if(gpuPBRPoints.empty()) gpuPBRPoints.push_back(GPURenderData{});
