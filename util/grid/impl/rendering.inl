@@ -82,6 +82,7 @@ struct InFlightFrame {
     frame::colormap colorformat = frame::colormap::RGB;
     bool pending = false;
     uint32_t slot = 0;
+    uint32_t postSlot = 0;
 };
 
 #ifdef VULKAN_SUPPORT
@@ -236,7 +237,11 @@ struct GpuContext {
     uint32_t queueFamilyIndex = 0;
     VkCommandPool commandPool = VK_NULL_HANDLE;
     VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
-    VkFence postFence = VK_NULL_HANDLE;
+    static constexpr uint32_t POST_SLOTS = 2;
+    VkFence postFenceRing[POST_SLOTS] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    bool postSlotInFlight[POST_SLOTS] = {false, false};
+    uint32_t nextPostSlot = 0;
+    uint32_t lastPostSlot = 0;
     VkCommandBuffer wfCmd[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
     VkFence wfFence[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
     static constexpr uint32_t FRAME_SLOTS = 2;
@@ -303,7 +308,8 @@ struct GpuContext {
     VkBuffer skyboxBuffer = VK_NULL_HANDLE;
     VkBuffer lightBuffer = VK_NULL_HANDLE;
     VkBuffer fogBuffer = VK_NULL_HANDLE;
-    VkBuffer finalOutBuffer = VK_NULL_HANDLE;
+    VkBuffer finalOutBuffer[POST_SLOTS] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkBuffer finalScratchBuffer = VK_NULL_HANDLE;
     VkBuffer lowResOutBuffer = VK_NULL_HANDLE;
     VkBuffer adaptiveBuffer = VK_NULL_HANDLE;
     VkBuffer materialBuffer = VK_NULL_HANDLE;
@@ -354,7 +360,8 @@ struct GpuContext {
     VkDeviceMemory pbrPointMem = VK_NULL_HANDLE;
     VkDeviceMemory skyboxMem = VK_NULL_HANDLE;
     VkDeviceMemory lightMem = VK_NULL_HANDLE;
-    VkDeviceMemory finalOutMem = VK_NULL_HANDLE;
+    VkDeviceMemory finalOutMem[POST_SLOTS] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkDeviceMemory finalScratchMem = VK_NULL_HANDLE;
     VkDeviceMemory lowResOutMem = VK_NULL_HANDLE;
     VkDeviceMemory adaptiveMem = VK_NULL_HANDLE;
     VkDeviceMemory materialMem = VK_NULL_HANDLE;
@@ -390,7 +397,8 @@ struct GpuContext {
     uint32_t currentPBRPointsCap = 0;
     uint32_t currentSkyboxCap = 0;
     uint32_t currentLightCap = 0;
-    uint32_t currentFinalOutCap = 0;
+    uint32_t currentFinalOutCap[POST_SLOTS] = {0, 0};
+    uint32_t currentFinalScratchCap = 0;
     uint32_t currentLowResOutCap = 0;
     uint32_t currentAdaptiveCap = 0;
     uint32_t currentMaterialCap = 0;
@@ -952,6 +960,36 @@ struct GpuContext {
             }
         }
         nextFrameSlot = 0;
+    }
+
+    void destroyPostSlots() {
+        for (uint32_t i = 0; i < POST_SLOTS; ++i) {
+            if (postSlotInFlight[i] && postFenceRing[i] != VK_NULL_HANDLE) {
+                vkWaitForFences(device, 1, &postFenceRing[i], VK_TRUE, UINT64_MAX);
+                postSlotInFlight[i] = false;
+            }
+            if (postFenceRing[i] != VK_NULL_HANDLE) {
+                vkDestroyFence(device, postFenceRing[i], nullptr);
+                postFenceRing[i] = VK_NULL_HANDLE;
+            }
+            if (finalOutBuffer[i]) {
+                vkDestroyBuffer(device, finalOutBuffer[i], nullptr);
+                vkFreeMemory(device, finalOutMem[i], nullptr);
+                finalOutBuffer[i] = VK_NULL_HANDLE;
+                finalOutMem[i] = VK_NULL_HANDLE;
+                currentFinalOutCap[i] = 0;
+            }
+        }
+        if (finalScratchBuffer) {
+            vkDestroyBuffer(device, finalScratchBuffer, nullptr);
+            vkFreeMemory(device, finalScratchMem, nullptr);
+            finalScratchBuffer = VK_NULL_HANDLE;
+            finalScratchMem = VK_NULL_HANDLE;
+            currentFinalScratchCap = 0;
+        }
+        nextPostSlot = 0;
+        lastPostSlot = 0;
+        postPassInFlight = false;
     }
 
     void executeSingleTimeCommands(std::function<void(VkCommandBuffer)> action) {
@@ -1722,19 +1760,43 @@ struct GpuContext {
         copyBuffer(device, outBuffer, fastGBuffer, fastOutSize);
     }
 
-    void dispatchSmoothPasses(int width, int height, int samples, int iters, bool toFinal, bool deferFinalWait = false, int useAlbedo = 1,
-                              int varMode = 0, VkBuffer histFeedback = VK_NULL_HANDLE) {
-        uint32_t finalSize = width * height * 3 * sizeof(float);
-        if(finalSize > currentFinalOutCap) {
-            if(finalOutBuffer) {
-                vkDestroyBuffer(device, finalOutBuffer, nullptr);
-                vkFreeMemory(device, finalOutMem, nullptr);
+    void ensureFinalOutSlot(uint32_t slot, uint32_t finalSize) {
+        if (finalSize > currentFinalOutCap[slot]) {
+            if (postSlotInFlight[slot] && postFenceRing[slot] != VK_NULL_HANDLE) {
+                vkWaitForFences(device, 1, &postFenceRing[slot], VK_TRUE, UINT64_MAX);
+                postSlotInFlight[slot] = false;
             }
-            createBuffer(device, primaryDevice, finalSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, finalOutBuffer, finalOutMem);
-            currentFinalOutCap = finalSize;
+            if (finalOutBuffer[slot]) {
+                vkDestroyBuffer(device, finalOutBuffer[slot], nullptr);
+                vkFreeMemory(device, finalOutMem[slot], nullptr);
+            }
+            createBuffer(device, primaryDevice, finalSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, finalOutBuffer[slot], finalOutMem[slot]);
+            currentFinalOutCap[slot] = finalSize;
+        }
+    }
+
+    void dispatchSmoothPasses(int width, int height, int samples, int iters, bool toFinal, bool deferFinalWait = false, int useAlbedo = 1,
+                              int varMode = 0, VkBuffer histFeedback = VK_NULL_HANDLE, bool intermediate = false) {
+        uint32_t finalSize = width * height * 3 * sizeof(float);
+        uint32_t postSlot = nextPostSlot;
+        VkBuffer finalTarget;
+        if (intermediate) {
+            if (finalSize > currentFinalScratchCap) {
+                if (finalScratchBuffer) {
+                    vkDestroyBuffer(device, finalScratchBuffer, nullptr);
+                    vkFreeMemory(device, finalScratchMem, nullptr);
+                }
+                createBuffer(device, primaryDevice, finalSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                             finalScratchBuffer, finalScratchMem);
+                currentFinalScratchCap = finalSize;
+            }
+            finalTarget = finalScratchBuffer;
+        } else {
+            ensureFinalOutSlot(postSlot, finalSize);
+            finalTarget = finalOutBuffer[postSlot];
         }
 
-        // Ping-pong scratch for the a-trous iterations (5 floats per pixel).
         uint32_t scratchSize = width * height * 5 * sizeof(float);
         if (scratchSize > currentSmoothScratchCap) {
             if (smoothScratchBuffer) {
@@ -1746,7 +1808,6 @@ struct GpuContext {
             currentSmoothScratchCap = scratchSize;
         }
 
-        // Variance ping-pong for the variance-guided luminance weight.
         uint32_t varSize = width * height * sizeof(float);
         if (varSize > svgfVarCap) {
             for (int i = 0; i < 2; ++i) {
@@ -1763,7 +1824,8 @@ struct GpuContext {
         for (int it = 0; it < iters; ++it) {
             bool finalPass = toFinal && (it == iters - 1);
             int step = 1 << it;
-            VkBuffer outBuf = finalPass ? finalOutBuffer : dst;
+            VkBuffer outBuf = finalPass ? finalTarget : dst;
+            if (finalPass && !intermediate) lastPostSlot = postSlot;
 
             VkDescriptorBufferInfo bInfos[7] = {
                 {src, 0, VK_WHOLE_SIZE},
@@ -1806,14 +1868,19 @@ struct GpuContext {
             VkFence fence;
             vkCreateFence(device, &fenceInfo, nullptr, &fence);
             vkQueueSubmit(queue, 1, &submitInfo, fence);
-            if (finalPass && deferFinalWait) {
-                awaitPostPass();
-                if (postFence != VK_NULL_HANDLE) vkDestroyFence(device, postFence, nullptr);
-                postFence = fence;
+            if (finalPass && deferFinalWait && !intermediate) {
+                if (postSlotInFlight[postSlot] && postFenceRing[postSlot] != VK_NULL_HANDLE) {
+                    vkWaitForFences(device, 1, &postFenceRing[postSlot], VK_TRUE, UINT64_MAX);
+                    vkDestroyFence(device, postFenceRing[postSlot], nullptr);
+                }
+                postFenceRing[postSlot] = fence;
+                postSlotInFlight[postSlot] = true;
                 postPassInFlight = true;
+                nextPostSlot = (postSlot + 1) % POST_SLOTS;
             } else {
                 vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
                 vkDestroyFence(device, fence, nullptr);
+                if (finalPass && !intermediate) nextPostSlot = (postSlot + 1) % POST_SLOTS;
             }
 
             if (!finalPass) {
@@ -1886,7 +1953,7 @@ struct GpuContext {
     /// Leaves filtered colour in outBuffer and variance in svgfVarBuffer[0],
     /// then hands off to dispatchSmoothPasses for the a-trous iterations.
     ///@return false if the SVGF pipelines are unavailable and nothing was done.
-    bool submitSVGF(int width, int height, int samples, const GPUCameraData& camData) {
+    bool submitSVGF(int width, int height, int samples, const GPUCameraData& camData, bool presented = true) {
         if (!svgfReprojectPipe || !svgfMomentsPipe || !smoothPipeline) return false;
         if (width <= 0 || height <= 0) return false;
 
@@ -1966,7 +2033,7 @@ struct GpuContext {
                     &mp, sizeof(mp), width, height);
 
         // samples == 1: reproject already divided by the sample count.
-        dispatchSmoothPasses(width, height, 1, iters, true, true, 1, 1, histOut);
+        dispatchSmoothPasses(width, height, 1, iters, true, true, 1, 1, histOut, !presented);
 
         // Retain the dual basis of this frame's camera for next frame.
         Vec3 d = camData.dir, r = camData.right, u = camData.up;
@@ -1995,14 +2062,9 @@ struct GpuContext {
     void dispatchBlend(int width, int height, int lowW, int lowH, float pbrScale, int samples,
                        bool deferWait = false) {
         uint32_t finalSize = width * height * 3 * sizeof(float);
-        if(finalSize > currentFinalOutCap) {
-            if(finalOutBuffer) { 
-                vkDestroyBuffer(device, finalOutBuffer, nullptr);
-                vkFreeMemory(device, finalOutMem, nullptr);
-            }
-            createBuffer(device, primaryDevice, finalSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, finalOutBuffer, finalOutMem);
-            currentFinalOutCap = finalSize;
-        }
+        uint32_t postSlot = nextPostSlot;
+        ensureFinalOutSlot(postSlot, finalSize);
+        lastPostSlot = postSlot;
 
         uint32_t coeffSize = uint32_t(lowW) * uint32_t(lowH) * 24 * sizeof(float);
         if (coeffSize > currentGuidedCoeffCap) {
@@ -2017,7 +2079,7 @@ struct GpuContext {
 
         VkBuffer gbuf = gbufferBuffer ? gbufferBuffer : adaptiveBuffer;
         VkDescriptorBufferInfo gcInfos[4] = { {outBuffer, 0, VK_WHOLE_SIZE}, {lowResOutBuffer, 0, VK_WHOLE_SIZE}, {guidedCoeffBuffer, 0, VK_WHOLE_SIZE}, {gbuf, 0, VK_WHOLE_SIZE} };
-        VkDescriptorBufferInfo bInfos[5]  = { {outBuffer, 0, VK_WHOLE_SIZE}, {lowResOutBuffer, 0, VK_WHOLE_SIZE}, {finalOutBuffer, 0, VK_WHOLE_SIZE}, {guidedCoeffBuffer, 0, VK_WHOLE_SIZE}, {gbuf, 0, VK_WHOLE_SIZE} };
+        VkDescriptorBufferInfo bInfos[5]  = { {outBuffer, 0, VK_WHOLE_SIZE}, {lowResOutBuffer, 0, VK_WHOLE_SIZE}, {finalOutBuffer[postSlot], 0, VK_WHOLE_SIZE}, {guidedCoeffBuffer, 0, VK_WHOLE_SIZE}, {gbuf, 0, VK_WHOLE_SIZE} };
         VkWriteDescriptorSet writes[9] = {};
         for(int i=0; i<4; i++) {
             writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -2073,25 +2135,44 @@ struct GpuContext {
             vkQueueSubmit(queue, 1, &submitInfo, fence);
             vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
             vkDestroyFence(device, fence, nullptr);
+            nextPostSlot = (postSlot + 1) % POST_SLOTS;
             return;
         }
 
-        if (postFence == VK_NULL_HANDLE) {
+        if (postSlotInFlight[postSlot] && postFenceRing[postSlot] != VK_NULL_HANDLE) {
+            vkWaitForFences(device, 1, &postFenceRing[postSlot], VK_TRUE, UINT64_MAX);
+            vkResetFences(device, 1, &postFenceRing[postSlot]);
+        } else if (postFenceRing[postSlot] == VK_NULL_HANDLE) {
             VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-            vkCreateFence(device, &fenceInfo, nullptr, &postFence);
-        } else {
-            awaitPostPass();
-            vkResetFences(device, 1, &postFence);
+            vkCreateFence(device, &fenceInfo, nullptr, &postFenceRing[postSlot]);
         }
-        vkQueueSubmit(queue, 1, &submitInfo, postFence);
+        vkQueueSubmit(queue, 1, &submitInfo, postFenceRing[postSlot]);
+        postSlotInFlight[postSlot] = true;
         postPassInFlight = true;
+        nextPostSlot = (postSlot + 1) % POST_SLOTS;
     }
 
-    ///@brief Waits on the trailing smooth/blend submit, if one is outstanding.
     void awaitPostPass() {
         if (!postPassInFlight) return;
-        vkWaitForFences(device, 1, &postFence, VK_TRUE, UINT64_MAX);
+        for (uint32_t s = 0; s < POST_SLOTS; ++s) {
+            if (postSlotInFlight[s] && postFenceRing[s] != VK_NULL_HANDLE) {
+                vkWaitForFences(device, 1, &postFenceRing[s], VK_TRUE, UINT64_MAX);
+                postSlotInFlight[s] = false;
+            }
+        }
         postPassInFlight = false;
+    }
+
+    ///@brief Wait only on one double-buffered final slot (the one being read back).
+    void awaitPostSlot(uint32_t slot) {
+        if (slot >= POST_SLOTS) return;
+        if (postSlotInFlight[slot] && postFenceRing[slot] != VK_NULL_HANDLE) {
+            vkWaitForFences(device, 1, &postFenceRing[slot], VK_TRUE, UINT64_MAX);
+            postSlotInFlight[slot] = false;
+        }
+        bool any = false;
+        for (uint32_t s = 0; s < POST_SLOTS; ++s) any |= postSlotInFlight[s];
+        postPassInFlight = any;
     }
 
 struct WFPushConstants {

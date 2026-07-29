@@ -464,8 +464,8 @@ int main() {
     octree.setMaxDistance(4096);
 
     // 3. Setup rendering loop
-    int width = 512;
-    int height = 512;
+    int width = 1920;
+    int height = 1080;
     
     const float fps = 60.0f;
     const float durationPerSegment = 10.0f;

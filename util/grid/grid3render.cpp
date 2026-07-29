@@ -1094,21 +1094,22 @@ InFlightFrame Octree<T>::beginRenderFrameVulkan(const Camera& cam, int height, i
     pending.outSize = outSize;
     pending.colorformat = colorformat;
     pending.pending = true;
+    pending.postSlot = vkCtx.lastPostSlot;
     return pending;
 }
 
 template<typename T>
 static frame collectFinalOut(InFlightFrame& pending) {
     if (!pending.pending) return frame();
-    vkCtx.awaitPostPass();
+    vkCtx.awaitPostSlot(pending.postSlot);
     pending.pending = false;
 
     frame outFrame(pending.width, pending.height, pending.colorformat);
     std::vector<float> colorBuffer(size_t(pending.width) * size_t(pending.height) * 3);
     void* mappedData;
-    vkMapMemory(vkCtx.device, vkCtx.finalOutMem, 0, colorBuffer.size() * sizeof(float), 0, &mappedData);
+    vkMapMemory(vkCtx.device, vkCtx.finalOutMem[pending.postSlot], 0, colorBuffer.size() * sizeof(float), 0, &mappedData);
     memcpy(colorBuffer.data(), mappedData, colorBuffer.size() * sizeof(float));
-    vkUnmapMemory(vkCtx.device, vkCtx.finalOutMem);
+    vkUnmapMemory(vkCtx.device, vkCtx.finalOutMem[pending.postSlot]);
 
     outFrame.setData(colorBuffer, frame::colormap::RGB);
     return outFrame;
@@ -1363,6 +1364,7 @@ InFlightFrame Octree<T>::beginBlendedRenderFrameVulkan(const Camera& cam, int he
     pending.outSize = size_t(width) * size_t(height) * 5 * sizeof(float);
     pending.colorformat = colorformat;
     pending.pending = true;
+    pending.postSlot = vkCtx.lastPostSlot;
     return pending;
 }
 
@@ -1786,7 +1788,7 @@ InFlightFrame Octree<T>::beginSuperBlendedRenderFrameVulkan(const Camera& cam, i
 
     runWavefrontTilesMultiGPU(lowW, lowH, pbrCamData, samplesPerPixel, maxBounces, 1, pixFloats, pbrOutSize, true);
 
-    if (!vkCtx.submitSVGF(lowW, lowH, samplesPerPixel, pbrCamData)) {
+    if (!vkCtx.submitSVGF(lowW, lowH, samplesPerPixel, pbrCamData, false)) {
         vkCtx.dispatchSmoothPasses(lowW, lowH, samplesPerPixel, 2, false);
     }
     vkCtx.ensureLowResBuffer(pbrOutSize);
@@ -1803,6 +1805,7 @@ InFlightFrame Octree<T>::beginSuperBlendedRenderFrameVulkan(const Camera& cam, i
     pending.outSize = fastOutSize;
     pending.colorformat = colorformat;
     pending.pending = true;
+    pending.postSlot = vkCtx.lastPostSlot;
     return pending;
 }
 
