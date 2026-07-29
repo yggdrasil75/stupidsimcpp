@@ -14,9 +14,8 @@ void Octree<T>::pixelToRay(const Camera& cam, int px, int py, int width, int hei
     const float tanHalfFov = std::tan(cam.fovRad() * 0.5f);
     const float tanfovx = tanHalfFov * aspect;
     const float tanfovy = tanHalfFov;
-    Vec3 dir = cam.direction.normalized();
-    Vec3 right = cam.right();
-    Vec3 up = cam.up.normalized();
+    Vec3 dir, right, up;
+    cam.orthonormalBasis(right, up, dir);
     float sx = (2.0f * (px + 0.5f) / width - 1.0f) * tanfovx;
     float sy = (1.0f - 2.0f * (py + 0.5f) / height) * tanfovy;
     outOrigin = cam.origin;

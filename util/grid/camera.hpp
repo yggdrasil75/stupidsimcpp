@@ -73,18 +73,47 @@ struct Camera {
     }
 
     Vector3f right() const {
-        return forward().cross(up).normalized();
+        return basisRight();
+    }
+
+    void orthonormalBasis(Vector3f& outRight, Vector3f& outUp, Vector3f& outForward) const {
+        outForward = direction.normalized();
+
+        Vector3f desiredUp = up;
+        if (!desiredUp.allFinite() || desiredUp.squaredNorm() < 1e-12f) {
+            desiredUp = Vector3f(0, 1, 0);
+        }
+
+        Vector3f u = desiredUp - outForward * outForward.dot(desiredUp);
+        if (u.squaredNorm() < 1e-8f) {
+            Vector3f fallback = (std::fabs(outForward.y()) < 0.999f)
+                                    ? Vector3f(0, 1, 0)
+                                    : Vector3f(0, 0, 1);
+            u = fallback - outForward * outForward.dot(fallback);
+        }
+        outUp = u.normalized();
+        outRight = outForward.cross(outUp).normalized();
+    }
+
+    Vector3f basisRight() const {
+        Vector3f r, u, f;
+        orthonormalBasis(r, u, f);
+        return r;
+    }
+
+    Vector3f basisUp() const {
+        Vector3f r, u, f;
+        orthonormalBasis(r, u, f);
+        return u;
     }
 
     float fovRad() const {
         return fov * (M_PI / 180.0f);
     }
     
-    // Look at a specific point
     void lookAt(const Vector3f& target) {
         direction = (target - origin).normalized();
         
-        // Recalculate up vector
         Vector3f worldUp(0, 1, 0);
         if (direction.cross(worldUp).norm() < 0.001f) {
             worldUp = Vector3f(0, 0, 1);
@@ -94,7 +123,6 @@ struct Camera {
         up = right.cross(direction).normalized();
     }
     
-    // Set position directly
     void setPosition(const Vector3f& pos) {
         origin = pos;
     }

@@ -92,6 +92,10 @@ private:
 
     bool orbiting = false;
     Vec3 orbitTarget = Vec3::Zero();
+    float orbitAzimuth = 0.0f;
+    float orbitElevation = 0.0f;
+    float orbitRadius = 6.0f;
+    bool orbitInit = false;
 
 public:
     EditorUI() {
@@ -168,19 +172,31 @@ private:
         cam.origin += right * (-dx) + up * dy;
     }
 
-    void orbitCamera(float dx, float dy) {
+    void beginOrbit() {
         Vec3 offset = cam.origin - orbitTarget;
-        float radius = offset.norm();
-        Eigen::Matrix3f ry;
-        ry = Eigen::AngleAxisf(-dx, cam.up.normalized());
-        offset = ry * offset;
-        Vec3 right = cam.direction.cross(cam.up).normalized();
-        Eigen::Matrix3f rp;
-        rp = Eigen::AngleAxisf(-dy, right);
-        offset = rp * offset;
-        cam.origin = orbitTarget + offset.normalized() * radius;
-        cam.direction = (orbitTarget - cam.origin).normalized();
-        cam.up = Vec3(0, 1, 0);
+        orbitRadius = offset.norm();
+        if (orbitRadius < 1e-4f) orbitRadius = 1e-4f;
+        Vec3 n = offset / orbitRadius;
+        orbitElevation = std::asin(std::clamp(n.y(), -1.0f, 1.0f));
+        orbitAzimuth = std::atan2(n.x(), n.z());
+        orbitInit = true;
+    }
+
+    void orbitCamera(float dx, float dy) {
+        if (!orbitInit) beginOrbit();
+        orbitAzimuth += dx;
+        orbitElevation += dy;
+
+        float ce = std::cos(orbitElevation);
+        float se = std::sin(orbitElevation);
+        float ca = std::cos(orbitAzimuth);
+        float sa = std::sin(orbitAzimuth);
+
+        Vec3 offset(ce * sa, se, ce * ca);
+        cam.origin = orbitTarget + offset * orbitRadius;
+        cam.direction = (-offset).normalized();
+        Vec3 right(ca, 0.0f, -sa);
+        cam.up = right.cross(cam.direction).normalized();
     }
 
     static bool numF(const char* label, float* v, float step = 0.01f) {
@@ -441,8 +457,10 @@ private:
         bool hovered = ImGui::IsItemHovered();
         ImGuiIO& io = ImGui::GetIO();
 
-        if (hovered && io.MouseWheel != 0.0f)
+        if (hovered && io.MouseWheel != 0.0f) {
             cam.origin += cam.direction.normalized() * io.MouseWheel * (moveSpeed * 0.15f);
+            orbitInit = false;
+        }
 
         if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Middle)) {
             if (io.KeyShift) {
@@ -452,6 +470,7 @@ private:
                 else
                     orbitTarget = cam.origin + cam.direction.normalized() * 6.0f;
                 orbiting = true;
+                beginOrbit();
             }
         }
         if (ImGui::IsMouseDown(ImGuiMouseButton_Middle) && (hovered || orbiting)) {

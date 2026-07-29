@@ -38,6 +38,9 @@ endif
 
 CXXFLAGS = $(BASE_CXXFLAGS) $(SIMD_CXXFLAGS) 
 
+CHAR_CXXFLAGS = -std=c++23 -O3 -fopenmp -march=native -g $(SIMD_CXXFLAGS)
+CHAR_LDFLAGS = -ltbb
+
 # Source files
 # SRC := $(SRC_DIR)/ptest.cpp
 # SRC := $(SRC_DIR)/naturetest.cpp
@@ -52,9 +55,11 @@ SRC += $(SUPPORT_SRC)
 SUPPORT_OBJS = $(addprefix $(OBJ_DIR)/, $(addsuffix .o, $(basename $(notdir $(SUPPORT_SRC)))))
 OBJS = $(addprefix $(OBJ_DIR)/, $(addsuffix .o, $(basename $(notdir $(SRC)))))
 EDITOR_OBJS = $(OBJ_DIR)/editor.o $(SUPPORT_OBJS)
+CHARACTER_OBJS = $(OBJ_DIR)/charactertest.o
 UNAME_S := $(shell uname -s)
 EXE := $(BIN_DIR)/g2gradc
 EDITOR_EXE := $(BIN_DIR)/editor
+CHARACTER_EXE := $(BIN_DIR)/charactertest
 
 GLSLC := glslc --target-env=vulkan1.3
 
@@ -85,7 +90,7 @@ $(OBJ_DIR)/%.o: $(STB_DIR)/%.cpp
 $(OBJ_DIR)/%.o: $(GRID_DIR)/%.cpp
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
-all: $(EXE) $(EDITOR_EXE) $(SHADER_SPVS)
+all: $(EXE) $(EDITOR_EXE) $(CHARACTER_EXE) $(SHADER_SPVS)
 	@echo "Build complete for $(UNAME_S)"
 
 $(BIN_DIR)/wf_init.spv $(BIN_DIR)/wf_args.spv $(BIN_DIR)/wf_extend.spv $(BIN_DIR)/wf_shade.spv $(BIN_DIR)/wf_shadow.spv $(BIN_DIR)/wf_finalize.spv $(BIN_DIR)/ddgi_update.spv: $(SHADER_DIR)/wf_common.glsl $(SHADER_DIR)/vct_cone.glsl
@@ -105,5 +110,14 @@ $(EDITOR_EXE): $(EDITOR_OBJS)
 editor: $(EDITOR_EXE) $(SHADER_SPVS)
 	@echo "Editor build complete for $(UNAME_S)"
 
+$(CHARACTER_EXE): $(CHARACTER_OBJS)
+	$(CXX) -o $@ $^ $(CHAR_CXXFLAGS) $(CHAR_LDFLAGS)
+
+$(OBJ_DIR)/charactertest.o: $(SRC_DIR)/charactertest.cpp
+	$(CXX) $(CHAR_CXXFLAGS) -c -o $@ $<
+
+charactertest: $(CHARACTER_EXE)
+	@echo "Character generator build complete for $(UNAME_S)"
+
 clean:
-	rm -f $(EXE) $(EDITOR_EXE) $(OBJS) $(EDITOR_OBJS) $(SHADER_SPVS)
+	rm -f $(EXE) $(EDITOR_EXE) $(CHARACTER_EXE) $(OBJS) $(EDITOR_OBJS) $(CHARACTER_OBJS) $(SHADER_SPVS)

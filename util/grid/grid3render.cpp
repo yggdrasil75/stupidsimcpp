@@ -387,9 +387,8 @@ frame Octree<T>::fastRenderFrame(const Camera& cam, int height, int width, frame
     const RenderBuffer_<T>& shared_buffer = tl_buffer;
 
     Vec3 origin = cam.origin;
-    Vec3 dir = cam.direction.normalized();
-    Vec3 up = cam.up.normalized();
-    Vec3 right = cam.right();
+    Vec3 dir, up, right;
+    cam.orthonormalBasis(right, up, dir);
     
     frame outFrame(width, height, colorformat);
     std::vector<float> colorBuffer;
@@ -1003,8 +1002,10 @@ InFlightFrame Octree<T>::beginRenderFrameVulkan(const Camera& cam, int height, i
     size_t skyW, skyH;
     const std::vector<Eigen::Vector4f>& skyData = getCachedSkyData(skyW, skyH);
 
+    Vec3 camBasisRight_, camBasisUp_, camBasisFwd_;
+    cam.orthonormalBasis(camBasisRight_, camBasisUp_, camBasisFwd_);
     GPUCameraData camData = {
-        cam.origin, lodMinDistance_, cam.direction.normalized(), invLodf, cam.up.normalized(), 0.1f, cam.right(), maxDistance_,
+        cam.origin, lodMinDistance_, camBasisFwd_, invLodf, camBasisUp_, 0.1f, camBasisRight_, maxDistance_,
         skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
         width, height, maxBounces, useLod ? 1 : 0, invFogRange, frameCounter_,
         (int)skyW, (int)skyH, 0, 0, globalIllumination ? 1 : 0, 
@@ -1164,8 +1165,10 @@ InFlightFrame Octree<T>::beginFastRenderFrameVulkan(const Camera& cam, int heigh
     float tanHalfFov = tan(fovRad * 0.5f);
     float invFogRange = 1.0f / std::max(0.001f, maxDistance_ - lodMinDistance_);
 
+    Vec3 camBasisRight_, camBasisUp_, camBasisFwd_;
+    cam.orthonormalBasis(camBasisRight_, camBasisUp_, camBasisFwd_);
     GPUCameraData camData = {
-        cam.origin, lodMinDistance_, cam.direction.normalized(), invLodf, cam.up.normalized(), 0.1f, cam.right(), maxDistance_,
+        cam.origin, lodMinDistance_, camBasisFwd_, invLodf, camBasisUp_, 0.1f, camBasisRight_, maxDistance_,
         skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
         width, height, 1, 1, invFogRange, frameCounter_++, (int)skyW, (int)skyH, 0, 1, 0, 
         0, (uint32_t)gpuPoints.size(), 0, 0, emissiveCount, 1
@@ -1309,8 +1312,10 @@ InFlightFrame Octree<T>::beginBlendedRenderFrameVulkan(const Camera& cam, int he
     int lowW = std::max(1, static_cast<int>(width * pbrScale));
     int lowH = std::max(1, static_cast<int>(height * pbrScale));
 
+    Vec3 camBasisRight_, camBasisUp_, camBasisFwd_;
+    cam.orthonormalBasis(camBasisRight_, camBasisUp_, camBasisFwd_);
     GPUCameraData pbrCamData = {
-        cam.origin, lodMinDistance_, cam.direction.normalized(), invLodf, cam.up.normalized(), 0.1f, cam.right(), maxDistance_,
+        cam.origin, lodMinDistance_, camBasisFwd_, invLodf, camBasisUp_, 0.1f, camBasisRight_, maxDistance_,
         skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
         lowW, lowH, maxBounces, useLod ? 1 : 0, invFogRange, frameCounter_,
         (int)skyW, (int)skyH, 0, 0, globalIllumination ? 1 : 0, 
@@ -1336,7 +1341,7 @@ InFlightFrame Octree<T>::beginBlendedRenderFrameVulkan(const Camera& cam, int he
     vkCtx.copyBuffer(vkCtx.device, vkCtx.outBuffer, vkCtx.lowResOutBuffer, pbrOutSize);
 
     GPUCameraData fastCamData = {
-        cam.origin, lodMinDistance_, cam.direction.normalized(), invLodf, cam.up.normalized(), 0.1f, cam.right(), maxDistance_,
+        cam.origin, lodMinDistance_, camBasisFwd_, invLodf, camBasisUp_, 0.1f, camBasisRight_, maxDistance_,
         skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
         width, height, 1, useLod ? 1 : 0, invFogRange, frameCounter_++, (int)skyW, (int)skyH, 0, 1, 0, 
         0, (uint32_t)gpuFastPoints.size(), 0, 0, emissiveCount, 1
@@ -1471,8 +1476,10 @@ InFlightFrame Octree<T>::beginGameStyleRenderFrame(const Camera& cam, int height
     vkCtx.awaitAllFastFrames();
     vkCtx.updateSkyboxBuffer(skyData);
 
+    Vec3 camBasisRight_, camBasisUp_, camBasisFwd_;
+    cam.orthonormalBasis(camBasisRight_, camBasisUp_, camBasisFwd_);
     GPUCameraData fastCamData = {
-        cam.origin, lodMinDistance_, cam.direction.normalized(), invLodf, cam.up.normalized(), 0.1f, cam.right(), maxDistance_,
+        cam.origin, lodMinDistance_, camBasisFwd_, invLodf, camBasisUp_, 0.1f, camBasisRight_, maxDistance_,
         skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
         width, height, 1, 1, invFogRange, frameCounter_++, (int)skyW, (int)skyH, 0, 1, 2,
         0, (uint32_t)gpuFastPoints.size(), 0, 0, emissiveCount, 1
@@ -1637,8 +1644,10 @@ InFlightFrame Octree<T>::beginSuperBlendedRenderFrameVulkan(const Camera& cam, i
     int lowW = std::max(1, static_cast<int>(width * ptScale));
     int lowH = std::max(1, static_cast<int>(height * ptScale));
 
+    Vec3 camBasisRight_, camBasisUp_, camBasisFwd_;
+    cam.orthonormalBasis(camBasisRight_, camBasisUp_, camBasisFwd_);
     GPUCameraData fastCamData = {
-        cam.origin, lodMinDistance_, cam.direction.normalized(), invLodf, cam.up.normalized(), 0.1f, cam.right(), maxDistance_,
+        cam.origin, lodMinDistance_, camBasisFwd_, invLodf, camBasisUp_, 0.1f, camBasisRight_, maxDistance_,
         skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
         width, height, 1, useLod ? 1 : 0, invFogRange, frameCounter_, (int)skyW, (int)skyH, 0, 1, 2,
         0, (uint32_t)gpuFastPoints.size(), 0, 0, emissiveCount, 1
@@ -1726,7 +1735,7 @@ InFlightFrame Octree<T>::beginSuperBlendedRenderFrameVulkan(const Camera& cam, i
     }
 
     GPUCameraData pbrCamData = {
-        cam.origin, lodMinDistance_, cam.direction.normalized(), invLodf, cam.up.normalized(), 0.1f, cam.right(), maxDistance_,
+        cam.origin, lodMinDistance_, camBasisFwd_, invLodf, camBasisUp_, 0.1f, camBasisRight_, maxDistance_,
         skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
         lowW, lowH, maxBounces, useLod ? 1 : 0, invFogRange, frameCounter_++,
         (int)skyW, (int)skyH, 0, 0, globalIllumination ? 1 : 0,
