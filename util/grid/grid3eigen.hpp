@@ -651,24 +651,6 @@ private:
         }
         return removed;
     }
-    
-    ///@brief Fully purges an object by ID from the tree and registry
-    ///@param objectId The target object ID
-    ///@return True if successfully removed at least some related components
-    bool removeObject(int objectId) {
-        std::vector<std::shared_ptr<NodeData>> nodes;
-        uint32_t startNode = collectNodesByObjectId(objectId, nodes);
-        if (nodes.empty()) return false;
-
-        size_t removed = removeObjectBatchRecursive(startNode, objectId);
-        size -= removed;
-
-        {
-            u_lock lock(objectsMutex_);
-            objects_.erase(objectId);
-        }
-        return true;
-    }
 
     ///@brief Erases specific nodes dynamically without needing bounds search for each
     ///@param node The common ancestor node to parse from
@@ -729,6 +711,24 @@ public:
         auto it = objects_.find(id);
         if (it != objects_.end()) return it->second;
         return nullptr;
+    }
+    
+    ///@brief Fully purges an object by ID from the tree and registry
+    ///@param objectId The target object ID
+    ///@return True if successfully removed at least some related components
+    bool removeObject(int objectId) {
+        std::vector<std::shared_ptr<NodeData>> nodes;
+        uint32_t startNode = collectNodesByObjectId(objectId, nodes);
+        if (nodes.empty()) return false;
+
+        size_t removed = removeObjectBatchRecursive(startNode, objectId);
+        size -= removed;
+
+        {
+            u_lock lock(objectsMutex_);
+            objects_.erase(objectId);
+        }
+        return true;
     }
 
     ///@brief Looks up a render material by its grid-global index

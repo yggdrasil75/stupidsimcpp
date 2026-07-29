@@ -16,6 +16,7 @@
 #include "../util/grid/grid3physics.cpp"
 #include "../util/grid/grid3edit.cpp"
 #include "../util/timing_decorator.cpp"
+#include "../util/character.hpp"
 
 using Vec3 = Eigen::Vector3f;
 using Grid3 = Grid::Octree<int>;
@@ -89,6 +90,11 @@ private:
 
     float moveSpeed = 4.0f;
     float orbitSpeed = 1.5f;
+
+    float charHeight = 2.0f;
+    float charDetail = 0.02f;
+    float charCenter[3] = {0.0f, 0.0f, 0.0f};
+    int   lastCharCount = 0;
 
     bool orbiting = false;
     Vec3 orbitTarget = Vec3::Zero();
@@ -277,6 +283,81 @@ private:
         if (id >= 0) editObjectId = id;
     }
 
+    void clearCharacterLayer(int oid) {
+        // remove any existing voxels for this layer so regenerating is clean
+        grid.removeObject(oid);
+    }
+
+    void generateCharacter(int layer) {
+        // layer: 0 = all, 1 = skeleton, 2 = muscle, 3 = flesh
+        Vec3 c(charCenter[0], charCenter[1], charCenter[2]);
+        size_t n = 0;
+        switch (layer) {
+            case 1:
+                clearCharacterLayer(Character::OID_SKELETON);
+                n = Character::buildSkeleton(grid, charHeight, charDetail, c);
+                editObjectId = Character::OID_SKELETON;
+                break;
+            case 2:
+                clearCharacterLayer(Character::OID_MUSCLE);
+                n = Character::buildMuscle(grid, charHeight, charDetail, c);
+                editObjectId = Character::OID_MUSCLE;
+                break;
+            case 3:
+                clearCharacterLayer(Character::OID_FLESH);
+                n = Character::buildFlesh(grid, charHeight, charDetail, c);
+                editObjectId = Character::OID_FLESH;
+                break;
+            default:
+                clearCharacterLayer(Character::OID_SKELETON);
+                clearCharacterLayer(Character::OID_MUSCLE);
+                clearCharacterLayer(Character::OID_FLESH);
+                n = Character::buildCharacter(grid, charHeight, charDetail, c);
+                editObjectId = Character::OID_FLESH;
+                break;
+        }
+        lastCharCount = (int)n;
+    }
+
+    void drawCharacterTab() {
+        ImGui::TextWrapped("Generate a voxel humanoid in place so you can view it "
+                           "without exporting. Each layer can be built on its own.");
+        ImGui::Separator();
+        numF("Height", &charHeight, 0.1f);
+        numF("Detail (voxel size)", &charDetail, 0.005f);
+        if (charDetail < 0.005f) charDetail = 0.005f;
+        ImGui::InputFloat3("Center", charCenter, "%.3f");
+
+        // rough cost hint so a user doesn't accidentally build millions of voxels
+        float span = charHeight * 0.9f;
+        double approx = std::pow(span / std::max(charDetail, 0.001f), 3.0) * 0.12;
+        ImGui::TextDisabled("~%.0fk voxel candidates at this detail", approx / 1000.0);
+
+        ImGui::SeparatorText("Generate");
+        if (ImGui::Button("Skeleton")) generateCharacter(1);
+        ImGui::SameLine();
+        if (ImGui::Button("Muscle")) generateCharacter(2);
+        ImGui::SameLine();
+        if (ImGui::Button("Flesh")) generateCharacter(3);
+
+        if (ImGui::Button("Build All Layers")) generateCharacter(0);
+        ImGui::SameLine();
+        if (ImGui::Button("Clear Character")) {
+            clearCharacterLayer(Character::OID_SKELETON);
+            clearCharacterLayer(Character::OID_MUSCLE);
+            clearCharacterLayer(Character::OID_FLESH);
+            lastCharCount = 0;
+        }
+
+        if (lastCharCount > 0)
+            ImGui::Text("Inserted %d voxels (active id %d).", lastCharCount, editObjectId);
+
+        ImGui::SeparatorText("View tips");
+        ImGui::TextWrapped("Build Skeleton alone to inspect bones. Build Muscle to "
+                           "see the layer wrap the skeleton. Flesh is the outer skin. "
+                           "Use the Camera tab / orbit controls to look around.");
+    }
+
     void drawToolsTab() {
         ImGui::Text("Active object id");
         numI("##objid", &editObjectId);
@@ -392,6 +473,7 @@ private:
         if (ImGui::BeginTabBar("tabs")) {
             if (ImGui::BeginTabItem("Primitives")) { drawPrimTab(); ImGui::EndTabItem(); }
             if (ImGui::BeginTabItem("Tools")) { drawToolsTab(); ImGui::EndTabItem(); }
+            if (ImGui::BeginTabItem("Character")) { drawCharacterTab(); ImGui::EndTabItem(); }
             if (ImGui::BeginTabItem("Render")) { drawRenderTab(); ImGui::EndTabItem(); }
             if (ImGui::BeginTabItem("Camera")) { drawCameraTab(); ImGui::EndTabItem(); }
             if (ImGui::BeginTabItem("File")) { drawFileTab(); ImGui::EndTabItem(); }
