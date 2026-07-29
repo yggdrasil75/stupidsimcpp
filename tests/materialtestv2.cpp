@@ -27,9 +27,8 @@ static float smoothNoise(float x, float y, float z, float scale) {
     float val = std::sin(nx + std::cos(ny)) + std::sin(ny + std::cos(nz)) + std::sin(nz + std::cos(nx));
     return (val + 3.0f) / 6.0f;
 }
-static float clamp01(float v) { return std::max(0.0f, std::min(1.0f, v)); }
 static float smoothstep01(float x) {
-    float t = clamp01(x);
+    float t = std::clamp(x, 0.0f, 1.0f);
     return t * t * (3.0f - 2.0f * t);
 }
 
@@ -181,72 +180,157 @@ static size_t createFluidBody(Grid::Octree<int>& octree, const Vec3& center, con
     return pts.size();
 }
 
-static constexpr float ROOM_SPAN   = 12.0f;
+static constexpr float ROOM_SPAN = 12.0f;
 static constexpr float ROOM_HALF_W = 5.0f;
-static constexpr float FLOOR_Z     = -0.6f;
-static constexpr float CEIL_Z      = 7.4f;
+static constexpr float FLOOR_Z = -0.6f;
+static constexpr float CEIL_Z = 7.4f;
 static constexpr float DOOR_HALF_W = 1.6f;
 
 static float roomCenterY(int i) { return i * ROOM_SPAN; }
 
-static void buildRoomShell(Grid::Octree<int>& octree, int roomIdx, const Vec3& floorA, const Vec3& floorB,
-                           bool emissiveCeiling, float ceilEmit, const Vec3& ceilColor) {
+namespace WallCol {
+    static const Vec3 NORTH_A(0.75f, 0.10f, 0.12f), NORTH_B(0.95f, 0.55f, 0.60f); // red / pink
+    static const Vec3 SOUTH_A(0.10f, 0.20f, 0.75f), SOUTH_B(0.55f, 0.70f, 0.95f); // blue / light blue
+    static const Vec3 WEST_A (0.10f, 0.55f, 0.15f), WEST_B (0.55f, 0.90f, 0.55f); // green / light green
+    static const Vec3 EAST_A (0.45f, 0.40f, 0.05f), EAST_B (0.95f, 0.85f, 0.15f); // dark / bright yellow
+    static const Vec3 FLOOR_A(0.03f, 0.03f, 0.03f), FLOOR_B(0.95f, 0.95f, 0.95f); // black / white
+}
+
+static void createCheckerWall(Grid::Octree<int>& octree, const Vec3& center, const Vec3& size,
+                              const Vec3& c1, const Vec3& c2, float checker, float rough, float metal,
+                              int oid = 100, float step = 0.2f) {
+    Vec3 half = size / 2.0f, minB = center - half, maxB = center + half;
+    for (float x = minB.x(); x <= maxB.x(); x += step)
+        for (float y = minB.y(); y <= maxB.y(); y += step)
+            for (float z = minB.z(); z <= maxB.z(); z += step) {
+                int cx = (int)std::floor(x / checker);
+                int cy = (int)std::floor(y / checker);
+                int cz = (int)std::floor(z / checker);
+                bool even = ((cx + cy + cz) & 1) == 0;
+                octree.insert(1, Vec3(x, y, z), true, even ? c1 : c2, step, true, oid,
+                              0.0f, rough, metal, 0.0f, 1.46f);
+            }
+}
+
+enum class Finish { CONCRETE, METAL, GLOSSY };
+
+static void finishParams(Finish f, float& rough, float& metal) {
+    switch (f) {
+        case Finish::METAL:
+            rough = 0.12f;
+            metal = 1.0f;
+            break;
+        case Finish::GLOSSY:
+            rough = 0.08f;
+            metal = 0.0f;
+            break;
+        case Finish::CONCRETE:
+        default:
+            rough = 0.85f;
+            metal = 0.0f;
+            break;
+    }
+}
+
+static void buildRoomShell(Grid::Octree<int>& octree, int roomIdx, Finish wallFinish, Finish floorFinish,
+                           float ceilEmit, const Vec3& ceilColor, int ceilOid, float floorZ = FLOOR_Z) {
     float cy = roomCenterY(roomIdx);
-    Vec3 wallGray(0.35f, 0.35f, 0.38f);
-    createCheckerBox(octree, Vec3(0, cy, FLOOR_Z), Vec3(2 * ROOM_HALF_W, ROOM_SPAN, 0.2f), floorA, floorB, 1.0f, 100, 0.55f, 0.0f, 0.18f);
-    if (emissiveCeiling) {
+    float wr, wm, fr, fm;
+    finishParams(wallFinish, wr, wm);
+    finishParams(floorFinish, fr, fm);
+    const float wallThick = 0.3f;
+    const float midZ = (floorZ + CEIL_Z) / 2.0f;
+    const float wallH = CEIL_Z - floorZ;
+
+    createCheckerWall(octree, Vec3(0, cy, floorZ), Vec3(2 * ROOM_HALF_W, ROOM_SPAN, 0.2f),
+                      WallCol::FLOOR_A, WallCol::FLOOR_B, 1.0f, fr, fm, 100);
+
+    createCheckerWall(octree, Vec3(ROOM_HALF_W, cy, midZ), Vec3(wallThick, ROOM_SPAN, wallH),
+                      WallCol::EAST_A, WallCol::EAST_B, 1.0f, wr, wm, 100);
+
+    createCheckerWall(octree, Vec3(-ROOM_HALF_W, cy, midZ), Vec3(wallThick, ROOM_SPAN, wallH),
+                      WallCol::WEST_A, WallCol::WEST_B, 1.0f, wr, wm, 100);
+
+    {
         float step = 0.2f;
+        float lightZ = CEIL_Z - 0.3f;
         for (float x = -ROOM_HALF_W + 1.0f; x <= ROOM_HALF_W - 1.0f; x += step)
             for (float y = cy - ROOM_SPAN / 2 + 1.0f; y <= cy + ROOM_SPAN / 2 - 1.0f; y += step) {
-                Vec3 p(x, y, CEIL_Z);
-                octree.insert(1, p, true, ceilColor, step, true, 300 + roomIdx, ceilEmit, 0.9f, 0.0f, 0.0f, 1.45f);
+                Vec3 p(x, y, lightZ);
+                octree.insert(1, p, true, ceilColor, step, true, ceilOid, ceilEmit, 0.9f, 0.0f, 0.0f, 1.45f);
                 octree.setEmittance(p, ceilColor * ceilEmit, 0.01f);
             }
-        createBox(octree, Vec3(0, cy, CEIL_Z + 0.02f), Vec3(2 * ROOM_HALF_W, ROOM_SPAN, 0.18f), Vec3(0.02f, 0.02f, 0.02f), 0.0f, 0.9f, 0.1f, 0.0f, 1.45f, Vec3::Zero(), 100, Grid::BodyType::STATIC, 1.0f, 0.4f);
-    } else {
-        createBox(octree, Vec3(0, cy, CEIL_Z), Vec3(2 * ROOM_HALF_W, ROOM_SPAN, 0.2f), Vec3(0.05f, 0.05f, 0.06f), 0.0f, 0.9f, 0.05f, 0.0f, 1.45f, Vec3::Zero(), 100, Grid::BodyType::STATIC, 1.0f, 0.3f);
+        createBox(octree, Vec3(0, cy, CEIL_Z), Vec3(2 * ROOM_HALF_W, ROOM_SPAN, 0.18f),
+                  Vec3(0.02f, 0.02f, 0.02f), 0.0f, 0.9f, 0.1f, 0.0f, 1.45f, Vec3::Zero(), 100,
+                  Grid::BodyType::STATIC, 1.0f, 0.4f);
     }
-    createBox(octree, Vec3( ROOM_HALF_W, cy, (FLOOR_Z + CEIL_Z) / 2), Vec3(0.2f, ROOM_SPAN, CEIL_Z - FLOOR_Z), wallGray, 0.0f, 0.8f, 0.0f, 0.0f, 1.45f, Vec3::Zero(), 100, Grid::BodyType::STATIC, 1.0f, 0.25f);
-    createBox(octree, Vec3(-ROOM_HALF_W, cy, (FLOOR_Z + CEIL_Z) / 2), Vec3(0.2f, ROOM_SPAN, CEIL_Z - FLOOR_Z), wallGray, 0.0f, 0.8f, 0.0f, 0.0f, 1.45f, Vec3::Zero(), 100, Grid::BodyType::STATIC, 1.0f, 0.25f);
 }
 
-static void buildPartition(Grid::Octree<int>& octree, float boundaryY) {
+static void buildPartition(Grid::Octree<int>& octree, float boundaryY, bool northFace, bool southFace) {
     float step = 0.2f;
-    Vec3 wallGray(0.30f, 0.30f, 0.33f);
-    for (float x = -ROOM_HALF_W; x <= ROOM_HALF_W; x += step)
-        for (float z = FLOOR_Z; z <= CEIL_Z; z += step) {
-            bool inDoor = (std::abs(x) < DOOR_HALF_W) && (z < CEIL_Z - 2.5f);
-            if (inDoor) continue;
-            octree.insert(1, Vec3(x, boundaryY, z), true, wallGray, step, true, 100, 0.0f, 0.8f, 0.0f, 0.0f, 1.45f);
-        }
-}
-
-static void buildEndCap(Grid::Octree<int>& octree, float y) {
-    createBox(octree, Vec3(0, y, (FLOOR_Z + CEIL_Z) / 2), Vec3(2 * ROOM_HALF_W, 0.2f, CEIL_Z - FLOOR_Z), Vec3(0.25f, 0.25f, 0.28f), 0.0f, 0.85f, 0.0f, 0.0f, 1.45f, Vec3::Zero(), 100, Grid::BodyType::STATIC, 1.0f, 0.25f);
+    float midZ = (FLOOR_Z + CEIL_Z) / 2.0f;
+    if (northFace)
+        for (float x = -ROOM_HALF_W; x <= ROOM_HALF_W; x += step)
+            for (float z = FLOOR_Z; z <= CEIL_Z; z += step) {
+                if ((std::abs(x) < DOOR_HALF_W) && (z < CEIL_Z - 2.5f)) continue;
+                int cx = (int)std::floor(x / 1.0f), cz = (int)std::floor(z / 1.0f);
+                bool even = ((cx + cz) & 1) == 0;
+                octree.insert(1, Vec3(x, boundaryY - 0.12f, z), true,
+                              even ? WallCol::NORTH_A : WallCol::NORTH_B, step, true, 100,
+                              0.0f, 0.85f, 0.0f, 0.0f, 1.45f);
+            }
+    if (southFace)
+        for (float x = -ROOM_HALF_W; x <= ROOM_HALF_W; x += step)
+            for (float z = FLOOR_Z; z <= CEIL_Z; z += step) {
+                if ((std::abs(x) < DOOR_HALF_W) && (z < CEIL_Z - 2.5f)) continue;
+                int cx = (int)std::floor(x / 1.0f), cz = (int)std::floor(z / 1.0f);
+                bool even = ((cx + cz) & 1) == 0;
+                octree.insert(1, Vec3(x, boundaryY + 0.12f, z), true,
+                              even ? WallCol::SOUTH_A : WallCol::SOUTH_B, step, true, 100,
+                              0.0f, 0.85f, 0.0f, 0.0f, 1.45f);
+            }
 }
 
 namespace OID {
-    constexpr int DRIP_DROP  = 210;
-    constexpr int FLUID_TANK = 211;
-    constexpr int FLICKER_A  = 340;
-    constexpr int FLICKER_B  = 341;
-    constexpr int FLICKER_C  = 342;
-    constexpr int FLASHLIGHT = 350;
+    constexpr int FLICKER_CEIL = 360;
+    constexpr int WATER_TANK = 370;
+    constexpr int COLOR_CEIL = 380;
+    constexpr int ROVE_RED = 390;
+    constexpr int ROVE_BLUE = 391;
+    constexpr int ICE_BLOCK = 400;
+    constexpr int HEAT_CEIL = 401;
+    constexpr int ROVE_GREEN = 402;
 }
 
+enum Room {
+    R_GENERIC = 0,
+    R_FLICKER = 1,
+    R_GLASS = 2,
+    R_WATER = 3,
+    R_COLOR = 4,
+    R_METAL = 5,
+    R_GLOSSY = 6,
+    R_ROVING = 7,
+    R_COMBINED= 8,
+    NUM_ROOMS = 9
+};
+
+static const Vec3 BRIGHT_LIGHT(1.0f, 0.98f, 0.94f);
+static constexpr float BRIGHT_EMIT = 1.6f;
+
 int main() {
-    std::cout << "Initializing multi-room walkthrough scene..." << std::endl;
+    std::cout << "Initializing material test walkthrough..." << std::endl;
 
-    const int   NUM_ROOMS = 6;
     const float corridorStartY = roomCenterY(0) - ROOM_SPAN / 2;
-    const float corridorEndY   = roomCenterY(NUM_ROOMS - 1) + ROOM_SPAN / 2;
+    const float corridorEndY = roomCenterY(NUM_ROOMS - 1) + ROOM_SPAN / 2;
+    const float WATER_FLOOR_Z = FLOOR_Z - 1.0f;
 
-    Vec3 minBound(-ROOM_HALF_W - 2, corridorStartY - 3, FLOOR_Z - 3);
+    Vec3 minBound(-ROOM_HALF_W - 2, corridorStartY - 3, WATER_FLOOR_Z - 3);
     Vec3 maxBound( ROOM_HALF_W + 2, corridorEndY + 3,   CEIL_Z + 3);
     Grid::Octree<int> octree(minBound, maxBound, "output/renderscene", 4);
 
     octree.setBackgroundColor(Vec3(0.01f, 0.01f, 0.015f));
-    octree.setSkylight(Vec3(0.015f, 0.015f, 0.02f));
+    octree.setSkylight(Vec3(0.02f, 0.02f, 0.025f));
     octree.setphys_gravityCenter(Vec3(0.0f, 0.0f, -1000.0f));
     octree.setPhysicsSmoothingRadius(0.2f);
     octree.setPhysicsGasConstant(100.0f);
@@ -255,112 +339,96 @@ int main() {
     octree.setPhysicsAirDensity(1.225f);
 
     std::cout << "Building rooms..." << std::endl;
-    Vec3 checkA(0.72f, 0.72f, 0.74f), checkB(0.14f, 0.14f, 0.16f);
+
+    auto ceilFor = [&](int r, float& emit, Vec3& col, int& oid) {
+        emit = BRIGHT_EMIT;
+        col = BRIGHT_LIGHT;
+        oid = 300 + r;
+        switch (r) {
+            case R_FLICKER:
+                oid = OID::FLICKER_CEIL;
+                break;
+            case R_COLOR:
+                oid = OID::COLOR_CEIL;
+                col = Vec3(1.0f, 0.15f, 0.15f);
+                break;
+            case R_ROVING:
+                emit = 0.0f;
+                break;
+            case R_COMBINED:
+                oid = OID::HEAT_CEIL;
+                col = Vec3(1.0f, 0.25f, 0.12f);
+                emit = 0.45f;
+                break;
+            default: break;
+        }
+    };
 
     for (int r = 0; r < NUM_ROOMS; ++r) {
-        bool emissiveCeil;
-        float ceilEmit;
-        Vec3 ceilColor(1.0f, 1.0f, 1.0f);
-        switch (r) {
-            case 0: emissiveCeil = true;  ceilEmit = 1.4f; break;
-            case 1: emissiveCeil = true;  ceilEmit = 1.2f; break;
-            case 2: emissiveCeil = true;  ceilEmit = 1.0f; break;
-            case 3: emissiveCeil = false; ceilEmit = 0.0f; break;
-            case 4: emissiveCeil = true;  ceilEmit = 0.9f; break;
-            default: emissiveCeil = false; ceilEmit = 0.0f; break;
+        Finish wall = Finish::CONCRETE;
+        Finish floor = Finish::CONCRETE;
+        float fz = FLOOR_Z;
+        if (r == R_METAL) wall = Finish::METAL;
+        if (r == R_GLOSSY) wall = Finish::GLOSSY;
+        if (r == R_WATER) fz = WATER_FLOOR_Z;
+        if (r == R_COMBINED){
+            wall = Finish::METAL;
+            floor = Finish::GLOSSY;
         }
-        buildRoomShell(octree, r, checkA, checkB, emissiveCeil, ceilEmit, ceilColor);
+
+        float emit;
+        Vec3 col;
+        int oid;
+        ceilFor(r, emit, col, oid);
+        buildRoomShell(octree, r, wall, floor, emit, col, oid, fz);
     }
-    for (int r = 0; r < NUM_ROOMS - 1; ++r) buildPartition(octree, roomCenterY(r) + ROOM_SPAN / 2);
-    buildEndCap(octree, corridorStartY);
-    buildEndCap(octree, corridorEndY);
+
+    buildPartition(octree, corridorStartY, true,  false);
+    for (int r = 0; r < NUM_ROOMS - 1; ++r)
+        buildPartition(octree, roomCenterY(r) + ROOM_SPAN / 2, true, true);
+    buildPartition(octree, corridorEndY, false, true);
 
     {
-        float cy = roomCenterY(0);
-        createMirror(octree, Vec3(ROOM_HALF_W - 0.25f, cy, 3.2f), Vec3(0.15f, ROOM_SPAN - 2.0f, 5.5f), 10);
-        Vec3 gold(1.00f, 0.80f, 0.30f), silver(0.90f, 0.90f, 0.95f), copper(0.95f, 0.55f, 0.35f);
-        createBox(octree, Vec3(0, cy, FLOOR_Z + 0.4f), Vec3(6.0f, 3.0f, 0.6f), Vec3(0.08f, 0.08f, 0.09f), 0.0f, 0.9f, 0.0f, 0.0f, 1.45f, Vec3::Zero(), 100, Grid::BodyType::STATIC, 1.0f, 0.2f);
-        auto sphere = [&](const Vec3& c, const Vec3& col, float rough, float metal, int oid) {
-            float R = 0.7f;
-            for (float x = c.x() - R; x <= c.x() + R; x += 0.1f)
-                for (float y = c.y() - R; y <= c.y() + R; y += 0.1f)
-                    for (float z = c.z() - R; z <= c.z() + R; z += 0.1f) {
-                        if ((Vec3(x, y, z) - c).norm() > R) continue;
-                        octree.insert(1, Vec3(x, y, z), true, col, 0.1f, true, oid, 0.0f, rough, metal, 0.0f, 0.3f);
-                    }
-        };
-        sphere(Vec3(-2.2f, cy, 1.1f), silver, 0.02f, 1.0f, 11);
-        sphere(Vec3( 0.0f, cy, 1.1f), gold,   0.15f, 1.0f, 12);
-        sphere(Vec3( 2.2f, cy, 1.1f), copper, 0.35f, 1.0f, 13);
+        float cy = roomCenterY(R_GLASS);
+        createBox(octree, Vec3(0, cy, FLOOR_Z + 1.8f), Vec3(2.6f, 2.6f, 3.4f),
+                  Vec3(0.92f, 0.96f, 1.0f), 0.0f, 0.02f, 0.0f, 0.95f, 1.5f,
+                  Vec3(0.02f, 0.02f, 0.03f), 40, Grid::BodyType::STATIC, 1.0f, 0.12f);
     }
 
     {
-        float cy = roomCenterY(1);
-        Vec3 cRuby(0.878f, 0.066f, 0.3725f), cAmethyst(0.6f, 0.4f, 0.8f);
-        createBox(octree, Vec3(0, cy, FLOOR_Z + 0.35f), Vec3(6.5f, 3.5f, 0.5f), Vec3(0.06f, 0.06f, 0.07f), 0.0f, 0.9f, 0.0f, 0.0f, 1.45f, Vec3::Zero(), 100, Grid::BodyType::STATIC, 1.0f, 0.2f);
-        createGem(octree, Vec3(-2.0f, cy, 1.2f), 0.7f, GemCut::OCTAHEDRON, cRuby, 0.1f, 20,
-                  Grid::BodyType::STATIC, 1.0f, 0.95f, 1.757f, Vec3(0.05f, 0.8f, 0.8f),
-                  Vec3(1.4360479f, 0.64583146f, 3.4556846f), Vec3(0.0052998009f, 0.014262926f, 210.80888f), true);
-        createGem(octree, Vec3(2.0f, cy, 1.2f), 0.7f, GemCut::HEXAGONAL_BIPYRAMID, cAmethyst, 0.1f, 21,
-                  Grid::BodyType::STATIC, 1.0f, 0.97f, 1.534f, Vec3(0.8f, 0.6f, 0.05f),
-                  Vec3(0.696f, 0.407f, 0.897f), Vec3(0.0046f, 0.013f, 97.934f), true);
-        createBox(octree, Vec3(0, cy, 1.2f), Vec3(1.1f, 1.1f, 1.1f), Vec3(0.9f, 0.95f, 1.0f), 0.0f, 0.01f, 0.0f, 0.95f, 1.62f,
-                  Vec3(0.10f, 0.03f, 0.02f), 22, Grid::BodyType::STATIC, 1.0f, 0.1f,
-                  Vec3(0.54727636f, 0.15459328f, 0.13445437f), Vec3(0.0053423668f, 0.019974298f, 10.596549f), true);
-    }
-
-    Vec3 dripSpawn;
-    {
-        float cy = roomCenterY(2);
-        Vec3 tankColor(0.85f, 0.9f, 1.0f);
-        float tw = 3.0f, tl = 3.0f, th = 2.2f, base = FLOOR_Z + 0.1f;
-        createBox(octree, Vec3(0, cy, base), Vec3(tw + 0.4f, tl + 0.4f, 0.2f), Vec3(0.1f, 0.1f, 0.12f), 0.0f, 0.5f, 0.0f, 0.0f, 1.45f, Vec3::Zero(), 100, Grid::BodyType::STATIC, 1.0f, 0.15f);
-        auto glassWall = [&](const Vec3& c, const Vec3& s) {
-            createBox(octree, c, s, tankColor, 0.0f, 0.02f, 0.0f, 0.9f, 1.5f, Vec3(0.02f, 0.02f, 0.03f), 100, Grid::BodyType::STATIC, 1.0f, 0.12f);
-        };
-        glassWall(Vec3( tw / 2, cy, base + th / 2), Vec3(0.15f, tl, th));
-        glassWall(Vec3(-tw / 2, cy, base + th / 2), Vec3(0.15f, tl, th));
-        glassWall(Vec3(0, cy + tl / 2, base + th / 2), Vec3(tw, 0.15f, th));
-        glassWall(Vec3(0, cy - tl / 2, base + th / 2), Vec3(tw, 0.15f, th));
-        createFluidBody(octree, Vec3(0, cy, base + 0.6f), Vec3(tw - 0.4f, tl - 0.4f, 0.9f), OID::FLUID_TANK, Vec3(0.2f, 0.45f, 0.85f), 6.0f, 0.18f);
-        dripSpawn = Vec3(0.0f, cy, CEIL_Z - 0.6f);
-        createWaterDrop(octree, dripSpawn, 0.45f, 90, OID::DRIP_DROP, 0.08f);
+        float cy = roomCenterY(R_WATER);
+        Vec3 water(0.2f, 0.45f, 0.85f), absorp(0.04f, 0.02f, 0.06f);
+        float step = 0.2f;
+        Vec3 c(0, cy, WATER_FLOOR_Z + 1.4f), s(4.5f, 4.5f, 2.4f);
+        Vec3 half = s / 2.0f, minB = c - half, maxB = c + half;
+        int nx = (int)((s.x()) / step) + 1, ny = (int)((s.y()) / step) + 1, nz = (int)((s.z()) / step) + 1;
+        float per = 8.0f / std::max(1, nx * ny * nz);
+        for (float x = minB.x(); x <= maxB.x(); x += step)
+            for (float y = minB.y(); y <= maxB.y(); y += step)
+                for (float z = minB.z(); z <= maxB.z(); z += step) {
+                    octree.insert(1, Vec3(x, y, z), true, water, step, true, OID::WATER_TANK,
+                                  0.0f, 0.03f, 0.0f, 0.85f, 1.333f, absorp, Grid::BodyType::STATIC, per);
+                    octree.setSellmeier(Vec3(x, y, z),
+                        Vec3(5.684027565e-1f, 1.726177391e-1f, 2.086189578e-2f).cast<Eigen::half>(),
+                        Vec3(5.101829712e-3f, 1.821153936e-2f, 2.620722293e-2f).cast<Eigen::half>());
+                }
     }
 
     {
-        float cy = roomCenterY(3);
-        createBulb(octree, Vec3(0, cy + ROOM_SPAN / 2 - 1.2f, 4.5f), 0.5f, Vec3(1.0f, 0.97f, 0.9f), 6.0f, 330);
-        Vec3 stone(0.55f, 0.52f, 0.48f);
-        for (int i = -2; i <= 2; ++i) {
-            if (i == 0) continue;
-            float px = i * 1.7f;
-            createBox(octree, Vec3(px, cy, (FLOOR_Z + CEIL_Z) / 2), Vec3(0.6f, 0.6f, CEIL_Z - FLOOR_Z - 0.4f), stone, 0.0f, 0.85f, 0.0f, 0.0f, 1.45f, Vec3::Zero(), 100, Grid::BodyType::STATIC, 1.0f, 0.15f);
-        }
-        createBox(octree, Vec3(0, cy - 2.5f, FLOOR_Z + 0.5f), Vec3(3.0f, 1.5f, 1.0f), Vec3(0.8f, 0.8f, 0.82f), 0.0f, 0.7f, 0.0f, 0.0f, 1.45f, Vec3::Zero(), 100, Grid::BodyType::STATIC, 1.0f, 0.15f);
+        float cy = roomCenterY(R_ROVING);
+        createBulb(octree, Vec3(-2.0f, cy, 3.0f), 0.4f, Vec3(1.0f, 0.1f, 0.1f), 20.0f, OID::ROVE_RED, 0.12f);
+        createBulb(octree, Vec3( 2.0f, cy, 3.0f), 0.4f, Vec3(0.1f, 0.2f, 1.0f), 20.0f, OID::ROVE_BLUE, 0.12f);
+        createBox(octree, Vec3(0, cy, FLOOR_Z + 0.6f), Vec3(1.4f, 1.4f, 1.2f),
+                  Vec3(0.8f, 0.8f, 0.8f), 0.0f, 0.7f, 0.0f, 0.0f, 1.45f, Vec3::Zero(), 100,
+                  Grid::BodyType::STATIC, 1.0f, 0.15f);
     }
 
     {
-        float cy = roomCenterY(4);
-        auto tube = [&](float yoff, const Vec3& col, int oid) {
-            for (float x = -3.0f; x <= 3.0f; x += 0.15f) {
-                Vec3 p(x, cy + yoff, CEIL_Z - 0.4f);
-                octree.insert(1, p, true, col, 0.15f, true, oid, 1.5f, 0.9f, 0.0f, 0.0f, 1.45f);
-                octree.setEmittance(p, col * 1.5f, 0.01f);
-            }
-        };
-        tube(-3.0f, Vec3(1.0f, 0.15f, 0.2f), OID::FLICKER_A);
-        tube( 0.0f, Vec3(0.2f, 1.0f, 0.35f), OID::FLICKER_B);
-        tube( 3.0f, Vec3(0.25f, 0.4f, 1.0f), OID::FLICKER_C);
-        createBox(octree, Vec3(0, cy, 1.2f), Vec3(2.0f, 2.0f, 2.0f), Vec3(0.8f, 0.8f, 0.8f), 0.0f, 0.6f, 0.0f, 0.0f, 1.45f, Vec3::Zero(), 100, Grid::BodyType::STATIC, 1.0f, 0.2f);
-    }
-
-    {
-        float cy = roomCenterY(5);
-        Vec3 crate(0.6f, 0.45f, 0.3f);
-        createBox(octree, Vec3(-2.5f, cy + 1.5f, FLOOR_Z + 0.8f), Vec3(1.4f, 1.4f, 1.6f), crate, 0.0f, 0.8f, 0.0f, 0.0f, 1.45f, Vec3::Zero(), 100, Grid::BodyType::STATIC, 1.0f, 0.15f);
-        createBox(octree, Vec3( 2.5f, cy - 1.0f, FLOOR_Z + 0.5f), Vec3(1.2f, 1.2f, 1.0f), crate, 0.0f, 0.8f, 0.0f, 0.0f, 1.45f, Vec3::Zero(), 100, Grid::BodyType::STATIC, 1.0f, 0.15f);
-        createBox(octree, Vec3( 0.0f, cy + 2.5f, FLOOR_Z + 1.2f), Vec3(0.8f, 0.8f, 2.4f), crate, 0.0f, 0.8f, 0.0f, 0.0f, 1.45f, Vec3::Zero(), 100, Grid::BodyType::STATIC, 1.0f, 0.15f);
-        createBulb(octree, Vec3(0, cy - ROOM_SPAN / 2 + 1.0f, 2.0f), 0.25f, Vec3(1.0f, 0.95f, 0.85f), 8.0f, OID::FLASHLIGHT, 0.08f);
+        float cy = roomCenterY(R_COMBINED);
+        createBox(octree, Vec3(0, cy, FLOOR_Z + 1.6f), Vec3(2.8f, 2.8f, 3.0f),
+                  Vec3(0.80f, 0.90f, 1.0f), 0.0f, 0.05f, 0.0f, 0.85f, 1.31f,
+                  Vec3(0.02f, 0.01f, 0.005f), OID::ICE_BLOCK, Grid::BodyType::STATIC, 1.0f, 0.2f);
+        createBulb(octree, Vec3(2.5f, cy, 3.2f), 0.4f, Vec3(0.1f, 1.0f, 0.2f), 6.0f, OID::ROVE_GREEN, 0.12f);
     }
 
     std::cout << "Finalizing octree..." << std::endl;
@@ -370,52 +438,55 @@ int main() {
     octree.markPhysicsCollidersDirty();
     octree.printStats();
 
-    struct WayPoint {
-        Vec3 pos;
-        Vec3 look;
-    };
-    std::vector<WayPoint> path = {
-        {Vec3( 0.0f, roomCenterY(0) - 4.5f, 2.2f), Vec3( 2.0f, roomCenterY(0),        1.5f)},
-        {Vec3(-1.5f, roomCenterY(0),        2.0f), Vec3( ROOM_HALF_W, roomCenterY(0), 3.0f)},
-        {Vec3( 0.0f, roomCenterY(0) + 3.5f, 2.0f), Vec3( 0.0f, roomCenterY(0),        1.1f)},
-        {Vec3(-2.5f, roomCenterY(1) - 3.5f, 2.0f), Vec3(-2.0f, roomCenterY(1),        1.2f)},
-        {Vec3( 0.0f, roomCenterY(1),        2.2f), Vec3( 0.0f, roomCenterY(1),        1.2f)},
-        {Vec3( 2.5f, roomCenterY(1) + 3.0f, 2.0f), Vec3( 2.0f, roomCenterY(1),        1.2f)},
-        {Vec3( 0.0f, roomCenterY(2) - 4.0f, 2.4f), Vec3( 0.0f, roomCenterY(2),        1.0f)},
-        {Vec3( 2.0f, roomCenterY(2) - 1.0f, 2.0f), Vec3( 0.0f, roomCenterY(2),        0.6f)},
-        {Vec3( 0.0f, roomCenterY(2) + 3.5f, 2.2f), Vec3( 0.0f, roomCenterY(2) - 1.0f, 1.5f)},
-        {Vec3(-3.0f, roomCenterY(3) - 3.5f, 2.0f), Vec3( 0.0f, roomCenterY(3) + 3.0f, 3.5f)},
-        {Vec3( 0.0f, roomCenterY(3) - 1.0f, 1.8f), Vec3( 0.0f, roomCenterY(3) + 4.0f, 4.0f)},
-        {Vec3( 3.0f, roomCenterY(3) + 3.0f, 2.0f), Vec3(-2.0f, roomCenterY(3),        1.5f)},
-        {Vec3( 0.0f, roomCenterY(4) - 4.0f, 2.2f), Vec3( 0.0f, roomCenterY(4),        2.0f)},
-        {Vec3(-2.0f, roomCenterY(4),        2.4f), Vec3( 0.0f, roomCenterY(4),        3.0f)},
-        {Vec3( 0.0f, roomCenterY(4) + 3.5f, 2.0f), Vec3( 0.0f, roomCenterY(4),        1.2f)},
-        {Vec3( 0.0f, roomCenterY(5) - 4.0f, 2.0f), Vec3( 0.0f, roomCenterY(5),        2.0f)},
-        {Vec3( 0.0f, roomCenterY(5) - 0.5f, 2.2f), Vec3(-2.5f, roomCenterY(5) + 1.5f, 1.5f)},
-        {Vec3( 0.5f, roomCenterY(5) + 2.5f, 2.2f), Vec3( 2.5f, roomCenterY(5) - 1.0f, 1.0f)},
-    };
+    struct WayPoint { Vec3 pos; Vec3 look; };
+    const float EYE_Z = 2.0f;
+    const float DOOR_IN = ROOM_SPAN / 2;
+    const float STEP_IN = 1.5f;
+    const int LEGS_PER_ROOM = 4;
 
-    int width = 512, height = 512;
+    std::vector<WayPoint> path;
+    path.push_back({Vec3(0.0f, roomCenterY(0) - DOOR_IN - 2.0f, EYE_Z),
+                    Vec3(0.0f, roomCenterY(0), EYE_Z - 0.4f)});
+    for (int r = 0; r < NUM_ROOMS; ++r) {
+        float cy = roomCenterY(r);
+        path.push_back({Vec3(0.0f, cy - DOOR_IN + 0.5f, EYE_Z), Vec3(0.0f, cy, EYE_Z - 0.3f)});
+        path.push_back({Vec3(0.0f, cy + STEP_IN, EYE_Z), Vec3(0.0f, cy + STEP_IN + 2.0f, EYE_Z - 0.2f)});
+        path.push_back({Vec3(0.0f, cy + STEP_IN, EYE_Z), Vec3(0.0f, cy - DOOR_IN, EYE_Z - 0.2f)});
+        float nextY = (r + 1 < NUM_ROOMS) ? roomCenterY(r + 1) : cy + DOOR_IN + 2.0f;
+        path.push_back({Vec3(0.0f, cy + DOOR_IN - 0.5f, EYE_Z), Vec3(0.0f, nextY, EYE_Z - 0.3f)});
+    }
+
+    int width = 512;
+    int height = 512;
     const float fps = 60.0f;
-    const int   framesPerLeg = 90;
-    const int   videosamples = 7;
-    const int   bounces = 4;
+    const int framesPerLeg = 90;
+    const int videosamples = 7;
+    const int bounces = 4;
     const float blendedfactor = 0.65f;
-    const int   physicsSubsteps = 8;
+    const int physicsSubsteps = 8;
     const float subDt = (1.0f / fps) / physicsSubsteps;
 
-    const int totalLegs   = (int)path.size() - 1;
+    const int totalLegs = (int)path.size() - 1;
     const int totalFrames = totalLegs * framesPerLeg;
 
     Grid::FrameWriter writer(2, 8);
 
-    std::vector<std::weak_ptr<Grid::Octree<int>::NodeData>> dripVoxels  = octree.getWeakNodesByObjectId(OID::DRIP_DROP);
-    std::vector<std::weak_ptr<Grid::Octree<int>::NodeData>> flashVoxels = octree.getWeakNodesByObjectId(OID::FLASHLIGHT);
+    auto legRoom = [&](int leg) -> int {
+        int r = (leg <= 0) ? 0 : (leg - 1) / LEGS_PER_ROOM;
+        return std::clamp(r, 0, NUM_ROOMS - 1);
+    };
+    auto roomEntryFrame = [&](int r) -> int { return framesPerLeg * (1 + r * LEGS_PER_ROOM); };
 
-    Vec3 flashHome(0, roomCenterY(5) - ROOM_SPAN / 2 + 1.0f, 2.0f);
-    Vec3 flashCurrent = flashHome;
+    auto roveRed = octree.getWeakNodesByObjectId(OID::ROVE_RED);
+    auto roveBlue = octree.getWeakNodesByObjectId(OID::ROVE_BLUE);
+    auto roveGreen = octree.getWeakNodesByObjectId(OID::ROVE_GREEN);
 
-    auto legRoom = [&](int leg) -> int { return std::min(NUM_ROOMS - 1, leg / 3); };
+    Vec3 roveRedHome (-2.0f, roomCenterY(R_ROVING),   3.0f);
+    Vec3 roveBlueHome( 2.0f, roomCenterY(R_ROVING),   3.0f);
+    Vec3 roveGreenHome(2.5f, roomCenterY(R_COMBINED), 3.2f);
+    Vec3 roveRedCur = roveRedHome, roveBlueCur = roveBlueHome, roveGreenCur = roveGreenHome;
+
+    bool waterSpawned = false, iceMelted = false;
 
     std::cout << "\nRendering walkthrough: " << totalFrames << " frames.\n" << std::endl;
 
@@ -423,7 +494,14 @@ int main() {
     std::string pending;
     bool havePending = false;
     int globalFrame = 0;
-    const int fluidReleaseFrame = framesPerLeg * 6;
+
+    auto moveOrb = [&](std::vector<std::weak_ptr<Grid::Octree<int>::NodeData>>& orb, Vec3& cur, const Vec3& target) {
+        Vec3 delta = target - cur;
+        if (delta.norm() > 1e-4f) {
+            for (auto& wp : orb) if (auto sp = wp.lock()) octree.move(sp->position, sp->position + delta);
+            cur = target;
+        }
+    };
 
     for (int leg = 0; leg < totalLegs; ++leg) {
         const WayPoint& A = path[leg];
@@ -432,58 +510,76 @@ int main() {
         std::cout << "Leg " << leg << " (room " << room << ")" << std::endl;
 
         for (int f = 0; f < framesPerLeg; ++f, ++globalFrame) {
-            float t  = (float)f / (float)framesPerLeg;
+            float t = (float)f / (float)framesPerLeg;
             float ts = smoothstep01(t);
 
             Camera cam;
             cam.fov = 70.0f;
             cam.origin = A.pos * (1.0f - ts) + B.pos * ts;
-            Vec3 look  = A.look * (1.0f - ts) + B.look * ts;
+            Vec3 look = A.look * (1.0f - ts) + B.look * ts;
             cam.up = Vec3(0.0f, 0.0f, 1.0f);
             cam.direction = (look - cam.origin).normalized();
 
-            if (globalFrame >= fluidReleaseFrame) {
-                for (int s = 0; s < physicsSubsteps; ++s) octree.stepPhysics(subDt);
-            } else {
-                for (auto& wp : dripVoxels)
-                    if (auto sp = wp.lock()) {
-                        sp->physics.velocity = Vec3::Zero();
-                        sp->physics.force = Vec3::Zero();
-                    }
+            if (!waterSpawned && globalFrame >= roomEntryFrame(R_WATER)) {
+                octree.makeObjectFluid(OID::WATER_TANK, 0.02f, Grid::BodyType::FLUID);
+                octree.markPhysicsCollidersDirty();
+                waterSpawned = true;
+                std::cout << "  water spawned" << std::endl;
             }
+            if (!iceMelted && globalFrame >= roomEntryFrame(R_COMBINED)) {
+                octree.makeObjectFluid(OID::ICE_BLOCK, 0.02f, Grid::BodyType::FLUID);
+                octree.markPhysicsCollidersDirty();
+                iceMelted = true;
+                std::cout << "  ice melting" << std::endl;
+            }
+            if (waterSpawned || iceMelted)
+                for (int s = 0; s < physicsSubsteps; ++s) octree.stepPhysics(subDt);
 
             {
                 float ph = globalFrame * 0.5f;
-                auto flick = [&](int oid, const Vec3& col, float seed) {
-                    float n = smoothNoise(seed, ph, seed * 1.7f, 1.0f);
-                    float level = (n > 0.30f) ? (0.8f + 0.7f * n) : (0.05f + 0.1f * n);
-                    for (auto& wp : octree.getWeakNodesByObjectId(oid))
-                        if (auto sp = wp.lock()) octree.setEmittance(sp->position, col * level * 1.6f, 0.02f);
-                };
-                flick(OID::FLICKER_A, Vec3(1.0f, 0.15f, 0.2f), 1.3f);
-                flick(OID::FLICKER_B, Vec3(0.2f, 1.0f, 0.35f), 4.1f);
-                flick(OID::FLICKER_C, Vec3(0.25f, 0.4f, 1.0f), 7.9f);
+                float n = smoothNoise(1.3f, ph, 2.2f, 1.0f);
+                float level = (n > 0.30f) ? BRIGHT_EMIT : BRIGHT_EMIT * 0.06f;
+                for (auto& wp : octree.getWeakNodesByObjectId(OID::FLICKER_CEIL))
+                    if (auto sp = wp.lock()) octree.setEmittance(sp->position, BRIGHT_LIGHT * level, 0.01f);
             }
 
             {
-                float cy = roomCenterY(5);
-                float sweep = globalFrame * 0.06f;
-                Vec3 target = flashHome + Vec3(2.6f * std::sin(sweep), 2.6f * std::cos(sweep * 0.7f), 0.6f * std::sin(sweep * 1.3f));
-                target.y() = std::clamp(target.y(), cy - ROOM_SPAN / 2 + 1.0f, cy + ROOM_SPAN / 2 - 1.0f);
-                Vec3 delta = target - flashCurrent;
-                if (delta.norm() > 1e-4f) {
-                    for (auto& wp : flashVoxels)
-                        if (auto sp = wp.lock()) octree.move(sp->position, sp->position + delta);
-                    flashCurrent = target;
+                int entry = roomEntryFrame(R_COLOR);
+                int dwell = LEGS_PER_ROOM * framesPerLeg;
+                float u = std::clamp((globalFrame - entry) / (float)dwell, 0.0f, 1.0f);
+                Vec3 red(1.0f, 0.12f, 0.12f), green(0.12f, 1.0f, 0.18f), blue(0.15f, 0.2f, 1.0f);
+                Vec3 col;
+                if (u < 0.5f) {
+                    float k = u / 0.5f;
+                    col = red * (1 - k) + green * k;
                 }
-                float pulse = 7.0f + 2.0f * std::sin(globalFrame * 0.4f);
-                for (auto& wp : flashVoxels)
-                    if (auto sp = wp.lock()) octree.setEmittance(sp->position, Vec3(1.0f, 0.95f, 0.85f) * pulse, 0.02f);
+                else {
+                    float k = (u - 0.5f) / 0.5f;
+                    col = green * (1 - k) + blue * k;
+                }
+                for (auto& wp : octree.getWeakNodesByObjectId(OID::COLOR_CEIL))
+                    if (auto sp = wp.lock()) octree.setEmittance(sp->position, col * BRIGHT_EMIT, 0.01f);
             }
 
-            Grid::InFlightFrame next = octree.beginSuperBlendedRenderFrameVulkan(
-                cam, height * 2, width * 2, blendedfactor, frame::colormap::RGB, videosamples, bounces, true);
+            {
+                float cy = roomCenterY(R_ROVING);
+                float a = globalFrame * 0.08f, R = 2.6f;
+                moveOrb(roveRed, roveRedCur, Vec3(R * std::cos(a), cy + R * std::sin(a), 3.0f));
+                moveOrb(roveBlue, roveBlueCur, Vec3(R * std::cos(a + 3.1416f), cy + R * std::sin(a + 3.1416f), 3.0f));
+            }
+
+            {
+                float cy = roomCenterY(R_COMBINED);
+                float a = globalFrame * 0.10f, R = 2.8f;
+                moveOrb(roveGreen, roveGreenCur, Vec3(R * std::cos(a), cy + R * std::sin(a), 3.2f));
+                for (auto& wp : roveGreen)
+                    if (auto sp = wp.lock()) octree.setEmittance(sp->position, Vec3(0.1f, 1.0f, 0.2f) * 7.0f, 0.02f);
+            }
+
+            // Grid::InFlightFrame next = octree.beginFastRenderFrameVulkan(cam, height, width, frame::colormap::RGB);
+            Grid::InFlightFrame next = octree.beginSuperBlendedRenderFrameVulkan(cam, height, width, blendedfactor, frame::colormap::RGB, videosamples, bounces, true);
             if (havePending) {
+                // frame prev = octree.endFastRenderFrameVulkan(inflight);
                 frame prev = octree.endSuperBlendedRenderFrameVulkan(inflight);
                 writer.enqueue(std::move(prev), "output/walkthrough/frame_" + pending + ".bmp");
             }
@@ -495,6 +591,7 @@ int main() {
         }
     }
     if (havePending) {
+        // frame prev = octree.endFastRenderFrameVulkan(inflight);
         frame prev = octree.endSuperBlendedRenderFrameVulkan(inflight);
         writer.enqueue(std::move(prev), "output/walkthrough/frame_" + pending + ".bmp");
     }
