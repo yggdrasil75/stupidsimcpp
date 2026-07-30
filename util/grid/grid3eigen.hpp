@@ -2029,6 +2029,30 @@ public:
         node->physics.bondsBuilt = true;
     }
 
+    ///@brief Creates an explicit constraint bond between two (usually
+    ///       different-object) RIGID voxels. Used to stitch separate rigid
+    ///       segments together at a joint so the skeleton articulates
+    ///       instead of behaving as one solid block.
+    ///@param a,b     The two nodes to link.
+    ///@param restLen Rest length of the constraint (defaults to current gap).
+    ///@param strength Break force of the joint bond.
+    ///@return true if the bond was added.
+    bool addJointBond(const std::shared_ptr<NodeData>& a,
+                      const std::shared_ptr<NodeData>& b,
+                      float restLen = -1.0f, float strength = 200.0f,
+                      float stiffnessOverride = 0.0f) {
+        if (!a || !b || a.get() == b.get()) return false;
+        if (restLen < 0.0f) restLen = (a->position - b->position).norm();
+        if (restLen < 1e-5f) return false;
+
+        a->physics.bonds.push_back({b, restLen, strength, 0.0f, false, false, stiffnessOverride});
+        b->physics.bonds.push_back({a, restLen, strength, 0.0f, false, false, stiffnessOverride});
+        a->physics.bondsBuilt = true;
+        b->physics.bondsBuilt = true;
+
+        return true;
+    }
+
     ///@brief Serializes one object's geometry and inlined materials to a stream.
     ///@param out Open binary output stream.
     bool serializeObject(std::ofstream& out, int id) {
@@ -3443,6 +3467,22 @@ public:
         size_t loadedPoints = 0;
         getLoadedStatsSafe(root_, loadedNodes, loadedPoints);
         return loadedPoints;
+    }
+
+    ///@brief Compacts the point-storage pool, reclaiming dead slots left by
+    ///       repeated physics relocations. Safe to call between physics
+    ///       steps; preserves point-block indices. Returns slots reclaimed.
+    size_t compactPointPool() {
+        return store_.points.compact();
+    }
+
+    ///@brief Ratio of physically held pool slots to live points. 1.0 means no
+    ///       fragmentation; higher means dead slots are accumulating.
+    float pointPoolFragmentation() const {
+        size_t live = store_.points.totalPoints();
+        size_t slots = store_.points.poolSlots();
+        if (live == 0) return slots == 0 ? 1.0f : 2.0f;
+        return static_cast<float>(slots) / static_cast<float>(live);
     }
 
     ///@brief stepPhysics over multiple steps to prevent issues

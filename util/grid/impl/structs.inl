@@ -250,6 +250,7 @@ struct Bond_ {
     float damage     = 0.0f;
     bool  toAnchor   = false;
     bool  broken     = false;
+    float stiffnessOverride = 0.0f;
 };
 
 template<typename T>
@@ -1132,18 +1133,31 @@ struct PointStore {
             return static_cast<uint32_t>(blocks.size() - 1);
         }
         Block& b = blocks[blockIdx];
+        
+        if (static_cast<size_t>(b.offset) + b.count > pool.size()) {
+            uint32_t offset = static_cast<uint32_t>(pool.size());
+            pool.push_back(pt);
+            b.offset = offset;
+            b.count = 1;
+            b.capacity = 1;
+            return blockIdx;
+        }
         if (b.offset + b.count == pool.size()) {
             pool.push_back(pt);
             b.count++;
             b.capacity = b.count;
             return blockIdx;
         }
-        
+
+        std::vector<std::shared_ptr<NodeData_<T>>> existing;
+        existing.reserve(b.count + 1);
+        for (uint32_t i = 0; i < b.count; ++i) existing.push_back(pool[b.offset + i]);
+        existing.push_back(pt);
+
         uint32_t newOffset = static_cast<uint32_t>(pool.size());
-        for (uint32_t i = 0; i < b.count; ++i) pool.push_back(pool[b.offset + i]);
-        pool.push_back(pt);
+        pool.insert(pool.end(), existing.begin(), existing.end());
         b.offset = newOffset;
-        b.count++;
+        b.count = static_cast<uint32_t>(existing.size());
         b.capacity = b.count;
         return blockIdx;
     }
@@ -1152,12 +1166,16 @@ struct PointStore {
         u_lock lock(mutex);
         if (blockIdx != INVALID_IDX && blockIdx < blocks.size()) {
             Block& b = blocks[blockIdx];
-            if (pts.size() <= b.capacity) {
+            bool spanValid = static_cast<size_t>(b.offset) + b.capacity <= pool.size();
+            if (spanValid && pts.size() <= b.capacity) {
                 for (size_t i = 0; i < pts.size(); ++i) pool[b.offset + i] = pts[i];
                 for (size_t i = pts.size(); i < b.count; ++i) pool[b.offset + i] = nullptr;
                 b.count = static_cast<uint32_t>(pts.size());
                 return blockIdx;
             }
+            if (spanValid) for (uint32_t i = 0; i < b.count; ++i) pool[b.offset + i] = nullptr;
+            b.count = 0;
+            b.capacity = 0;
             freeBlocks.push_back(blockIdx);
         }
         return allocLocked(pts);
@@ -1168,8 +1186,11 @@ struct PointStore {
         u_lock lock(mutex);
         if (blockIdx >= blocks.size()) return;
         Block& b = blocks[blockIdx];
-        for (uint32_t i = 0; i < b.count; ++i) pool[b.offset + i] = nullptr;
+        if (b.count == 0 && b.capacity == 0) return;
+        if (static_cast<size_t>(b.offset) + b.count <= pool.size())
+            for (uint32_t i = 0; i < b.count; ++i) pool[b.offset + i] = nullptr;
         b.count = 0;
+        b.capacity = 0;
         freeBlocks.push_back(blockIdx);
     }
 
@@ -1193,6 +1214,33 @@ struct PointStore {
         size_t n = 0;
         for (const auto& b : blocks) n += b.count;
         return n;
+    }
+
+    size_t poolSlots() const {
+        s_lock lock(mutex);
+        return pool.size();
+    }
+
+    size_t compact() {
+        u_lock lock(mutex);
+        if (pool.empty()) return 0;
+        std::vector<std::shared_ptr<NodeData_<T>>> fresh;
+        fresh.reserve(pool.size());
+        for (auto& b : blocks) {
+            if (b.count == 0) { b.offset = 0; b.capacity = 0; continue; }
+            if (static_cast<size_t>(b.offset) + b.count > pool.size()) {
+                b.count = 0; b.capacity = 0; b.offset = 0;
+                continue;
+            }
+            uint32_t newOffset = static_cast<uint32_t>(fresh.size());
+            for (uint32_t i = 0; i < b.count; ++i)
+                fresh.push_back(pool[b.offset + i]);
+            b.offset = newOffset;
+            b.capacity = b.count;
+        }
+        size_t freed = pool.size() - fresh.size();
+        pool.swap(fresh);
+        return freed;
     }
 };
 

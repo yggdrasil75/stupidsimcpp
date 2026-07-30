@@ -62,6 +62,19 @@ void Octree<T>::stepPhysics(float dt) {
         }
         activePhysicsNodes_.resize(writeIdx);
         
+        {
+            std::unordered_set<NodeData*> seenActive;
+            seenActive.reserve(writeIdx);
+            size_t uniqIdx = 0;
+            for (size_t i = 0; i < writeIdx; ++i) {
+                auto sp = activePhysicsNodes_[i].lock();
+                if (!sp) continue;
+                if (seenActive.insert(sp.get()).second)
+                    activePhysicsNodes_[uniqIdx++] = activePhysicsNodes_[i];
+            }
+            activePhysicsNodes_.resize(uniqIdx);
+            writeIdx = uniqIdx;
+        }
         sphNodes.reserve(writeIdx);
 
         for (size_t i = 0; i < writeIdx; ++i) {
@@ -430,6 +443,10 @@ void Octree<T>::stepPhysics(float dt) {
         if (!insertRecursive(start, pd, depth))
             if (!insertRecursive(root_, pd, 0)) size--;
     }
+
+    if (pointPoolFragmentation() > 3.0f) {
+        store_.points.compact();
+    }
 }
 
 template<typename T>
@@ -468,11 +485,14 @@ void Octree<T>::stepRigidLattice(
             if (len < 1e-6f) continue;
             Vec3 dir = d / len;
 
+            float k = (bond.stiffnessOverride > 0.0f) ? bond.stiffnessOverride
+                                                       : m->stiffness;
+
             float ext = len - bond.restLength;
-            float springF = m->stiffness * ext;
+            float springF = k * ext;
 
             Vec3 relVel = other->physics.velocity - node->physics.velocity;
-            float dampF = m->damping * relVel.dot(dir) * m->stiffness * 0.02f;
+            float dampF = m->damping * relVel.dot(dir) * k * 0.02f;
 
             float total = springF + dampF;
             force += dir * total;
@@ -483,7 +503,7 @@ void Octree<T>::stepRigidLattice(
 
             if (m->breakTorque > 0.0f) {
                 Vec3 lateral = relVel - dir * relVel.dot(dir);
-                float shear = m->stiffness * lateral.norm() * 0.02f;
+                float shear = k * lateral.norm() * 0.02f;
                 if (shear > m->breakTorque) { bond.broken = true; anyBroke.store(true, std::memory_order_relaxed); continue; }
             }
 
@@ -536,7 +556,13 @@ void Octree<T>::stepRigidLattice(
         node->setSettled(false);
         moves[i].node = node;
         moves[i].oldPos = node->position;
-        moves[i].newPos = node->position + node->physics.velocity * dt;
+        Vec3 np = node->position + node->physics.velocity * dt;
+        if (!np.allFinite() || !node->position.allFinite()) {
+            node->physics.velocity.setZero();
+            if (!node->position.allFinite()) { valid[i] = 0; continue; }
+            np = node->position;
+        }
+        moves[i].newPos = np;
         valid[i] = 1;
     }
 
