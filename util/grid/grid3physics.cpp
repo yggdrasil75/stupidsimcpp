@@ -10,24 +10,23 @@ struct FluidMoveAction {
     bool solidNearby = true;
 };
 
-struct SolidNb { Vec3 pos; float size; };
+
 template<typename T>
 struct Fragment_ {
     std::vector<std::shared_ptr<NodeData_<T>>> nodes;
     int sourceObjectId = -1;
 };
 
-
 template<typename T>
-void Octree<T>::stepPhysics(float dt) {
-    TIME_FUNCTION;
-    if (root_ == INVALID_IDX || dt <= 0.0f) return;
-    
-    const BoundingBox domainBounds = nodeAt(root_)->bounds();
-    const Vec3 domLo = domainBounds.first;
-    const Vec3 domHi = domainBounds.second;
+void Octree<T>::beginPhysicsFrame(PhysicsFrameContext& ctx) {
+    ctx.valid = false;
+    if (root_ == INVALID_IDX) return;
 
-    ScopedFunctionTimer _tSetup("stepPhysics.setupMaterials");
+    const BoundingBox domainBounds = nodeAt(root_)->bounds();
+    ctx.domLo = domainBounds.first;
+    ctx.domHi = domainBounds.second;
+
+    ScopedFunctionTimer _tSetup("beginPhysicsFrame.setupMaterials");
     int maxObjId = -1;
     {
         s_lock lock(objectsMutex_);
@@ -36,22 +35,22 @@ void Octree<T>::stepPhysics(float dt) {
         }
     }
 
-    std::vector<std::vector<PhysicsMaterial_>> fastMats(maxObjId + 2);
+    ctx.fastMats.assign(maxObjId + 2, {});
     {
         s_lock lock(objectsMutex_);
         for (const auto& pair : objects_) {
             s_lock objLock(pair.second->objMutex);
-            fastMats[pair.first + 1] = pair.second->physicsMaterials;
+            ctx.fastMats[pair.first + 1] = pair.second->physicsMaterials;
         }
     }
-    size_t fastMatsSize = fastMats.size();
+    ctx.fastMatsSize = ctx.fastMats.size();
     _tSetup.stop();
 
-    std::vector<std::shared_ptr<NodeData>> sphNodes;
-    std::vector<std::shared_ptr<NodeData>> rigidNodes;
+    ctx.sphNodes.clear();
+    ctx.rigidNodes.clear();
 
     {
-        ScopedFunctionTimer _tClassify("stepPhysics.classifyActive");
+        ScopedFunctionTimer _tClassify("beginPhysicsFrame.classifyActive");
         std::lock_guard<std::mutex> lock(physicsMutex_);
         
         size_t writeIdx = 0;
@@ -75,378 +74,450 @@ void Octree<T>::stepPhysics(float dt) {
             activePhysicsNodes_.resize(uniqIdx);
             writeIdx = uniqIdx;
         }
-        sphNodes.reserve(writeIdx);
+        ctx.sphNodes.reserve(writeIdx);
 
         for (size_t i = 0; i < writeIdx; ++i) {
-            if (auto sp = activePhysicsNodes_[i].lock()) {
-                if (sp->isActive()) {
-                    int objIdx = sp->objectId + 1;
-                    if (objIdx >= 0 && objIdx < fastMatsSize) {
-                        const auto& mats = fastMats[objIdx];
-                        if (sp->physMatIdx < mats.size()) {
-                            BodyType bType = mats[sp->physMatIdx].type;
-                            if (bType == BodyType::FLUID) {
-                                sphNodes.push_back(sp);
-                            } else if (bType == BodyType::RIGID) {
-                                rigidNodes.push_back(sp);
-                            }
-                        }
-                    }
-                }
-            }
+            auto sp = activePhysicsNodes_[i].lock();
+            if (!sp) continue;
+            if (!sp->isActive()) continue;
+            int objIdx = sp->objectId + 1;
+            if (objIdx < 0 || objIdx >= (int)ctx.fastMatsSize) continue;
+            const auto& mats = ctx.fastMats[objIdx];
+            if (sp->physMatIdx >= mats.size()) continue;
+            BodyType bType = mats[sp->physMatIdx].type;
+            if (bType == BodyType::FLUID) ctx.sphNodes.push_back(sp);
+            else if (bType == BodyType::RIGID) ctx.rigidNodes.push_back(sp);
         }
     }
+
+    gatherSolidNeighborhood(ctx);
+    ctx.valid = true;
+}
+
+template<typename T>
+void Octree<T>::gatherSolidNeighborhood(PhysicsFrameContext& ctx) {
+    ctx.solidCells.clear();
+    if (ctx.sphNodes.empty()) return;
+
+    const float C = kernels_.h;
+    ctx.solidCellSize = C;
+    const float invC = 1.0f / C;
+
+    auto keyOf = [invC](const Vec3& p) -> std::array<int64_t,3> {
+        return { (int64_t)std::floor(p.x() * invC),
+                 (int64_t)std::floor(p.y() * invC),
+                 (int64_t)std::floor(p.z() * invC) };
+    };
+
+    std::array<int64_t,3> keyMin = keyOf(ctx.sphNodes[0]->position);
+    std::array<int64_t,3> keyMax = keyMin;
+    for (const auto& n : ctx.sphNodes) {
+        auto k = keyOf(n->position);
+        for (int a = 0; a < 3; ++a) {
+            keyMin[a] = std::min(keyMin[a], k[a]);
+            keyMax[a] = std::max(keyMax[a], k[a]);
+        }
+    }
+
+    Vec3 regionLo((keyMin[0]-1)*C, (keyMin[1]-1)*C, (keyMin[2]-1)*C);
+    Vec3 regionHi((keyMax[0]+2)*C, (keyMax[1]+2)*C, (keyMax[2]+2)*C);
+    BoundingBox region{regionLo, regionHi};
+
+    std::vector<Vec3> regionCorners = {regionLo, regionHi};
+    int rd = 0;
+    uint32_t solidStart = getHighestCommonNode(regionCorners, root_, rd);
+    if (solidStart == INVALID_IDX) solidStart = root_;
+
+    std::vector<uint32_t> stack{solidStart};
+    while (!stack.empty()) {
+        uint32_t curIdx = stack.back();
+        stack.pop_back();
+        const OctreeNode* cur = nodeAt(curIdx);
+        if (!cur || !boxIntersectsBox(cur->bounds(), region) || !cur->isLoaded()) continue;
+        for (const auto& pt : pointsView(curIdx)) {
+            if (!pt || !pt->isActive()) continue;
+            int oi = pt->objectId + 1;
+            if (oi < 0 || oi >= (int)ctx.fastMatsSize) continue;
+            if (pt->physMatIdx >= ctx.fastMats[oi].size()) continue;
+            if (ctx.fastMats[oi][pt->physMatIdx].type == BodyType::FLUID) continue;
+            const Vec3& pp = pt->position;
+            if (pp.x() < regionLo.x() || pp.x() > regionHi.x() ||
+                pp.y() < regionLo.y() || pp.y() > regionHi.y() ||
+                pp.z() < regionLo.z() || pp.z() > regionHi.z()) continue;
+            ctx.solidCells[keyOf(pp)].push_back({pp, pt->size});
+        }
+        if (!cur->isLeaf())
+            for (int i = 0; i < 8; ++i) if (cur->hasChild(i)) stack.push_back(cur->firstChild + i);
+    }
+}
+
+template<typename T>
+void Octree<T>::substepPhysics(float dt, PhysicsFrameContext& ctx) {
+    TIME_FUNCTION;
+    if (!ctx.valid || dt <= 0.0f) return;
+
+    const Vec3 domLo = ctx.domLo;
+    const Vec3 domHi = ctx.domHi;
+    auto& fastMats = ctx.fastMats;
+    size_t fastMatsSize = ctx.fastMatsSize;
 
     {
-        ScopedFunctionTimer _tRigid("stepPhysics.rigidLattice");
-        stepRigidLattice(dt, rigidNodes, fastMats, fastMatsSize);
+        ScopedFunctionTimer _tRigid("substepPhysics.rigidLattice");
+        stepRigidLattice(dt, ctx.rigidNodes, fastMats, fastMatsSize);
     }
 
-    std::vector<FluidMoveAction<T>> pendingFluidMoves;
+    auto& sphNodes = ctx.sphNodes;
+    if (sphNodes.empty()) return;
 
-    if (!sphNodes.empty()) {
-        const SPHKernels& K = kernels_;
-        const float h = K.h;
-        const float maxKernelVol = 4.18879f * K.h3;
-        const float C = h;
-        const float invC = 1.0f / C;
+    const SPHKernels& K = kernels_;
+    const float h = K.h;
+    const float maxKernelVol = 4.18879f * K.h3;
+    const float C = h;
+    const float invC = 1.0f / C;
 
-        // Cell key for a position.
-        auto keyOf = [invC](const Vec3& p) -> std::array<int64_t,3> {
-            return { (int64_t)std::floor(p.x() * invC),
-                     (int64_t)std::floor(p.y() * invC),
-                     (int64_t)std::floor(p.z() * invC) };
-        };
+    auto keyOf = [invC](const Vec3& p) -> std::array<int64_t,3> {
+        return { (int64_t)std::floor(p.x() * invC),
+                 (int64_t)std::floor(p.y() * invC),
+                 (int64_t)std::floor(p.z() * invC) };
+    };
 
-        // (1) Bin fluids into a sparse cell map, then flatten to a compact cell
-        //     list so we can iterate cells in parallel. Particles in the same
-        //     cell share the same neighbor cells, so neighbor data is gathered
-        //     once per cell rather than once per particle.
-        ScopedFunctionTimer _tBin("stepPhysics.fluidBin");
-        std::unordered_map<std::array<int64_t,3>, int, Vec3i64Hash> cellIndex;
-        cellIndex.reserve(sphNodes.size());
-        struct Cell {
-            std::array<int64_t,3> key;
-            std::vector<int> members;        // fluid indices in this cell
-            std::vector<int> fluidNeighbors; // fluid indices in the 27-cell block
-            std::vector<SolidNb> solids;     // nearby static voxels
-        };
-        std::vector<Cell> cells;
-        cells.reserve(sphNodes.size());
-        std::vector<int> partCell(sphNodes.size());
+    ScopedFunctionTimer _tBin("substepPhysics.fluidBin");
+    std::unordered_map<std::array<int64_t,3>, int, Vec3i64Hash> cellIndex;
+    cellIndex.reserve(sphNodes.size());
+    struct Cell {
+        std::array<int64_t,3> key;
+        std::vector<int> members;
+        std::vector<int> fluidNeighbors;
+        std::vector<SolidNb> solids;
+    };
+    std::vector<Cell> cells;
+    cells.reserve(sphNodes.size());
+    std::vector<int> partCell(sphNodes.size());
 
-        for (int i = 0; i < (int)sphNodes.size(); ++i) {
-            auto key = keyOf(sphNodes[i]->position);
-            auto it = cellIndex.find(key);
-            int ci;
-            if (it == cellIndex.end()) {
-                ci = (int)cells.size();
-                cellIndex.emplace(key, ci);
-                cells.push_back(Cell{key, {}, {}, {}});
-            } else {
-                ci = it->second;
-            }
-            cells[ci].members.push_back(i);
-            partCell[i] = ci;
+    for (int i = 0; i < (int)sphNodes.size(); ++i) {
+        auto key = keyOf(sphNodes[i]->position);
+        auto it = cellIndex.find(key);
+        int ci;
+        if (it == cellIndex.end()) {
+            ci = (int)cells.size();
+            cellIndex.emplace(key, ci);
+            cells.push_back(Cell{key, {}, {}, {}});
+        } else {
+            ci = it->second;
         }
-        _tBin.stop();
+        cells[ci].members.push_back(i);
+        partCell[i] = ci;
+    }
+    _tBin.stop();
 
-        // (2) Per-cell neighbor gathering (parallel). Fluid neighbors come from
-        //     the 27 surrounding cells. Solid neighbors are read straight from
-        //     the SVO: we find the lowest octree node containing the cell's
-        //     search box and walk down from THERE (not the root), so the tree
-        //     itself is the broad-phase — no duplicate collider structure, no
-        //     extra memory. The walk only takes shared locks (read-only), so
-        //     cells process concurrently.
-        ScopedFunctionTimer _tGather("stepPhysics.fluidNeighborGather");
+    ScopedFunctionTimer _tGather("substepPhysics.fluidNeighborGather");
+    #pragma omp parallel for schedule(dynamic, 32)
+    for (int c = 0; c < (int)cells.size(); ++c) {
+        Cell& cell = cells[c];
+        const auto& base = cell.key;
+        for (int dx = -1; dx <= 1; ++dx)
+        for (int dy = -1; dy <= 1; ++dy)
+        for (int dz = -1; dz <= 1; ++dz) {
+            std::array<int64_t,3> nk{base[0]+dx, base[1]+dy, base[2]+dz};
+            auto fit = cellIndex.find(nk);
+            if (fit != cellIndex.end()) {
+                const auto& m = cells[fit->second].members;
+                cell.fluidNeighbors.insert(cell.fluidNeighbors.end(), m.begin(), m.end());
+            }
+            auto sit = ctx.solidCells.find(nk);
+            if (sit != ctx.solidCells.end()) {
+                const auto& s = sit->second;
+                cell.solids.insert(cell.solids.end(), s.begin(), s.end());
+            }
+        }
+    }
+    _tGather.stop();
 
-        std::array<int64_t,3> keyMin = cells[0].key, keyMax = cells[0].key;
-        for (const auto& cl : cells)
+    ScopedFunctionTimer _tDensity("substepPhysics.fluidDensity");
+    #pragma omp parallel for schedule(dynamic, 64)
+    for (int i = 0; i < (int)sphNodes.size(); ++i) {
+        auto& node = sphNodes[i];
+        const auto& nb = cells[partCell[i]].fluidNeighbors;
+        float densityFraction = 0.0f;
+        for (int j : nb) {
+            auto& neighbor = sphNodes[j];
+            float r = (node->position - neighbor->position).norm();
+            if (r < h) {
+                float V_j = std::min(neighbor->size * neighbor->size * neighbor->size, maxKernelVol);
+                densityFraction += V_j * K.Poly6(r);
+            }
+        }
+        node->physics.density = densityFraction * phys_restDensity;
+        float over_density = std::max(0.0f, densityFraction - 1.0f);
+        node->physics.pressure = phys_gasConstant * std::min(over_density, 1.5f);
+    }
+    _tDensity.stop();
+
+    ScopedFunctionTimer _tForces("substepPhysics.fluidForces");
+    #pragma omp parallel for schedule(dynamic, 64)
+    for (int i = 0; i < (int)sphNodes.size(); ++i) {
+        auto& node = sphNodes[i];
+        const Cell& cell = cells[partCell[i]];
+
+        float V_i = std::min(node->size * node->size * node->size, maxKernelVol);
+        float mass_i = std::max(V_i * phys_restDensity, 1e-6f);
+
+        Vec3 gravityDir = phys_gravity;
+        if (phys_useGravityPoint) {
+            Vec3 toCenter = phys_gravityCenter - node->position;
+            float dist = toCenter.norm();
+            gravityDir = (dist > 1e-4f) ? (toCenter / dist) * phys_gravityStrength : Vec3(0,0,0);
+        }
+        node->physics.force = gravityDir * mass_i;
+
+        Vec3 fPress = Vec3::Zero();
+        Vec3 fVisc = Vec3::Zero();
+
+        for (int j : cell.fluidNeighbors) {
+            if (j == i) continue;
+            auto& neighbor = sphNodes[j];
+            Vec3 diff = node->position - neighbor->position;
+            float r = diff.norm();
+            if (r < 1e-5f) {
+                Vec3 rnd = Vec3::Random();
+                if (rnd.squaredNorm() < 1e-8f) rnd = Vec3(1,0,0);
+                fPress += rnd.normalized() * mass_i * K.Poly6(0) * 10.0f;
+                continue;
+            }
+            if (r < h) {
+                Vec3 dir = diff / r;
+                float V_j = std::min(neighbor->size * neighbor->size * neighbor->size, maxKernelVol);
+                float P_sum = node->physics.pressure + neighbor->physics.pressure;
+                fPress += dir * (-V_i * V_j * P_sum * K.WendlandGrad(r));
+                float F_v = V_i * V_j * phys_viscosity * K.ViscLaplacian(r);
+                fVisc += F_v * (neighbor->physics.velocity - node->physics.velocity);
+            }
+        }
+
+        float baseG = (phys_gravityStrength > 0.1f) ? phys_gravityStrength : 9.81f;
+        for (const auto& solid : cell.solids) {
+            Vec3 diff = node->position - solid.pos;
+            float r = diff.norm();
+            float minDist = (node->size + solid.size) * 0.5f;
+            if (r >= minDist) continue;
+            if (r < 1e-5f) {
+                Vec3 rnd = Vec3::Random();
+                if (rnd.squaredNorm() < 1e-8f) rnd = Vec3(1,0,0);
+                fPress += rnd.normalized() * mass_i * K.Poly6(0) * 10.0f;
+                continue;
+            }
+            Vec3 dir = diff / r;
+            float q = r / minDist;
+            float oq = 1.0f - q;
+            float repel = mass_i * baseG * 250.0f * (oq*oq*oq*oq) * (4.0f*q + 1.0f);
+            fPress += dir * repel;
+            float approach = node->physics.velocity.dot(dir);
+            if (approach < 0.0f) fVisc += -dir * (approach * mass_i * 50.0f * (1.0f - q));
+        }
+
+        if (phys_solidBoundary) {
+            const float wallH = h;
             for (int a = 0; a < 3; ++a) {
-                keyMin[a] = std::min(keyMin[a], cl.key[a]);
-                keyMax[a] = std::max(keyMax[a], cl.key[a]);
-            }
-
-        // Fluid region expanded by one cell (== one smoothing radius, C == h).
-        Vec3 regionLo((keyMin[0]-1)*C, (keyMin[1]-1)*C, (keyMin[2]-1)*C);
-        Vec3 regionHi((keyMax[0]+2)*C, (keyMax[1]+2)*C, (keyMax[2]+2)*C);
-        BoundingBox region{regionLo, regionHi};
-
-        std::unordered_map<std::array<int64_t,3>, std::vector<SolidNb>, Vec3i64Hash> solidCells;
-
-        std::vector<Vec3> regionCorners = {regionLo, regionHi};
-        int rd = 0;
-        uint32_t solidStart = getHighestCommonNode(regionCorners, root_, rd);
-        if (solidStart == INVALID_IDX) solidStart = root_;
-
-        std::vector<uint32_t> stack{solidStart};
-        while (!stack.empty()) {
-            uint32_t curIdx = stack.back(); stack.pop_back();
-            const OctreeNode* cur = nodeAt(curIdx);
-            if (!cur || !boxIntersectsBox(cur->bounds(), region) || !cur->isLoaded()) continue;
-            for (const auto& pt : pointsView(curIdx)) {
-                if (!pt || !pt->isActive()) continue;
-                int oi = pt->objectId + 1;
-                if (pt->physMatIdx >= fastMats[oi].size()) continue;
-                if (oi < 0 || oi >= (int)fastMatsSize) continue;
-                if (fastMats[oi][pt->physMatIdx].type == BodyType::FLUID) continue;
-                const Vec3& pp = pt->position;
-                if (pp.x() < regionLo.x() || pp.x() > regionHi.x() ||
-                    pp.y() < regionLo.y() || pp.y() > regionHi.y() ||
-                    pp.z() < regionLo.z() || pp.z() > regionHi.z()) continue;
-                solidCells[keyOf(pp)].push_back({pp, pt->size});
-            }
-            if (!cur->isLeaf())
-                for (int i=0;i<8;++i) if (cur->hasChild(i)) stack.push_back(cur->firstChild + i);
-        }
-
-        #pragma omp parallel for schedule(dynamic, 32)
-        for (int c = 0; c < (int)cells.size(); ++c) {
-            Cell& cell = cells[c];
-            const auto& base = cell.key;
-
-            for (int dx=-1; dx<=1; ++dx)
-            for (int dy=-1; dy<=1; ++dy)
-            for (int dz=-1; dz<=1; ++dz) {
-                std::array<int64_t,3> nk{base[0]+dx, base[1]+dy, base[2]+dz};
-                auto fit = cellIndex.find(nk);
-                if (fit != cellIndex.end()) {
-                    const auto& m = cells[fit->second].members;
-                    cell.fluidNeighbors.insert(cell.fluidNeighbors.end(), m.begin(), m.end());
+                float dLo = node->position[a] - domLo[a];
+                if (dLo < wallH) {
+                    float q = std::min(std::max(dLo, 1e-4f) / wallH, 1.0f);
+                    float oq = 1.0f - q;
+                    fPress[a] += mass_i * baseG * 250.0f * (oq*oq*oq*oq) * (4.0f*q + 1.0f);
+                    float approach = -node->physics.velocity[a];
+                    if (approach > 0.0f) fVisc[a] += approach * mass_i * 50.0f * (1.0f - q);
                 }
-                auto sit = solidCells.find(nk);
-                if (sit != solidCells.end()) {
-                    const auto& s = sit->second;
-                    cell.solids.insert(cell.solids.end(), s.begin(), s.end());
+                float dHi = domHi[a] - node->position[a];
+                if (dHi < wallH) {
+                    float q = std::min(std::max(dHi, 1e-4f) / wallH, 1.0f);
+                    float oq = 1.0f - q;
+                    fPress[a] -= mass_i * baseG * 250.0f * (oq*oq*oq*oq) * (4.0f*q + 1.0f);
+                    float approach = node->physics.velocity[a];
+                    if (approach > 0.0f) fVisc[a] -= approach * mass_i * 50.0f * (1.0f - q);
                 }
             }
         }
 
-        _tGather.stop();
+        node->physics.force += fPress + fVisc;
+    }
+    _tForces.stop();
+    
+    ScopedFunctionTimer _tIntegrate("substepPhysics.fluidIntegrate");
+    const float sleepVel2 = (0.02f * h) * (0.02f * h);
+    const float cfl = 0.4f * h;
+    const float maxVel = std::max(cfl / dt, 8.0f);
+    const float xsph = phys_xsphEpsilon;
 
-        // (3) DENSITY + PRESSURE pass — parallel over particles.
-        ScopedFunctionTimer _tDensity("stepPhysics.fluidDensity");
-        #pragma omp parallel for schedule(dynamic, 64)
-        for (int i = 0; i < (int)sphNodes.size(); ++i) {
-            auto& node = sphNodes[i];
+    std::vector<Vec3> smoothedVel(sphNodes.size());
+    #pragma omp parallel for schedule(dynamic, 64)
+    for (int i = 0; i < (int)sphNodes.size(); ++i) {
+        auto& node = sphNodes[i];
+        Vec3 accum = Vec3::Zero();
+        if (xsph > 0.0f) {
             const auto& nb = cells[partCell[i]].fluidNeighbors;
-            float densityFraction = 0.0f;
             for (int j : nb) {
+                if (j == i) continue;
                 auto& neighbor = sphNodes[j];
                 float r = (node->position - neighbor->position).norm();
                 if (r < h) {
                     float V_j = std::min(neighbor->size * neighbor->size * neighbor->size, maxKernelVol);
-                    densityFraction += V_j * K.Poly6(r);
+                    accum += V_j * K.Poly6(r) * (neighbor->physics.velocity - node->physics.velocity);
                 }
             }
-            node->physics.density = densityFraction * phys_restDensity;
-            float over_density = std::max(0.0f, densityFraction - 1.0f);
-            node->physics.pressure = phys_gasConstant * std::min(over_density, 1.5f);
         }
-
-        _tDensity.stop();
-
-        // (4) FORCES (parallel over particles).
-        ScopedFunctionTimer _tForces("stepPhysics.fluidForces");
-        #pragma omp parallel for schedule(dynamic, 64)
-        for (int i = 0; i < (int)sphNodes.size(); ++i) {
-            auto& node = sphNodes[i];
-            const Cell& cell = cells[partCell[i]];
-
-            float V_i = std::min(node->size * node->size * node->size, maxKernelVol);
-            float mass_i = std::max(V_i * phys_restDensity, 1e-6f);
-
-            Vec3 gravityDir = phys_gravity;
-            if (phys_useGravityPoint) {
-                Vec3 toCenter = phys_gravityCenter - node->position;
-                float dist = toCenter.norm();
-                gravityDir = (dist > 1e-4f) ? (toCenter / dist) * phys_gravityStrength
-                                            : Vec3(0,0,0);
-            }
-            node->physics.force = gravityDir * mass_i;
-
-            Vec3 fPress = Vec3::Zero();
-            Vec3 fVisc = Vec3::Zero();
-
-            // Fluid-fluid.
-            for (int j : cell.fluidNeighbors) {
-                if (j == i) continue;
-                auto& neighbor = sphNodes[j];
-                Vec3 diff = node->position - neighbor->position;
-                float r = diff.norm();
-                if (r < 1e-5f) {
-                    Vec3 rnd = Vec3::Random();
-                    if (rnd.squaredNorm() < 1e-8f) rnd = Vec3(1,0,0);
-                    fPress += rnd.normalized() * mass_i * K.Poly6(0) * 10.0f;
-                    continue;
-                }
-                if (r < h) {
-                    Vec3 dir = diff / r;
-                    float V_j = std::min(neighbor->size * neighbor->size * neighbor->size, maxKernelVol);
-                    float P_sum = node->physics.pressure + neighbor->physics.pressure;
-                    fPress += dir * (-V_i * V_j * P_sum * K.WendlandGrad(r));
-                    float F_v = V_i * V_j * phys_viscosity * K.ViscLaplacian(r);
-                    fVisc += F_v * (neighbor->physics.velocity - node->physics.velocity);
-                }
-            }
-
-            // Fluid-solid (static voxels from the SVO walk; velocity == 0).
-            float baseG = (phys_gravityStrength > 0.1f) ? phys_gravityStrength : 9.81f;
-            for (const auto& solid : cell.solids) {
-                Vec3 diff = node->position - solid.pos;
-                float r = diff.norm();
-                float minDist = (node->size + solid.size) * 0.5f;
-                if (r >= minDist) continue;
-                if (r < 1e-5f) {
-                    Vec3 rnd = Vec3::Random();
-                    if (rnd.squaredNorm() < 1e-8f) rnd = Vec3(1,0,0);
-                    fPress += rnd.normalized() * mass_i * K.Poly6(0) * 10.0f;
-                    continue;
-                }
-                Vec3 dir = diff / r;
-                // Boundary repulsion scaled to the local cell spacing.
-                float q = r / minDist;
-                float oq = 1.0f - q;
-                float repel = mass_i * baseG * 250.0f * (oq*oq*oq*oq) * (4.0f*q + 1.0f);
-                fPress += dir * repel;
-                float approach = node->physics.velocity.dot(dir);
-                if (approach < 0.0f) fVisc += -dir * (approach * mass_i * 50.0f * (1.0f - q));
-            }
-            
-            if (phys_solidBoundary) {
-                const float wallH = h;
-                for (int a = 0; a < 3; ++a) {
-                    float dLo = node->position[a] - domLo[a]; // distance to low face
-                    if (dLo < wallH) {
-                        float q = std::min(std::max(dLo, 1e-4f) / wallH, 1.0f);
-                        float oq = 1.0f - q;
-                        fPress[a] += mass_i * baseG * 250.0f * (oq*oq*oq*oq) * (4.0f*q + 1.0f);
-                        float approach = -node->physics.velocity[a]; // >0 means moving into wall
-                        if (approach > 0.0f) fVisc[a] += approach * mass_i * 50.0f * (1.0f - q);
-                    }
-                    float dHi = domHi[a] - node->position[a]; // distance to high face
-                    if (dHi < wallH) {
-                        float q = std::min(std::max(dHi, 1e-4f) / wallH, 1.0f);
-                        float oq = 1.0f - q;
-                        fPress[a] -= mass_i * baseG * 250.0f * (oq*oq*oq*oq) * (4.0f*q + 1.0f);
-                        float approach = node->physics.velocity[a]; // >0 means moving into wall
-                        if (approach > 0.0f) fVisc[a] -= approach * mass_i * 50.0f * (1.0f - q);
-                    }
-                }
-            }
-
-            node->physics.force += fPress + fVisc;
-        }
-
-        _tForces.stop();
-
-        // (5) INTEGRATE (parallel). Sleeping: settled particles skip relocation.
-        ScopedFunctionTimer _tIntegrate("stepPhysics.fluidIntegrate");
-        std::vector<FluidMoveAction<T>> perMoves(sphNodes.size());
-        std::vector<char> moveValid(sphNodes.size(), 0);
-        const float sleepVel2 = (0.02f * h) * (0.02f * h);
-        const float maxVel = std::max(h / dt, 25.0f);
-
-        #pragma omp parallel for schedule(static)
-        for (int i = 0; i < (int)sphNodes.size(); ++i) {
-            auto& node = sphNodes[i];
-            
-            float V_i = std::min(node->size * node->size * node->size, maxKernelVol);
-            float mass_i = std::max(V_i * phys_restDensity, 1e-6f);
-
-            Vec3 accel = node->physics.force / mass_i;
-            if (!accel.allFinite()) accel = Vec3::Zero();
-            if (accel.squaredNorm() > 1000.0f * 1000.0f) accel = accel.normalized() * 1000.0f;
-
-            node->physics.velocity += accel * dt;
-            if (!node->physics.velocity.allFinite()) node->physics.velocity = Vec3::Zero();
-            
-            node->physics.velocity *= std::max(0.0f, 1.0f - phys_velocityDamping * dt);
-            if (node->physics.velocity.squaredNorm() > maxVel * maxVel)
-                node->physics.velocity = node->physics.velocity.normalized() * maxVel;
-
-            if (node->physics.velocity.squaredNorm() < sleepVel2) {
-                node->physics.velocity.setZero();
-                node->setStatic(true);
-                node->setSettled(true);
-                continue;
-            }
-            node->setStatic(false);
-            node->setSettled(false);
-
-            perMoves[i].node = node;
-            perMoves[i].oldPos = node->position;
-            perMoves[i].newPos = node->position + node->physics.velocity * dt;
-            perMoves[i].solidNearby = !cells[partCell[i]].solids.empty();
-            moveValid[i] = 1;
-        }
-
-        for (int i = 0; i < (int)sphNodes.size(); ++i)
-            if (moveValid[i]) pendingFluidMoves.push_back(std::move(perMoves[i]));
-        _tIntegrate.stop();
+        smoothedVel[i] = node->physics.velocity + xsph * accum;
     }
 
-    ScopedFunctionTimer _tRelocate("stepPhysics.fluidRelocate_SERIAL");
+    #pragma omp parallel for schedule(static)
+    for (int i = 0; i < (int)sphNodes.size(); ++i) {
+        auto& node = sphNodes[i];
 
-    #pragma omp parallel for schedule(dynamic, 64)
-    for (size_t i = 0; i < pendingFluidMoves.size(); ++i) {
-        auto& mv = pendingFluidMoves[i];
-        Vec3 diff = mv.newPos - mv.oldPos;
-        float dist = diff.norm();
-        if (dist > 1e-5f && mv.solidNearby) {
-            Vec3 dir = diff / dist;
-            RayHit_<T> hit;               // thread-local
-            // Pass fastMats so the solid-only filter is lock-free (no objectsMutex_
-            // / material-copy per point) — this is the dominant relocate cost.
-            if (this->raycast(mv.oldPos, dir, dist + mv.node->size * 0.5f, hit, mv.node, true, true, &fastMats)) {
-                mv.newPos = hit.hitPoint + hit.normal * (mv.node->size * 0.51f);
-                float vn = mv.node->physics.velocity.dot(hit.normal);
-                if (vn < 0.0f) {
-                    mv.node->physics.velocity -= vn * hit.normal;
-                    mv.node->physics.velocity *= 0.5f;
+        float V_i = std::min(node->size * node->size * node->size, maxKernelVol);
+        float mass_i = std::max(V_i * phys_restDensity, 1e-6f);
+
+        Vec3 accel = node->physics.force / mass_i;
+        if (!accel.allFinite()) accel = Vec3::Zero();
+        if (accel.squaredNorm() > 1000.0f * 1000.0f) accel = accel.normalized() * 1000.0f;
+
+        Vec3 vel = smoothedVel[i] + accel * dt;
+        if (!vel.allFinite()) vel = Vec3::Zero();
+
+        vel *= std::max(0.0f, 1.0f - phys_velocityDamping * dt);
+        if (vel.squaredNorm() > maxVel * maxVel) vel = vel.normalized() * maxVel;
+        node->physics.velocity = vel;
+
+        if (vel.squaredNorm() < sleepVel2) {
+            node->physics.velocity.setZero();
+            node->setStatic(true);
+            node->setSettled(true);
+            continue;
+        }
+        node->setStatic(false);
+        node->setSettled(false);
+
+        Vec3 np = node->position + vel * dt;
+
+        if (partCell[i] >= 0 && !cells[partCell[i]].solids.empty()) {
+            Vec3 diff = np - node->position;
+            float dist = diff.norm();
+            if (dist > 1e-5f) {
+                Vec3 dir = diff / dist;
+                RayHit_<T> hit;
+                if (this->raycast(node->position, dir, dist + node->size * 0.5f, hit, node, true, true, &fastMats)) {
+                    np = hit.hitPoint + hit.normal * (node->size * 0.51f);
+                    float vn = node->physics.velocity.dot(hit.normal);
+                    if (vn < 0.0f) {
+                        node->physics.velocity -= vn * hit.normal;
+                        node->physics.velocity *= 0.5f;
+                    }
                 }
             }
         }
         
         if (phys_solidBoundary) {
-            float half = mv.node->size * 0.5f;
+            float half = node->size * 0.5f;
             for (int a = 0; a < 3; ++a) {
-                float lo = domLo[a] + half, hi = domHi[a] - half;
-                if (lo > hi) { mv.newPos[a] = (domLo[a] + domHi[a]) * 0.5f; continue; }
-                if (mv.newPos[a] < lo) {
-                    mv.newPos[a] = lo;
-                    if (mv.node->physics.velocity[a] < 0.0f)
-                        mv.node->physics.velocity[a] *= -0.3f;
-                } else if (mv.newPos[a] > hi) {
-                    mv.newPos[a] = hi;
-                    if (mv.node->physics.velocity[a] > 0.0f)
-                        mv.node->physics.velocity[a] *= -0.3f;
+                float lo = domLo[a] + half;
+                float hi = domHi[a] - half;
+                if (lo > hi) { np[a] = (domLo[a] + domHi[a]) * 0.5f; continue; }
+                if (np[a] < lo) {
+                    np[a] = lo;
+                    if (node->physics.velocity[a] < 0.0f) node->physics.velocity[a] *= -0.3f;
+                } else if (np[a] > hi) {
+                    np[a] = hi;
+                    if (node->physics.velocity[a] > 0.0f) node->physics.velocity[a] *= -0.3f;
                 }
             }
         }
+
+        if (np.allFinite()) node->position = np;
+    }
+    _tIntegrate.stop();
+}
+
+template<typename T>
+void Octree<T>::endPhysicsFrame(PhysicsFrameContext& ctx) {
+    TIME_FUNCTION;
+    if (!ctx.valid) return;
+    if (ctx.sphNodes.empty()) {
+        if (pointPoolFragmentation() > 3.0f) store_.points.compact();
+        return;
     }
 
-    // Phase B: serial tree edits.
-    std::vector<Vec3> span(2);   // reused to avoid a heap alloc per particle
-    for (size_t i = 0; i < pendingFluidMoves.size(); ++i) {
-        auto& mv = pendingFluidMoves[i];
-        auto pd = mv.node;
-        span[0] = mv.oldPos;
-        span[1] = mv.newPos;
+    ScopedFunctionTimer _tRelocate("endPhysicsFrame.fluidRelocate");
+
+    struct Relocation {
+        std::shared_ptr<NodeData> node;
+        Vec3 oldKeyPos;
+        uint32_t start;
+        int depth;
+    };
+    std::vector<Relocation> relocs;
+    relocs.reserve(ctx.sphNodes.size());
+
+    for (auto& node : ctx.sphNodes) {
+        if (!node) continue;
+        if (node->position == node->physics.lastTreePos) continue;
+        std::vector<Vec3> span = { node->physics.lastTreePos, node->position };
         int depth = 0;
         uint32_t start = getHighestCommonNode(span, root_, depth);
         if (start == INVALID_IDX) start = root_;
-
-        if (!removeRecursive(start, pd->getCubeBounds(), pd))
-            removeRecursive(root_, pd->getCubeBounds(), pd);
-        pd->position = mv.newPos;
-        if (!insertRecursive(start, pd, depth))
-            if (!insertRecursive(root_, pd, 0)) size--;
+        relocs.push_back({node, node->physics.lastTreePos, start, depth});
     }
 
-    if (pointPoolFragmentation() > 3.0f) {
-        store_.points.compact();
+    std::sort(relocs.begin(), relocs.end(),
+              [](const Relocation& a, const Relocation& b) { return a.start < b.start; });
+
+    size_t g = 0;
+    while (g < relocs.size()) {
+        size_t gEnd = g;
+        uint32_t node = relocs[g].start;
+        while (gEnd < relocs.size() && relocs[gEnd].start == node) ++gEnd;
+
+        #pragma omp parallel for schedule(dynamic, 16)
+        for (size_t i = g; i < gEnd; ++i) {
+            auto& rc = relocs[i];
+            auto pd = rc.node;
+            Vec3 target = pd->position;
+            pd->position = rc.oldKeyPos;
+            bool removed = removeRecursive(rc.start, pd->getCubeBounds(), pd);
+            if (!removed) removeRecursive(root_, pd->getCubeBounds(), pd);
+            pd->position = target;
+            bool inserted = insertRecursive(rc.start, pd, rc.depth);
+            if (!inserted) inserted = insertRecursive(root_, pd, 0);
+            if (!inserted) {
+                #pragma omp atomic
+                size--;
+            }
+            pd->physics.lastTreePos = target;
+        }
+        g = gEnd;
     }
+    _tRelocate.stop();
+
+    if (pointPoolFragmentation() > 3.0f) store_.points.compact();
+}
+
+template<typename T>
+void Octree<T>::multiStepPhysics(float dt, int steps) {
+    TIME_FUNCTION;
+    if (root_ == INVALID_IDX || dt <= 0.0f || steps < 1) return;
+
+    PhysicsFrameContext ctx;
+    beginPhysicsFrame(ctx);
+    if (!ctx.valid) return;
+
+    for (auto& node : ctx.sphNodes)
+        if (node) node->physics.lastTreePos = node->position;
+
+    float subDt = dt / steps;
+    for (int s = 0; s < steps; ++s) substepPhysics(subDt, ctx);
+
+    endPhysicsFrame(ctx);
+}
+
+template<typename T>
+void Octree<T>::stepPhysics(float dt) {
+    multiStepPhysics(dt, 1);
 }
 
 template<typename T>
@@ -485,8 +556,7 @@ void Octree<T>::stepRigidLattice(
             if (len < 1e-6f) continue;
             Vec3 dir = d / len;
 
-            float k = (bond.stiffnessOverride > 0.0f) ? bond.stiffnessOverride
-                                                       : m->stiffness;
+            float k = (bond.stiffnessOverride > 0.0f) ? bond.stiffnessOverride : m->stiffness;
 
             float ext = len - bond.restLength;
             float springF = k * ext;
@@ -497,8 +567,7 @@ void Octree<T>::stepRigidLattice(
             float total = springF + dampF;
             force += dir * total;
 
-            float limit = (ext >= 0.0f) ? bond.strength
-                                        : bond.strength * m->breakCompressionScale;
+            float limit = (ext >= 0.0f) ? bond.strength : bond.strength * m->breakCompressionScale;
             float load = std::abs(springF);
 
             if (m->breakTorque > 0.0f) {
@@ -568,7 +637,7 @@ void Octree<T>::stepRigidLattice(
 
     _tRIntegrate.stop();
 
-    ScopedFunctionTimer _tRRelocate("stepRigidLattice.relocate_SERIAL");
+    ScopedFunctionTimer _tRRelocate("stepRigidLattice.relocate");
 
     std::unordered_set<int> fracturedObjects;
     for (auto& node : rigidNodes) {
@@ -592,19 +661,43 @@ void Octree<T>::stepRigidLattice(
         b.resize(writeIdx);
     }
 
+    struct RRelocation { int idx; uint32_t start; int depth; };
+    std::vector<RRelocation> rrelocs;
+    rrelocs.reserve(rigidNodes.size());
     for (int i = 0; i < (int)rigidNodes.size(); ++i) {
         if (!valid[i]) continue;
         auto& mv = moves[i];
-        auto pd = mv.node;
         std::vector<Vec3> span = { mv.oldPos, mv.newPos };
         int depth = 0;
         uint32_t start = getHighestCommonNode(span, root_, depth);
         if (start == INVALID_IDX) start = root_;
-        if (!removeRecursive(start, pd->getCubeBounds(), pd))
-            removeRecursive(root_, pd->getCubeBounds(), pd);
-        pd->position = mv.newPos;
-        if (!insertRecursive(start, pd, depth))
-            if (!insertRecursive(root_, pd, 0)) size--;
+        rrelocs.push_back({i, start, depth});
+    }
+
+    std::sort(rrelocs.begin(), rrelocs.end(),
+              [](const RRelocation& a, const RRelocation& b) { return a.start < b.start; });
+
+    size_t g = 0;
+    while (g < rrelocs.size()) {
+        size_t gEnd = g;
+        uint32_t node = rrelocs[g].start;
+        while (gEnd < rrelocs.size() && rrelocs[gEnd].start == node) ++gEnd;
+
+        #pragma omp parallel for schedule(dynamic, 16)
+        for (size_t r = g; r < gEnd; ++r) {
+            auto& rc = rrelocs[r];
+            auto& mv = moves[rc.idx];
+            auto pd = mv.node;
+            if (!removeRecursive(rc.start, pd->getCubeBounds(), pd))
+                removeRecursive(root_, pd->getCubeBounds(), pd);
+            pd->position = mv.newPos;
+            if (!insertRecursive(rc.start, pd, rc.depth))
+                if (!insertRecursive(root_, pd, 0)) {
+                    #pragma omp atomic
+                    size--;
+                }
+        }
+        g = gEnd;
     }
     _tRRelocate.stop();
 

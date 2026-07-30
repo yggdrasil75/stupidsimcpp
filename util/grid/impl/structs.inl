@@ -257,6 +257,7 @@ template<typename T>
 struct PhysicsState_ {
     Vec3 velocity{0.0f, 0.0f, 0.0f};
     Vec3 force{0.0f, 0.0f, 0.0f};
+    Vec3 lastTreePos{0.0f, 0.0f, 0.0f};
     float density = 1.0f;
     float pressure = 0.0f;
     std::vector<Bond_<T>> bonds;
@@ -1366,6 +1367,24 @@ struct ProgressiveAccum {
     float tanfovx = 0.0f;
     float tanfovy = 0.0f;
     uint64_t sceneEpoch = ~0ull;
+};
+
+struct SolidNb {
+    Vec3 pos;
+    float size;
+};
+
+template<typename T>
+struct PhysicsFrameContext_ {
+    std::vector<std::vector<PhysicsMaterial_>> fastMats;
+    size_t fastMatsSize = 0;
+    std::vector<std::shared_ptr<NodeData_<T>>> sphNodes;
+    std::vector<std::shared_ptr<NodeData_<T>>> rigidNodes;
+    std::unordered_map<std::array<int64_t,3>, std::vector<SolidNb>, Vec3i64Hash> solidCells;
+    Vec3 domLo;
+    Vec3 domHi;
+    float solidCellSize = 0.0f;
+    bool valid = false;
 };
 
 }

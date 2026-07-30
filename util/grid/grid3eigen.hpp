@@ -60,6 +60,8 @@ class Octree {
 public:
     ///@brief Alias for node data structures used in the octree
     using NodeData = NodeData_<T>;
+    ///@brief Per-frame physics context alias
+    using PhysicsFrameContext = PhysicsFrameContext_<T>;
     ///@brief Alias for octree nodes
     using OctreeNode = OctreeNode_<T>;
     ///@brief Alias for raycasting hit information
@@ -417,6 +419,9 @@ private:
     
     ///@brief Drag multiplier to progressively slow particles
     float phys_velocityDamping = 0.5f;
+
+    ///@brief XSPH velocity-smoothing coefficient (0 disables).
+    float phys_xsphEpsilon = 0.2f;
     
     ///@brief Ambient air density value for drag calculations
     float phys_airDensity = 1.225f;
@@ -838,6 +843,8 @@ public:
     ///@brief Updates fluid physics drag reduction parameter
     ///@param damping The physics damping value
     void setPhysicsVelocityDamping(float damping) { phys_velocityDamping = damping; }
+
+    void setPhysicsXsphEpsilon(float e) { phys_xsphEpsilon = e; }
     ///@brief Sets physics constant that modifies SPH gas dynamics
     ///@param c New physics gas constant
     void setPhysicsGasConstant(float c) { phys_gasConstant = c; }
@@ -3345,6 +3352,16 @@ public:
     frame endRenderFrameVulkan(InFlightFrame& pending);
 
     void stepPhysics(float dt);
+
+    ///@brief Gathers per-frame physics invariants (materials, active nodes, solids)
+    void beginPhysicsFrame(PhysicsFrameContext& ctx);
+    ///@brief Runs one SPH + rigid substep against SVO-resident particles (no tree writeback)
+    void substepPhysics(float dt, PhysicsFrameContext& ctx);
+    ///@brief Re-keys moved particles in the SVO once, in parallel grouped batches
+    void endPhysicsFrame(PhysicsFrameContext& ctx);
+    ///@brief Walks the SVO once for static voxels bordering the fluid region
+    void gatherSolidNeighborhood(PhysicsFrameContext& ctx);
+
     void stepRigidLattice(float dt, std::vector<std::shared_ptr<NodeData>>& rigidNodes,
                           const std::vector<std::vector<PhysicsMaterial_>>& fastMats, size_t fastMatsSize);
 
@@ -3485,16 +3502,10 @@ public:
         return static_cast<float>(slots) / static_cast<float>(live);
     }
 
-    ///@brief stepPhysics over multiple steps to prevent issues
+    ///@brief Steps physics with one per-frame setup and N substeps
     ///@param dt total time (divided among steps)
-    ///@param steps number of steps
-    void multiStepPhysics(float dt, int steps) {
-        dt = dt / steps;
-        while (steps > 0) {
-            stepPhysics(dt);
-            steps--;
-        }
-    }
+    ///@param steps number of substeps
+    void multiStepPhysics(float dt, int steps);
 };
 }
 #endif
