@@ -464,7 +464,7 @@ int main() {
     const int bounces = 4;
     const float blendedfactor = 0.65f;
     const int physicsSubsteps = 8;
-    const float subDt = (1.0f / fps) / physicsSubsteps;
+    const float subDt = (1.0f / fps);
 
     const int totalLegs = (int)path.size() - 1;
     const int totalFrames = totalLegs * framesPerLeg;
@@ -533,7 +533,7 @@ int main() {
                 std::cout << "  ice melting" << std::endl;
             }
             if (waterSpawned || iceMelted)
-                for (int s = 0; s < physicsSubsteps; ++s) octree.stepPhysics(subDt);
+                octree.multiStepPhysics(subDt, physicsSubsteps);
 
             {
                 float ph = globalFrame * 0.5f;
