@@ -121,6 +121,18 @@ void Octree<T>::gatherSolidNeighborhood(PhysicsFrameContext& ctx) {
 
     Vec3 regionLo((keyMin[0]-1)*C, (keyMin[1]-1)*C, (keyMin[2]-1)*C);
     Vec3 regionHi((keyMax[0]+2)*C, (keyMax[1]+2)*C, (keyMax[2]+2)*C);
+    Vec3 gdir = phys_useGravityPoint
+                    ? (phys_gravityCenter - 0.5f * (regionLo + regionHi))
+                    : phys_gravity;
+    if (gdir.squaredNorm() > 1e-8f) {
+        gdir.normalize();
+        const float reach = 8.0f * C;
+        for (int a = 0; a < 3; ++a) {
+            float d = gdir[a] * reach;
+            if (d < 0.0f) regionLo[a] += d;
+            else if (d > 0.0f) regionHi[a] += d;
+        }
+    }
     BoundingBox region{regionLo, regionHi};
 
     std::vector<Vec3> regionCorners = {regionLo, regionHi};
@@ -396,7 +408,7 @@ void Octree<T>::substepPhysics(float dt, PhysicsFrameContext& ctx) {
 
         Vec3 np = node->position + vel * dt;
 
-        if (partCell[i] >= 0 && !cells[partCell[i]].solids.empty()) {
+        {
             Vec3 diff = np - node->position;
             float dist = diff.norm();
             if (dist > 1e-5f) {
