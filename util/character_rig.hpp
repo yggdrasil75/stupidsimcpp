@@ -43,11 +43,24 @@ struct RigMuscle {
     std::vector<Vec3> voxels;
 };
 
- struct CharacterRig {
+struct RigStrandMuscle {
+    int id;
+    std::string name;
+    MuscleRole role;
+    Joint origin, insertion, crosses;
+    int originObjId, insertObjId;
+    Vec3 originPos, insertPos;
+    std::vector<std::vector<Vec3>> fascicles;
+    std::vector<Vec3> voxels;
+    std::vector<Vec3> fiberDirs;
+};
+
+struct CharacterRig {
     SkeletonRig geom;
     std::vector<RigBone> bones;
     std::vector<RigJoint> joints;
     std::vector<RigMuscle> muscles;
+    std::vector<RigStrandMuscle> strandMuscles;
     int fleshObjId = OID_FLESH;
     int muscleObjId = OID_MUSCLE;
 
@@ -60,6 +73,10 @@ struct RigMuscle {
     }
     const RigMuscle* findMuscle(const std::string& n) const {
         for (auto& m : muscles) if (m.name == n) return &m;
+        return nullptr;
+    }
+    const RigStrandMuscle* findStrandMuscle(const std::string& n) const {
+        for (auto& m : strandMuscles) if (m.name == n) return &m;
         return nullptr;
     }
 };
@@ -99,18 +116,48 @@ inline void classifyJointBones(const CharacterRig& rig, Joint j,
             for (int i = 0; i < (int)rig.geom.bones.size(); ++i) {
                 if (i == childBone) continue;
                 const Bone& b = rig.geom.bones[i];
-                if (b.a == headJoint) {
-                    parentBone = i;
-                    break;
-                }
+                if (b.a == headJoint) { parentBone = i; break; }
             }
         }
     }
 }
 
-inline CharacterRig assembleRig(float height, const Vec3& base) {
+inline JointLimits limitsFor(Joint jt) {
+    switch (jt) {
+        case J_ELBOW_L: case J_ELBOW_R:
+        case J_KNEE_L: case J_KNEE_R:
+            return { 0.0f, 2.4f, -0.1f, 0.1f };
+        case J_INDEX_PIP_L: case J_INDEX_DIP_L:
+        case J_MIDDLE_PIP_L: case J_MIDDLE_DIP_L:
+        case J_RING_PIP_L: case J_RING_DIP_L:
+        case J_PINKY_PIP_L: case J_PINKY_DIP_L:
+        case J_INDEX_PIP_R: case J_INDEX_DIP_R:
+        case J_MIDDLE_PIP_R: case J_MIDDLE_DIP_R:
+        case J_RING_PIP_R: case J_RING_DIP_R:
+        case J_PINKY_PIP_R: case J_PINKY_DIP_R:
+        case J_THUMB_IP_L: case J_THUMB_IP_R:
+            return { 0.0f, 1.75f, -0.05f, 0.05f };
+        case J_INDEX_MCP_L: case J_MIDDLE_MCP_L:
+        case J_RING_MCP_L:  case J_PINKY_MCP_L:
+        case J_INDEX_MCP_R: case J_MIDDLE_MCP_R:
+        case J_RING_MCP_R:  case J_PINKY_MCP_R:
+        case J_THUMB_MCP_L: case J_THUMB_MCP_R:
+            return { -0.35f, 1.6f, -0.35f, 0.35f };
+        case J_BIGTOE_L: case J_TOE2_L: case J_TOE3_L: case J_TOE4_L: case J_TOE5_L:
+        case J_BIGTOE_R: case J_TOE2_R: case J_TOE3_R: case J_TOE4_R: case J_TOE5_R:
+            return { -0.6f, 1.0f, -0.1f, 0.1f };
+        case J_NECK: case J_HEAD:
+            return { -0.9f, 0.9f, -1.2f, 1.2f };
+        case J_JAW:
+            return { 0.0f, 0.5f, -0.1f, 0.1f };
+        default:
+            return {};
+    }
+}
+
+inline CharacterRig assembleRig(float height, const Vec3& base, const BuildConfig& cfg) {
     CharacterRig rig;
-    rig.geom = buildRig(height, base);
+    rig.geom = buildRig(height, base, cfg);
 
     for (int i = 0; i < (int)rig.geom.bones.size(); ++i) {
         const Bone& b = rig.geom.bones[i];
@@ -144,21 +191,7 @@ inline CharacterRig assembleRig(float height, const Vec3& base) {
         rj.childObjId  = rig.boneObjectId(cB);
         rj.position    = rig.geom.J[jt];
         rj.name        = jointName(jt);
-        switch (jt) {
-            case J_ELBOW_L:
-            case J_ELBOW_R:
-            case J_KNEE_L:
-            case J_KNEE_R:
-                rj.limits = { 0.0f, 2.4f, -0.1f, 0.1f };
-                break;
-            case J_NECK:
-            case J_HEAD:
-                rj.limits = { -0.9f, 0.9f, -1.2f, 1.2f };
-                break;
-            default:
-                rj.limits = {};
-                break;
-        }
+        rj.limits      = limitsFor(jt);
         rig.joints.push_back(rj);
     }
 
@@ -191,7 +224,41 @@ inline CharacterRig assembleRig(float height, const Vec3& base) {
         rig.muscles.push_back(rm);
     }
 
+    auto boneAtJoint = [&](Joint j, bool preferTail) -> int {
+        int match = -1;
+        for (int k = 0; k < (int)rig.geom.bones.size(); ++k) {
+            const Bone& bk = rig.geom.bones[k];
+            if (preferTail && bk.b == j) return k;
+            if (!preferTail && bk.a == j) return k;
+            if (bk.a == j || bk.b == j) match = k;
+        }
+        return match;
+    };
+    for (const auto& routed : rig.geom.routed) {
+        RigStrandMuscle sm;
+        sm.id        = routed.id;
+        sm.name      = routed.name;
+        sm.role      = routed.role;
+        sm.origin    = routed.origin;
+        sm.insertion = routed.insertion;
+        sm.crosses   = routed.crosses;
+        sm.originPos = routed.originPos;
+        sm.insertPos = routed.insertPos;
+        sm.fascicles = routed.fascicles;
+        int bo = boneAtJoint(routed.origin, true);
+        int bi = boneAtJoint(routed.insertion, false);
+        if (bo < 0) bo = nearestBone(rig.geom, routed.originPos);
+        if (bi < 0) bi = nearestBone(rig.geom, routed.insertPos);
+        sm.originObjId = bo >= 0 ? rig.boneObjectId(bo) : -1;
+        sm.insertObjId = bi >= 0 ? rig.boneObjectId(bi) : -1;
+        rig.strandMuscles.push_back(sm);
+    }
+
     return rig;
+}
+
+inline CharacterRig assembleRig(float height, const Vec3& base) {
+    return assembleRig(height, base, BuildConfig{});
 }
 
 namespace detail {
@@ -215,66 +282,93 @@ inline void insertFlesh(Grid::Octree<T>& octree, int objId, const Vec3& p, float
                   BodyType::SOFT, 0.95f, 1200.0f, 22.0f, 0.75f);
 }
 
-}
-
-template <typename T>
-inline CharacterRig buildRiggedCharacter(Grid::Octree<T>& octree, float height, float detail,
-                                         const Vec3& base = Vec3::Zero(), const RigCallbacks& cb = {}) {
-    CharacterRig rig = assembleRig(height, base);
-    const SkeletonRig& r = rig.geom;
-    const float step = detail;
-
-    static std::mt19937 rng(20260729u);
-    std::uniform_real_distribution<float> jitter(-0.0015f, 0.0015f);
-
-    if (cb.onBone) for (auto& b : rig.bones) cb.onBone(b);
-    if (cb.onJoint) for (auto& j : rig.joints) cb.onJoint(j);
-
-    Vec3 lo, hi;
-    rigBounds(r, step, lo, hi);
-
-    std::vector<std::vector<Vec3>> muscleVoxels(rig.muscles.size());
-
+template <typename T, typename Emit>
+inline void voxeliseLayer(Grid::Octree<T>& octree, const SkeletonRig& r,
+                          int wantLayer, float step, std::mt19937& rng, Emit&& emit) {
+    std::uniform_real_distribution<float> jitter(-step * 0.15f, step * 0.15f);
+    Vec3 lo, hi; rigBounds(r, step, lo, hi);
     for (float x = lo.x(); x <= hi.x(); x += step)
         for (float y = lo.y(); y <= hi.y(); y += step)
             for (float z = lo.z(); z <= hi.z(); z += step) {
                 Vec3 p(x, y, z);
-                int layer = classify(r, p);
-                if (layer == 0) continue;
+                if (classify(r, p) != wantLayer) continue;
                 Vec3 jp(x + jitter(rng), y + jitter(rng), z + jitter(rng));
-
-                if (layer == 1) {
-                    int bi = nearestBone(r, p);
-                    if (bi < 0) continue;
-                    int objId = rig.boneObjectId(bi);
-                    detail::insertBone(octree, objId, jp, step);
-                    if (cb.onVoxel) cb.onVoxel(objId, 1, jp);
-                } else if (layer == 2) {
-                    detail::insertMuscle(octree, OID_MUSCLE, jp, step);
-                    if (cb.onVoxel) cb.onVoxel(OID_MUSCLE, 2, jp);
-                    int best = -1;
-                    float bd = 1e30f;
-                    for (int mi = 0; mi < (int)r.muscles.size(); ++mi) {
-                        float t;
-                        float d = distToSegment(p, r.J[r.muscles[mi].a], r.J[r.muscles[mi].b], t);
-                        if (d < bd) {
-                            bd = d;
-                            best = mi;
-                        }
-                    }
-                    if (best >= 0) muscleVoxels[best].push_back(jp);
-                } else {
-                    detail::insertFlesh(octree, OID_FLESH, jp, step);
-                    if (cb.onVoxel) cb.onVoxel(OID_FLESH, 3, jp);
-                }
+                emit(p, jp, step);
             }
+}
 
-    for (int mi = 0; mi < (int)rig.muscles.size(); ++mi) {
-        rig.muscles[mi].voxels = std::move(muscleVoxels[mi]);
-        if (cb.onMuscle) cb.onMuscle(rig.muscles[mi]);
+}
+
+template <typename T>
+inline CharacterRig buildRiggedCharacter(Grid::Octree<T>& octree, float height,
+                                         const BuildConfig& cfg,
+                                         const Vec3& base = Vec3::Zero(),
+                                         const RigCallbacks& cb = {}) {
+    CharacterRig rig = assembleRig(height, base, cfg);
+    const SkeletonRig& r = rig.geom;
+
+    static std::mt19937 rng(20260729u);
+
+    if (cb.onBone)  for (auto& b : rig.bones)  cb.onBone(b);
+    if (cb.onJoint) for (auto& j : rig.joints) cb.onJoint(j);
+
+    const bool useStrands = cfg.useStrandMuscles && !r.routed.empty();
+    std::vector<std::vector<Vec3>> legacyVoxels(rig.muscles.size());
+
+    detail::voxeliseLayer(octree, r, 1, cfg.skeletonDetail, rng,
+        [&](const Vec3& p, const Vec3& jp, float step) {
+            int bi = nearestBone(r, p);
+            if (bi < 0) return;
+            int objId = rig.boneObjectId(bi);
+            detail::insertBone(octree, objId, jp, step);
+            if (cb.onVoxel) cb.onVoxel(objId, 1, jp);
+        });
+
+    detail::voxeliseLayer(octree, r, 2, cfg.muscleDetail, rng,
+        [&](const Vec3& p, const Vec3& jp, float step) {
+            detail::insertMuscle(octree, OID_MUSCLE, jp, step);
+            if (cb.onVoxel) cb.onVoxel(OID_MUSCLE, 2, jp);
+            if (useStrands) {
+                Vec3 dir; int mid = -1;
+                if (strandFiberDir(r, p, dir, mid) && mid >= 0 &&
+                    mid < (int)rig.strandMuscles.size()) {
+                    rig.strandMuscles[mid].voxels.push_back(jp);
+                    rig.strandMuscles[mid].fiberDirs.push_back(dir);
+                }
+            } else {
+                int best = -1; float bd = 1e30f;
+                for (int mi = 0; mi < (int)r.muscles.size(); ++mi) {
+                    float t;
+                    float d = distToSegment(p, r.J[r.muscles[mi].a],
+                                            r.J[r.muscles[mi].b], t);
+                    if (d < bd) { bd = d; best = mi; }
+                }
+                if (best >= 0) legacyVoxels[best].push_back(jp);
+            }
+        });
+
+    // --- flesh / skin ---
+    detail::voxeliseLayer(octree, r, 3, cfg.skinDetail, rng,
+        [&](const Vec3&, const Vec3& jp, float step) {
+            detail::insertFlesh(octree, OID_FLESH, jp, step);
+            if (cb.onVoxel) cb.onVoxel(OID_FLESH, 3, jp);
+        });
+
+    if (!useStrands) {
+        for (int mi = 0; mi < (int)rig.muscles.size(); ++mi) {
+            rig.muscles[mi].voxels = std::move(legacyVoxels[mi]);
+            if (cb.onMuscle) cb.onMuscle(rig.muscles[mi]);
+        }
     }
 
     return rig;
+}
+
+template <typename T>
+inline CharacterRig buildRiggedCharacter(Grid::Octree<T>& octree, float height, float detail,
+                                         const Vec3& base = Vec3::Zero(),
+                                         const RigCallbacks& cb = {}) {
+    return buildRiggedCharacter(octree, height, BuildConfig::fromLegacyDetail(detail), base, cb);
 }
 
 template <typename T>
@@ -306,42 +400,39 @@ template <typename T>
 inline size_t emitLayer(Grid::Octree<T>& octree, const SkeletonRig& r,
                         float step, int wantLayer) {
     static std::mt19937 rng(20260729u);
-    std::uniform_real_distribution<float> jitter(-0.0015f, 0.0015f);
-    Vec3 lo, hi; rigBounds(r, step, lo, hi);
     size_t inserted = 0;
-    for (float x = lo.x(); x <= hi.x(); x += step)
-        for (float y = lo.y(); y <= hi.y(); y += step)
-            for (float z = lo.z(); z <= hi.z(); z += step) {
-                Vec3 p(x, y, z);
-                if (classify(r, p) != wantLayer) continue;
-                Vec3 jp(x + jitter(rng), y + jitter(rng), z + jitter(rng));
-                if (wantLayer == 1) {
-                    int bi = nearestBone(r, p);
-                    detail::insertBone(octree, OID_SKELETON_BASE + (bi < 0 ? 0 : bi), jp, step);
-                } else if (wantLayer == 2) {
-                    detail::insertMuscle(octree, OID_MUSCLE, jp, step);
-                } else {
-                    detail::insertFlesh(octree, OID_FLESH, jp, step);
-                }
-                ++inserted;
+    detail::voxeliseLayer(octree, r, wantLayer, step, rng,
+        [&](const Vec3& p, const Vec3& jp, float s) {
+            if (wantLayer == 1) {
+                int bi = nearestBone(r, p);
+                detail::insertBone(octree, OID_SKELETON_BASE + (bi < 0 ? 0 : bi), jp, s);
+            } else if (wantLayer == 2) {
+                detail::insertMuscle(octree, OID_MUSCLE, jp, s);
+            } else {
+                detail::insertFlesh(octree, OID_FLESH, jp, s);
             }
+            ++inserted;
+        });
     return inserted;
 }
 
 template <typename T>
 inline size_t buildSkeleton(Grid::Octree<T>& octree, float height, float detail,
                             const Vec3& base = Vec3::Zero()) {
-    return emitLayer(octree, buildRig(height, base), detail, 1);
+    BuildConfig cfg = BuildConfig::fromLegacyDetail(detail);
+    return emitLayer(octree, buildRig(height, base, cfg), cfg.skeletonDetail, 1);
 }
 template <typename T>
 inline size_t buildMuscle(Grid::Octree<T>& octree, float height, float detail,
                           const Vec3& base = Vec3::Zero()) {
-    return emitLayer(octree, buildRig(height, base), detail, 2);
+    BuildConfig cfg = BuildConfig::fromLegacyDetail(detail);
+    return emitLayer(octree, buildRig(height, base, cfg), cfg.muscleDetail, 2);
 }
 template <typename T>
 inline size_t buildFlesh(Grid::Octree<T>& octree, float height, float detail,
                          const Vec3& base = Vec3::Zero()) {
-    return emitLayer(octree, buildRig(height, base), detail, 3);
+    BuildConfig cfg = BuildConfig::fromLegacyDetail(detail);
+    return emitLayer(octree, buildRig(height, base, cfg), cfg.skinDetail, 3);
 }
 
 template <typename T>

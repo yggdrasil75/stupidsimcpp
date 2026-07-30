@@ -324,8 +324,8 @@ private:
                            "without exporting. Each layer can be built on its own.");
         ImGui::Separator();
         numF("Height", &charHeight, 0.1f);
-        numF("Detail (voxel size)", &charDetail, 0.005f);
-        if (charDetail < 0.005f) charDetail = 0.005f;
+        numF("Detail (voxel size)", &charDetail, 0.0005f);
+        if (charDetail < 0.0005f) charDetail = 0.0005f;
         ImGui::InputFloat3("Center", charCenter, "%.3f");
 
         // rough cost hint so a user doesn't accidentally build millions of voxels
