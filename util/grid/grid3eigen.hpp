@@ -2060,6 +2060,139 @@ public:
         return true;
     }
 
+    ///@brief Creates a contractile muscle-fibre bond between two voxels and
+    ///       registers it with a sub-object actuator so it can be driven by
+    ///       commands. Unlike a joint bond, this bond's rest length is modulated
+    ///       by the owning sub-object's activation: at activation 1 it shortens
+    ///       to (1 - maxContraction) of its relaxed length, and the existing
+    ///       spring solver turns that into a pulling force. This only wires the
+    ///       geometry -- nothing contracts until applyMuscleCommand is called.
+    ///@param obj          The composite object (e.g. a character).
+    ///@param subObjectId  The actuator sub-object id (e.g. "achilles tendon").
+    ///@param a,b          The two voxels the fibre connects.
+    ///@param strength     Break force of the fibre bond.
+    ///@param stiffness    Optional stiffness override (0 = use material).
+    ///@param maxContract  Shortening fraction at full activation.
+    ///@return true if the fibre bond was created.
+    bool addMuscleFiber(const std::shared_ptr<GridObject>& obj, int subObjectId,
+                        const std::shared_ptr<NodeData>& a,
+                        const std::shared_ptr<NodeData>& b,
+                        float strength = 120.0f, float stiffness = 0.0f,
+                        float maxContract = 0.35f) {
+        if (!obj || !a || !b || a.get() == b.get()) return false;
+        float restLen = (a->position - b->position).norm();
+        if (restLen < 1e-5f) return false;
+
+        Bond_<T> bond;
+        bond.other = b;
+        bond.restLength = restLen;
+        bond.strength = strength;
+        bond.stiffnessOverride = stiffness;
+        bond.isFiber = true;
+        bond.restLengthRelaxed = restLen;
+        bond.maxContraction = maxContract;
+        bond.actuatorId = subObjectId;
+
+        a->physics.bonds.push_back(bond);
+        int bondIdx = static_cast<int>(a->physics.bonds.size()) - 1;
+        a->physics.bondsBuilt = true;
+
+        auto& so = obj->getOrCreateSubObject(subObjectId, "", SubObjectKind::MUSCLE);
+        typename SubObject_<T>::FiberRef ref;
+        ref.node = a;
+        ref.bondIndex = bondIdx;
+        {
+            u_lock lock(obj->objMutex);
+            so.fibers.push_back(ref);
+            so.maxContraction = maxContract;
+        }
+        return true;
+    }
+
+    ///@brief Sets a sub-object actuator's activation and updates its fibres'
+    ///       live rest lengths accordingly. Safe to call every frame.
+    ///@return true if the actuator was found and updated.
+    bool setSubObjectActivation(int objectId, int subObjectId, float activation) {
+        auto obj = getObject(objectId);
+        if (!obj) return false;
+        activation = std::clamp(activation, 0.0f, 1.0f);
+
+        u_lock lock(obj->objMutex);
+        auto it = obj->subObjects.find(subObjectId);
+        if (it == obj->subObjects.end()) return false;
+        SubObject_<T>& so = it->second;
+        so.activation = activation;
+
+        for (auto& fref : so.fibers) {
+            auto node = fref.node.lock();
+            if (!node) continue;
+            if (fref.bondIndex < 0 ||
+                fref.bondIndex >= (int)node->physics.bonds.size()) continue;
+            Bond_<T>& bond = node->physics.bonds[fref.bondIndex];
+            if (!bond.isFiber) continue;
+            float relaxed = bond.restLengthRelaxed > 0.0f ? bond.restLengthRelaxed
+                                                          : bond.restLength;
+            bond.restLength = relaxed * (1.0f - activation * bond.maxContraction);
+            // Waking the endpoints so the solver re-evaluates them.
+            node->setSettled(false);
+            if (auto other = bond.other.lock()) other->setSettled(false);
+        }
+        return true;
+    }
+
+    ///@brief Applies a MuscleCommand to the addressed (object, sub-object).
+    ///       This is the top-level "send a command to a muscle" entry point:
+    ///           applyMuscleCommand({ 1, 40, MuscleVerb::CONTRACT, 0.5f });
+    ///       means "object 1, sub-object 40, contract by 0.5". Verbs map onto
+    ///       the actuator's activation level; the fibres do the rest through the
+    ///       normal spring solve. Returns true if the command was applied.
+    bool applyMuscleCommand(const MuscleCommand& cmd) {
+        auto obj = getObject(cmd.objectId);
+        if (!obj) return false;
+        float current = 0.0f;
+        {
+            s_lock lock(obj->objMutex);
+            auto it = obj->subObjects.find(cmd.subObjectId);
+            if (it == obj->subObjects.end()) return false;
+            current = it->second.activation;
+        }
+        float target = current;
+        switch (cmd.verb) {
+            case MuscleVerb::SET_ACTIVATION: target = cmd.amount; break;
+            case MuscleVerb::CONTRACT:       target = current + cmd.amount; break;
+            case MuscleVerb::DECOMPRESS:     target = current - cmd.amount; break;
+            case MuscleVerb::RELAX:          target = 0.0f; break;
+        }
+        return setSubObjectActivation(cmd.objectId, cmd.subObjectId, target);
+    }
+
+    ///@brief Convenience: label a sub-object (name/kind) without adding fibres.
+    ///       Used for bones and other non-actuator parts so they are addressable
+    ///       and queryable by name.
+    void registerSubObject(int objectId, int subObjectId, const std::string& name,
+                           SubObjectKind kind) {
+        auto obj = getOrCreateObject(objectId);
+        auto& so = obj->getOrCreateSubObject(subObjectId, name, kind);
+        u_lock lock(obj->objMutex);
+        so.name = name;
+        so.kind = kind;
+    }
+
+    ///@brief Tags every voxel matching (objectId, predicate) with a sub-object
+    ///       id. Lets a builder stamp "these voxels are sub-object 40".
+    ///@return count of voxels tagged.
+    template<typename Pred>
+    size_t tagSubObject(int objectId, int subObjectId, Pred&& pred) {
+        std::vector<std::shared_ptr<NodeData>> nodes;
+        collectNodesByObjectId(objectId, nodes);
+        size_t n = 0;
+        for (auto& nd : nodes) {
+            if (!nd) continue;
+            if (pred(nd)) { nd->subObjectId = subObjectId; ++n; }
+        }
+        return n;
+    }
+
     ///@brief Serializes one object's geometry and inlined materials to a stream.
     ///@param out Open binary output stream.
     bool serializeObject(std::ofstream& out, int id) {

@@ -251,6 +251,11 @@ struct Bond_ {
     bool  toAnchor   = false;
     bool  broken     = false;
     float stiffnessOverride = 0.0f;
+
+    bool  isFiber = false;
+    float restLengthRelaxed = 0.0f;
+    float maxContraction = 0.35f;
+    int   actuatorId = -1;
 };
 
 template<typename T>
@@ -698,6 +703,57 @@ struct VoxelMat {
     float mass = 1.0f;
 };
 
+///@brief Kind of a sub-object part within a composite object.
+enum class SubObjectKind : uint8_t {
+    GENERIC = 0,
+    BONE    = 1,
+    MUSCLE  = 2,
+    TENDON  = 3,
+    LIGAMENT = 4,
+    ORGAN   = 5,
+};
+
+///@brief Verb for a command sent to a muscle-like sub-object.
+enum class MuscleVerb : uint8_t {
+    SET_ACTIVATION = 0,
+    CONTRACT = 1,
+    DECOMPRESS = 2,
+    RELAX = 3,
+};
+
+///@brief A command addressed to (objectId, subObjectId).
+struct MuscleCommand {
+    int objectId = -1;
+    int subObjectId = -1;
+    MuscleVerb verb = MuscleVerb::SET_ACTIVATION;
+    float amount = 0.0f;
+};
+
+///@brief A named, addressable part of a composite object (e.g. "left femur",
+///       "achilles tendon").
+template<typename T>
+struct SubObject_ {
+    int id = -1;
+    std::string name;
+    SubObjectKind kind = SubObjectKind::GENERIC;
+
+    int originSubObj = -1;
+    int insertSubObj = -1;
+
+    struct FiberRef {
+        std::weak_ptr<NodeData_<T>> node;
+        int bondIndex = -1;
+    };
+    std::vector<FiberRef> fibers;
+
+    float activation = 0.0f;
+    float maxContraction = 0.35f;
+
+    bool isActuator() const {
+        return kind == SubObjectKind::MUSCLE || kind == SubObjectKind::TENDON;
+    }
+};
+
 template<typename T>
 struct GridObject_ {
     int id;
@@ -761,6 +817,34 @@ struct GridObject_ {
         if (idx < physicsMaterials.size()) return physicsMaterials[idx];
         return PhysicsMaterial_();
     }
+
+    std::unordered_map<int, SubObject_<T>> subObjects;
+
+    SubObject_<T>& getOrCreateSubObject(int subId, const std::string& name = "",
+                                        SubObjectKind kind = SubObjectKind::GENERIC) {
+        u_lock lock(objMutex);
+        auto it = subObjects.find(subId);
+        if (it != subObjects.end()) return it->second;
+        SubObject_<T> so;
+        so.id = subId;
+        so.name = name;
+        so.kind = kind;
+        auto res = subObjects.emplace(subId, std::move(so));
+        return res.first->second;
+    }
+
+    const SubObject_<T>* getSubObject(int subId) const {
+        s_lock lock(objMutex);
+        auto it = subObjects.find(subId);
+        return it != subObjects.end() ? &it->second : nullptr;
+    }
+
+    int findSubObjectByName(const std::string& name) const {
+        s_lock lock(objMutex);
+        for (const auto& kv : subObjects)
+            if (kv.second.name == name) return kv.first;
+        return -1;
+    }
 };
 
 template<typename T>
@@ -768,6 +852,7 @@ struct NodeData_ {
     T data;
     Vec3 position;
     int objectId;
+    int subObjectId = -1;
     float size;
     Eigen::Vector4f color;
     uint32_t renderMatIdx;
@@ -788,8 +873,9 @@ struct NodeData_ {
     
     NodeData_() : objectId(-1), size(0.0f), color(Eigen::Vector4f::Zero()), renderMatIdx(0), physMatIdx(0), flags(0), settledFrames(0) {}
 
-    NodeData_(const NodeData_& other) : data(other.data), position(other.position), objectId(other.objectId), size(other.size),
-            color(other.color), renderMatIdx(other.renderMatIdx), physMatIdx(other.physMatIdx), flags(other.flags.load(std::memory_order_relaxed)),
+    NodeData_(const NodeData_& other) : data(other.data), position(other.position), objectId(other.objectId),
+            subObjectId(other.subObjectId), size(other.size), color(other.color), renderMatIdx(other.renderMatIdx),
+            physMatIdx(other.physMatIdx), flags(other.flags.load(std::memory_order_relaxed)),
             settledFrames(other.settledFrames.load(std::memory_order_relaxed)), physics(other.physics) {}
 
     NodeData_& operator=(const NodeData_& other) {
@@ -797,6 +883,7 @@ struct NodeData_ {
             data = other.data;
             position = other.position;
             objectId = other.objectId;
+            subObjectId = other.subObjectId;
             size = other.size;
             color = other.color;
             renderMatIdx = other.renderMatIdx;

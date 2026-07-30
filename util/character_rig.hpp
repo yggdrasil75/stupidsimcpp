@@ -64,6 +64,11 @@ struct CharacterRig {
     int fleshObjId = OID_FLESH;
     int muscleObjId = OID_MUSCLE;
 
+    static constexpr int SUBOBJ_MUSCLE_BASE = 1000;
+
+    int boneSubObjectId(int boneIndex) const { return boneIndex + 1; }
+    int muscleSubObjectId(int muscleId) const { return SUBOBJ_MUSCLE_BASE + muscleId; }
+
     int boneObjectId(int boneIndex) const {
         return OID_SKELETON_BASE + boneIndex;
     }
@@ -443,6 +448,81 @@ inline size_t buildCharacter(Grid::Octree<T>& octree, float height, float detail
     cb.onVoxel = [&n](int, int, const Vec3&) { ++n; };
     buildRiggedCharacter(octree, height, detail, base, cb);
     return n;
+}
+
+template <typename T>
+inline size_t wireMusculature(Grid::Octree<T>& octree, const CharacterRig& rig,
+                              int fibersPerMuscle = 6,
+                              float fiberStrength = 120.0f,
+                              float maxContraction = 0.35f) {
+    using NodeT = Grid::NodeData_<T>;
+
+    for (const auto& b : rig.bones) {
+        octree.registerSubObject(b.objectId, rig.boneSubObjectId(b.index),
+                                 b.name, Grid::SubObjectKind::BONE);
+    }
+    auto muscleObj = octree.getOrCreateObject(rig.muscleObjId);
+    for (const auto& sm : rig.strandMuscles) {
+        int sub = rig.muscleSubObjectId(sm.id);
+        octree.registerSubObject(rig.muscleObjId, sub, sm.name,
+                                 Grid::SubObjectKind::MUSCLE);
+        auto& so = muscleObj->getOrCreateSubObject(sub, sm.name,
+                                                   Grid::SubObjectKind::MUSCLE);
+        so.originSubObj = -1;
+        so.insertSubObj = -1;
+    }
+
+    {
+        std::vector<std::shared_ptr<NodeT>> mv;
+        octree.collectNodesByObjectId(rig.muscleObjId, mv);
+        for (auto& nd : mv) {
+            if (!nd) continue;
+            int mid = nearestStrandMuscle(rig.geom, nd->position);
+            if (mid >= 0) nd->subObjectId = rig.muscleSubObjectId(mid);
+        }
+    }
+
+    size_t fibersMade = 0;
+    for (const auto& sm : rig.strandMuscles) {
+        int sub = rig.muscleSubObjectId(sm.id);
+
+        int originBoneObj = sm.originObjId;
+        int insertBoneObj = sm.insertObjId;
+        if (originBoneObj < 0 || insertBoneObj < 0) continue;
+
+        std::vector<std::shared_ptr<NodeT>> originVox, insertVox;
+        octree.collectNodesByObjectId(originBoneObj, originVox);
+        octree.collectNodesByObjectId(insertBoneObj, insertVox);
+        if (originVox.empty() || insertVox.empty()) continue;
+
+        int nF = std::min<int>(fibersPerMuscle, (int)sm.fascicles.size());
+        if (nF <= 0) nF = std::min<int>(fibersPerMuscle, 1);
+
+        for (int f = 0; f < nF; ++f) {
+            Vec3 oP = sm.originPos, iP = sm.insertPos;
+            if (f < (int)sm.fascicles.size() && sm.fascicles[f].size() >= 2) {
+                oP = sm.fascicles[f].front();
+                iP = sm.fascicles[f].back();
+            }
+            auto nearest = [](const std::vector<std::shared_ptr<NodeT>>& v,
+                              const Vec3& p) -> std::shared_ptr<NodeT> {
+                std::shared_ptr<NodeT> best; float bd = 1e30f;
+                for (auto& n : v) {
+                    if (!n) continue;
+                    float d = (n->position - p).squaredNorm();
+                    if (d < bd) { bd = d; best = n; }
+                }
+                return best;
+            };
+            auto a = nearest(originVox, oP);
+            auto b = nearest(insertVox, iP);
+            if (!a || !b || a.get() == b.get()) continue;
+            if (octree.addMuscleFiber(muscleObj, sub, a, b,
+                                      fiberStrength, 0.0f, maxContraction))
+                ++fibersMade;
+        }
+    }
+    return fibersMade;
 }
 
 }
