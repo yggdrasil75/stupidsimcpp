@@ -79,16 +79,16 @@ int main(int argc, char** argv) {
     float bondStretchMax=0;
     long jointBondCount=0;
     for (auto& kv : byObj) for (auto& n : kv.second) {
-        for (auto& bd : n->physics.bonds) {
-            if (bd.stiffnessOverride <= 0.0f) continue;
-            auto o = bd.other.lock();
-            if (!o) continue;
+        oct.forEachBond(n, [&](uint32_t, Grid::Bond_<int>& bd, uint32_t otherId) {
+            if (bd.stiffnessOverride <= 0.0f) return;
+            auto o = oct.pointById(otherId);
+            if (!o) return;
             float len = (o->position - n->position).norm();
             float rel = bd.restLength>1e-5f ? std::abs(len-bd.restLength)/bd.restLength : 0.0f;
             bondStretchSum += rel;
             bondStretchMax = std::max(bondStretchMax, rel);
             ++jointBondCount;
-        }
+        });
     }
     float avgBondStretch = jointBondCount ? (float)(bondStretchSum/jointBondCount) : 0.0f;
 

@@ -24,7 +24,7 @@ int main(int argc, char** argv) {
     Vec3 minBound(-m, -m, -1.0f);
     Vec3 maxBound( m,  m, height + 1.0f);
 
-    Grid::Octree<int> octree(minBound, maxBound, "output/characterstore", 4);
+    Grid::Octree<int> octree(minBound, maxBound, "output/characterstore", 32);
     octree.setBackgroundColor(Vec3(0.02f, 0.02f, 0.03f));
     octree.setSkylight(Vec3(0.05f, 0.05f, 0.06f));
 

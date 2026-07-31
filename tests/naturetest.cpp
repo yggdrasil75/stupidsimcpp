@@ -397,7 +397,7 @@ int main() {
 
     Vec3 minB(-cfg::worldHalf, -cfg::worldHalf, -cfg::worldHalf);
     Vec3 maxB( cfg::worldHalf,  cfg::worldHalf,  cfg::worldHalf);
-    Grid::Octree<int> octree(minB, maxB, "output/naturescene", 8);
+    Grid::Octree<int> octree(minB, maxB, "output/naturescene", 32);
 
     // no dynamic physics in this scene - everything is STATIC. Gravity setup
     // kept for parity in case someone flips a rock to RIGID to test knockdown.

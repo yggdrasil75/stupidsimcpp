@@ -44,7 +44,8 @@ CHAR_LDFLAGS = -ltbb
 # Source files
 # SRC := $(SRC_DIR)/ptest.cpp
 # SRC := $(SRC_DIR)/naturetest.cpp
-SRC := $(SRC_DIR)/materialtestv2.cpp
+SRC := $(SRC_DIR)/physicsroom.cpp
+# SRC := $(SRC_DIR)/materialtestv2.cpp
 SUPPORT_SRC := $(IMGUI_DIR)/imgui.cpp $(IMGUI_DIR)/imgui_demo.cpp $(IMGUI_DIR)/imgui_draw.cpp $(IMGUI_DIR)/imgui_tables.cpp $(IMGUI_DIR)/imgui_widgets.cpp
 SUPPORT_SRC += $(IMGUI_DIR)/backends/imgui_impl_glfw.cpp $(IMGUI_DIR)/backends/imgui_impl_opengl3.cpp
 SUPPORT_SRC += $(SRC_DIR)/stb_image.cpp

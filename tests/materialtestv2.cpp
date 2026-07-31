@@ -327,7 +327,7 @@ int main() {
 
     Vec3 minBound(-ROOM_HALF_W - 2, corridorStartY - 3, WATER_FLOOR_Z - 3);
     Vec3 maxBound( ROOM_HALF_W + 2, corridorEndY + 3,   CEIL_Z + 3);
-    Grid::Octree<int> octree(minBound, maxBound, "output/renderscene", 4);
+    Grid::Octree<int> octree(minBound, maxBound, "output/renderscene", 32);
 
     octree.setBackgroundColor(Vec3(0.01f, 0.01f, 0.015f));
     octree.setSkylight(Vec3(0.02f, 0.02f, 0.025f));

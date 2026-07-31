@@ -244,18 +244,25 @@ struct NodeData_;
 
 template<typename T>
 struct Bond_ {
-    std::weak_ptr<NodeData_<T>> other;
+    uint32_t idA = INVALID_IDX;
+    uint32_t idB = INVALID_IDX;
+    uint32_t nextA = INVALID_IDX;
+    uint32_t nextB = INVALID_IDX;
     float restLength = 0.0f;
     float strength   = 0.0f;
     float damage     = 0.0f;
     bool  toAnchor   = false;
     bool  broken     = false;
+    bool  live       = false;
     float stiffnessOverride = 0.0f;
 
     bool  isFiber = false;
     float restLengthRelaxed = 0.0f;
     float maxContraction = 0.35f;
     int   actuatorId = -1;
+
+    uint32_t other(uint32_t self) const { return self == idA ? idB : idA; }
+    uint32_t nextFor(uint32_t self) const { return self == idA ? nextA : nextB; }
 };
 
 template<typename T>
@@ -265,7 +272,7 @@ struct PhysicsState_ {
     Vec3 lastTreePos{0.0f, 0.0f, 0.0f};
     float density = 1.0f;
     float pressure = 0.0f;
-    std::vector<Bond_<T>> bonds;
+    uint32_t bondHead = INVALID_IDX;
     bool bondsBuilt = false;
 };
 
@@ -849,6 +856,7 @@ struct GridObject_ {
 
 template<typename T>
 struct NodeData_ {
+    uint32_t id = INVALID_IDX;
     T data;
     Vec3 position;
     int objectId;
@@ -1146,6 +1154,49 @@ struct PointStore {
     std::vector<uint32_t> freeBlocks;
     mutable std::shared_mutex mutex;
 
+    std::vector<std::shared_ptr<NodeData_<T>>> slots;
+    std::vector<uint32_t> freeIds;
+
+    uint32_t registerIdLocked(const std::shared_ptr<NodeData_<T>>& pt) {
+        if (!pt) return INVALID_IDX;
+        if (pt->id != INVALID_IDX && pt->id < slots.size() && slots[pt->id] == pt)
+            return pt->id;
+        uint32_t id;
+        if (!freeIds.empty()) {
+            id = freeIds.back();
+            freeIds.pop_back();
+            slots[id] = pt;
+        } else {
+            id = static_cast<uint32_t>(slots.size());
+            slots.push_back(pt);
+        }
+        pt->id = id;
+        return id;
+    }
+
+    void releaseIdLocked(uint32_t id) {
+        if (id == INVALID_IDX || id >= slots.size()) return;
+        if (!slots[id]) return;
+        slots[id].reset();
+        freeIds.push_back(id);
+    }
+
+    std::shared_ptr<NodeData_<T>> byId(uint32_t id) const {
+        s_lock lock(mutex);
+        if (id == INVALID_IDX || id >= slots.size()) return nullptr;
+        return slots[id];
+    }
+
+    std::shared_ptr<NodeData_<T>> byIdLocked(uint32_t id) const {
+        if (id == INVALID_IDX || id >= slots.size()) return nullptr;
+        return slots[id];
+    }
+
+    size_t liveIdCount() const {
+        s_lock lock(mutex);
+        return slots.size() - freeIds.size();
+    }
+
     uint32_t alloc(const std::vector<std::shared_ptr<NodeData_<T>>>& pts) {
         u_lock lock(mutex);
         return allocLocked(pts);
@@ -1153,7 +1204,10 @@ struct PointStore {
 
     uint32_t allocLocked(const std::vector<std::shared_ptr<NodeData_<T>>>& pts) {
         uint32_t offset = static_cast<uint32_t>(pool.size());
-        for (const auto& p : pts) pool.push_back(p);
+        for (const auto& p : pts) {
+            registerIdLocked(p);
+            pool.push_back(p);
+        }
 
         Block b{offset, static_cast<uint32_t>(pts.size()), static_cast<uint32_t>(pts.size())};
         if (!freeBlocks.empty()) {
@@ -1214,6 +1268,7 @@ struct PointStore {
 
     uint32_t push(uint32_t blockIdx, const std::shared_ptr<NodeData_<T>>& pt) {
         u_lock lock(mutex);
+        registerIdLocked(pt);
         if (blockIdx == INVALID_IDX || blockIdx >= blocks.size()) {
             uint32_t offset = static_cast<uint32_t>(pool.size());
             pool.push_back(pt);
@@ -1252,6 +1307,7 @@ struct PointStore {
 
     uint32_t assign(uint32_t blockIdx, const std::vector<std::shared_ptr<NodeData_<T>>>& pts) {
         u_lock lock(mutex);
+        for (const auto& p : pts) registerIdLocked(p);
         if (blockIdx != INVALID_IDX && blockIdx < blocks.size()) {
             Block& b = blocks[blockIdx];
             bool spanValid = static_cast<size_t>(b.offset) + b.capacity <= pool.size();
@@ -1284,6 +1340,7 @@ struct PointStore {
 
     uint32_t addSingle(const std::shared_ptr<NodeData_<T>>& pt) {
         u_lock lock(mutex);
+        registerIdLocked(pt);
         uint32_t offset = static_cast<uint32_t>(pool.size());
         pool.push_back(pt);
         blocks.push_back(Block{offset, 1, 1});
@@ -1295,6 +1352,8 @@ struct PointStore {
         pool.clear();
         blocks.clear();
         freeBlocks.clear();
+        slots.clear();
+        freeIds.clear();
     }
 
     size_t totalPoints() const {
@@ -1333,6 +1392,76 @@ struct PointStore {
 };
 
 template<typename T>
+struct BondStore {
+    std::vector<Bond_<T>> arena;
+    std::vector<uint32_t> freeList;
+    mutable std::shared_mutex mutex;
+
+    Bond_<T>* at(uint32_t bid) {
+        if (bid == INVALID_IDX || bid >= arena.size()) return nullptr;
+        if (!arena[bid].live) return nullptr;
+        return &arena[bid];
+    }
+    const Bond_<T>* at(uint32_t bid) const {
+        if (bid == INVALID_IDX || bid >= arena.size()) return nullptr;
+        if (!arena[bid].live) return nullptr;
+        return &arena[bid];
+    }
+
+    uint32_t allocLocked() {
+        if (!freeList.empty()) {
+            uint32_t bid = freeList.back();
+            freeList.pop_back();
+            arena[bid] = Bond_<T>();
+            return bid;
+        }
+        arena.emplace_back();
+        return static_cast<uint32_t>(arena.size() - 1);
+    }
+
+    void linkLocked(uint32_t bid, PhysicsState_<T>& a, PhysicsState_<T>& b) {
+        Bond_<T>& bond = arena[bid];
+        bond.nextA = a.bondHead;
+        a.bondHead = bid;
+        bond.nextB = b.bondHead;
+        b.bondHead = bid;
+    }
+
+    void unlinkFromLocked(uint32_t bid, uint32_t self, PhysicsState_<T>& ps) {
+        uint32_t cur = ps.bondHead;
+        uint32_t prev = INVALID_IDX;
+        while (cur != INVALID_IDX) {
+            Bond_<T>& c = arena[cur];
+            if (cur == bid) {
+                uint32_t nxt = c.nextFor(self);
+                if (prev == INVALID_IDX) ps.bondHead = nxt;
+                else {
+                    Bond_<T>& p = arena[prev];
+                    if (p.idA == self) p.nextA = nxt;
+                    else p.nextB = nxt;
+                }
+                return;
+            }
+            prev = cur;
+            cur = c.nextFor(self);
+        }
+    }
+
+    void clear() {
+        u_lock lock(mutex);
+        arena.clear();
+        freeList.clear();
+    }
+
+    size_t liveCount() const {
+        s_lock lock(mutex);
+        size_t n = 0;
+        for (const auto& b : arena) if (b.live) ++n;
+        return n;
+    }
+};
+
+template<typename T>
 struct OctreeNodeStore {
     static constexpr size_t StripeCount = 1024;
 
@@ -1342,6 +1471,7 @@ struct OctreeNodeStore {
     mutable std::unique_ptr<std::shared_mutex[]> stripes;
 
     PointStore<T> points;
+    BondStore<T> bonds;
 
     OctreeNodeStore() : stripes(new std::shared_mutex[StripeCount]) {}
 
@@ -1412,6 +1542,7 @@ struct OctreeNodeStore {
         NodeList.clear();
         freeBlocks.clear();
         points.clear();
+        bonds.clear();
     }
 
     size_t memoryUsage() const {

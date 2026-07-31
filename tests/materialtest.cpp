@@ -284,7 +284,7 @@ int main() {
     // 1. Initialize Grid::Octree bounds
     Eigen::Vector3f minBound(-10.0f, -10.0f, -10.0f);
     Eigen::Vector3f maxBound(10.0f, 10.0f, 10.0f);
-    Grid::Octree<int> octree(minBound, maxBound, "output/renderscene", 4);
+    Grid::Octree<int> octree(minBound, maxBound, "output/renderscene", 32);
     
     // Set a dark background to emphasize the PBR light emission
     octree.setBackgroundColor(Eigen::Vector3f(0.02f, 0.02f, 0.02f));

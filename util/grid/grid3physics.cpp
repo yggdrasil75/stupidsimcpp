@@ -430,7 +430,10 @@ void Octree<T>::substepPhysics(float dt, PhysicsFrameContext& ctx) {
             for (int a = 0; a < 3; ++a) {
                 float lo = domLo[a] + half;
                 float hi = domHi[a] - half;
-                if (lo > hi) { np[a] = (domLo[a] + domHi[a]) * 0.5f; continue; }
+                if (lo > hi) {
+                    np[a] = (domLo[a] + domHi[a]) * 0.5f;
+                    continue;
+                }
                 if (np[a] < lo) {
                     np[a] = lo;
                     if (node->physics.velocity[a] < 0.0f) node->physics.velocity[a] *= -0.3f;
@@ -546,7 +549,10 @@ void Octree<T>::stepRigidLattice(
     for (int i = 0; i < (int)rigidNodes.size(); ++i) {
         auto& node = rigidNodes[i];
         const PhysicsMaterial_* m = physMatOf(node, fastMats, fastMatsSize);
-        if (!m) { node->physics.force.setZero(); continue; }
+        if (!m) {
+            node->physics.force.setZero();
+            continue;
+        }
 
         float mass = std::max(m->mass, 1e-4f);
 
@@ -558,14 +564,29 @@ void Octree<T>::stepRigidLattice(
         }
         Vec3 force = g * mass;
 
-        for (auto& bond : node->physics.bonds) {
-            auto other = bond.other.lock();
-            if (!other || !other->isActive()) { bond.broken = true; continue; }
-            if (bond.broken) continue;
+        uint32_t selfId = node->id;
+        for (uint32_t bid = node->physics.bondHead; bid != INVALID_IDX; ) {
+            Bond_<T>& bond = store_.bonds.arena[bid];
+            uint32_t nextBid = bond.nextFor(selfId);
+            if (!bond.live || bond.broken) {
+                bid = nextBid;
+                continue;
+            }
+
+            auto other = store_.points.byIdLocked(bond.other(selfId));
+            bool mayMutate = selfId < bond.other(selfId);
+            if (!other || !other->isActive()) {
+                if (mayMutate) bond.broken = true;
+                bid = nextBid;
+                continue;
+            }
 
             Vec3 d = other->position - node->position;
             float len = d.norm();
-            if (len < 1e-6f) continue;
+            if (len < 1e-6f) {
+                bid = nextBid;
+                continue;
+            }
             Vec3 dir = d / len;
 
             float k = (bond.stiffnessOverride > 0.0f) ? bond.stiffnessOverride : m->stiffness;
@@ -579,23 +600,34 @@ void Octree<T>::stepRigidLattice(
             float total = springF + dampF;
             force += dir * total;
 
-            float limit = (ext >= 0.0f) ? bond.strength : bond.strength * m->breakCompressionScale;
-            float load = std::abs(springF);
+            if (mayMutate) {
+                float limit = (ext >= 0.0f) ? bond.strength : bond.strength * m->breakCompressionScale;
+                float load = std::abs(springF);
 
-            if (m->breakTorque > 0.0f) {
-                Vec3 lateral = relVel - dir * relVel.dot(dir);
-                float shear = k * lateral.norm() * 0.02f;
-                if (shear > m->breakTorque) { bond.broken = true; anyBroke.store(true, std::memory_order_relaxed); continue; }
-            }
+                if (m->breakTorque > 0.0f) {
+                    Vec3 lateral = relVel - dir * relVel.dot(dir);
+                    float shear = k * lateral.norm() * 0.02f;
+                    if (shear > m->breakTorque) {
+                        bond.broken = true;
+                        anyBroke.store(true, std::memory_order_relaxed);
+                        bid = nextBid;
+                        continue;
+                    }
+                }
 
-            if (load > limit) {
-                bond.broken = true;
-                anyBroke.store(true, std::memory_order_relaxed);
-            } else if (m->fatigue > 0.0f && load > limit * 0.5f) {
-                bond.damage = std::min(1.0f, bond.damage + m->fatigue * (load / limit - 0.5f) * dt);
-                bond.strength = m->breakForce * (1.0f - bond.damage);
-                if (bond.damage >= 1.0f) { bond.broken = true; anyBroke.store(true, std::memory_order_relaxed); }
+                if (load > limit) {
+                    bond.broken = true;
+                    anyBroke.store(true, std::memory_order_relaxed);
+                } else if (m->fatigue > 0.0f && load > limit * 0.5f) {
+                    bond.damage = std::min(1.0f, bond.damage + m->fatigue * (load / limit - 0.5f) * dt);
+                    bond.strength = m->breakForce * (1.0f - bond.damage);
+                    if (bond.damage >= 1.0f) {
+                        bond.broken = true;
+                        anyBroke.store(true, std::memory_order_relaxed);
+                    }
+                }
             }
+            bid = nextBid;
         }
 
         node->physics.force = force;
@@ -640,7 +672,10 @@ void Octree<T>::stepRigidLattice(
         Vec3 np = node->position + node->physics.velocity * dt;
         if (!np.allFinite() || !node->position.allFinite()) {
             node->physics.velocity.setZero();
-            if (!node->position.allFinite()) { valid[i] = 0; continue; }
+            if (!node->position.allFinite()) {
+                valid[i] = 0;
+                continue;
+            }
             np = node->position;
         }
         moves[i].newPos = np;
@@ -652,28 +687,27 @@ void Octree<T>::stepRigidLattice(
     ScopedFunctionTimer _tRRelocate("stepRigidLattice.relocate");
 
     std::unordered_set<int> fracturedObjects;
+    std::vector<uint32_t> brokenBonds;
+    std::unordered_set<uint32_t> seenBonds;
     for (auto& node : rigidNodes) {
-        for (auto& bond : node->physics.bonds) {
-            if (!bond.broken) continue;
-            fracturedObjects.insert(node->objectId);
-            auto other = bond.other.lock();
-            if (!other) continue;
-            for (auto& back : other->physics.bonds) {
-                if (back.other.lock() == node) back.broken = true;
+        uint32_t selfId = node->id;
+        for (uint32_t bid = node->physics.bondHead; bid != INVALID_IDX; ) {
+            Bond_<T>& bond = store_.bonds.arena[bid];
+            uint32_t nextBid = bond.nextFor(selfId);
+            if (bond.broken && bond.live && seenBonds.insert(bid).second) {
+                fracturedObjects.insert(node->objectId);
+                brokenBonds.push_back(bid);
             }
+            bid = nextBid;
         }
     }
+    for (uint32_t bid : brokenBonds) breakBond(bid);
 
-    for (auto& node : rigidNodes) {
-        std::vector<Bond_<T>>& b = node->physics.bonds;
-        size_t writeIdx = 0;
-        for (size_t j = 0; j < b.size(); ++j) {
-            if (!b[j].broken) b[writeIdx++] = std::move(b[j]);
-        }
-        b.resize(writeIdx);
-    }
-
-    struct RRelocation { int idx; uint32_t start; int depth; };
+    struct RRelocation {
+        int idx;
+        uint32_t start;
+        int depth;
+    };
     std::vector<RRelocation> rrelocs;
     rrelocs.reserve(rigidNodes.size());
     for (int i = 0; i < (int)rigidNodes.size(); ++i) {
@@ -737,36 +771,47 @@ void Octree<T>::resolveFracture(int objectId,
     collectNodesByObjectId(objectId, nodes);
     if (nodes.size() < 2) return;
 
-    std::unordered_map<NodeData*, uint32_t> component;
+    std::unordered_map<uint32_t, uint32_t> component;
     component.reserve(nodes.size());
-    for (const auto& n : nodes) component[n.get()] = INVALID_IDX;
+    for (const auto& n : nodes) component[n->id] = INVALID_IDX;
 
     std::vector<Fragment_<T>> fragments;
     std::vector<std::shared_ptr<NodeData>> stack;
 
     for (const auto& seed : nodes) {
-        if (component[seed.get()] != INVALID_IDX) continue;
+        if (component[seed->id] != INVALID_IDX) continue;
         uint32_t cid = static_cast<uint32_t>(fragments.size());
         fragments.push_back(Fragment_<T>{});
         fragments[cid].sourceObjectId = objectId;
 
         stack.clear();
         stack.push_back(seed);
-        component[seed.get()] = cid;
+        component[seed->id] = cid;
 
         while (!stack.empty()) {
             std::shared_ptr<NodeData> cur = stack.back();
             stack.pop_back();
             fragments[cid].nodes.push_back(cur);
 
-            for (const auto& bond : cur->physics.bonds) {
-                if (bond.toAnchor) continue;
-                auto other = bond.other.lock();
-                if (!other) continue;
-                auto slot = component.find(other.get());
-                if (slot == component.end() || slot->second != INVALID_IDX) continue;
+            uint32_t selfId = cur->id;
+            for (uint32_t bid = cur->physics.bondHead; bid != INVALID_IDX; ) {
+                Bond_<T>& bond = store_.bonds.arena[bid];
+                uint32_t nextBid = bond.nextFor(selfId);
+                if (!bond.live || bond.toAnchor) {
+                    bid = nextBid;
+                    continue;
+                }
+                uint32_t otherId = bond.other(selfId);
+                auto slot = component.find(otherId);
+                if (slot == component.end() || slot->second != INVALID_IDX) { bid = nextBid; continue; }
+                auto other = store_.points.byId(otherId);
+                if (!other) {
+                    bid = nextBid;
+                    continue;
+                }
                 slot->second = cid;
                 stack.push_back(other);
+                bid = nextBid;
             }
         }
     }
@@ -820,7 +865,7 @@ void Octree<T>::freezeFragment(const std::vector<std::shared_ptr<NodeData>>& fra
     for (const auto& n : frag) {
         n->physics.velocity.setZero();
         n->physics.force.setZero();
-        n->physics.bonds.clear();
+        clearBondsOf(n);
         n->physMatIdx = staticIdx;
         n->setStatic(true);
         n->setSettled(false);

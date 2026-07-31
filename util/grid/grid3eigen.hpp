@@ -695,6 +695,11 @@ private:
     }
 
 public:
+    ///@brief Resolves a stable point id to its live NodeData shared_ptr
+    std::shared_ptr<NodeData> pointById(uint32_t id) const {
+        return store_.points.byId(id);
+    }
+
     ///@brief Look up an existing GridObject or allocate a new one if missing
     ///@param id The target object ID, -1 generates an auto incremented new ID
     ///@return Shared pointer to the designated GridObject
@@ -2005,6 +2010,73 @@ public:
         return false;
     }
     
+    ///@brief Creates a bond in the central arena and links it into both endpoints
+    uint32_t createBond(const std::shared_ptr<NodeData>& a, const std::shared_ptr<NodeData>& b,
+                        float restLen, float strength, bool toAnchor = false,
+                        float stiffnessOverride = 0.0f) {
+        if (!a || !b || a.get() == b.get()) return INVALID_IDX;
+        if (a->id == INVALID_IDX || b->id == INVALID_IDX) return INVALID_IDX;
+        u_lock lock(store_.bonds.mutex);
+        uint32_t bid = store_.bonds.allocLocked();
+        Bond_<T>& bond = store_.bonds.arena[bid];
+        bond.idA = a->id;
+        bond.idB = b->id;
+        bond.restLength = restLen;
+        bond.strength = strength;
+        bond.toAnchor = toAnchor;
+        bond.stiffnessOverride = stiffnessOverride;
+        bond.live = true;
+        store_.bonds.linkLocked(bid, a->physics, b->physics);
+        return bid;
+    }
+
+    ///@brief Marks a bond broken and unlinks it from both endpoints, freeing the slot
+    void breakBond(uint32_t bid) {
+        u_lock lock(store_.bonds.mutex);
+        Bond_<T>* bond = store_.bonds.at(bid);
+        if (!bond) return;
+        uint32_t idA = bond->idA;
+        uint32_t idB = bond->idB;
+        auto a = store_.points.byIdLocked(idA);
+        auto b = store_.points.byIdLocked(idB);
+        if (a) store_.bonds.unlinkFromLocked(bid, idA, a->physics);
+        if (b) store_.bonds.unlinkFromLocked(bid, idB, b->physics);
+        bond->live = false;
+        bond->broken = true;
+        store_.bonds.freeList.push_back(bid);
+    }
+
+    ///@brief Visits every live bond incident to a node, passing bond and the other endpoint id
+    template<typename Fn>
+    void forEachBond(const std::shared_ptr<NodeData>& node, Fn&& fn) {
+        if (!node || node->id == INVALID_IDX) return;
+        uint32_t self = node->id;
+        uint32_t cur = node->physics.bondHead;
+        while (cur != INVALID_IDX) {
+            Bond_<T>& bond = store_.bonds.arena[cur];
+            uint32_t nxt = bond.nextFor(self);
+            if (bond.live) fn(cur, bond, bond.other(self));
+            cur = nxt;
+        }
+    }
+
+    ///@brief Breaks every live bond incident to a node, unlinking from far endpoints
+    void clearBondsOf(const std::shared_ptr<NodeData>& node) {
+        if (!node || node->id == INVALID_IDX) return;
+        std::vector<uint32_t> ids;
+        {
+            u_lock lock(store_.bonds.mutex);
+            uint32_t self = node->id;
+            for (uint32_t bid = node->physics.bondHead; bid != INVALID_IDX; ) {
+                Bond_<T>& bond = store_.bonds.arena[bid];
+                uint32_t nxt = bond.nextFor(self);
+                if (bond.live) ids.push_back(bid);
+                bid = nxt;
+            }
+        }
+        for (uint32_t bid : ids) breakBond(bid);
+    }
+
     ///@brief Generates explicit connected rigid internal constraints mapping rigid structures
     ///@param node Element scanning nearby segments looking for identical mapping relationships
     void bondRigidVoxel(const std::shared_ptr<NodeData>& node) {
@@ -2027,10 +2099,9 @@ public:
 
             if (nbType == BodyType::STATIC) {
                 if (nb->objectId != node->objectId)
-                    node->physics.bonds.push_back({nb, restLen, strength, 0.0f, true, false});
+                    createBond(node, nb, restLen, strength, true);
             } else if (nbType == BodyType::RIGID && nb->objectId == node->objectId) {
-                node->physics.bonds.push_back({nb, restLen, strength, 0.0f, false, false});
-                nb->physics.bonds.push_back({node, restLen, strength, 0.0f, false, false});
+                createBond(node, nb, restLen, strength, false);
             }
         }
         node->physics.bondsBuilt = true;
@@ -2052,8 +2123,7 @@ public:
         if (restLen < 0.0f) restLen = (a->position - b->position).norm();
         if (restLen < 1e-5f) return false;
 
-        a->physics.bonds.push_back({b, restLen, strength, 0.0f, false, false, stiffnessOverride});
-        b->physics.bonds.push_back({a, restLen, strength, 0.0f, false, false, stiffnessOverride});
+        if (createBond(a, b, restLen, strength, false, stiffnessOverride) == INVALID_IDX) return false;
         a->physics.bondsBuilt = true;
         b->physics.bondsBuilt = true;
 
@@ -2083,24 +2153,22 @@ public:
         float restLen = (a->position - b->position).norm();
         if (restLen < 1e-5f) return false;
 
-        Bond_<T> bond;
-        bond.other = b;
-        bond.restLength = restLen;
-        bond.strength = strength;
-        bond.stiffnessOverride = stiffness;
-        bond.isFiber = true;
-        bond.restLengthRelaxed = restLen;
-        bond.maxContraction = maxContract;
-        bond.actuatorId = subObjectId;
-
-        a->physics.bonds.push_back(bond);
-        int bondIdx = static_cast<int>(a->physics.bonds.size()) - 1;
+        uint32_t bid = createBond(a, b, restLen, strength, false, stiffness);
+        if (bid == INVALID_IDX) return false;
+        {
+            u_lock lock(store_.bonds.mutex);
+            Bond_<T>& bond = store_.bonds.arena[bid];
+            bond.isFiber = true;
+            bond.restLengthRelaxed = restLen;
+            bond.maxContraction = maxContract;
+            bond.actuatorId = subObjectId;
+        }
         a->physics.bondsBuilt = true;
 
         auto& so = obj->getOrCreateSubObject(subObjectId, "", SubObjectKind::MUSCLE);
         typename SubObject_<T>::FiberRef ref;
         ref.node = a;
-        ref.bondIndex = bondIdx;
+        ref.bondIndex = static_cast<int>(bid);
         {
             u_lock lock(obj->objMutex);
             so.fibers.push_back(ref);
@@ -2123,19 +2191,18 @@ public:
         SubObject_<T>& so = it->second;
         so.activation = activation;
 
+        u_lock block(store_.bonds.mutex);
         for (auto& fref : so.fibers) {
             auto node = fref.node.lock();
             if (!node) continue;
-            if (fref.bondIndex < 0 ||
-                fref.bondIndex >= (int)node->physics.bonds.size()) continue;
-            Bond_<T>& bond = node->physics.bonds[fref.bondIndex];
-            if (!bond.isFiber) continue;
-            float relaxed = bond.restLengthRelaxed > 0.0f ? bond.restLengthRelaxed
-                                                          : bond.restLength;
-            bond.restLength = relaxed * (1.0f - activation * bond.maxContraction);
-            // Waking the endpoints so the solver re-evaluates them.
+            if (fref.bondIndex < 0) continue;
+            Bond_<T>* bond = store_.bonds.at(static_cast<uint32_t>(fref.bondIndex));
+            if (!bond || !bond->isFiber) continue;
+            float relaxed = bond->restLengthRelaxed > 0.0f ? bond->restLengthRelaxed : bond->restLength;
+            bond->restLength = relaxed * (1.0f - activation * bond->maxContraction);
             node->setSettled(false);
-            if (auto other = bond.other.lock()) other->setSettled(false);
+            auto other = store_.points.byIdLocked(bond->other(node->id));
+            if (other) other->setSettled(false);
         }
         return true;
     }
