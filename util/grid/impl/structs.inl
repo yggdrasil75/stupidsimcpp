@@ -1387,7 +1387,24 @@ struct PointStore {
         }
         size_t freed = pool.size() - fresh.size();
         pool.swap(fresh);
+        trimSlotsLocked();
         return freed;
+    }
+
+    ///@brief Reclaims trailing dead entries in the id slot table. Only trims
+    ///       contiguous freed ids at the tail; interior holes remain in freeIds
+    ///       for reuse. Never renumbers live ids, so all stable handles (bond
+    ///       endpoints, fiber refs) stay valid. Caller must hold the write lock.
+    size_t trimSlotsLocked() {
+        size_t before = slots.size();
+        while (!slots.empty() && !slots.back()) slots.pop_back();
+        if (slots.size() == before) return 0;
+        uint32_t newSize = static_cast<uint32_t>(slots.size());
+        std::vector<uint32_t> kept;
+        kept.reserve(freeIds.size());
+        for (uint32_t id : freeIds) if (id < newSize) kept.push_back(id);
+        freeIds.swap(kept);
+        return before - slots.size();
     }
 };
 
@@ -1458,6 +1475,43 @@ struct BondStore {
         size_t n = 0;
         for (const auto& b : arena) if (b.live) ++n;
         return n;
+    }
+
+    size_t arenaSlots() const {
+        s_lock lock(mutex);
+        return arena.size();
+    }
+
+    ///@brief Relocates live bonds to the front of the arena, drops dead slots,
+    ///       and rewrites all intrusive links and endpoint bondHeads to the new
+    ///       ids. slots maps point id -> live NodeData (from PointStore). remap
+    ///       is filled old bond id -> new bond id (INVALID_IDX for dropped), so
+    ///       the caller can fix external references such as fiber bondIndex.
+    ///       Returns dead slots reclaimed. Caller must hold the write lock.
+    size_t compactLocked(const std::vector<std::shared_ptr<NodeData_<T>>>& slots,
+                         std::vector<uint32_t>& remap) {
+        size_t oldSize = arena.size();
+        remap.assign(oldSize, INVALID_IDX);
+        std::vector<Bond_<T>> fresh;
+        fresh.reserve(oldSize);
+        for (uint32_t old = 0; old < oldSize; ++old) {
+            if (!arena[old].live) continue;
+            remap[old] = static_cast<uint32_t>(fresh.size());
+            fresh.push_back(arena[old]);
+        }
+        for (auto& b : fresh) {
+            if (b.nextA != INVALID_IDX) b.nextA = remap[b.nextA];
+            if (b.nextB != INVALID_IDX) b.nextB = remap[b.nextB];
+        }
+        arena.swap(fresh);
+        freeList.clear();
+        for (uint32_t id = 0; id < slots.size(); ++id) {
+            auto& node = slots[id];
+            if (!node) continue;
+            uint32_t& head = node->physics.bondHead;
+            if (head != INVALID_IDX) head = remap[head];
+        }
+        return oldSize - arena.size();
     }
 };
 

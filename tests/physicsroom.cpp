@@ -183,6 +183,7 @@ int main(int argc, char** argv) {
     std::cout << "Muscle fibers wired: " << fibers << std::endl;
 
     oct.markPhysicsCollidersDirty();
+    oct.optimize();
 
     const int F_FLUID   = 40;
     const int F_MUSCLE0 = 90;

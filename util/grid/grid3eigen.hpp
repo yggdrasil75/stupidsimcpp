@@ -3586,6 +3586,8 @@ public:
             optimizeRecursive(root_);
             generateLODs();
         }
+        if (pointPoolFragmentation() > 1.5f) compactPointPool();
+        if (bondArenaFragmentation() > 1.5f) compactBonds();
     }
 
     void printStats(std::ostream& os = std::cout) const {
@@ -3698,6 +3700,44 @@ public:
     float pointPoolFragmentation() const {
         size_t live = store_.points.totalPoints();
         size_t slots = store_.points.poolSlots();
+        if (live == 0) return slots == 0 ? 1.0f : 2.0f;
+        return static_cast<float>(slots) / static_cast<float>(live);
+    }
+
+    ///@brief Compacts the bond arena, dropping dead slots left by breaks and
+    ///       fractures. Relocates live bonds, rewrites intrusive links and node
+    ///       bondHeads, then remaps every fiber bondIndex so muscle actuators
+    ///       keep addressing the right bond. Returns bond slots reclaimed.
+    size_t compactBonds() {
+        std::vector<uint32_t> remap;
+        size_t freed = 0;
+        {
+            u_lock bondLock(store_.bonds.mutex);
+            s_lock ptLock(store_.points.mutex);
+            freed = store_.bonds.compactLocked(store_.points.slots, remap);
+        }
+        if (remap.empty()) return freed;
+        s_lock objLock(objectsMutex_);
+        for (auto& kv : objects_) {
+            if (!kv.second) continue;
+            u_lock oLock(kv.second->objMutex);
+            for (auto& soKv : kv.second->subObjects) {
+                for (auto& fref : soKv.second.fibers) {
+                    if (fref.bondIndex < 0) continue;
+                    uint32_t old = static_cast<uint32_t>(fref.bondIndex);
+                    fref.bondIndex = (old < remap.size() && remap[old] != INVALID_IDX)
+                                     ? static_cast<int>(remap[old]) : -1;
+                }
+            }
+        }
+        return freed;
+    }
+
+    ///@brief Ratio of held bond arena slots to live bonds. 1.0 means no waste;
+    ///       higher means dead bond slots are accumulating after fractures.
+    float bondArenaFragmentation() const {
+        size_t live = store_.bonds.liveCount();
+        size_t slots = store_.bonds.arenaSlots();
         if (live == 0) return slots == 0 ? 1.0f : 2.0f;
         return static_cast<float>(slots) / static_cast<float>(live);
     }
