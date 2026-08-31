@@ -28,21 +28,27 @@ void Octree<T>::beginPhysicsFrame(PhysicsFrameContext& ctx) {
 
     ScopedFunctionTimer _tSetup("beginPhysicsFrame.setupMaterials");
     int maxObjId = -1;
+    std::vector<std::pair<int, std::shared_ptr<GridObject>>> activeObjs;
+    
+    // AXIOM SEAL: Unified Traversal & Wavefront Stall Mitigation
+    // Scans max ID and gathers pointers in a single O(N) pass under one global lock.
     {
         s_lock lock(objectsMutex_);
+        activeObjs.reserve(objects_.size());
         for (const auto& pair : objects_) {
             if (pair.first > maxObjId) maxObjId = pair.first;
+            activeObjs.push_back({pair.first, pair.second});
         }
     }
 
     ctx.fastMats.assign(maxObjId + 2, {});
-    {
-        s_lock lock(objectsMutex_);
-        for (const auto& pair : objects_) {
-            s_lock objLock(pair.second->objMutex);
-            ctx.fastMats[pair.first + 1] = pair.second->physicsMaterials;
-        }
+    
+    // Acquire individual locks outside the global lock constraint
+    for (const auto& obj : activeObjs) {
+        s_lock objLock(obj.second->objMutex);
+        ctx.fastMats[obj.first + 1] = obj.second->physicsMaterials;
     }
+    
     ctx.fastMatsSize = ctx.fastMats.size();
     _tSetup.stop();
 
@@ -53,27 +59,18 @@ void Octree<T>::beginPhysicsFrame(PhysicsFrameContext& ctx) {
         ScopedFunctionTimer _tClassify("beginPhysicsFrame.classifyActive");
         std::lock_guard<std::mutex> lock(physicsMutex_);
         
-        size_t writeIdx = 0;
-        for (size_t i = 0; i < activePhysicsNodes_.size(); ++i) {
-            if (!activePhysicsNodes_[i].expired()) {
-                activePhysicsNodes_[writeIdx++] = activePhysicsNodes_[i];
-            }
-        }
+        // AXIOM SEAL: Zero-Allocation Deduplication (Vacuum Leak Eradicated)
+        // Utilizes in-place memory sorting to remove the std::unordered_set heap fragmentation.
+        size_t writeIdx = activePhysicsNodes_.size();
+        std::sort(activePhysicsNodes_.begin(), activePhysicsNodes_.begin() + writeIdx,
+            [](const auto& a, const auto& b) { return a.owner_before(b); });
+        
+        auto uniqueEnd = std::unique(activePhysicsNodes_.begin(), activePhysicsNodes_.begin() + writeIdx,
+            [](const auto& a, const auto& b) { return !a.owner_before(b) && !b.owner_before(a); });
+        
+        writeIdx = std::distance(activePhysicsNodes_.begin(), uniqueEnd);
         activePhysicsNodes_.resize(writeIdx);
         
-        {
-            std::unordered_set<NodeData*> seenActive;
-            seenActive.reserve(writeIdx);
-            size_t uniqIdx = 0;
-            for (size_t i = 0; i < writeIdx; ++i) {
-                auto sp = activePhysicsNodes_[i].lock();
-                if (!sp) continue;
-                if (seenActive.insert(sp.get()).second)
-                    activePhysicsNodes_[uniqIdx++] = activePhysicsNodes_[i];
-            }
-            activePhysicsNodes_.resize(uniqIdx);
-            writeIdx = uniqIdx;
-        }
         ctx.sphNodes.reserve(writeIdx);
 
         for (size_t i = 0; i < writeIdx; ++i) {
