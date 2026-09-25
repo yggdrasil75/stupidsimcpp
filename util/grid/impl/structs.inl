@@ -265,6 +265,16 @@ struct Bond_ {
     uint32_t nextFor(uint32_t self) const { return self == idA ? nextA : nextB; }
 };
 
+///@brief A crack plane running through a rigid object. Seeded by a bond that
+///       broke in tension, it advances each frame through the bonds that
+///       cross its plane near the current front until it exits the object.
+struct PhysCrack_ {
+    Vec3 origin{0.0f, 0.0f, 0.0f};
+    Vec3 normal{0.0f, 0.0f, 1.0f};
+    std::vector<Vec3> front;
+    int idleFrames = 0;
+};
+
 template<typename T>
 struct PhysicsState_ {
     Vec3 velocity{0.0f, 0.0f, 0.0f};
@@ -275,6 +285,49 @@ struct PhysicsState_ {
     uint32_t bondHead = INVALID_IDX;
     bool bondsBuilt = false;
 };
+
+
+using v3half = Eigen::Matrix<Eigen::half, 3, 1>;
+static constexpr float SELL_LAMBDA_R = 0.610f;
+static constexpr float SELL_LAMBDA_G = 0.550f;
+static constexpr float SELL_LAMBDA_B = 0.465f;
+
+static inline float sellmeierN(const v3half& B, const v3half& C, float lambdaUm) {
+    float l2 = lambdaUm * lambdaUm;
+    float n2 = 1.0f;
+    for (int j = 0; j < 3; ++j) {
+        float Bj = static_cast<float>(B[j]);
+        float Cj = static_cast<float>(C[j]);
+        float denom = l2 - Cj;
+        if (std::abs(denom) > 1e-8f) n2 += Bj * l2 / denom;
+    }
+    return std::sqrt(std::max(1.0f, n2));
+}
+
+static inline void sellmeierFromConstant(float n, v3half& B, v3half& C) {
+    float n2 = n * n;
+
+    if (n >= 1.0f) {
+        float n2_minus_1 = n2 - 1.0f;
+        float c1 = 0.0106f; 
+        float c2 = 100.0f;  
+        float b1 = n2_minus_1 / 1.030788f;
+        float b2 = b1 * 0.2f; 
+
+        B = v3half(Eigen::half(b1), Eigen::half(b2), Eigen::half(0.0f));
+        C = v3half(Eigen::half(c1), Eigen::half(c2), Eigen::half(0.0f));
+
+    } else {
+        n2 = std::max(0.00001f, n2); 
+        float c1 = 0.0f;
+        float c2 = -0.1f;
+        float b1 = 0.611792f * n2 - 1.0f;
+        float b2 = 0.5f * n2;
+
+        B = v3half(Eigen::half(b1), Eigen::half(b2), Eigen::half(0.0f));
+        C = v3half(Eigen::half(c1), Eigen::half(c2), Eigen::half(0.0f));
+    }
+}
 
 struct SPHKernels {
     float h, h2, h3, h4, h6, h9;
@@ -412,48 +465,6 @@ struct SPHKernels {
         return -12.0f * spline_k / h2 * (1.0f - q) * (1.0f - 2.0f*q) / q;
     }
 };
-
-using v3half = Eigen::Matrix<Eigen::half, 3, 1>;
-static constexpr float SELL_LAMBDA_R = 0.610f;
-static constexpr float SELL_LAMBDA_G = 0.550f;
-static constexpr float SELL_LAMBDA_B = 0.465f;
-
-static inline float sellmeierN(const v3half& B, const v3half& C, float lambdaUm) {
-    float l2 = lambdaUm * lambdaUm;
-    float n2 = 1.0f;
-    for (int j = 0; j < 3; ++j) {
-        float Bj = static_cast<float>(B[j]);
-        float Cj = static_cast<float>(C[j]);
-        float denom = l2 - Cj;
-        if (std::abs(denom) > 1e-8f) n2 += Bj * l2 / denom;
-    }
-    return std::sqrt(std::max(1.0f, n2));
-}
-
-static inline void sellmeierFromConstant(float n, v3half& B, v3half& C) {
-    float n2 = n * n;
-
-    if (n >= 1.0f) {
-        float n2_minus_1 = n2 - 1.0f;
-        float c1 = 0.0106f; 
-        float c2 = 100.0f;  
-        float b1 = n2_minus_1 / 1.030788f;
-        float b2 = b1 * 0.2f; 
-
-        B = v3half(Eigen::half(b1), Eigen::half(b2), Eigen::half(0.0f));
-        C = v3half(Eigen::half(c1), Eigen::half(c2), Eigen::half(0.0f));
-
-    } else {
-        n2 = std::max(0.00001f, n2); 
-        float c1 = 0.0f;
-        float c2 = -0.1f;
-        float b1 = 0.611792f * n2 - 1.0f;
-        float b2 = 0.5f * n2;
-
-        B = v3half(Eigen::half(b1), Eigen::half(b2), Eigen::half(0.0f));
-        C = v3half(Eigen::half(c1), Eigen::half(c2), Eigen::half(0.0f));
-    }
-}
 
 struct alignas(16) GPUMaterial {
     uint32_t chromaticity; //RBG9E5
@@ -648,7 +659,10 @@ struct PhysicsMaterial_ {
     float stiffness  = 4000.0f;
     float breakForce = 60.0f;
     float damping    = 0.4f;
-    ///TODO: restitution, density
+    ///@brief Tangential velocity fraction removed per substep while touching a solid
+    float friction = 0.3f;
+    ///@brief Normal velocity fraction returned on solid impact
+    float restitution = 0.0f;
 
     float breakCompressionScale = 4.0f;
     float breakTorque = 0.0f;
@@ -658,6 +672,7 @@ struct PhysicsMaterial_ {
     bool operator==(const PhysicsMaterial_& o) const {
         return type == o.type && mass == o.mass && stiffness == o.stiffness &&
                breakForce == o.breakForce && damping == o.damping &&
+               friction == o.friction && restitution == o.restitution &&
                breakCompressionScale == o.breakCompressionScale &&
                breakTorque == o.breakTorque && fatigue == o.fatigue &&
                minFragmentVoxels == o.minFragmentVoxels;
@@ -1641,22 +1656,5 @@ struct ProgressiveAccum {
     uint64_t sceneEpoch = ~0ull;
 };
 
-struct SolidNb {
-    Vec3 pos;
-    float size;
-};
-
-template<typename T>
-struct PhysicsFrameContext_ {
-    std::vector<std::vector<PhysicsMaterial_>> fastMats;
-    size_t fastMatsSize = 0;
-    std::vector<std::shared_ptr<NodeData_<T>>> sphNodes;
-    std::vector<std::shared_ptr<NodeData_<T>>> rigidNodes;
-    std::unordered_map<std::array<int64_t,3>, std::vector<SolidNb>, Vec3i64Hash> solidCells;
-    Vec3 domLo;
-    Vec3 domHi;
-    float solidCellSize = 0.0f;
-    bool valid = false;
-};
 
 }

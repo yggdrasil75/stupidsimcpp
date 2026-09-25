@@ -36,6 +36,7 @@
 #include "impl/structs.inl"
 #include "impl/skybox.inl"
 #include "impl/rendering.inl"
+#include "impl/physics_gpu.inl"
 
 #ifdef SSE
 #include <immintrin.h>
@@ -60,8 +61,6 @@ class Octree {
 public:
     ///@brief Alias for node data structures used in the octree
     using NodeData = NodeData_<T>;
-    ///@brief Per-frame physics context alias
-    using PhysicsFrameContext = PhysicsFrameContext_<T>;
     ///@brief Alias for octree nodes
     using OctreeNode = OctreeNode_<T>;
     ///@brief Alias for raycasting hit information
@@ -407,41 +406,51 @@ private:
 
     ///@brief Distance scalar for particle interactions
     float phys_smoothingRadius = 0.2f;
-    
-    ///@brief Base fluid density constant
-    float phys_restDensity = 1000.0f;
-    
-    ///@brief Gas pressure constant for physics calculations
-    float phys_gasConstant = 2000.0f;
-    
-    ///@brief Coefficient of viscosity
-    float phys_viscosity = 200.0f;
-    
-    ///@brief Drag multiplier to progressively slow particles
+
+    ///@brief SPH kernel constants for the current smoothing radius (the GPU uses the same poly6 and spiky forms)
+    SPHKernels kernels_{phys_smoothingRadius};
+
+    ///@brief Linear velocity damping per second
     float phys_velocityDamping = 0.5f;
 
-    ///@brief XSPH velocity-smoothing coefficient (0 disables).
+    ///@brief XSPH velocity-smoothing coefficient for fluids (0 disables)
     float phys_xsphEpsilon = 0.2f;
-    
-    ///@brief Ambient air density value for drag calculations
-    float phys_airDensity = 1.225f;
-    
-    ///@brief Base global directional gravity vector
+
+    ///@brief Cohesion acceleration pulling fluid particles toward their neighbours (m/s^2)
+    float phys_surfaceTension = 4.0f;
+
+    ///@brief Constraint solver iterations per substep
+    int phys_iterations = 4;
+
+    ///@brief Shape-matching stiffness for SOFT bodies (RIGID uses 1)
+    float phys_softStiffness = 0.3f;
+
+    ///@brief Directional gravity (used when phys_useGravityPoint is false)
     Vec3 phys_gravity{0.0f, -9.81f, 0.0f};
 
-    ///@brief SPH math kernel state based on smoothing radius
-    SPHKernels kernels_{phys_smoothingRadius};
-    
-    ///@brief Toggle for radial point gravity vs directional gravity
+    ///@brief Whether gravity pulls toward phys_gravityCenter instead of along phys_gravity
     bool phys_useGravityPoint = true;
-    
-    ///@brief The origin point for point-based gravity
+
+    ///@brief Point-gravity centre
     Vec3 phys_gravityCenter{0.0f, 0.0f, 0.0f};
-    
-    ///@brief Intensity of the gravity vector
+
+    ///@brief Gravity magnitude
     float phys_gravityStrength = 9.81f;
     bool phys_solidBoundary = true;
-    
+
+#ifdef VULKAN_SUPPORT
+    ///@brief Vulkan compute state for the physics engine
+    PhysGpu physGpu_;
+#endif
+    ///@brief Static-voxel occupancy grid parameters (rebuilt when colliders are dirty)
+    Vec3 physOccLo_{0.0f, 0.0f, 0.0f};
+    float physOccCell_ = 0.1f;
+    uint32_t physOccDim_[3] = {1, 1, 1};
+    bool physOccBuilt_ = false;
+
+    ///@brief Active crack planes per object id
+    std::unordered_map<int, std::vector<PhysCrack_>> physCracks_;
+
     ///@brief Flag indicating the physics colliders need spatial reorganization
     std::atomic<bool> physicsCollidersDirty_{true};
 
@@ -831,45 +840,57 @@ public:
         f.wait();
     }
 
-    ///@brief Tunes the interaction threshold radius for voxel SPH fluid simulations
-    ///@param radius Distance threshold
+    ///@brief Fluid kernel radius (auto-widened to at least ~2.2 particle sizes)
     void setPhysicsSmoothingRadius(float radius) {
         phys_smoothingRadius = radius;
         kernels_.update(radius);
     }
-    
-    ///@brief Modifies the static background gravity vector
-    ///@param g The global downward drift vector
+    ///@brief Directional gravity; disables point gravity
     void setPhysicsGravity(const Vec3& g) {
         phys_gravity = g;
         phys_gravityStrength = g.norm();
+        phys_useGravityPoint = false;
     }
-
-    ///@brief Updates fluid physics drag reduction parameter
-    ///@param damping The physics damping value
     void setPhysicsVelocityDamping(float damping) { phys_velocityDamping = damping; }
-
     void setPhysicsXsphEpsilon(float e) { phys_xsphEpsilon = e; }
-    ///@brief Sets physics constant that modifies SPH gas dynamics
-    ///@param c New physics gas constant
-    void setPhysicsGasConstant(float c) { phys_gasConstant = c; }
-    ///@brief Sets physics resistance to fluid shearing flows
-    ///@param v The viscosity scale
-    void setPhysicsViscosity(float v) { phys_viscosity = v; }
-    ///@brief Sets ideal fluid volumetric mass constant
-    ///@param d Target particle rest density
-    void setPhysicsRestDensity(float d) { phys_restDensity = d; }
-    ///@brief Changes global atmosphere weight affecting aerodynamic bounds
-    ///@param d Ambient air density value
-    void setPhysicsAirDensity(float d) { phys_airDensity = d; }
-    ///@brief Adjusts the coordinate point acting as a radial gravity focus
-    ///@param n Target XYZ world location
-    void setphys_gravityCenter(Vec3 n) { phys_gravityCenter = n; }
-    ///@brief Flips physics between directional global gravity and point-source mass gravity
-    ///@param use True to activate radial mass gravity
+    ///@brief Kept for API compatibility: PBF has no gas constant
+    void setPhysicsGasConstant(float) {}
+    ///@brief Maps the old SPH viscosity scale onto XSPH smoothing (200 -> 0.2)
+    void setPhysicsViscosity(float v) { phys_xsphEpsilon = std::clamp(v / 1000.0f, 0.0f, 0.5f); }
+    ///@brief Kept for API compatibility: densities are normalized per particle volume
+    void setPhysicsRestDensity(float) {}
+    ///@brief Kept for API compatibility: no aerodynamic drag model
+    void setPhysicsAirDensity(float) {}
+    void setPhysicsSurfaceTension(float a) { phys_surfaceTension = std::max(0.0f, a); }
+    ///@brief Sets fracture limits on every physics material of an object
+    ///@param breakForce Bond force (N) above which a bond snaps
+    ///@param compressionScale Multiplier on breakForce for bonds in compression
+    ///@param minFragmentVoxels Pieces smaller than this stay with their object instead of splitting off
+    void setObjectFracture(int objectId, float breakForce, float compressionScale, uint32_t minFragmentVoxels) {
+        auto obj = getObject(objectId);
+        if (!obj) return;
+        u_lock lock(obj->objMutex);
+        for (auto& m : obj->physicsMaterials) {
+            m.breakForce = std::max(0.0f, breakForce);
+            m.breakCompressionScale = std::max(0.0f, compressionScale);
+            m.minFragmentVoxels = std::max(1u, minFragmentVoxels);
+        }
+    }
+    ///@brief Sets friction and restitution on every physics material of an object
+    void setObjectContact(int objectId, float friction, float restitution) {
+        auto obj = getObject(objectId);
+        if (!obj) return;
+        u_lock lock(obj->objMutex);
+        for (auto& m : obj->physicsMaterials) {
+            m.friction = std::clamp(friction, 0.0f, 1.0f);
+            m.restitution = std::clamp(restitution, 0.0f, 1.0f);
+        }
+    }
+    void setPhysicsIterations(int n) { phys_iterations = std::max(1, n); }
+    void setPhysicsSoftStiffness(float a) { phys_softStiffness = std::clamp(a, 0.0f, 1.0f); }
+    ///@brief Point gravity centre; enables point gravity
+    void setphys_gravityCenter(Vec3 n) { phys_gravityCenter = n; phys_useGravityPoint = true; }
     void setPhysicsUseGravityPoint(bool use) { phys_useGravityPoint = use; }
-    ///@brief Defines overall power coefficient of the gravity calculations
-    ///@param s Value scaler of physical gravity pull
     void setPhysicsGravityStrength(float s) { phys_gravityStrength = s; }
     void setPhysicsSolidBoundary(bool v) { phys_solidBoundary = v; }
     bool getPhysicsSolidBoundary() const { return phys_solidBoundary; }
@@ -3043,6 +3064,8 @@ public:
                 activePhysicsNodes_.push_back(n);
             }
             n->physMatIdx = newIdx;
+            n->setStatic(newType == BodyType::STATIC);
+            n->setSettled(false);
         }
         physicsCollidersDirty_.store(true);
     }
@@ -3553,22 +3576,45 @@ public:
 
     void stepPhysics(float dt);
 
-    ///@brief Gathers per-frame physics invariants (materials, active nodes, solids)
-    void beginPhysicsFrame(PhysicsFrameContext& ctx);
-    ///@brief Runs one SPH + rigid substep against SVO-resident particles (no tree writeback)
-    void substepPhysics(float dt, PhysicsFrameContext& ctx);
-    ///@brief Re-keys moved particles in the SVO once, in parallel grouped batches
-    void endPhysicsFrame(PhysicsFrameContext& ctx);
-    ///@brief Walks the SVO once for static voxels bordering the fluid region
-    void gatherSolidNeighborhood(PhysicsFrameContext& ctx);
-
-    void stepRigidLattice(float dt, std::vector<std::shared_ptr<NodeData>>& rigidNodes,
-                          const std::vector<std::vector<PhysicsMaterial_>>& fastMats, size_t fastMatsSize);
+#ifdef VULKAN_SUPPORT
+    ///@brief Collects every static or pinned voxel as (x, y, z, size) for the occupancy grid
+    void collectStaticVoxels(const std::vector<std::vector<PhysicsMaterial_>>& fastMats,
+                             std::vector<float>& out, float& minSize);
+    ///@brief Flattens per-object physics materials, indexed by objectId + 1
+    void buildPhysicsMaterialTable(std::vector<std::vector<PhysicsMaterial_>>& fastMats);
+    ///@brief Collects live fluid, rigid and soft voxels, rigid and soft sorted by object
+    void gatherDynamicNodes(const std::vector<std::vector<PhysicsMaterial_>>& fastMats,
+                            std::vector<std::shared_ptr<NodeData>>& dyn);
+    ///@brief Fills particle, object and rest-position arrays for the GPU
+    void packPhysicsParticles(const std::vector<std::vector<PhysicsMaterial_>>& fastMats,
+                              const std::vector<std::shared_ptr<NodeData>>& dyn,
+                              PhysFrameInput& in, float& maxFluidSize, float& maxSize);
+    ///@brief Splits live bonds into intra-object strain bonds and cross-object constraints
+    void packPhysicsBonds(const std::vector<std::vector<PhysicsMaterial_>>& fastMats,
+                          const std::vector<std::shared_ptr<NodeData>>& dyn,
+                          PhysFrameInput& in, std::vector<uint32_t>& ibondIds);
+    ///@brief Chooses the occupancy grid resolution and requests a GPU rebuild
+    void rebuildPhysicsOccupancy(const std::vector<std::vector<PhysicsMaterial_>>& fastMats,
+                                 const BoundingBox& dom, PhysFrameInput& in);
+    void fillPhysicsPushConstants(const BoundingBox& dom, uint32_t numParticles,
+                                  float subDt, float maxFluidSize, float maxSize, PhysPush& pc);
+    ///@brief Stores GPU results on the nodes and re-keys moved voxels in the tree
+    void writeBackPhysics(const std::vector<std::shared_ptr<NodeData>>& dyn,
+                          const std::vector<float>& outPos, const std::vector<float>& outVel);
+    ///@brief Keeps object voxel layouts valid after voxels moved
+    void refreshPhysicsObjectLayouts(const std::vector<std::shared_ptr<NodeData>>& dyn,
+                                     const std::vector<float>& oldPos);
+#endif
 
     ///@brief Resolves the physics material for a node against the flattened per-object table
     ///@return Pointer into fastMats, or nullptr when the object or index is out of range
     const PhysicsMaterial_* physMatOf(const std::shared_ptr<NodeData>& n,
                           const std::vector<std::vector<PhysicsMaterial_>>& fastMats, size_t fastMatsSize) const;
+
+    ///@brief Seeds cracks from bonds that snapped in tension and advances every
+    ///       active crack through the bonds crossing its plane
+    ///@param seeds Broken bond ids that snapped in tension this frame
+    void propagateCracks(const std::vector<uint32_t>& seeds, std::unordered_set<int>& fractured);
 
     ///@brief Splits an object whose bond graph came apart into connected components
     ///@param objectId The object that lost at least one bond this step

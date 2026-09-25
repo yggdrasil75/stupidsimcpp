@@ -1,0 +1,13 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "phys_common.glsl"
+
+// Place each particle into its hash cell's slot range.
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.numParticles) return;
+    uint c = info[i].z;
+    // decrement, returns the previous count
+    uint old = atomicAdd(cellCount[c], 0xFFFFFFFFu);
+    sorted[cellStart[c] + old - 1u] = i;
+}

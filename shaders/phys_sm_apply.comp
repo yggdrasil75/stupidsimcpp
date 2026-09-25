@@ -1,0 +1,20 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "phys_common.glsl"
+
+// Pulls each rigid or soft particle toward its shape matching goal, then
+// resolves solids again. A soft particle also takes its own joint and fibre
+// correction here; a rigid one already had it folded into cm and R.
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.numParticles) return;
+    uint o = info[i].x;
+    if (o == NO_OBJ) return;
+    vec3 goal = objR(o) * rest[i].xyz + objCm(o);
+    float alpha = objs[o].alpha;
+    vec3 xs = mix(pred[i].xyz, goal, alpha);
+    if (alpha < 1.0) xs += disp[i].xyz;
+    disp[i] = vec4(0.0);
+    collideSolid(i, xs);
+    pred[i].xyz = xs;
+}

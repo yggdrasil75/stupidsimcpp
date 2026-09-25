@@ -63,7 +63,7 @@ static void createCheckerBox(Octree& octree, const Vec3& center, const Vec3& siz
 }
 
 int main(int argc, char** argv) {
-    int width = 1280, height = 720;
+    int width = 512, height = 512;
     int framesTotal = 320;
     float voxel = 0.08f;
     int physicsSubsteps = 8;
@@ -140,8 +140,17 @@ int main(int argc, char** argv) {
     oct.insertCube(Vec3(3.5f, 3.5f, 3.0f), Vec3(1.8f, 1.8f, 1.2f), voxel,
                    Vec3(0.8f, 0.5f, 0.25f), OID::HARDBLOCK, false, BodyType::RIGID, 1.0f);
     oct.setObjectSplitPolicy(OID::HARDBLOCK, Grid::SplitPolicy::NEW_OID);
-    oct.insertCube(Vec3(3.5f, 3.5f, 6.0f), Vec3(2.2f, 0.12f, 0.9f), voxel,
-                   Vec3(0.85f, 0.87f, 0.9f), OID::CLEAVER, false, BodyType::RIGID, 8.0f);
+
+    const int bladeLayers = 12;
+    for (int k = 0; k < bladeLayers; ++k) {
+        float thickness = voxel * std::min(1.0f + 0.5f * k, 4.0f);
+        oct.insertCube(Vec3(3.5f, 3.5f, 5.6f + (k + 0.5f) * voxel), Vec3(2.2f, thickness, voxel), voxel,
+                       Vec3(0.85f, 0.87f, 0.9f), OID::CLEAVER, false, BodyType::RIGID, 40.0f);
+    }
+    oct.setObjectFracture(OID::CLEAVER, 1e9f, 1.0f, 1);
+    oct.setObjectFracture(OID::HARDBLOCK, 60.0f, 4.0f, 12);
+    for (auto& wp : oct.getWeakNodesByObjectId(OID::CLEAVER))
+        if (auto sp = wp.lock()) sp->physics.velocity = Vec3(0.0f, 0.0f, -8.0f);
 
     oct.insertCylinder(Vec3(-3.5f, 3.5f, 0.9f), 0.14f, 1.8f, voxel,
                        Vec3(0.7f, 0.7f, 0.75f), OID::SPIKE, false, -1.0f,
@@ -149,14 +158,19 @@ int main(int argc, char** argv) {
     oct.insertSphere(Vec3(-3.5f, 3.5f, 5.5f), 0.85f, voxel,
                      Vec3(0.9f, 0.2f, 0.5f), OID::SPHERE, false, -1.0f,
                      BodyType::RIGID, 0.4f);
+    oct.setObjectContact(OID::SPHERE, 0.1f, 0.8f);
 
-    oct.insertCylinder(Vec3(2.0f, -3.0f, 2.2f), 0.22f, 1.8f, voxel,
-                       Vec3(0.92f, 0.90f, 0.82f), OID::BONE_A, false, -1.0f,
-                       BodyType::RIGID, 0.6f);
-    oct.insertCylinder(Vec3(2.0f, -3.0f, 4.6f), 0.22f, 1.8f, voxel,
-                       Vec3(0.92f, 0.90f, 0.82f), OID::BONE_B, false, -1.0f,
-                       BodyType::RIGID, 0.6f);
+    const Vec3 boneDims(1.6f, 0.36f, 0.36f);
+    const float jointX = 2.05f;
+    const float boneZ = 3.0f;
+    const float boneY = -3.0f;
+    oct.insertCube(Vec3(jointX - 0.05f - 0.8f, boneY, boneZ), boneDims, voxel,
+                   Vec3(0.92f, 0.90f, 0.82f), OID::BONE_A, false, BodyType::RIGID, 0.6f);
+    oct.insertCube(Vec3(jointX + 0.05f + 0.8f, boneY, boneZ), boneDims, voxel,
+                   Vec3(0.92f, 0.90f, 0.82f), OID::BONE_B, false, BodyType::RIGID, 0.6f);
 
+    oct.setObjectFracture(OID::BONE_A, 1e9f, 1.0f, 1);
+    oct.setObjectFracture(OID::BONE_B, 1e9f, 1.0f, 1);
     for (auto& wp : oct.getWeakNodesByObjectId(OID::BONE_A))
         if (auto sp = wp.lock()) { sp->physics.velocity.setZero(); sp->setStatic(true); }
 
@@ -165,21 +179,44 @@ int main(int argc, char** argv) {
     for (auto& wp : oct.getWeakNodesByObjectId(OID::BONE_A)) if (auto sp = wp.lock()) aNodes.push_back(sp);
     for (auto& wp : oct.getWeakNodesByObjectId(OID::BONE_B)) if (auto sp = wp.lock()) bNodes.push_back(sp);
 
-    std::sort(aNodes.begin(), aNodes.end(), [](const NodePtr& x, const NodePtr& y){ return x->position.z() > y->position.z(); });
-    std::sort(bNodes.begin(), bNodes.end(), [](const NodePtr& x, const NodePtr& y){ return x->position.z() < y->position.z(); });
+    float aEndX = -1e9f, bStartX = 1e9f, topZ = -1e9f;
+    for (const auto& n : aNodes) { aEndX = std::max(aEndX, n->position.x()); topZ = std::max(topZ, n->position.z()); }
+    for (const auto& n : bNodes) bStartX = std::min(bStartX, n->position.x());
 
-    int fibers = 0;
-    int pairCount = std::min<int>(16, (int)std::min(aNodes.size(), bNodes.size()));
-    for (int i = 0; i < pairCount; ++i) {
-        NodePtr a = aNodes[i];
-        NodePtr best = nullptr; float bd = 1e9f;
-        for (int j = 0; j < pairCount; ++j) {
-            float d = (a->position - bNodes[j]->position).squaredNorm();
-            if (d < bd) { bd = d; best = bNodes[j]; }
+    // hinge row: forearm voxels on the joint face at bone-centre height, each
+    // bonded to the three nearest upper-arm voxels on its joint face
+    int joints = 0;
+    for (const auto& b : bNodes) {
+        if (b->position.x() > bStartX + voxel * 0.5f) continue;
+        if (std::abs(b->position.z() - boneZ) > voxel * 0.5f) continue;
+        for (const auto& a : aNodes) {
+            if (a->position.x() < aEndX - voxel * 0.5f) continue;
+            if (std::abs(a->position.z() - boneZ) > voxel * 0.5f) continue;
+            if (std::abs(a->position.y() - b->position.y()) > voxel * 1.5f) continue;
+            if (oct.addJointBond(a, b, -1.0f, 1e9f, 1e9f)) ++joints;
         }
-        if (best && oct.addMuscleFiber(muscleObj, MUSCLE_SUBOBJ, a, best, 300.0f, 0.0f, 0.4f))
+    }
+
+    // biceps: top-surface voxels, upper arm mid-length to forearm near the joint
+    std::vector<NodePtr> aTop, bTop;
+    for (const auto& n : aNodes)
+        if (n->position.z() > topZ - voxel * 0.5f && n->position.x() > jointX - 1.2f && n->position.x() < jointX - 0.6f) aTop.push_back(n);
+    for (const auto& n : bNodes)
+        if (n->position.z() > topZ - voxel * 0.5f && n->position.x() > jointX + 0.2f && n->position.x() < jointX + 0.7f) bTop.push_back(n);
+    int fibers = 0;
+    int pairCount = std::min<int>(24, (int)std::min(aTop.size(), bTop.size()));
+    for (int i = 0; i < pairCount; ++i) {
+        NodePtr a = aTop[i];
+        NodePtr best = nullptr;
+        float bd = 1e9f;
+        for (const auto& b : bTop) {
+            float d = (a->position - b->position).squaredNorm();
+            if (d < bd) { bd = d; best = b; }
+        }
+        if (best && oct.addMuscleFiber(muscleObj, MUSCLE_SUBOBJ, a, best, 1e9f, 2e7f, 0.4f))
             ++fibers;
     }
+    std::cout << "Elbow joint bonds: " << joints << std::endl;
     std::cout << "Muscle fibers wired: " << fibers << std::endl;
 
     oct.markPhysicsCollidersDirty();

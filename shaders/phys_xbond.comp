@@ -1,0 +1,52 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "phys_common.glsl"
+
+// Cross-object distance constraints (anchors to static voxels, joints and
+// muscle fibres), XPBD style. For a rigid particle the constraint acts on
+// the whole body: the inverse mass is the body's and the correction is left
+// in disp for phys_sm_reduce, which turns the sum over the body into a
+// centre-of-mass shift plus a rotation. Nothing here touches pred, so the
+// strain check never sees a joint pull as a snapped bond. Joint and fibre
+// corrections are each averaged over their count on the body so many
+// constraints pulling the same way do not overshoot. Soft particles take
+// the correction directly in phys_sm_apply.
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.numParticles) return;
+    uint lo = xoff[i];
+    uint hi = xoff[i + 1u];
+    if (lo == hi) return;
+    vec3 xi = pred[i].xyz;
+    float mi = max(vel[i].w, 1e-6);
+    uint o = info[i].x;
+    bool rigid = (o != NO_OBJ) && (info[i].y == TYPE_RIGID);
+    float jointNorm = rigid ? 1.0 / max(float(objs[o].jointBonds), 1.0) : 1.0;
+    float fiberNorm = rigid ? 1.0 / max(float(objs[o].fiberBonds), 1.0) : 1.0;
+    float wi = rigid ? 1.0 / (mi * float(objs[o].count)) : 1.0 / mi;
+    float dt2 = pc.dt * pc.dt;
+    vec3 dp = vec3(0.0);
+    for (uint b = lo; b < hi; ++b) {
+        XBond xb = xbonds[b];
+        vec3 xj;
+        float wj;
+        if (xb.isFixed != 0u) {
+            xj = xb.fixedPos;
+            wj = 0.0;
+        } else {
+            xj = pred[xb.other].xyz;
+            uint oj = info[xb.other].x;
+            float countJ = (oj != NO_OBJ && info[xb.other].y == TYPE_RIGID) ? float(objs[oj].count) : 1.0;
+            wj = 1.0 / (max(vel[xb.other].w, 1e-6) * countJ);
+        }
+        vec3 d = xi - xj;
+        float l = length(d);
+        if (l < 1e-7) continue;
+        float C = l - xb.rest;
+        float alpha = 1.0 / max(xb.stiffness * dt2, 1e-9);
+        float lambda = -C / (wi + wj + alpha);
+        float norm = (xb.kind == 1u) ? fiberNorm : jointNorm;
+        dp += (wi * norm) * lambda * (d / l);
+    }
+    disp[i].xyz += dp;
+}

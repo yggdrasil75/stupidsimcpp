@@ -1,0 +1,66 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "phys_common.glsl"
+
+// One workgroup per rigid or soft object, after the last iteration. The
+// position solve has already removed the normal velocity of every particle
+// that hit a solid this substep; here the restitution part is put back at
+// body level: a velocity and an angular velocity change that finalize adds
+// to every particle of the object, so a ball bounces as one body instead of
+// only its contact patch twitching.
+shared vec3 sj[256];
+shared vec3 st[256];
+shared float si[256];
+shared float sm[256];
+
+void main() {
+    uint o = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    uint s = objs[o].start;
+    uint n = objs[o].count;
+    vec3 cm = objCm(o);
+    vec3 impulse = vec3(0.0);
+    vec3 torque = vec3(0.0);
+    float inertia = 0.0;
+    float mass = 0.0;
+    for (uint k = tid; k < n; k += 256u) {
+        uint i = s + k;
+        float m = vel[i].w;
+        vec3 r = pred[i].xyz - cm;
+        inertia += m * dot(r, r);
+        mass += m;
+        vec4 cn = cnorm[i];
+        if (cn.w < 0.5) continue;
+        float vnIn = dot(vel[i].xyz, cn.xyz);
+        if (vnIn >= 0.0) continue;
+        float e = uintBitsToFloat(info[i].w);
+        vec3 j = m * (-e * vnIn) * cn.xyz;
+        impulse += j;
+        torque += cross(r, j);
+    }
+    sj[tid] = impulse;
+    st[tid] = torque;
+    si[tid] = inertia;
+    sm[tid] = mass;
+    barrier();
+    for (uint off = 128u; off > 0u; off >>= 1u) {
+        if (tid < off) {
+            sj[tid] += sj[tid + off];
+            st[tid] += st[tid + off];
+            si[tid] += si[tid + off];
+            sm[tid] += sm[tid + off];
+        }
+        barrier();
+    }
+    if (tid != 0u) return;
+    // isotropic inertia approximation: I = 2/3 sum m |r|^2
+    float inv = 1.0 / max(si[0] * (2.0 / 3.0), 1e-9);
+    vec3 dv = sj[0] / max(sm[0], 1e-9);
+    vec3 dw = st[0] * inv;
+    objs[o].dv[0] = dv.x;
+    objs[o].dv[1] = dv.y;
+    objs[o].dv[2] = dv.z;
+    objs[o].dw[0] = dw.x;
+    objs[o].dw[1] = dw.y;
+    objs[o].dw[2] = dw.z;
+}

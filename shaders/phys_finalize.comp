@@ -1,0 +1,39 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "phys_common.glsl"
+
+// Velocity from position change, friction on solid contact, commit position.
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.numParticles) return;
+    vec3 x0 = pos[i].xyz;
+    vec3 x1 = pred[i].xyz;
+    vec3 v = (x1 - x0) / pc.dt;
+    vec4 cn = cnorm[i];
+    uint o = info[i].x;
+    if (cn.w > 0.5) {
+        float friction = rest[i].w;
+        float vn = dot(v, cn.xyz);
+        vec3 vt = v - vn * cn.xyz;
+        v = vt * max(0.0, 1.0 - friction) + max(vn, 0.0) * cn.xyz;
+        if (o == NO_OBJ) {
+            // free particle: bounce on its own
+            float vnIn = dot(vel[i].xyz, cn.xyz);
+            float e = uintBitsToFloat(info[i].w);
+            if (vnIn < 0.0) v += cn.xyz * max(-e * vnIn - dot(v, cn.xyz), 0.0);
+        }
+    }
+    if (o != NO_OBJ) {
+        // rigid body restitution reduced by phys_bounce
+        vec3 dv = vec3(objs[o].dv[0], objs[o].dv[1], objs[o].dv[2]);
+        vec3 dw = vec3(objs[o].dw[0], objs[o].dw[1], objs[o].dw[2]);
+        v += dv + cross(dw, x1 - objCm(o));
+    }
+    // at most one hash cell per substep keeps the neighbour search valid
+    float vmax = 0.45 * pc.hashCellSize / pc.dt;
+    float vl = length(v);
+    if (vl > vmax) v *= vmax / vl;
+    if (any(isnan(v)) || any(isinf(v))) v = vec3(0.0);
+    velTmp[i] = vec4(v, 0.0);
+    pos[i].xyz = x1;
+}

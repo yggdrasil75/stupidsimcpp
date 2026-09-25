@@ -1,0 +1,43 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "phys_common.glsl"
+
+// PBF density constraint multiplier for fluid particles. Rigid and soft
+// neighbours count as boundary volume.
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.numParticles) return;
+    if (info[i].y != TYPE_FLUID) {
+        pred[i].w = 0.0;
+        return;
+    }
+    vec3 xi = pred[i].xyz;
+    float hh = pc.h;
+    float maxV = 4.18879 * hh * hh * hh;
+    float rho = 0.0;
+    vec3 gradSelf = vec3(0.0);
+    float gradSum = 0.0;
+    ivec3 c0 = hashCoord(xi);
+    for (int dz = -1; dz <= 1; ++dz)
+    for (int dy = -1; dy <= 1; ++dy)
+    for (int dx = -1; dx <= 1; ++dx) {
+        uint c = hashCell(c0 + ivec3(dx, dy, dz));
+        for (uint k = cellStart[c]; k < cellStart[c + 1u]; ++k) {
+            uint j = sorted[k];
+            vec3 d = xi - pred[j].xyz;
+            float r = length(d);
+            if (r >= hh) continue;
+            float sz = pos[j].w;
+            float Vj = min(sz * sz * sz, maxV);
+            rho += Vj * W(r);
+            if (j == i) continue;
+            vec3 g = Vj * gradW(d, r);
+            gradSelf += g;
+            gradSum += dot(g, g);
+        }
+    }
+    gradSum += dot(gradSelf, gradSelf);
+    float C = max(rho - 1.0, 0.0);
+    float eps = 0.05 / (hh * hh);
+    pred[i].w = -C / (gradSum + eps);
+}

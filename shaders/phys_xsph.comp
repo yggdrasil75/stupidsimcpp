@@ -1,0 +1,46 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "phys_common.glsl"
+
+// XSPH velocity smoothing and surface tension for fluids, everything else
+// copies through. Surface tension is a cohesion pull toward the weighted
+// neighbour direction (Akinci 2013 spline), so free surfaces bead up into
+// drops instead of spreading into a film.
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.numParticles) return;
+    vec3 vi = velTmp[i].xyz;
+    if (info[i].y == TYPE_FLUID) {
+        vec3 xi = pos[i].xyz;
+        float hh = pc.h;
+        float maxV = 4.18879 * hh * hh * hh;
+        vec3 acc = vec3(0.0);
+        vec3 cohesion = vec3(0.0);
+        float cohesionW = 0.0;
+        float h6 = hh * hh * hh * hh * hh * hh;
+        ivec3 c0 = hashCoord(xi);
+        for (int dz = -1; dz <= 1; ++dz)
+        for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx) {
+            uint c = hashCell(c0 + ivec3(dx, dy, dz));
+            for (uint k = cellStart[c]; k < cellStart[c + 1u]; ++k) {
+                uint j = sorted[k];
+                if (j == i || info[j].y != TYPE_FLUID) continue;
+                vec3 d = xi - pos[j].xyz;
+                float r = length(d);
+                if (r >= hh || r < 1e-6) continue;
+                float sz = pos[j].w;
+                acc += min(sz * sz * sz, maxV) * W(r) * (velTmp[j].xyz - vi);
+                float t = hh - r;
+                float spline = (2.0 * r > hh) ? t * t * t * r * r * r
+                                              : 2.0 * t * t * t * r * r * r - h6 / 64.0;
+                spline = max(spline, 0.0) * 32.0 / h6;
+                cohesion += spline * (d / r);
+                cohesionW += spline;
+            }
+        }
+        vi += pc.xsph * acc;
+        if (cohesionW > 1e-6) vi -= pc.surfaceTension * pc.dt * cohesion / cohesionW;
+    }
+    vel[i].xyz = vi;
+}

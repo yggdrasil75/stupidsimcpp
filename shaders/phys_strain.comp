@@ -1,0 +1,18 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "phys_common.glsl"
+
+// Intra-object bonds: flagged broken when the spring force implied by the
+// neighbour separation exceeds the material limit. 1 = snapped in tension,
+// 2 = crushed in compression; only tension breaks seed crack planes.
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.count) return;
+    IBond b = ibonds[i];
+    if (b.broken != 0u) return;
+    float l = length(pred[b.a].xyz - pred[b.b].xyz);
+    float ext = l - b.rest;
+    float f = b.stiffness * abs(ext);
+    float lim = (ext >= 0.0) ? b.tension : b.compression;
+    if (f > lim) ibonds[i].broken = (ext >= 0.0) ? 1u : 2u;
+}

@@ -1,0 +1,128 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "phys_common.glsl"
+
+// One workgroup per rigid or soft object: centre of mass, moment matrix A
+// and rotation R (Muller 2016 polar extraction). Positions are summed
+// relative to the object's previous centre so float accumulation error
+// stays far below what shape matching would amplify into drift. The joint
+// and fibre corrections phys_xbond left in disp are then applied at body
+// level: their sum shifts the centre, their moment about it rotates R.
+shared vec3 sx[256];
+shared float sm[256];
+shared vec3 sa0[256];
+shared vec3 sa1[256];
+shared vec3 sa2[256];
+shared vec3 sd[256];
+shared vec3 sq[256];
+shared float si[256];
+
+void main() {
+    uint o = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    uint s = objs[o].start;
+    uint n = objs[o].count;
+    vec3 ref = objCm(o);
+    vec3 ax = vec3(0.0);
+    float am = 0.0;
+    for (uint k = tid; k < n; k += 256u) {
+        float m = vel[s + k].w;
+        ax += m * (pred[s + k].xyz - ref);
+        am += m;
+    }
+    sx[tid] = ax;
+    sm[tid] = am;
+    barrier();
+    for (uint off = 128u; off > 0u; off >>= 1u) {
+        if (tid < off) {
+            sx[tid] += sx[tid + off];
+            sm[tid] += sm[tid + off];
+        }
+        barrier();
+    }
+    vec3 cm = ref + sx[0] / max(sm[0], 1e-9);
+    float mass = sm[0];
+    bool rigid = objs[o].alpha >= 1.0;
+    vec3 a0 = vec3(0.0);
+    vec3 a1 = vec3(0.0);
+    vec3 a2 = vec3(0.0);
+    vec3 dsum = vec3(0.0);
+    vec3 torque = vec3(0.0);
+    float inertia = 0.0;
+    for (uint k = tid; k < n; k += 256u) {
+        float m = vel[s + k].w;
+        vec3 p = pred[s + k].xyz - cm;
+        vec3 q = rest[s + k].xyz;
+        a0 += m * p * q.x;
+        a1 += m * p * q.y;
+        a2 += m * p * q.z;
+        inertia += m * dot(p, p);
+        if (rigid) {
+            vec3 d = disp[s + k].xyz;
+            dsum += d;
+            torque += cross(p, d);
+        }
+    }
+    sa0[tid] = a0;
+    sa1[tid] = a1;
+    sa2[tid] = a2;
+    sd[tid] = dsum;
+    sq[tid] = torque;
+    si[tid] = inertia;
+    barrier();
+    for (uint off = 128u; off > 0u; off >>= 1u) {
+        if (tid < off) {
+            sa0[tid] += sa0[tid + off];
+            sa1[tid] += sa1[tid + off];
+            sa2[tid] += sa2[tid + off];
+            sd[tid] += sd[tid + off];
+            sq[tid] += sq[tid + off];
+            si[tid] += si[tid + off];
+        }
+        barrier();
+    }
+    if (tid != 0u) return;
+    mat3 A = mat3(sa0[0], sa1[0], sa2[0]);
+    mat3 R = objR(o);
+    for (int it = 0; it < 12; ++it) {
+        vec3 omega = (cross(R[0], A[0]) + cross(R[1], A[1]) + cross(R[2], A[2]))
+                   * (1.0 / (abs(dot(R[0], A[0]) + dot(R[1], A[1]) + dot(R[2], A[2])) + 1e-9));
+        float w = length(omega);
+        if (w < 1e-9) break;
+        vec3 u = omega / w;
+        float c = cos(w);
+        float sn = sin(w);
+        float t = 1.0 - c;
+        mat3 Q = mat3(
+            t*u.x*u.x + c,      t*u.x*u.y + sn*u.z, t*u.x*u.z - sn*u.y,
+            t*u.x*u.y - sn*u.z, t*u.y*u.y + c,      t*u.y*u.z + sn*u.x,
+            t*u.x*u.z + sn*u.y, t*u.y*u.z - sn*u.x, t*u.z*u.z + c);
+        R = Q * R;
+    }
+    if (rigid) {
+        // body level joint response: isotropic inertia I = 2/3 sum m |p|^2,
+        // each disp already carries the body's inverse mass
+        cm += sd[0];
+        vec3 theta = sq[0] * (mass / max(si[0] * (2.0 / 3.0), 1e-9));
+        float ang = length(theta);
+        if (ang > 1e-9) {
+            vec3 u = theta / ang;
+            float c = cos(ang);
+            float sn = sin(ang);
+            float t = 1.0 - c;
+            mat3 Q = mat3(
+                t*u.x*u.x + c,      t*u.x*u.y + sn*u.z, t*u.x*u.z - sn*u.y,
+                t*u.x*u.y - sn*u.z, t*u.y*u.y + c,      t*u.y*u.z + sn*u.x,
+                t*u.x*u.z + sn*u.y, t*u.y*u.z - sn*u.x, t*u.z*u.z + c);
+            R = Q * R;
+        }
+    }
+    objs[o].cm[0] = cm.x;
+    objs[o].cm[1] = cm.y;
+    objs[o].cm[2] = cm.z;
+    for (int c = 0; c < 3; ++c) {
+        objs[o].R[c * 3 + 0] = R[c].x;
+        objs[o].R[c * 3 + 1] = R[c].y;
+        objs[o].R[c * 3 + 2] = R[c].z;
+    }
+}

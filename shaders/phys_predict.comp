@@ -1,0 +1,21 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "phys_common.glsl"
+
+// Apply external forces, predict positions, count hash-cell occupancy.
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.numParticles) return;
+    vec3 x = pos[i].xyz;
+    vec3 v = vel[i].xyz;
+    v += gravityAt(x) * pc.dt;
+    v *= max(0.0, 1.0 - pc.damping * pc.dt);
+    vec3 xp = x + v * pc.dt;
+    vel[i].xyz = v;
+    pred[i] = vec4(xp, 0.0);
+    disp[i] = vec4(0.0);
+    cnorm[i] = vec4(0.0);
+    uint c = hashCell(hashCoord(xp));
+    info[i].z = c;
+    atomicAdd(cellCount[c], 1u);
+}

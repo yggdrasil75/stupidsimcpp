@@ -1,0 +1,30 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "phys_common.glsl"
+
+// Exclusive prefix sum of cellCount into cellStart (single workgroup, chunked).
+shared uint sums[256];
+void main() {
+    uint n = pc.numHashCells;
+    uint tid = gl_LocalInvocationID.x;
+    uint chunk = (n + 255u) / 256u;
+    uint lo = tid * chunk;
+    uint hi = min(lo + chunk, n);
+    uint s = 0u;
+    for (uint c = lo; c < hi; ++c) s += cellCount[c];
+    sums[tid] = s;
+    barrier();
+    for (uint off = 1u; off < 256u; off <<= 1u) {
+        uint v = (tid >= off) ? sums[tid - off] : 0u;
+        barrier();
+        sums[tid] += v;
+        barrier();
+    }
+    uint run = (tid > 0u) ? sums[tid - 1u] : 0u;
+    for (uint c = lo; c < hi; ++c) {
+        uint v = cellCount[c];
+        cellStart[c] = run;
+        run += v;
+    }
+    if (tid == 255u) cellStart[n] = run;
+}

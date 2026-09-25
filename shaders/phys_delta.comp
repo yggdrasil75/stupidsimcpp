@@ -1,0 +1,50 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "phys_common.glsl"
+
+// Fluid position correction from lambdas, plus particle contacts for every
+// pair that is not fluid-fluid.
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.numParticles) return;
+    vec3 xi = pred[i].xyz;
+    uint ti = info[i].y;
+    uint oi = info[i].x;
+    float hh = pc.h;
+    float maxV = 4.18879 * hh * hh * hh;
+    float li = pred[i].w;
+    float wi = 1.0 / max(vel[i].w, 1e-6);
+    float ri = pos[i].w * 0.5;
+    float Wq = W(0.2 * hh);
+    float kCorr = 0.002 * hh * hh;
+    vec3 dp = vec3(0.0);
+    ivec3 c0 = hashCoord(xi);
+    for (int dz = -1; dz <= 1; ++dz)
+    for (int dy = -1; dy <= 1; ++dy)
+    for (int dx = -1; dx <= 1; ++dx) {
+        uint c = hashCell(c0 + ivec3(dx, dy, dz));
+        for (uint k = cellStart[c]; k < cellStart[c + 1u]; ++k) {
+            uint j = sorted[k];
+            if (j == i) continue;
+            vec3 d = xi - pred[j].xyz;
+            float r = length(d);
+            uint tj = info[j].y;
+            if (ti == TYPE_FLUID && tj == TYPE_FLUID) {
+                if (r >= hh) continue;
+                float sz = pos[j].w;
+                float Vj = min(sz * sz * sz, maxV);
+                float sc = -kCorr * pow(W(r) / max(Wq, 1e-12), 4.0);
+                dp += (li + pred[j].w + sc) * Vj * gradW(d, r);
+            } else {
+                // same body, shape matching handles it
+                if (oi != NO_OBJ && oi == info[j].x) continue;
+                float rmin = ri + pos[j].w * 0.5;
+                if (r >= rmin) continue;
+                float wj = 1.0 / max(vel[j].w, 1e-6);
+                vec3 n = (r > 1e-6) ? d / r : vec3(0.0, 0.0, 1.0);
+                dp += n * ((rmin - r) * wi / (wi + wj));
+            }
+        }
+    }
+    disp[i].xyz += dp;
+}
