@@ -166,6 +166,7 @@ private:
             writeVec3(out, pt->physics.force);
             writeVal(out, pt->physics.density);
             writeVal(out, pt->physics.pressure);
+            writeVal(out, pt->shape);
         }
     }
 
@@ -191,6 +192,7 @@ private:
             readVec3(in, pt->physics.force);
             readVal(in, pt->physics.density);
             readVal(in, pt->physics.pressure);
+            readVal(in, pt->shape);
             pt->physics.bondsBuilt = false;
             pts.push_back(pt);
         }
@@ -876,6 +878,16 @@ public:
             m.minFragmentVoxels = std::max(1u, minFragmentVoxels);
         }
     }
+    ///@brief Marks an object as a blade: each step, dynamic voxels of other bodies that its
+    ///       voxels overlap by more than half a voxel are removed (the kerf) and the cut body
+    ///       is re-split, instead of the contact solver shoving them aside.
+    void setObjectCutter(int objectId, bool v) {
+        auto obj = getObject(objectId);
+        if (!obj) return;
+        u_lock lock(obj->objMutex);
+        obj->setCutter(v);
+    }
+
     ///@brief Sets friction and restitution on every physics material of an object
     void setObjectContact(int objectId, float friction, float restitution) {
         auto obj = getObject(objectId);
@@ -1134,7 +1146,7 @@ private:
 
         auto accumulate = [&](const std::shared_ptr<NodeData>& item) {
             if (!item || !item->isActive() || !item->isVisible()) return;
-            float v = item->size * item->size * item->size;
+            float v = item->volume();
             if (v <= 0.0) return;
 
             totalVolume += v;
@@ -1591,6 +1603,12 @@ private:
     ///@param tExit Optionally extracts outgoing intersection bounds length
     ///@return True on functional penetration validation
     inline bool rayCubeIntersect(const Ray& ray, const RenderData* cube, float& t, Vec3& normal, Vec3& hitPoint, float* tExit = nullptr) const {
+        // OBB / capsule points resolve through their own intersection
+        if (cube->isShape()) {
+            if (!cube->shape.intersect(ray, cube->position, cube->size, t, normal, tExit)) return false;
+            hitPoint = ray.origin + ray.dir * t;
+            return true;
+        }
         const Vec3 cbMin = cube->boundsMin();
         const Vec3 cbMax = cube->boundsMax();
 
@@ -2014,7 +2032,7 @@ public:
         Vec3 relPos = pos - obj->centerPosition;
         {
             u_lock lock(obj->objMutex);
-            obj->relativeVoxels.push_back({relPos});
+            obj->relativeVoxels.push_back({relPos, pointData->halfExtent()});
         }
         
         if (insertRecursive(root_, pointData, 0)) {
@@ -2125,7 +2143,35 @@ public:
                 createBond(node, nb, restLen, strength, false);
             }
         }
+        // a primitive of the same body whose surface is within reach counts as a neighbour
+        std::vector<std::shared_ptr<NodeData>> prims;
+        findShapesNear(node->position, reach, prims);
+        for (auto& prim : prims) {
+            if (prim.get() == node.get() || prim->objectId != node->objectId || prim->isStatic()) continue;
+            float restLen = (node->position - prim->position).norm();
+            if (restLen > 1e-5f) createBond(node, prim, restLen, strength, false);
+        }
         node->physics.bondsBuilt = true;
+    }
+
+    ///@brief Bonds a rigid primitive to every voxel of its body whose centre lies within reach
+    ///       of its surface, so fracture sees them as one piece
+    void bondRigidPrimitive(const std::shared_ptr<NodeData>& prim) {
+        if (!prim || !prim->isShape()) return;
+        const float reach = prim->size * 0.9f;
+        float strength = 60.0f;
+        if (auto obj = getObject(prim->objectId)) {
+            strength = obj->getPhysicsMaterial(prim->physMatIdx).breakForce;
+        }
+        std::vector<std::shared_ptr<NodeData>> nodes;
+        collectNodesByObjectId(prim->objectId, nodes);
+        for (auto& n : nodes) {
+            if (n.get() == prim.get() || !n->isActive()) continue;
+            if (prim->shape.sdf(n->position, prim->position, prim->size) > reach) continue;
+            float restLen = (n->position - prim->position).norm();
+            if (restLen > 1e-5f) createBond(prim, n, restLen, strength, false);
+        }
+        prim->physics.bondsBuilt = true;
     }
 
     ///@brief Creates an explicit constraint bond between two (usually
@@ -2317,6 +2363,7 @@ public:
             writeVal(out, rmat);
             PhysicsMaterial_ pmat = obj->getPhysicsMaterial(pt->physMatIdx);
             writeVal(out, pmat);
+            writeVal(out, pt->shape);
         }
         return true;
     }
@@ -2362,6 +2409,8 @@ public:
             readVal(in, f);
             readVal(in, rmat);
             readVal(in, pmat);
+            Shape shape;
+            readVal(in, shape);
 
             uint32_t rIdx = getOrAddRenderMaterial(rmat);
             uint16_t pIdx = obj->getOrAddPhysicsMaterial(pmat);
@@ -2373,9 +2422,10 @@ public:
 
             auto pointData = std::make_shared<NodeData>(
                 T{}, worldPos, visible, color, size, active, assignedId, rIdx, pIdx, staticb);
+            pointData->shape = shape;
             {
                 u_lock lock(obj->objMutex);
-                obj->relativeVoxels.push_back({relPos});
+                obj->relativeVoxels.push_back({relPos, pointData->halfExtent()});
             }
             if (insertRecursive(root_, pointData, 0)) {
                 this->size++;
@@ -2435,7 +2485,8 @@ public:
         int id = obj->id;
         {
             u_lock lock(obj->objMutex);
-            obj->centerPosition = center;
+            // relativeVoxels are relative to this; a second primitive on the same object keeps the first centre
+            if (obj->relativeVoxels.empty()) obj->centerPosition = center;
         }
         Vec3 half = dims * 0.5f;
         int nx = std::max(1, (int)std::round(dims.x() / voxel));
@@ -2463,7 +2514,8 @@ public:
         int id = obj->id;
         {
             u_lock lock(obj->objMutex);
-            obj->centerPosition = center;
+            // relativeVoxels are relative to this; a second primitive on the same object keeps the first centre
+            if (obj->relativeVoxels.empty()) obj->centerPosition = center;
         }
         int n = std::max(1, (int)std::round(radius / voxel));
         float r2 = radius * radius;
@@ -2491,7 +2543,8 @@ public:
         int id = obj->id;
         {
             u_lock lock(obj->objMutex);
-            obj->centerPosition = center;
+            // relativeVoxels are relative to this; a second primitive on the same object keeps the first centre
+            if (obj->relativeVoxels.empty()) obj->centerPosition = center;
         }
         int layers = std::max(1, (int)std::round(height / voxel));
         for (int ly = 0; ly < layers; ++ly) {
@@ -2524,7 +2577,8 @@ public:
         int id = obj->id;
         {
             u_lock lock(obj->objMutex);
-            obj->centerPosition = center;
+            // relativeVoxels are relative to this; a second primitive on the same object keeps the first centre
+            if (obj->relativeVoxels.empty()) obj->centerPosition = center;
         }
         int nr = std::max(1, (int)std::round(radius / voxel));
         int nh = std::max(1, (int)std::round(height / voxel));
@@ -2545,13 +2599,125 @@ public:
         return id;
     }
 
+    ///@brief Inserts one primitive node (OBB or capsule). Its mass is massPerVoxel times the
+    ///       number of voxels of size voxel it stands in for; that voxel size is also the
+    ///       granularity the grid cuts it into when part of it is removed (see explodeShape).
+    ///@param center Primitive position
+    ///@param shape Geometry
+    ///@param color Albedo
+    ///@param objectId Object to attach to, -1 for a new one
+    ///@param bType Body type
+    ///@param massPerVoxel Mass of one voxel of the material
+    ///@param voxel Voxel size, or <= 0 for the grid minimum (setMinVoxelSize)
+    ///@return The object id, or -1 when the primitive could not be placed
+    int insertPrimitive(const Vec3& center, const Shape& shape, Vec3 color, int objectId = -1,
+                        BodyType bType = BodyType::STATIC, float massPerVoxel = 1.0f, float voxel = -1.0f,
+                        float roughness = 1.0f, float metallic = 0.0f, float transmission = 0.0f) {
+        if (voxel <= 0.0f) voxel = minVoxelSize_;
+        if (shape.isBox()) return -1;
+        auto obj = getOrCreateObject(objectId);
+        int id = obj->id;
+        float mass = massPerVoxel * static_cast<float>(std::max<size_t>(1, shape.cellCount(center, voxel)));
+        RenderMaterial rmat(0.0f, roughness, metallic, 1.45f, Vec3::Zero());
+        uint32_t rIdx = renderMaterials_.getOrAdd(rmat);
+        PhysicsMaterial_ pmat{bType, mass};
+        uint16_t pIdx = obj->getOrAddPhysicsMaterial(pmat);
+        Eigen::Vector4f color4(color.x(), color.y(), color.z(), std::clamp(1.0f - transmission, 0.0f, 1.0f));
+        auto node = std::make_shared<NodeData>(T{}, center, true, color4, voxel, true, id, rIdx, pIdx, bType == BodyType::STATIC);
+        node->shape = shape;
+        if (!insertRecursive(root_, node, 0)) return -1;
+        size++;
+        {
+            u_lock lock(obj->objMutex);
+            obj->relativeVoxels.push_back({center - obj->centerPosition, node->halfExtent()});
+        }
+        if (bType != BodyType::STATIC) {
+            std::lock_guard<std::mutex> lock(physicsMutex_);
+            activePhysicsNodes_.push_back(node);
+        }
+        if (bType == BodyType::RIGID) bondRigidPrimitive(node);
+        physicsCollidersDirty_.store(true);
+        return id;
+    }
+
+    ///@brief Capsule between two endpoints, see insertPrimitive
+    int insertCapsule(const Vec3& a, const Vec3& b, float radius, float voxel, Vec3 color,
+                      int objectId = -1, BodyType bType = BodyType::STATIC, float massPerVoxel = 1.0f,
+                      float roughness = 1.0f, float metallic = 0.0f) {
+        if (radius <= 0.0f) return -1;
+        Vec3 center;
+        Shape shape = Shape::capsuleBetween(a, b, radius, center);
+        return insertPrimitive(center, shape, color, objectId, bType, massPerVoxel, voxel, roughness, metallic);
+    }
+
+    ///@brief Sphere as a zero-length capsule, see insertPrimitive
+    int insertSpherePrimitive(const Vec3& center, float radius, float voxel, Vec3 color,
+                              int objectId = -1, BodyType bType = BodyType::STATIC, float massPerVoxel = 1.0f,
+                              float roughness = 1.0f, float metallic = 0.0f) {
+        return insertCapsule(center, center, radius, voxel, color, objectId, bType, massPerVoxel, roughness, metallic);
+    }
+
+    ///@brief Oriented box, see insertPrimitive
+    int insertOBB(const Vec3& center, const Vec3& halfExtents, const Eigen::Quaternionf& rot, float voxel, Vec3 color,
+                  int objectId = -1, BodyType bType = BodyType::STATIC, float massPerVoxel = 1.0f,
+                  float roughness = 1.0f, float metallic = 0.0f, float transmission = 0.0f) {
+        if (halfExtents.minCoeff() <= 0.0f) return -1;
+        return insertPrimitive(center, Shape::obb(rot, halfExtents), color, objectId, bType, massPerVoxel, voxel,
+                               roughness, metallic, transmission);
+    }
+
+    ///@brief Re-poses a primitive in place (the tree slot follows its new bounds)
+    ///@param node Primitive to move
+    ///@param center New position
+    ///@param rot New rotation
+    ///@return False when node is not a primitive or the new pose leaves the grid
+    bool posePrimitive(const std::shared_ptr<NodeData>& node, const Vec3& center, const Eigen::Quaternionf& rot) {
+        if (!node || !node->isShape()) return false;
+        BoundingBox old = node->getCubeBounds();
+        Vec3 oldCenter = node->position;
+        Eigen::Quaternionf oldRot = node->shape.rot;
+        node->position = center;
+        node->shape.rot = rot.normalized();
+        if (!nodeAt(root_)->contains(node->getCubeBounds().first) || !nodeAt(root_)->contains(node->getCubeBounds().second)) {
+            node->position = oldCenter;
+            node->shape.rot = oldRot;
+            return false;
+        }
+        removeRecursive(root_, old, node);
+        insertRecursive(root_, node, 0);
+        node->physics.lastTreePos = center;
+        if (auto obj = getObject(node->objectId)) {
+            u_lock lock(obj->objMutex);
+            for (auto& rv : obj->relativeVoxels) {
+                if ((obj->centerPosition + rv.relPos - oldCenter).squaredNorm() > 1e-12f) continue;
+                rv.relPos = center - obj->centerPosition;
+                rv.half = node->halfExtent();
+                break;
+            }
+        }
+        if (node->isStatic()) physicsCollidersDirty_.store(true);
+        return true;
+    }
+
+    ///@brief Voxel size primitives are cut into when the caller gives none
+    void setMinVoxelSize(float v) {
+        if (v > 0.0f) minVoxelSize_ = v;
+    }
+
+    float minVoxelSize() const {
+        return minVoxelSize_;
+    }
+
     ///@brief Filled or hollow box using a full material spec.
     int insertCube(const Vec3& center, const Vec3& dims, float voxel, const VoxelMat& mat,
                    int objectId = -1, bool hollow = false) {
         if (voxel <= 0.0f) return -1;
         auto obj = getOrCreateObject(objectId);
         int id = obj->id;
-        { u_lock lock(obj->objMutex); obj->centerPosition = center; }
+        {
+            u_lock lock(obj->objMutex);
+            if (obj->relativeVoxels.empty()) obj->centerPosition = center;
+        }
         Vec3 half = dims * 0.5f;
         int nx = std::max(1, (int)std::round(dims.x() / voxel));
         int ny = std::max(1, (int)std::round(dims.y() / voxel));
@@ -2573,7 +2739,10 @@ public:
         if (shellThickness <= 0.0f) shellThickness = voxel;
         auto obj = getOrCreateObject(objectId);
         int id = obj->id;
-        { u_lock lock(obj->objMutex); obj->centerPosition = center; }
+        {
+            u_lock lock(obj->objMutex);
+            if (obj->relativeVoxels.empty()) obj->centerPosition = center;
+        }
         int n = std::max(1, (int)std::round(radius / voxel));
         float r2 = radius * radius;
         float inner = radius - shellThickness;
@@ -2596,7 +2765,10 @@ public:
         if (voxel <= 0.0f || height <= 0.0f) return -1;
         auto obj = getOrCreateObject(objectId);
         int id = obj->id;
-        { u_lock lock(obj->objMutex); obj->centerPosition = center; }
+        {
+            u_lock lock(obj->objMutex);
+            if (obj->relativeVoxels.empty()) obj->centerPosition = center;
+        }
         int layers = std::max(1, (int)std::round(height / voxel));
         for (int ly = 0; ly < layers; ++ly) {
             float t = (float)ly / (float)layers;
@@ -2622,7 +2794,10 @@ public:
         if (shellThickness <= 0.0f) shellThickness = voxel;
         auto obj = getOrCreateObject(objectId);
         int id = obj->id;
-        { u_lock lock(obj->objMutex); obj->centerPosition = center; }
+        {
+            u_lock lock(obj->objMutex);
+            if (obj->relativeVoxels.empty()) obj->centerPosition = center;
+        }
         int nr = std::max(1, (int)std::round(radius / voxel));
         int nh = std::max(1, (int)std::round(height / voxel));
         float r2 = radius * radius;
@@ -2663,24 +2838,31 @@ public:
         if (!obj) return INVALID_IDX;
         
         std::vector<Vec3> absolutePositions;
+        BoundingBox bounds;
         {
             s_lock lock(obj->objMutex);
             if (obj->relativeVoxels.empty()) return INVALID_IDX;
             
             absolutePositions.reserve(obj->relativeVoxels.size());
-            for (const auto& relPos : obj->relativeVoxels) {
-                absolutePositions.push_back(obj->centerPosition + relPos.relPos);
+            bounds.first = obj->centerPosition + obj->relativeVoxels[0].relPos;
+            bounds.second = bounds.first;
+            for (const auto& rv : obj->relativeVoxels) {
+                Vec3 abs = obj->centerPosition + rv.relPos;
+                absolutePositions.push_back(abs);
+                bounds.first = bounds.first.cwiseMin(abs - Vec3::Constant(rv.half));
+                bounds.second = bounds.second.cwiseMax(abs + Vec3::Constant(rv.half));
             }
         }
         int depth = 0;
-        uint32_t commonNode = getHighestCommonNode(absolutePositions, root_, depth);
+        uint32_t commonNode = getHighestCommonNode(bounds, root_, 0, depth);
         if (outDepth) {
             *outDepth = depth;
         }
         results.reserve(absolutePositions.size());
         
         for (const auto& absPos : absolutePositions) {
-            auto pt = find(absPos, id, EPSILON, commonNode);
+            // centre + relative round-trips through float, so match with a relative tolerance
+            auto pt = find(absPos, id, std::max(1e-6f, absPos.norm() * 1e-6f), commonNode);
             
             if (pt && pt->isActive()) {
                 results.push_back(pt);
@@ -2864,7 +3046,7 @@ public:
             Vec3 relPos = pos - obj->centerPosition;
             {
                 u_lock lock(obj->objMutex);
-                obj->relativeVoxels.push_back({relPos});
+                obj->relativeVoxels.push_back({relPos, pointData->halfExtent()});
             }
 
             if (insertRecursive(root_, pointData, 0)) {
@@ -3028,9 +3210,105 @@ public:
         return nodeAt(root_)->contains(pos);
     }
 
+    ///@brief Finds an OBB or capsule point whose volume contains pos. A shape is stored on the
+    ///       root-to-leaf path of every point it covers, so one descent suffices.
+    ///@param pos World point
+    ///@param tol Extra distance still counted as inside
+    std::shared_ptr<NodeData> findShapeAt(const Vec3& pos, float tol = 0.0f) {
+        uint32_t idx = root_;
+        while (idx != INVALID_IDX) {
+            const OctreeNode* node = nodeAt(idx);
+            if (!node || !node->contains(pos)) return nullptr;
+            ensureLoaded(idx, false);
+            node = nodeAt(idx);
+            for (const auto& pt : pointsView(idx)) {
+                if (!pt || !pt->isActive() || !pt->isShape()) continue;
+                if (pt->shape.contains(pos, pt->position, pt->size, tol)) return pt;
+            }
+            if (node->isLeaf()) return nullptr;
+            int octant = getOctant(pos, node->center);
+            idx = node->hasChild(octant) ? node->firstChild + octant : INVALID_IDX;
+        }
+        return nullptr;
+    }
+
+    ///@brief Collects OBB / capsule points whose surface lies within reach of pos. Only nodes
+    ///       whose bounds meet the query box can hold such a shape, since a node contains the
+    ///       full AABB of every point stored in it.
+    ///@param pos World point
+    ///@param reach Signed-distance threshold
+    ///@param out Receives the matching primitives
+    void findShapesNear(const Vec3& pos, float reach, std::vector<std::shared_ptr<NodeData>>& out) {
+        BoundingBox query{pos - Vec3::Constant(reach), pos + Vec3::Constant(reach)};
+        std::vector<uint32_t> stack{root_};
+        while (!stack.empty()) {
+            uint32_t idx = stack.back();
+            stack.pop_back();
+            const OctreeNode* node = nodeAt(idx);
+            if (!node || !node->isLoaded() || !boxIntersectsBox(node->bounds(), query)) continue;
+            for (const auto& pt : pointsView(idx)) {
+                if (!pt || !pt->isActive() || !pt->isShape()) continue;
+                if (pt->shape.sdf(pos, pt->position, pt->size) <= reach) out.push_back(pt);
+            }
+            if (node->isLeaf()) continue;
+            for (int i = 0; i < 8; ++i) {
+                if (node->hasChild(i)) stack.push_back(node->firstChild + i);
+            }
+        }
+    }
+
+    ///@brief Splits an OBB or capsule point back into the voxels it stands in for
+    ///@param node Primitive to split
+    ///@return Number of voxels re-inserted, 0 when node is not a shape
+    size_t explodeShape(const std::shared_ptr<NodeData>& node) {
+        if (!node || !node->isShape()) return 0;
+        std::vector<Vec3> cells;
+        node->shape.forEachCell(node->position, node->size, [&](const Vec3& c) { cells.push_back(c); });
+        if (!removeRecursive(root_, node->getCubeBounds(), node)) return 0;
+        size--;
+        size_t n = 0;
+        for (const Vec3& c : cells) {
+            auto v = std::make_shared<NodeData>(*node);
+            v->id = INVALID_IDX;
+            v->position = c;
+            v->shape = Shape{};
+            v->physics.bondHead = INVALID_IDX;
+            if (insertRecursive(root_, v, 0)) {
+                size++;
+                ++n;
+            }
+        }
+        physicsCollidersDirty_.store(true);
+        return n;
+    }
+
+    ///@brief Explodes every shape of an object, required before the object goes dynamic
+    ///@param objectId Object to process
+    ///@return Number of voxels re-inserted
+    size_t explodeObjectShapes(int objectId) {
+        std::vector<std::shared_ptr<NodeData>> nodes;
+        collectNodesByObjectId(objectId, nodes);
+        size_t n = 0;
+        for (auto& v : nodes) {
+            if (v->isShape()) n += explodeShape(v);
+        }
+        return n;
+    }
+
+    ///@brief Removes the voxel at pos. If pos lies inside a merged primitive the primitive is
+    ///       split back into voxels first, so only that one cell disappears.
+    ///@param pos World point
+    ///@param tolerance Match distance for a plain voxel
     bool remove(const Vec3& pos, float tolerance = EPSILON) {
         auto pt = find(pos, -2, tolerance);
-        if (!pt) return false;
+        if (!pt) {
+            auto sh = findShapeAt(pos);
+            if (!sh) return false;
+            const float cell = sh->size;
+            explodeShape(sh);
+            pt = find(pos, -2, std::max(tolerance, 0.5f * cell * 1.7321f));
+            if (!pt) return false;
+        }
         if (removeRecursive(root_, pt->getCubeBounds(), pt)) {
             size--;
             return true;
@@ -3056,6 +3334,19 @@ public:
         auto obj = getOrCreateObject(objectId);
         PhysicsMaterial_ pmat{newType, newMass};
         uint16_t newIdx = obj->getOrAddPhysicsMaterial(pmat);
+
+        if (newType != BodyType::STATIC) {
+            bool any = false;
+            for (auto& n : nodes) {
+                if (!n->isShape()) continue;
+                explodeShape(n);
+                any = true;
+            }
+            if (any) {
+                nodes.clear();
+                collectNodesByObjectId(objectId, nodes);
+            }
+        }
 
         std::lock_guard<std::mutex> lock(physicsMutex_);
         for (auto& n : nodes) {
@@ -3419,6 +3710,11 @@ public:
 
                 if (tmax_pt >= std::max(0.0f, tmin_pt) && tmax_pt >= 0.0f) {
                     float t = (tmin_pt < 0.0f) ? (resolvePenetration ? 0.0f : tmax_pt) : tmin_pt;
+                    if (pt->isShape()) {
+                        Vec3 sn;
+                        if (!pt->shape.intersect(ray, pt->position, pt->size, t, sn)) continue;
+                        if (resolvePenetration && pt->shape.sdf(ray.origin, pt->position, pt->size) <= 0.0f) t = 0.0f;
+                    }
                     
                     if (t >= 0 && t <= currentMaxDist && t <= current.tMax + 0.001f) {
                         currentMaxDist = t;
@@ -3471,6 +3767,10 @@ public:
             hit.distance = currentMaxDist;
             hit.hitPoint = ray.origin + ray.dir * currentMaxDist;
 
+            if (bestNode->isShape()) {
+                float st;
+                if (bestNode->shape.intersect(ray, bestNode->position, bestNode->size, st, hit.normal)) return true;
+            }
             BoundingBox bounds = bestNode->getCubeBounds();
             Vec3 dMin = (hit.hitPoint - bounds.first).cwiseAbs();
             Vec3 dMax = (hit.hitPoint - bounds.second).cwiseAbs();
@@ -3601,6 +3901,15 @@ public:
     ///@brief Stores GPU results on the nodes and re-keys moved voxels in the tree
     void writeBackPhysics(const std::vector<std::shared_ptr<NodeData>>& dyn,
                           const std::vector<float>& outPos, const std::vector<float>& outVel);
+    ///@brief Removes the dynamic voxels of other bodies that cutter voxels overlap, marking
+    ///       the cut bodies for fracture resolution
+    void applyCutters(const std::vector<std::shared_ptr<NodeData>>& dyn,
+                      const std::vector<std::vector<PhysicsMaterial_>>& fastMats,
+                      std::unordered_set<int>& fractured);
+    ///@brief Rotates OBB / capsule particles with their rigid body. The body rotation is
+    ///       recovered on the CPU by Kabsch from the rest offsets and the new positions.
+    void orientPhysicsShapes(const std::vector<std::shared_ptr<NodeData>>& dyn,
+                             const PhysFrameInput& in, const std::vector<float>& outPos);
     ///@brief Keeps object voxel layouts valid after voxels moved
     void refreshPhysicsObjectLayouts(const std::vector<std::shared_ptr<NodeData>>& dyn,
                                      const std::vector<float>& oldPos);
@@ -3627,8 +3936,217 @@ public:
     ///@brief Moves a fragment onto a fresh object id, inheriting materials and policy
     void reassignFragment(const std::vector<std::shared_ptr<NodeData>>& frag, int sourceObjectId);
 
+    ///@brief Merges blobs of idle voxels (static, settled, unbonded) into one primitive each:
+    ///       a capsule when one covers the blob exactly, else a box (a bigger voxel when cubic,
+    ///       an axis-aligned OBB otherwise), else the largest boxes a greedy carve finds.
+    ///       Every replacement voxelises back to exactly the cells it replaced, see explodeShape.
+    ///@return Number of voxels removed by merging
+    size_t mergeIdleShapes() {
+        if (root_ == INVALID_IDX) return 0;
+        size_t removed = mergeIdleShapesIn(root_);
+        if (removed) physicsCollidersDirty_.store(true);
+        return removed;
+    }
+
+    ///@brief Whether optimize() (including the worker thread's timed one) runs mergeIdleShapes()
+    void setAutoMergeShapes(bool v) {
+        autoMergeShapes_ = v;
+    }
+
+    ///@brief Smallest blob worth replacing with one primitive (default 8 cells)
+    void setMinMergeCells(size_t n) {
+        minMergeCells_ = std::max<size_t>(2, n);
+    }
+
+private:
+    ///@brief Off by default: the worker thread's timed optimize() is not synchronised with
+    ///       physics or rendering, and merging moves points. Call mergeIdleShapes() yourself.
+    bool autoMergeShapes_ = false;
+    size_t minMergeCells_ = 8;
+    float minVoxelSize_ = 0.01f;
+
+    ///@brief Static, settled, unbonded plain voxel: safe to fold into a primitive
+    bool isIdleVoxel(const std::shared_ptr<NodeData>& pt) const {
+        return pt && pt->isActive() && !pt->isShape() && pt->isStatic() && pt->isSettled()
+               && pt->physics.bondHead == INVALID_IDX && pt->size > 0.0f;
+    }
+
+    ///@brief Appends every loaded point below idx
+    void collectSubtreePoints(uint32_t idx, std::vector<std::shared_ptr<NodeData>>& out) {
+        const OctreeNode* node = nodeAt(idx);
+        if (!node || !node->isLoaded()) return;
+        for (const auto& pt : pointsView(idx)) {
+            if (pt) out.push_back(pt);
+        }
+        if (node->isLeaf()) return;
+        for (int i = 0; i < 8; ++i) {
+            if (node->hasChild(i)) collectSubtreePoints(node->firstChild + i, out);
+        }
+    }
+
+    ///@brief Swaps a set of voxels for one primitive
+    ///@param voxels Voxels to remove; the first one seeds the primitive's attributes
+    ///@param center Primitive position
+    ///@param size Primitive voxel size
+    ///@param shape Primitive geometry
+    ///@return False, with nothing changed, when the primitive cannot be placed in the tree
+    bool replaceWithPrimitive(const std::vector<std::shared_ptr<NodeData>>& voxels, const Vec3& center,
+                              float size, const Shape& shape) {
+        auto prim = std::make_shared<NodeData>(*voxels[0]);
+        prim->id = INVALID_IDX;
+        prim->position = center;
+        prim->size = size;
+        prim->shape = shape;
+        prim->physics.bondHead = INVALID_IDX;
+        for (size_t i = 1; i < voxels.size(); ++i) {
+            prim->data = mergePayload<T>(prim->data, voxels[i]->data);
+        }
+        if (!insertRecursive(root_, prim, 0)) return false;
+        size++;
+        if (auto obj = getObject(prim->objectId)) {
+            u_lock lock(obj->objMutex);
+            obj->relativeVoxels.push_back({center - obj->centerPosition, prim->halfExtent()});
+        }
+        for (const auto& v : voxels) {
+            if (removeRecursive(root_, v->getCubeBounds(), v)) size--;
+        }
+        return true;
+    }
+
+    ///@brief mergeIdleShapes() for one loaded subtree. Also drops idle voxels that sit exactly
+    ///       on top of an identical one (overlapping primitive inserts).
+    ///@param idx Subtree root
+    ///@return Number of voxels removed
+    size_t mergeIdleShapesIn(uint32_t idx) {
+        std::vector<std::shared_ptr<NodeData>> pts;
+        collectSubtreePoints(idx, pts);
+        if (pts.size() < minMergeCells_) return 0;
+
+        // voxels can only share a primitive when they share a lattice, so the lattice phase
+        // (position modulo cell, quantised to LATTICE_EPS) is part of the group key
+        using GroupKey = std::tuple<int, int, uint32_t, uint16_t, float, float, float, float, float, bool, Cell>;
+        std::map<GroupKey, std::vector<std::shared_ptr<NodeData>>> groups;
+        for (auto& pt : pts) {
+            if (!isIdleVoxel(pt)) continue;
+            Vec3 r = pt->position / pt->size;
+            Vec3 frac = r - r.array().round().matrix();
+            Cell phase{cellRound(frac.x() / (2.0f * LATTICE_EPS)), cellRound(frac.y() / (2.0f * LATTICE_EPS)),
+                       cellRound(frac.z() / (2.0f * LATTICE_EPS))};
+            groups[GroupKey{pt->objectId, pt->subObjectId, pt->renderMatIdx, pt->physMatIdx, pt->size,
+                            pt->color.x(), pt->color.y(), pt->color.z(), pt->color.w(), pt->isVisible(), phase}].push_back(pt);
+        }
+
+        size_t removed = 0;
+        for (auto& [key, group] : groups) {
+            if (group.size() < 2) continue;
+            const float cell = group[0]->size;
+            std::unordered_map<Cell, uint32_t, Vec3i64Hash> lattice;
+            lattice.reserve(group.size() * 2);
+            std::vector<Cell> coords(group.size());
+            std::vector<char> onLattice(group.size(), 0);
+            for (uint32_t i = 0; i < group.size(); ++i) {
+                Vec3 r = group[i]->position / cell;
+                coords[i] = {cellRound(r.x()), cellRound(r.y()), cellRound(r.z())};
+                if (lattice.emplace(coords[i], i).second) {
+                    onLattice[i] = 1;
+                } else if (payloadMergeable<T>(group[lattice[coords[i]]]->data, group[i]->data)
+                           && removeRecursive(root_, group[i]->getCubeBounds(), group[i])) {
+                    size--;
+                    ++removed;
+                }
+            }
+
+            std::vector<char> visited(group.size(), 0);
+            static const Cell nbr[6] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+            for (uint32_t seed = 0; seed < group.size(); ++seed) {
+                if (!onLattice[seed] || visited[seed]) continue;
+                std::vector<uint32_t> comp;
+                std::vector<uint32_t> todo{seed};
+                visited[seed] = 1;
+                while (!todo.empty()) {
+                    uint32_t cur = todo.back();
+                    todo.pop_back();
+                    comp.push_back(cur);
+                    for (const Cell& d : nbr) {
+                        auto it = lattice.find({coords[cur][0] + d[0], coords[cur][1] + d[1], coords[cur][2] + d[2]});
+                        if (it == lattice.end() || visited[it->second]) continue;
+                        visited[it->second] = 1;
+                        todo.push_back(it->second);
+                    }
+                }
+                if (comp.size() < minMergeCells_) continue;
+                bool mergeable = true;
+                for (uint32_t i : comp) {
+                    if (payloadMergeable<T>(group[comp[0]]->data, group[i]->data)) continue;
+                    mergeable = false;
+                    break;
+                }
+                if (!mergeable) continue;
+
+                auto voxelsOf = [&](const std::vector<uint32_t>& ids) {
+                    std::vector<std::shared_ptr<NodeData>> v;
+                    v.reserve(ids.size());
+                    for (uint32_t i : ids) v.push_back(group[i]);
+                    return v;
+                };
+                auto centersOf = [&](const std::vector<uint32_t>& ids) {
+                    std::vector<Vec3> c;
+                    c.reserve(ids.size());
+                    for (uint32_t i : ids) c.push_back(group[i]->position);
+                    return c;
+                };
+                auto emitBox = [&](const std::vector<uint32_t>& ids, const Shape& box, const Vec3& center) {
+                    Vec3 cnt = box.half * 2.0f / cell;
+                    int64_t nx = cellRound(cnt.x());
+                    bool cubic = nx == cellRound(cnt.y()) && nx == cellRound(cnt.z());
+                    bool ok = false;
+                    if (cubic) {
+                        ok = replaceWithPrimitive(voxelsOf(ids), center, cell * float(nx), Shape{});
+                    } else {
+                        ok = replaceWithPrimitive(voxelsOf(ids), center, cell, box);
+                    }
+                    if (ok) removed += ids.size() - 1;
+                    return ok;
+                };
+
+                Shape sh;
+                Vec3 center;
+                std::vector<Vec3> centers = centersOf(comp);
+                if (fitCapsuleExact(centers, cell, sh, center)) {
+                    if (replaceWithPrimitive(voxelsOf(comp), center, cell, sh)) removed += comp.size() - 1;
+                    continue;
+                }
+                if (fitBoxExact(centers, cell, sh, center)) {
+                    emitBox(comp, sh, center);
+                    continue;
+                }
+
+                std::vector<Cell> cells;
+                cells.reserve(comp.size());
+                for (uint32_t i : comp) cells.push_back(coords[i]);
+                greedyBoxes(cells, [&](const Cell& lo, const Cell& n) {
+                    if (size_t(n[0]) * n[1] * n[2] < minMergeCells_) return;
+                    std::vector<uint32_t> ids;
+                    for (int64_t z = 0; z < n[2]; ++z) {
+                        for (int64_t y = 0; y < n[1]; ++y) {
+                            for (int64_t x = 0; x < n[0]; ++x) {
+                                ids.push_back(lattice.at({lo[0] + x, lo[1] + y, lo[2] + z}));
+                            }
+                        }
+                    }
+                    Shape box;
+                    Vec3 c;
+                    if (fitBoxExact(centersOf(ids), cell, box, c)) emitBox(ids, box, c);
+                });
+            }
+        }
+        return removed;
+    }
+public:
+
     void optimize() {
         if (root_ != INVALID_IDX) {
+            if (autoMergeShapes_) mergeIdleShapes();
             optimizeRecursive(root_);
             generateLODs();
         }

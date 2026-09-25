@@ -24,6 +24,7 @@ struct Obj {
     float R[9];
     float dv[3];
     float dw[3];
+    float mass;
 };
 
 struct IBond {
@@ -69,7 +70,7 @@ layout(std430, binding = 10) buffer XBondB { XBond xbonds[]; };
 layout(std430, binding = 11) buffer XOffB { uint xoff[]; };
 // occupancy bit grid of static voxels
 layout(std430, binding = 12) buffer OccB { uint occ[]; };
-// xyz = static voxel centre, w = size
+// 3 x vec4 per static primitive, see collectStaticVoxels
 layout(std430, binding = 13) buffer StatB { vec4 statics[]; };
 // xyz = last solid contact normal, w = 1 if touching
 layout(std430, binding = 14) buffer CNormB { vec4 cnorm[]; };

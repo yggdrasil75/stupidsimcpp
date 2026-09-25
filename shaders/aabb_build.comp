@@ -1,20 +1,7 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
-
-struct GPURenderData {
-    vec3 position;
-    float size;
-    uint color;
-    uint materialIdx;
-    int  objectId;
-    uint extent;
-};
-
-vec3 unpackExtent(uint e) {
-    return vec3(float((e & 0x3FFu) + 1u), float(((e >> 10) & 0x3FFu) + 1u), float(((e >> 20) & 0x3FFu) + 1u));
-}
-vec3 ptBoundsMin(GPURenderData p) { return p.position - p.size * 0.5; }
-vec3 ptBoundsMax(GPURenderData p) { return p.position + p.size * 0.5 + p.size * (unpackExtent(p.extent) - vec3(1.0)); }
+#include "shapes.glsl"
 
 
 layout(std430, binding = 0) readonly buffer PointBuffer { GPURenderData points[]; };

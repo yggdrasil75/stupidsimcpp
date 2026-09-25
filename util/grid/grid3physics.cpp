@@ -41,6 +41,9 @@ const PhysicsMaterial_* Octree<T>::physMatOf(const std::shared_ptr<NodeData>& n,
 
 #ifdef VULKAN_SUPPORT
 
+///@brief Gathers every static primitive as PHYS_STATIC_FLOATS floats: centre + size,
+///       packed rotation + capsule radius + half length + type, OBB half extents + pad.
+///       Matches the StatB layout in phys_common.glsl.
 template<typename T>
 void Octree<T>::collectStaticVoxels(const std::vector<std::vector<PhysicsMaterial_>>& fastMats,
                                     std::vector<float>& out, float& minSize) {
@@ -57,10 +60,25 @@ void Octree<T>::collectStaticVoxels(const std::vector<std::vector<PhysicsMateria
             const PhysicsMaterial_* m = physMatOf(pt, fastMats, fastMats.size());
             bool solid = !m || m->type == BodyType::STATIC || m->type == BodyType::KINEMATIC || pt->isStatic();
             if (!solid) continue;
+            const Shape& sh = pt->shape;
             out.push_back(pt->position.x());
             out.push_back(pt->position.y());
             out.push_back(pt->position.z());
             out.push_back(pt->size);
+            uint32_t rot = sh.isBox() ? 0u : packQuat(sh.rot);
+            uint32_t ty = static_cast<uint32_t>(sh.type);
+            float rotf = 0.0f;
+            float tyf = 0.0f;
+            std::memcpy(&rotf, &rot, 4);
+            std::memcpy(&tyf, &ty, 4);
+            out.push_back(rotf);
+            out.push_back(sh.type == ShapeType::CAPSULE ? sh.half.x() : 0.0f);
+            out.push_back(sh.type == ShapeType::CAPSULE ? sh.half.y() : 0.0f);
+            out.push_back(tyf);
+            out.push_back(sh.type == ShapeType::OBB ? sh.half.x() : 0.0f);
+            out.push_back(sh.type == ShapeType::OBB ? sh.half.y() : 0.0f);
+            out.push_back(sh.type == ShapeType::OBB ? sh.half.z() : 0.0f);
+            out.push_back(0.0f);
             minSize = std::min(minSize, pt->size);
         }
         if (node->isLeaf()) continue;
@@ -176,6 +194,7 @@ void Octree<T>::packPhysicsParticles(const std::vector<std::vector<PhysicsMateri
             mt += m;
         }
         cmd /= std::max(mt, 1e-9);
+        o.mass = static_cast<float>(std::max(mt, 1e-9));
         Vec3 cm = cmd.template cast<float>();
         o.cm[0] = cm.x();
         o.cm[1] = cm.y();
@@ -332,7 +351,9 @@ void Octree<T>::writeBackPhysics(const std::vector<std::shared_ptr<NodeData>>& d
         if (!v.allFinite()) v.setZero();
         n->physics.velocity = v;
         n->setSettled(v.squaredNorm() < sleep2);
-        if (!p.allFinite() || p == n->physics.lastTreePos) continue;
+        if (!p.allFinite()) continue;
+        // a rotated primitive changes its bounds even when its centre stayed put
+        if (p == n->physics.lastTreePos && !n->isShape()) continue;
         std::vector<Vec3> span = {n->physics.lastTreePos, p};
         int depth = 0;
         uint32_t start = getHighestCommonNode(span, root_, depth);
@@ -368,6 +389,75 @@ void Octree<T>::writeBackPhysics(const std::vector<std::shared_ptr<NodeData>>& d
     }
 }
 
+template<typename T>
+void Octree<T>::applyCutters(const std::vector<std::shared_ptr<NodeData>>& dyn,
+                             const std::vector<std::vector<PhysicsMaterial_>>& fastMats,
+                             std::unordered_set<int>& fractured) {
+    std::unordered_set<int> cutters;
+    {
+        s_lock lock(objectsMutex_);
+        for (const auto& p : objects_) {
+            if (p.second->isCutter()) cutters.insert(p.first);
+        }
+    }
+    if (cutters.empty()) return;
+    std::unordered_set<std::shared_ptr<NodeData>> doomed;
+    for (const auto& blade : dyn) {
+        if (!cutters.count(blade->objectId)) continue;
+        for (auto& v : findInRadius(blade->position, blade->size, -1)) {
+            if (v->objectId == blade->objectId || cutters.count(v->objectId)) continue;
+            if (!v->isActive() || v->isStatic() || v->isShape()) continue;
+            const PhysicsMaterial_* m = physMatOf(v, fastMats, fastMats.size());
+            if (!m || (m->type != BodyType::RIGID && m->type != BodyType::SOFT)) continue;
+            if ((v->position - blade->position).norm() > 0.5f * std::max(blade->size, v->size)) continue;
+            doomed.insert(v);
+            fractured.insert(v->objectId);
+        }
+    }
+    if (doomed.empty()) return;
+    for (const auto& v : doomed) clearBondsOf(v);
+    size -= removeSpecificNodesBatchRecursive(root_, doomed);
+}
+
+template<typename T>
+void Octree<T>::orientPhysicsShapes(const std::vector<std::shared_ptr<NodeData>>& dyn,
+                                    const PhysFrameInput& in, const std::vector<float>& outPos) {
+    for (const auto& o : in.objs) {
+        bool hasShape = false;
+        for (uint32_t i = o.start; i < o.start + o.count; ++i) {
+            if (dyn[i]->isShape()) {
+                hasShape = true;
+                break;
+            }
+        }
+        if (!hasShape || o.count < 3) continue;
+        Eigen::Vector3d cm = Eigen::Vector3d::Zero();
+        double mt = 0.0;
+        for (uint32_t i = o.start; i < o.start + o.count; ++i) {
+            double m = in.vel[i * 4 + 3];
+            cm += m * Eigen::Vector3d(outPos[i * 4], outPos[i * 4 + 1], outPos[i * 4 + 2]);
+            mt += m;
+        }
+        cm /= std::max(mt, 1e-9);
+        Eigen::Matrix3d A = Eigen::Matrix3d::Zero();
+        for (uint32_t i = o.start; i < o.start + o.count; ++i) {
+            double m = in.vel[i * 4 + 3];
+            Eigen::Vector3d p = Eigen::Vector3d(outPos[i * 4], outPos[i * 4 + 1], outPos[i * 4 + 2]) - cm;
+            Eigen::Vector3d q(in.rest[i * 4], in.rest[i * 4 + 1], in.rest[i * 4 + 2]);
+            A += m * p * q.transpose();
+        }
+        Eigen::JacobiSVD<Eigen::Matrix3d> svd(A, Eigen::ComputeFullU | Eigen::ComputeFullV);
+        Eigen::Matrix3d U = svd.matrixU();
+        Eigen::Matrix3d V = svd.matrixV();
+        if ((U * V.transpose()).determinant() < 0.0) U.col(2) = -U.col(2);
+        Eigen::Quaternionf R((U * V.transpose()).cast<float>());
+        for (uint32_t i = o.start; i < o.start + o.count; ++i) {
+            if (!dyn[i]->isShape()) continue;
+            dyn[i]->shape.rot = (R * dyn[i]->shape.rot).normalized();
+        }
+    }
+}
+
 // Keeps GridObject::relativeVoxels in sync with moved voxels so lookups by
 // object id (makeObjectFluid, fracture, getWeakNodesByObjectId) still resolve.
 // centerPosition is kept at zero so centerPosition + relPos == position exactly.
@@ -387,7 +477,7 @@ void Octree<T>::refreshPhysicsObjectLayouts(const std::vector<std::shared_ptr<No
     for (auto& [oid, idx] : byObj) {
         auto obj = getObject(oid);
         if (!obj) continue;
-        std::vector<Vec3> keep;
+        std::vector<VoxelRel> keep;
         {
             s_lock lock(obj->objMutex);
             if (obj->relativeVoxels.size() > idx.size()) {
@@ -397,7 +487,7 @@ void Octree<T>::refreshPhysicsObjectLayouts(const std::vector<std::shared_ptr<No
                 }
                 for (const auto& rv : obj->relativeVoxels) {
                     Vec3 abs = obj->centerPosition + rv.relPos;
-                    if (!moved.count(key(abs))) keep.push_back(abs);
+                    if (!moved.count(key(abs))) keep.push_back({abs, rv.half});
                 }
             }
         }
@@ -406,10 +496,10 @@ void Octree<T>::refreshPhysicsObjectLayouts(const std::vector<std::shared_ptr<No
         obj->relativeVoxels.clear();
         obj->relativeVoxels.reserve(idx.size() + keep.size());
         for (uint32_t i : idx) {
-            obj->relativeVoxels.push_back({dyn[i]->position});
+            obj->relativeVoxels.push_back({dyn[i]->position, dyn[i]->halfExtent()});
         }
-        for (const auto& p : keep) {
-            obj->relativeVoxels.push_back({p});
+        for (const auto& rv : keep) {
+            obj->relativeVoxels.push_back(rv);
         }
     }
 }
@@ -471,6 +561,7 @@ void Octree<T>::multiStepPhysics(float dt, int steps) {
 
     {
         ScopedFunctionTimer _t("multiStepPhysics.writeback");
+        orientPhysicsShapes(dyn, in, outPos);
         writeBackPhysics(dyn, outPos, outVel);
         refreshPhysicsObjectLayouts(dyn, in.pos);
     }
@@ -483,6 +574,7 @@ void Octree<T>::multiStepPhysics(float dt, int steps) {
         if (outBroken[b] == 1u) tensionSeeds.push_back(ibondIds[b]);
         breakBond(ibondIds[b]);
     }
+    applyCutters(dyn, fastMats, fractured);
     propagateCracks(tensionSeeds, fractured);
     for (int objId : fractured) {
         resolveFracture(objId, fastMats, fastMats.size());
@@ -747,7 +839,7 @@ void Octree<T>::reassignFragment(const std::vector<std::shared_ptr<NodeData>>& f
         dst->centerPosition = center;
         dst->relativeVoxels.clear();
         dst->relativeVoxels.reserve(frag.size());
-        for (const auto& n : frag) dst->relativeVoxels.push_back({n->position - center});
+        for (const auto& n : frag) dst->relativeVoxels.push_back({n->position - center, n->halfExtent()});
     }
 
     for (const auto& n : frag) n->objectId = dst->id;

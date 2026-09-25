@@ -96,11 +96,11 @@ $(OBJ_DIR)/%.o: $(GRID_DIR)/%.cpp
 all: $(EXE) $(EDITOR_EXE) $(CHARACTER_EXE) $(SHADER_SPVS)
 	@echo "Build complete for $(UNAME_S)"
 
-$(BIN_DIR)/wf_init.spv $(BIN_DIR)/wf_args.spv $(BIN_DIR)/wf_extend.spv $(BIN_DIR)/wf_shade.spv $(BIN_DIR)/wf_shadow.spv $(BIN_DIR)/wf_finalize.spv $(BIN_DIR)/ddgi_update.spv: $(SHADER_DIR)/wf_common.glsl $(SHADER_DIR)/vct_cone.glsl
+$(BIN_DIR)/wf_init.spv $(BIN_DIR)/wf_args.spv $(BIN_DIR)/wf_extend.spv $(BIN_DIR)/wf_shade.spv $(BIN_DIR)/wf_shadow.spv $(BIN_DIR)/wf_finalize.spv $(BIN_DIR)/ddgi_update.spv $(BIN_DIR)/fast_raytrace_hw.spv $(BIN_DIR)/aabb_build.spv $(BIN_DIR)/vct_voxelize.spv: $(SHADER_DIR)/shapes.glsl
 
 $(BIN_DIR)/smooth.spv $(BIN_DIR)/svgf_reproject.spv $(BIN_DIR)/svgf_moments.spv: $(SHADER_DIR)/svgf_common.glsl
 
-$(addprefix $(BIN_DIR)/phys_,$(addsuffix .spv,$(PHYS_SHADERS))): $(SHADER_DIR)/phys_common.glsl
+$(addprefix $(BIN_DIR)/phys_,$(addsuffix .spv,$(PHYS_SHADERS))): $(SHADER_DIR)/phys_common.glsl $(SHADER_DIR)/shapes.glsl
 
 $(BIN_DIR)/phys_%.spv: $(SHADER_DIR)/phys_%.comp
 	@echo "Compiling shader $< -> $@"

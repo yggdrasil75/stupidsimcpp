@@ -1,5 +1,7 @@
 #version 460
 #extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : require
+#include "shapes.glsl"
 layout(local_size_x = 8, local_size_y = 8) in;
 
 vec3 unpackRGB9E5(uint c) {
@@ -23,21 +25,6 @@ struct GPUMaterial {
     uint absorption;     // RGB9E5
     uint albedo;         // RGB9E5
 };
-
-struct GPURenderData {
-    vec3 position;
-    float size;
-    uint color;
-    uint materialIdx;
-    int objectId;
-    uint extent;
-};
-
-vec3 unpackExtent(uint e) {
-    return vec3(float((e & 0x3FFu) + 1u), float(((e >> 10) & 0x3FFu) + 1u), float(((e >> 20) & 0x3FFu) + 1u));
-}
-vec3 ptBoundsMin(GPURenderData p) { return p.position - p.size * 0.5; }
-vec3 ptBoundsMax(GPURenderData p) { return p.position + p.size * 0.5 + p.size * (unpackExtent(p.extent) - vec3(1.0)); }
 
 
 layout(std430, binding = 1) readonly buffer PointBuffer { GPURenderData points[]; };
@@ -178,54 +165,7 @@ bool rayBoxIntersect(Ray ray, vec3 bMin, vec3 bMax, out float tMin, out float tM
 }
 
 bool rayCubeIntersect(Ray ray, GPURenderData pt, out float t, out float tExitOut, out vec3 normal) {
-    vec3 bMin = ptBoundsMin(pt);
-    vec3 bMax = ptBoundsMax(pt);
-
-    float tMin, tMax;
-    if (!rayBoxIntersect(ray, bMin, bMax, tMin, tMax) || tMax < 0.0) return false;
-    t = tMin < 0.0 ? tMax : tMin;
-    tExitOut = tMax;
-    vec3 hitPoint = ray.origin + ray.dir * t;
-    vec3 dMin = abs(hitPoint - bMin);
-    vec3 dMax = abs(hitPoint - bMax);
-    
-    float minDist = 999999.0;
-    int minAxis = 0;
-    float sgn = 1.0;
-    if(dMin.x < minDist) {
-        minDist = dMin.x;
-        minAxis = 0;
-        sgn = -1.0;
-    }
-    if(dMin.y < minDist) {
-        minDist = dMin.y;
-        minAxis = 1;
-        sgn = -1.0;
-    }
-    if(dMin.z < minDist) {
-        minDist = dMin.z;
-        minAxis = 2;
-        sgn = -1.0;
-    }
-    if(dMax.x < minDist) {
-        minDist = dMax.x;
-        minAxis = 0;
-        sgn = 1.0;
-    }
-    if(dMax.y < minDist) {
-        minDist = dMax.y;
-        minAxis = 1;
-        sgn = 1.0;
-    }
-    if(dMax.z < minDist) {
-        minDist = dMax.z;
-        minAxis = 2;
-        sgn = 1.0;
-    }
-    
-    normal = vec3(0);
-    normal[minAxis] = sgn;
-    return true;
+    return rayPrimIntersect(ray.origin, ray.dir, pt, t, normal, tExitOut);
 }
 
 vec3 sampleSkybox(vec3 d) {

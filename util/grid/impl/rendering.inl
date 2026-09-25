@@ -14,17 +14,32 @@ struct RenderData {
     uint32_t materialIdx;
     int objectId;
     uint32_t extent = EXTENT_UNIT;
+    ///@brief Primitive geometry; BOX means position is the first cell of an extent run
+    Shape shape;
+
+    bool isShape() const {
+        return !shape.isBox();
+    }
 
     const Vec3 boundsMin() const {
+        if (isShape()) return shape.aabb(position, size).first;
         return (position - Vec3::Constant(0.5f * size));
     }
 
     const Vec3 boundsMax() const {
+        if (isShape()) return shape.aabb(position, size).second;
         return (position + Vec3::Constant(0.5f * size)
                 + Vec3::Constant(size).cwiseProduct(unpackExtent(extent) - Vec3::Ones()));
     }
 
-    bool isMerged() const { return (extent & ~(EXTENT_STATIC_BIT | EXTENT_REUSE_BIT)) != EXTENT_UNIT; }
+    ///@brief A single plain voxel, eligible for lattice merging
+    bool isUnitVoxel() const {
+        return !isShape() && (extent & ~(EXTENT_STATIC_BIT | EXTENT_REUSE_BIT)) == EXTENT_UNIT;
+    }
+
+    bool isMerged() const {
+        return !isUnitVoxel();
+    }
 };
 
 template<typename T>
@@ -107,7 +122,39 @@ struct alignas(16) GPURenderData {
     uint32_t materialIdx;
     int objectId;
     uint32_t extent = EXTENT_UNIT;
+    GPUShapeWords shape;
 };
+
+///@brief Converts a render point to its GPU layout, packing the shape and rewriting extent for OBBs
+static inline GPURenderData toGPURenderData(const RenderData& p) {
+    GPURenderData g{p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId, p.extent, {}};
+    g.shape = packShapeWords(p.shape, p.size, g.extent);
+    return g;
+}
+
+///@brief A single plain voxel in GPU layout
+static inline bool gpuIsUnitVoxel(const GPURenderData& p) {
+    return p.shape.type == 0u && (p.extent & ~(EXTENT_STATIC_BIT | EXTENT_REUSE_BIT)) == EXTENT_UNIT;
+}
+
+///@brief World AABB of a GPU point, mirrors ptBoundsMin/Max in shapes.glsl
+static inline BoundingBox gpuPointAABB(const GPURenderData& p) {
+    const float hs = p.size * 0.5f;
+    if (p.shape.type == 0u) {
+        Vec3 run = Vec3::Constant(p.size).cwiseProduct(unpackExtent(p.extent) - Vec3::Ones());
+        return {p.position - Vec3::Constant(hs), p.position + Vec3::Constant(hs) + run};
+    }
+    Shape s;
+    s.rot = unpackQuat(p.shape.rot);
+    if (p.shape.type == 1u) {
+        s.type = ShapeType::OBB;
+        s.half = unpackExtent(p.extent) * hs;
+    } else {
+        s.type = ShapeType::CAPSULE;
+        s.half = Vec3(p.shape.a, p.shape.b, 0.0f);
+    }
+    return s.aabb(p.position, p.size);
+}
 
 struct alignas(16) GPUCameraData {
     Vec3 origin;
@@ -1234,11 +1281,7 @@ struct GpuContext {
         if (!gpuFill) {
             std::vector<VkAabbPositionsKHR> aabbs(numPrimitives);
             for (uint32_t i = 0; i < numPrimitives; ++i) {
-                const float halfSize = points[i].size * 0.5f;
-                const Vec3 lo = points[i].position - Vec3::Constant(halfSize);
-                const Vec3 hi = points[i].position + Vec3::Constant(halfSize)
-                    + Vec3::Constant(points[i].size).cwiseProduct(
-                        unpackExtent(points[i].extent) - Vec3::Ones());
+                const auto [lo, hi] = gpuPointAABB(points[i]);
                 aabbs[i].minX = lo.x();
                 aabbs[i].minY = lo.y();
                 aabbs[i].minZ = lo.z();

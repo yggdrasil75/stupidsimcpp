@@ -10,7 +10,9 @@
 // strain check never sees a joint pull as a snapped bond. Joint and fibre
 // corrections are each averaged over their count on the body so many
 // constraints pulling the same way do not overshoot. Soft particles take
-// the correction directly in phys_sm_apply.
+// the correction directly in phys_sm_apply. A rigid body's inverse mass is
+// its real total mass, so a heavy primitive particle and light voxels on the
+// same body see the same joint stiffness.
 void main() {
     uint i = gl_GlobalInvocationID.x;
     if (i >= pc.numParticles) return;
@@ -23,7 +25,7 @@ void main() {
     bool rigid = (o != NO_OBJ) && (info[i].y == TYPE_RIGID);
     float jointNorm = rigid ? 1.0 / max(float(objs[o].jointBonds), 1.0) : 1.0;
     float fiberNorm = rigid ? 1.0 / max(float(objs[o].fiberBonds), 1.0) : 1.0;
-    float wi = rigid ? 1.0 / (mi * float(objs[o].count)) : 1.0 / mi;
+    float wi = rigid ? 1.0 / max(objs[o].mass, 1e-6) : 1.0 / mi;
     float dt2 = pc.dt * pc.dt;
     vec3 dp = vec3(0.0);
     for (uint b = lo; b < hi; ++b) {
@@ -36,8 +38,8 @@ void main() {
         } else {
             xj = pred[xb.other].xyz;
             uint oj = info[xb.other].x;
-            float countJ = (oj != NO_OBJ && info[xb.other].y == TYPE_RIGID) ? float(objs[oj].count) : 1.0;
-            wj = 1.0 / (max(vel[xb.other].w, 1e-6) * countJ);
+            bool rigidJ = (oj != NO_OBJ && info[xb.other].y == TYPE_RIGID);
+            wj = rigidJ ? 1.0 / max(objs[oj].mass, 1e-6) : 1.0 / max(vel[xb.other].w, 1e-6);
         }
         vec3 d = xi - xj;
         float l = length(d);

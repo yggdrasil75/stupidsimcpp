@@ -21,6 +21,8 @@ struct PhysObjGpu {
     float R[9] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
     float dv[3] = {0.0f, 0.0f, 0.0f};
     float dw[3] = {0.0f, 0.0f, 0.0f};
+    ///@brief Total particle mass of the body
+    float mass = 1.0f;
 };
 
 ///@brief Intra-object bond checked for fracture on the GPU
@@ -49,6 +51,8 @@ constexpr uint32_t PhysGpu_XBOND_JOINT = 0u;
 constexpr uint32_t PhysGpu_XBOND_FIBER = 1u;
 constexpr uint32_t PhysGpu_FLAG_GRAVITY_POINT = 1u;
 constexpr uint32_t PhysGpu_FLAG_SOLID_BOUNDARY = 2u;
+///@brief floats per static primitive in PhysFrameInput::statics (3 x vec4, see phys_raster.comp)
+constexpr size_t PHYS_STATIC_FLOATS = 12;
 
 ///@brief Push constants, matches PC in phys_common.glsl
 struct PhysPush {
@@ -82,7 +86,7 @@ struct PhysFrameInput {
     std::vector<PhysIBondGpu> ibonds;
     std::vector<PhysXBondGpu> xbonds;
     std::vector<uint32_t> xoff;
-    std::vector<float> statics;
+    std::vector<float> statics; // PHYS_STATIC_FLOATS per entry, see collectStaticVoxels
     bool rebuildOcc = false;
     PhysPush pc{};
     int steps = 1;
@@ -288,7 +292,7 @@ struct PhysGpu {
 
         const uint64_t occCells = (uint64_t)in.pc.gridDim[0] * in.pc.gridDim[1] * in.pc.gridDim[2];
         const VkDeviceSize occBytes = (occCells + 31) / 32 * 4;
-        const uint32_t numStatics = (uint32_t)(in.statics.size() / 4);
+        const uint32_t numStatics = (uint32_t)(in.statics.size() / PHYS_STATIC_FLOATS);
         const VkDeviceSize objBytes = in.objs.size() * sizeof(PhysObjGpu);
         const VkDeviceSize ibondBytes = in.ibonds.size() * sizeof(PhysIBondGpu);
         const VkDeviceSize xbondBytes = in.xbonds.size() * sizeof(PhysXBondGpu);

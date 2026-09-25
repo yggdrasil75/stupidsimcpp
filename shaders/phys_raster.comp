@@ -1,21 +1,48 @@
 #version 460
 #extension GL_GOOGLE_include_directive : require
 #include "phys_common.glsl"
+#include "shapes.glsl"
 
-// One thread per static voxel: set every occupancy cell its cube overlaps.
+///@brief One thread per static primitive: marks every occupancy cell it overlaps.
+///       Voxels fill their cube; OBBs and capsules test each cell centre against the SDF.
 void main() {
     uint i = gl_GlobalInvocationID.x;
     if (i >= pc.count) return;
-    vec4 s = statics[i];
-    float hs = s.w * 0.5;
-    ivec3 lo = occCoord(s.xyz - hs + 1e-5);
-    ivec3 hi = occCoord(s.xyz + hs - 1e-5);
+    vec4 s0 = statics[3u * i];
+    vec4 s1 = statics[3u * i + 1u];
+    vec4 s2 = statics[3u * i + 2u];
+    GPURenderData pt;
+    pt.position = s0.xyz;
+    pt.size = s0.w;
+    pt.color = 0u;
+    pt.materialIdx = 0u;
+    pt.objectId = 0;
+    pt.rot = floatBitsToUint(s1.x);
+    pt.a = s1.y;
+    pt.b = s1.z;
+    pt.shapeType = floatBitsToUint(s1.w);
+    pt.extent = 0u;
+    if (pt.shapeType == SHAPE_OBB) {
+        uvec3 cnt = max(uvec3(round(s2.xyz * 2.0 / pt.size)), uvec3(1u));
+        pt.extent = (cnt.x - 1u) | ((cnt.y - 1u) << 10) | ((cnt.z - 1u) << 20);
+    }
+    vec3 bmin = ptBoundsMin(pt);
+    vec3 bmax = ptBoundsMax(pt);
+    ivec3 lo = occCoord(bmin + 1e-5);
+    ivec3 hi = occCoord(bmax - 1e-5);
     lo = max(lo, ivec3(0));
     hi = min(hi, ivec3(pc.gridDim) - 1);
-    for (int z = lo.z; z <= hi.z; ++z)
-    for (int y = lo.y; y <= hi.y; ++y)
-    for (int x = lo.x; x <= hi.x; ++x) {
-        uint idx = uint(x) + uint(y) * pc.gridDim.x + uint(z) * pc.gridDim.x * pc.gridDim.y;
-        atomicOr(occ[idx >> 5u], 1u << (idx & 31u));
+    float tol = 0.5 * pc.occCell;
+    for (int z = lo.z; z <= hi.z; ++z) {
+        for (int y = lo.y; y <= hi.y; ++y) {
+            for (int x = lo.x; x <= hi.x; ++x) {
+                if (pt.shapeType != SHAPE_BOX) {
+                    vec3 wc = pc.gridLo + (vec3(x, y, z) + 0.5) * pc.occCell;
+                    if (primSdf(wc, pt) > tol) continue;
+                }
+                uint idx = uint(x) + uint(y) * pc.gridDim.x + uint(z) * pc.gridDim.x * pc.gridDim.y;
+                atomicOr(occ[idx >> 5u], 1u << (idx & 31u));
+            }
+        }
     }
 }

@@ -50,7 +50,7 @@ void Octree<T>::buildRenderNodeAt(uint32_t nodeIndex, RenderBuffer_<T>& buffer, 
         const auto pts = pointsView(nodeIndex);
         for (const auto& pt : pts) {
             if (!pt || !pt->isActive() || !pt->isVisible()) continue; 
-            RenderData rd;
+            RenderData rd{};
             rd.position = pt->position;
             rd.size = pt->size;
             rd.color = pt->color;
@@ -59,6 +59,7 @@ void Octree<T>::buildRenderNodeAt(uint32_t nodeIndex, RenderBuffer_<T>& buffer, 
             
             rd.objectId = pt->objectId;
             rd.extent = EXTENT_UNIT;
+            rd.shape = pt->shape;
 
             const bool settled = pt->isSettled();
             rd.extent = extentSetStatic(rd.extent, settled);
@@ -96,7 +97,7 @@ void Octree<T>::buildRenderNodeAt(uint32_t nodeIndex, RenderBuffer_<T>& buffer, 
     rnode.lodPoint = -1;
     auto lodData = lodOf(nodeIndex);
     if (lodData) {
-        RenderData ld;
+        RenderData ld{};
         ld.position = lodData->position;
         ld.size = lodData->size;
         ld.color = lodData->color;
@@ -154,7 +155,7 @@ static bool slabMatches(const MergeLattice& lattice, const std::vector<RenderDat
             auto it = lattice.find({base[0] + dx, base[1] + dy, base[2]});
             if (it == lattice.end() || it->second.claimedBy != INVALID_IDX) return false;
             const RenderData& p = pts[first + it->second.src];
-            if (p.materialIdx != seed.materialIdx || p.objectId != seed.objectId
+            if (!p.isUnitVoxel() || p.materialIdx != seed.materialIdx || p.objectId != seed.objectId
                 || !p.color.isApprox(seed.color)) return false;
             if (extentIsStatic(p.extent) != extentIsStatic(seed.extent)
                     || extentIsReusable(p.extent) != extentIsReusable(seed.extent)) return false;
@@ -181,11 +182,7 @@ uint32_t Octree<T>::mergeLeafPoints(RenderBuffer_<T>& buffer, uint32_t first) {
     const float cell = buffer.points[first].size;
     if (cell <= 0.0f) return count;
     Vec3 lo = buffer.points[first].position;
-    for (uint32_t i = 1; i < count; ++i) {
-        const RenderData& p = buffer.points[first + i];
-        if (p.size != cell) return count;
-        lo = lo.cwiseMin(p.position);
-    }
+    for (uint32_t i = 1; i < count; ++i) lo = lo.cwiseMin(buffer.points[first + i].position);
 
     const float invCell = 1.0f / cell;
     std::unordered_map<std::array<int64_t, 3>, MergeCell, Vec3i64Hash> lattice;
@@ -204,7 +201,8 @@ uint32_t Octree<T>::mergeLeafPoints(RenderBuffer_<T>& buffer, uint32_t first) {
             passthrough.push_back(i);
             continue;
         }
-        if (!lattice.emplace(coords[i], MergeCell{i, INVALID_IDX}).second) {
+        if (!buffer.points[first + i].isUnitVoxel() || buffer.points[first + i].size != cell
+            || !lattice.emplace(coords[i], MergeCell{i, INVALID_IDX}).second) {
             passthrough.push_back(i);
         }
     }
@@ -578,7 +576,7 @@ static bool emissiveSlabMatches(const std::unordered_map<std::array<int64_t, 3>,
             const GPURenderData& p = pts[cand[it->second.src]];
             if (p.materialIdx != seed.materialIdx) return false;
             if (p.size != seed.size) return false;
-            if ((p.extent & ~(EXTENT_STATIC_BIT | EXTENT_REUSE_BIT)) != EXTENT_UNIT) return false;
+            if (!gpuIsUnitVoxel(p)) return false;
             if (extentIsStatic(p.extent) != extentIsStatic(seed.extent) || extentIsReusable(p.extent) != extentIsReusable(seed.extent)) return false;
         }
     }
@@ -607,7 +605,7 @@ static int mergeEmissiveProxies(std::vector<GPURenderData>& points,
         const GPURenderData& p = points[i];
         if (p.materialIdx >= materials.size()) continue;
         if (materials[p.materialIdx].chromaticity == 0u) continue;
-        if ((p.extent & ~(EXTENT_STATIC_BIT | EXTENT_REUSE_BIT)) != EXTENT_UNIT) {
+        if (!gpuIsUnitVoxel(p)) {
             outLights.push_back(i);
             continue;
         }
@@ -760,9 +758,8 @@ static bool refreshSceneCache(const BufferT& buffer, bool wantSort, bool expandB
         const auto& p = buffer.points[i];
         validIndices.push_back(i);
         if (expandByRadius) {
-            const Vec3 h = Vec3::Constant(p.size * 0.5f);
-            globalMin = globalMin.cwiseMin(p.position - h);
-            globalMax = globalMax.cwiseMax(p.position + h);
+            globalMin = globalMin.cwiseMin(p.boundsMin());
+            globalMax = globalMax.cwiseMax(p.boundsMax());
         } else {
             globalMin = globalMin.cwiseMin(p.position);
             globalMax = globalMax.cwiseMax(p.position);
@@ -784,14 +781,12 @@ static bool refreshSceneCache(const BufferT& buffer, bool wantSort, bool expandB
                           sortedPoints);
         for (const auto& sp : sortedPoints) {
             const auto& p = buffer.points[sp.idx];
-            cache.gpuPoints.push_back({p.position, p.size, packRGBA8(p.color),
-                                       p.materialIdx, p.objectId, p.extent});
+            cache.gpuPoints.push_back(toGPURenderData(p));
         }
     } else {
         for (const size_t idx : validIndices) {
             const auto& p = buffer.points[idx];
-            cache.gpuPoints.push_back({p.position, p.size, packRGBA8(p.color),
-                                       p.materialIdx, p.objectId, p.extent});
+            cache.gpuPoints.push_back(toGPURenderData(p));
         }
     }
     mergeEmissiveProxies(cache.gpuPoints, buffer.materials, cache.gpuLights);
@@ -1287,9 +1282,7 @@ InFlightFrame Octree<T>::beginBlendedRenderFrameVulkan(const Camera& cam, int he
 
     for(const auto& sp : sortedPoints) {
         const auto& p = tl_buffer.points[sp.idx];
-        gpuPBRPoints.push_back({
-            p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId, p.extent
-        });
+        gpuPBRPoints.push_back(toGPURenderData(p));
     }
 
     mergeEmissiveProxies(gpuPBRPoints, tl_buffer.materials, gpuLights);
@@ -1434,9 +1427,7 @@ InFlightFrame Octree<T>::beginGameStyleRenderFrame(const Camera& cam, int height
     for(const auto& sp : sortedPoints) {
         const auto& p = tl_buffer.points[sp.idx];
 
-        gpuFastPoints.push_back({
-            p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId, p.extent
-        });
+        gpuFastPoints.push_back(toGPURenderData(p));
     }
 
     std::vector<uint32_t> gpuLights;
@@ -1598,9 +1589,7 @@ InFlightFrame Octree<T>::beginSuperBlendedRenderFrameVulkan(const Camera& cam, i
     for(const auto& sp : sortedPoints) {
         const auto& p = tl_buffer.points[sp.idx];
 
-        gpuPBRPoints.push_back({
-            p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId, p.extent
-        });
+        gpuPBRPoints.push_back(toGPURenderData(p));
     }
 
     std::vector<uint32_t> gpuLights;

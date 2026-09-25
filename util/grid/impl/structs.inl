@@ -10,6 +10,7 @@
 #include <shared_mutex>
 #include <unordered_map>
 #include <deque>
+#include "shapes.inl"
 
 namespace Grid{
 
@@ -27,6 +28,8 @@ static constexpr uint8_t SAVEDQUEUED = 1 << 4;
 static constexpr uint8_t KEEPLOADED_BIT = 1 << 5;
 
 static constexpr uint8_t OBJ_ALLOW_PARTIAL_UNLOAD_BIT = 1 << 0;
+///@brief Object voxels carve a kerf through the dynamic voxels they overlap instead of shoving them
+static constexpr uint8_t OBJ_CUTTER_BIT = 1 << 1;
 
 static constexpr uint8_t REUSE_SETTLE_FRAMES = 3;
 static constexpr float REUSE_MAX_TRANSMISSION = 0.05f;
@@ -53,8 +56,6 @@ static constexpr float SELL_LMAX = 0.720f; // um
 
 template<typename> struct is_shared_ptr : std::false_type {};
 template<typename T> struct is_shared_ptr<std::shared_ptr<T>> : std::true_type {};
-using Vec3 = Eigen::Vector3f;
-using BoundingBox = std::pair<Vec3, Vec3>;
 using u_lock = std::unique_lock<std::shared_mutex>;
 using s_lock = std::shared_lock<std::shared_mutex>;
 namespace fs = std::filesystem;
@@ -75,18 +76,6 @@ enum class SplitPolicy : uint8_t {
     KEEP_OID = 1,
     SHED_STATIC = 2,
     DISSOLVE = 3
-};
-
-struct Vec3i64Hash {
-    std::size_t operator()(const std::array<int64_t, 3>& v) const {
-        return (std::size_t)((v[0] * 73856093) ^ (v[1] * 19349663) ^ (v[2] * 83492791));
-    }
-};
-
-struct Vec3fHash {
-    std::size_t operator()(const std::array<int64_t, 3>& v) const {
-        return (std::size_t)((v[0] * 73856093) ^ (v[1] * 19349663) ^ (v[2] * 83492791));
-    }
 };
 
 static inline uint32_t packRGB9E5(const Vec3& c) {
@@ -134,37 +123,6 @@ static inline uint32_t packRGBA8(const Eigen::Vector4f& c) {
     return r | (g << 8) | (b << 16) | (a << 24);
 }
 
-static constexpr uint32_t EXTENT_UNIT = 0u; // 1,1,1 packed; fields store count-1
-static constexpr float LATTICE_EPS = 1e-3f; // cell fractions; merge only near-exact grid points
-static constexpr uint32_t EXTENT_MAX  = 1024u;
-static constexpr uint32_t EXTENT_STATIC_BIT = 1u << 30;
-static constexpr uint32_t EXTENT_REUSE_BIT  = 1u << 31;
-
-static inline bool extentIsStatic(uint32_t e) {
-    return (e & EXTENT_STATIC_BIT) != 0u;
-}
-static inline uint32_t extentSetStatic(uint32_t e, bool v) {
-    return v ? (e | EXTENT_STATIC_BIT) : (e & ~EXTENT_STATIC_BIT);
-}
-static inline bool extentIsReusable(uint32_t e) {
-    return (e & EXTENT_REUSE_BIT) != 0u;
-}
-static inline uint32_t extentSetReusable(uint32_t e, bool v) {
-    return v ? (e | EXTENT_REUSE_BIT) : (e & ~EXTENT_REUSE_BIT);
-}
-
-///@brief Packs a per-axis cell count into three 10-bit fields
-///@param ex Cell span along x, clamped to [1, EXTENT_MAX]
-///@param ey Cell span along y
-///@param ez Cell span along z
-///@return Packed extent, x in bits 0-9, y in 10-19, z in 20-29
-static inline uint32_t packExtent(uint32_t ex, uint32_t ey, uint32_t ez) {
-    uint32_t x = std::clamp(ex, 1u, EXTENT_MAX) - 1u;
-    uint32_t y = std::clamp(ey, 1u, EXTENT_MAX) - 1u;
-    uint32_t z = std::clamp(ez, 1u, EXTENT_MAX) - 1u;
-    return x | (y << 10) | (z << 20);
-}
-
 static inline uint32_t quantizeNormal(const Vec3& n) {
     uint32_t major = 0;
     Vec3 a = n.cwiseAbs();
@@ -181,15 +139,6 @@ static inline uint32_t worldCacheKey(int64_t cx, int64_t cy, int64_t cz, uint32_
     h ^= nb * 0x9e3779b9u;
     h ^= h >> 16;
     return h == WC_INVALID_KEY ? 1u : h;
-}
-
-///@brief Expands a packed extent into per-axis cell counts
-///@param e Packed extent as produced by packExtent
-///@return Cell spans as floats, each at least 1.0f
-static inline Vec3 unpackExtent(uint32_t e) {
-    return Vec3(static_cast<float>((e         & 0x3FFu) + 1u),
-                static_cast<float>(((e >> 10) & 0x3FFu) + 1u),
-                static_cast<float>(((e >> 20) & 0x3FFu) + 1u));
 }
 
 static inline uint32_t packMaterialProps(float roughness, float metallic, uint32_t sellmeierRow) {
@@ -707,6 +656,8 @@ struct PMatHash {
 
 struct VoxelRel {
     Vec3 relPos;
+    ///@brief Largest half extent of the point's AABB, so the object bounds cover whole voxels
+    float half = 0.0f;
 };
 
 ///@brief Full per-voxel material spec used by detailed primitive insertion.
@@ -794,6 +745,15 @@ struct GridObject_ {
 
     bool isPartialUnloadAllowed() const {
         return objectFlags & OBJ_ALLOW_PARTIAL_UNLOAD_BIT;
+    }
+
+    bool isCutter() const {
+        return objectFlags & OBJ_CUTTER_BIT;
+    }
+
+    void setCutter(bool v) {
+        if (v) objectFlags |= OBJ_CUTTER_BIT;
+        else objectFlags &= ~OBJ_CUTTER_BIT;
     }
     void setPartialUnloadAllowed(bool v) {
         if (v) objectFlags |= OBJ_ALLOW_PARTIAL_UNLOAD_BIT;
@@ -883,6 +843,8 @@ struct NodeData_ {
     std::atomic<uint8_t> flags;
     std::atomic<uint8_t> settledFrames;
     PhysicsState_<T> physics;
+    ///@brief BOX for a plain voxel; OBB / CAPSULE make this one point stand in for many cells
+    Shape shape;
 
     NodeData_(const T& data, const Vec3& pos, bool visible, const Eigen::Vector4f& color, float size = 0.01f,
                 bool active = true, int objectId = -1, uint32_t rIdx = 0, uint16_t pIdx = 0, bool staticbit = 0) 
@@ -899,7 +861,8 @@ struct NodeData_ {
     NodeData_(const NodeData_& other) : data(other.data), position(other.position), objectId(other.objectId),
             subObjectId(other.subObjectId), size(other.size), color(other.color), renderMatIdx(other.renderMatIdx),
             physMatIdx(other.physMatIdx), flags(other.flags.load(std::memory_order_relaxed)),
-            settledFrames(other.settledFrames.load(std::memory_order_relaxed)), physics(other.physics) {}
+            settledFrames(other.settledFrames.load(std::memory_order_relaxed)), physics(other.physics),
+            shape(other.shape) {}
 
     NodeData_& operator=(const NodeData_& other) {
         if (this != &other) {
@@ -912,6 +875,7 @@ struct NodeData_ {
             renderMatIdx = other.renderMatIdx;
             physMatIdx = other.physMatIdx;
             physics = other.physics;
+            shape = other.shape;
             flags.store(other.flags.load(std::memory_order_relaxed), std::memory_order_relaxed);
             settledFrames.store(other.settledFrames.load(std::memory_order_relaxed), std::memory_order_relaxed);
         }
@@ -961,10 +925,30 @@ struct NodeData_ {
         float sizeh = size * 0.5f;
         return Vec3(sizeh, sizeh, sizeh);
     }
-    
+
+    bool isShape() const {
+        return !shape.isBox();
+    }
+
+    ///@brief World AABB of the point: the cube for BOX, the shape's bounds otherwise
     BoundingBox getCubeBounds() const {
-        Vec3 halfSize = getHalfSize();
-        return {position - halfSize, position + halfSize};
+        return shape.aabb(position, size);
+    }
+
+    ///@brief Largest half extent of the world AABB
+    float halfExtent() const {
+        BoundingBox b = getCubeBounds();
+        return (b.second - b.first).maxCoeff() * 0.5f;
+    }
+
+    ///@brief Volume in world units; a shape counts as all the cells it stands in for
+    float volume() const {
+        return shape.volume(size);
+    }
+
+    ///@brief Number of size-sized cells this point represents
+    size_t cellCount() const {
+        return isShape() ? shape.cellCount(position, size) : 1;
     }
 };
 
@@ -1628,20 +1612,6 @@ struct RayHit_ {
     Vec3 hitPoint;
 };
     
-struct Ray {
-    Vec3 origin;
-    Vec3 dir;
-    Vec3 invDir;
-    uint8_t sign[3];
-    uint8_t signMask;
-    Ray(const Vec3& orig, const Vec3& dir) : origin(orig), dir(dir) {
-        invDir = dir.cwiseInverse();
-        sign[0] = (invDir[0] < 0);
-        sign[1] = (invDir[1] < 0);
-        sign[2] = (invDir[2] < 0);
-        signMask = (sign[0] | sign[1] << 1 | sign[2] << 2);
-    }
-};
 
 struct ProgressiveAccum {
     bool valid = false;
