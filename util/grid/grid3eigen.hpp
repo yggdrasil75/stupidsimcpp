@@ -373,6 +373,8 @@ private:
     
     ///@brief Toggles automatic background optimization of the octree
     std::atomic<bool> autoOptimize_{true};
+    ///@brief Set by the worker when its timed optimize is due; serviced on the simulating thread
+    std::atomic<bool> optimizeRequested_{false};
     
     ///@brief Prevents multiple overlapping streaming requests
     std::atomic<bool> streamingQueued_{false};
@@ -522,7 +524,7 @@ private:
                         task = std::move(taskQueue_.front());
                         taskQueue_.pop();
                     } else if (timedOut && autoOptimize_) {
-                        task = [this]() { this->optimize(); };
+                        optimizeRequested_.store(true, std::memory_order_relaxed);
                         lastOptimize = std::chrono::steady_clock::now();
                     }
                 }
@@ -646,8 +648,10 @@ private:
             u_lock lock(store_.stripe(idx));
             auto pts = pointsOf(idx);
             size_t oldSize = pts.size();
-            std::erase_if(pts, [objectId](const auto& pt) {
-                return pt && pt->objectId == objectId;
+            std::erase_if(pts, [objectId, this](const auto& pt) {
+                if (!pt || pt->objectId != objectId) return false;
+                if (pt->isStatic()) physicsCollidersDirty_.store(true);
+                return true;
             });
             removed += oldSize - pts.size();
             if (oldSize != pts.size()) setPoints(idx, pts);
@@ -683,8 +687,10 @@ private:
             auto pts = pointsOf(idx);
             size_t oldSize = pts.size();
             // Was a no-op before: the lambda never returned its predicate.
-            std::erase_if(pts, [&nodesToRemove](const auto& pt) {
-                return nodesToRemove.find(pt) != nodesToRemove.end();
+            std::erase_if(pts, [&nodesToRemove, this](const auto& pt) {
+                if (nodesToRemove.find(pt) == nodesToRemove.end()) return false;
+                if (pt && pt->isStatic()) physicsCollidersDirty_.store(true);
+                return true;
             });
             removed += oldSize - pts.size();
             if (oldSize != pts.size()) setPoints(idx, pts);
@@ -715,8 +721,11 @@ public:
     ///@param id The target object ID, -1 generates an auto incremented new ID
     ///@return Shared pointer to the designated GridObject
     std::shared_ptr<GridObject> getOrCreateObject(int id) {
-        if (id < 0) id = nextObjId++;
         u_lock lock(objectsMutex_);
+        if (id < 0) {
+            while (objects_.count(nextObjId)) ++nextObjId;
+            id = nextObjId++;
+        }
         auto it = objects_.find(id);
         if (it != objects_.end()) return it->second;
         auto obj = std::make_shared<GridObject>(id);
@@ -1280,7 +1289,7 @@ private:
         }
 
         if (maxDistSq <= maxDistSq_max && minDistSq > lodMinDistanceSq) {
-            loadAndLodSubtreeRecursive(idx);
+            loadSubtreeRecursive(idx);
             return;
         }
         
@@ -1347,6 +1356,52 @@ private:
         return nullptr;
     }
 
+    ///@brief Drops one point from a node's own block (not its children)
+    ///@return True if the point was there
+    bool removeFromNode(uint32_t idx, const std::shared_ptr<NodeData>& targetPt) {
+        OctreeNode* node = nodeAt(idx);
+        if (!node) return false;
+        u_lock lock(store_.stripe(idx));
+        if (!store_.points.erase(node->pointBlock, targetPt.get())) return false;
+        node->lodIdx = INVALID_IDX;
+        node->setDirty(true);
+        if (targetPt->isStatic()) physicsCollidersDirty_.store(true);
+        return true;
+    }
+
+    ///@brief Node whose point block holds pt. Insertion pushes a point down while its cube
+    ///       fits the octant child of its position, so the holder is the first node on that
+    ///       path where it does not (or the leaf); only that one block is scanned.
+    ///       Read-only, safe to call from several threads.
+    ///@param pos Position pt was inserted at
+    ///@param cube pt's bounds at that position
+    ///@param path Optional: the nodes walked, root first, ending with the holder
+    ///@return The node index, or INVALID_IDX when pt is not there
+    uint32_t findHolder(const std::shared_ptr<NodeData>& pt, const Vec3& pos, const BoundingBox& cube,
+                        std::vector<uint32_t>* path = nullptr) const {
+        if (path) path->clear();
+        uint32_t idx = root_;
+        while (idx != INVALID_IDX) {
+            const OctreeNode* n = nodeAt(idx);
+            if (!n || !n->isLoaded()) return INVALID_IDX;
+            if (path) path->push_back(idx);
+            bool here = n->isLeaf();
+            uint8_t oct = 0;
+            if (!here) {
+                oct = getOctant(pos, n->center);
+                here = !n->hasChild(oct) || !boxContainsBox(createChildBounds(n, oct), cube);
+            }
+            if (here) {
+                for (const auto& q : pointsView(idx)) {
+                    if (q.get() == pt.get()) return idx;
+                }
+                return INVALID_IDX;
+            }
+            idx = n->firstChild + oct;
+        }
+        return INVALID_IDX;
+    }
+
     ///@brief Hunts and deletes explicit pointer references recursively
     ///@param node Operation bounding parent
     ///@param bounds Targeted boundary region containing element
@@ -1357,22 +1412,7 @@ private:
         if (!node || !boxIntersectsBox(node->bounds(), bounds)) return false;
         ensureLoaded(idx, false);
         node = nodeAt(idx);
-        bool foundAny = false;
-        
-        {
-            u_lock lock(store_.stripe(idx));
-            auto pts = pointsOf(idx);
-            size_t oldSize = pts.size();
-            std::erase_if(pts, [&targetPt](const std::shared_ptr<NodeData>& pointData) {
-                return pointData == targetPt;
-            });
-            if (oldSize > pts.size()) {
-                foundAny = true;
-                setPoints(idx, pts);
-                node->lodIdx = INVALID_IDX;
-                node->setDirty(true);
-            }
-        }
+        bool foundAny = removeFromNode(idx, targetPt);
         if (!node->isLeaf()) {
             for (int i = 0; i < 8; ++i) {
                 if (node->hasChild(i)) {
@@ -1394,13 +1434,9 @@ private:
     ///@param radiusSq Radial mathematical max extent
     ///@param objectid Filter for collecting specific object segments
     ///@param results Target return collection passed functionally
-    void searchNodeRecursive(uint32_t idx, const Vec3& center, float radiusSq, int objectid,
-                               std::vector<std::shared_ptr<NodeData>>& results) {
-        if (idx == INVALID_IDX) return;
-        ensureLoaded(idx, false);
-        const OctreeNode* node = nodeAt(idx);
-        if (!node) return;
-
+    ///@brief The radius test over one node's own block
+    void scanNodePoints(uint32_t idx, const Vec3& center, float radiusSq, int objectid,
+                        std::vector<std::shared_ptr<NodeData>>& results) const {
         for (const auto& pointData : pointsView(idx)) {
             if (!pointData || !pointData->isActive()) continue;
             float pointDistSq = (pointData->position - center).squaredNorm();
@@ -1408,10 +1444,22 @@ private:
                 results.emplace_back(pointData);
             }
         }
+    }
+
+    void searchNodeRecursive(uint32_t idx, const Vec3& center, float radiusSq, int objectid,
+                               std::vector<std::shared_ptr<NodeData>>& results) {
+        if (idx == INVALID_IDX) return;
+        ensureLoaded(idx, false);
+        const OctreeNode* node = nodeAt(idx);
+        if (!node) return;
+
+        scanNodePoints(idx, center, radiusSq, objectid, results);
         
         if (!node->isLeaf()) {
+            const Vec3 r = Vec3::Constant(std::sqrt(radiusSq));
+            const BoundingBox query(center - r, center + r);
             for (int i = 0; i < 8; ++i) {
-                if (node->hasChild(i)) {
+                if (node->hasChild(i) && boxIntersectsBox(createChildBounds(node, i), query)) {
                     searchNodeRecursive(node->firstChild + i, center, radiusSq, objectid, results);
                 }
             }
@@ -3318,11 +3366,21 @@ public:
 
     std::vector<std::shared_ptr<NodeData>> findInRadius(const Vec3& center, float radius, int objectid = -1) {
         std::vector<std::shared_ptr<NodeData>> results;
-        
+        if (root_ == INVALID_IDX) return results;
+
         float radiusSq = radius * radius;
-        int depth = 0;
-        uint32_t startingPoint = getHighestCommonNodeRecursive(center - Vec3::Constant(radius), center + Vec3::Constant(radius), root_, depth);
-        searchNodeRecursive(startingPoint, center, radiusSq, objectid, results);
+        const Vec3 lo = center - Vec3::Constant(radius);
+        const Vec3 hi = center + Vec3::Constant(radius);
+        uint32_t idx = root_;
+        while (true) {
+            const OctreeNode* n = nodeAt(idx);
+            if (!n) return results;
+            uint8_t mcell = getOctant(lo, n->center);
+            if (n->isLeaf() || mcell != getOctant(hi, n->center) || !n->hasChild(mcell)) break;
+            scanNodePoints(idx, center, radiusSq, objectid, results);
+            idx = n->firstChild + mcell;
+        }
+        searchNodeRecursive(idx, center, radiusSq, objectid, results);
         
         return results;
     }
@@ -3923,12 +3981,16 @@ public:
     ///@brief Seeds cracks from bonds that snapped in tension and advances every
     ///       active crack through the bonds crossing its plane
     ///@param seeds Broken bond ids that snapped in tension this frame
-    void propagateCracks(const std::vector<uint32_t>& seeds, std::unordered_set<int>& fractured);
+    ///@param dyn This step's dynamic nodes; an object's voxels are taken from here
+    void propagateCracks(const std::vector<uint32_t>& seeds, std::unordered_set<int>& fractured,
+                         const std::vector<std::shared_ptr<NodeData>>& dyn);
 
     ///@brief Splits an object whose bond graph came apart into connected components
     ///@param objectId The object that lost at least one bond this step
+    ///@param dyn This step's dynamic nodes; the object's voxels are taken from here
     void resolveFracture(int objectId,
-                          const std::vector<std::vector<PhysicsMaterial_>>& fastMats, size_t fastMatsSize);
+                          const std::vector<std::vector<PhysicsMaterial_>>& fastMats, size_t fastMatsSize,
+                          const std::vector<std::shared_ptr<NodeData>>& dyn);
 
     ///@brief Converts a fragment to STATIC debris in place
     void freezeFragment(const std::vector<std::shared_ptr<NodeData>>& frag);
@@ -4143,6 +4205,12 @@ private:
         return removed;
     }
 public:
+
+    ///@brief Runs the timed optimize the worker asked for. Called at the start of a physics
+    ///       step and of every render frame, where nothing else is touching the tree.
+    void serviceOptimizeRequest() {
+        if (optimizeRequested_.exchange(false, std::memory_order_relaxed)) optimize();
+    }
 
     void optimize() {
         if (root_ != INVALID_IDX) {

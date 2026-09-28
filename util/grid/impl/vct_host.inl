@@ -228,8 +228,9 @@ void vctImageBarrier(VkCommandBuffer cmd, VkImageLayout oldL, VkImageLayout newL
 
 void vctBuildVolume(VkBuffer pointBuf, uint32_t pointCount,
                     const Vec3& aabbMin, const Vec3& aabbMax,
-                    const Vec3& lightDir, bool enabled) {
+                    const Vec3& lightDir, bool enabled, uint64_t key = 0) {
     if (!vctReady) return;
+    const bool resident = (key != 0 && key == vctResidentKey);
 
     Vec3 ext = aabbMax - aabbMin;
     for (int i = 0; i < 3; ++i) if (ext[i] <= 1e-6f) ext[i] = 1.0f;
@@ -252,6 +253,11 @@ void vctBuildVolume(VkBuffer pointBuf, uint32_t pointCount,
     vkUnmapMemory(device, vctParamMem);
 
     if (!enabled) return;
+    if (resident) {
+        vctWriteFastDescriptors();
+        return;
+    }
+    vctResidentKey = key;
 
     {
         VkDescriptorBufferInfo pI{pointBuf, 0, VK_WHOLE_SIZE};

@@ -1284,6 +1284,12 @@ struct PointStore {
             b.capacity = 1;
             return blockIdx;
         }
+        // spare slots left by an earlier move or erase take the point without relocating
+        if (b.count < b.capacity && static_cast<size_t>(b.offset) + b.capacity <= pool.size()) {
+            pool[b.offset + b.count] = pt;
+            b.count++;
+            return blockIdx;
+        }
         if (b.offset + b.count == pool.size()) {
             pool.push_back(pt);
             b.count++;
@@ -1297,10 +1303,12 @@ struct PointStore {
         existing.push_back(pt);
 
         uint32_t newOffset = static_cast<uint32_t>(pool.size());
+        uint32_t capacity = static_cast<uint32_t>(existing.size()) + static_cast<uint32_t>(existing.size() / 2) + 2;
         pool.insert(pool.end(), existing.begin(), existing.end());
+        pool.resize(static_cast<size_t>(newOffset) + capacity);
         b.offset = newOffset;
         b.count = static_cast<uint32_t>(existing.size());
-        b.capacity = b.count;
+        b.capacity = capacity;
         return blockIdx;
     }
 
@@ -1322,6 +1330,26 @@ struct PointStore {
             freeBlocks.push_back(blockIdx);
         }
         return allocLocked(pts);
+    }
+
+    ///@brief Removes one point from a block in place, keeping the order of the rest.
+    ///       Its id stays registered: the point is on its way into another block.
+    ///@return False if the point was not in the block
+    bool erase(uint32_t blockIdx, const NodeData_<T>* pt) {
+        u_lock lock(mutex);
+        if (blockIdx == INVALID_IDX || blockIdx >= blocks.size()) return false;
+        Block& b = blocks[blockIdx];
+        if (static_cast<size_t>(b.offset) + b.count > pool.size()) return false;
+        auto* first = pool.data() + b.offset;
+        auto* last = first + b.count;
+        for (auto* it = first; it != last; ++it) {
+            if (it->get() != pt) continue;
+            std::move(it + 1, last, it);
+            (last - 1)->reset();
+            b.count--;
+            return true;
+        }
+        return false;
     }
 
     void release(uint32_t blockIdx) {

@@ -1,4 +1,15 @@
 #include "grid3eigen.hpp"
+
+// Per-stage timers for the render prologue. Off unless built with -DGRID_STAGE_TIMERS:
+// each record goes through FunctionTimer's single table and adds up in a game loop.
+#ifdef GRID_STAGE_TIMERS
+#define STAGE_TIMER_CAT2(a, b) a##b
+#define STAGE_TIMER_CAT(a, b) STAGE_TIMER_CAT2(a, b)
+#define STAGE_TIMER(name) ScopedFunctionTimer STAGE_TIMER_CAT(stageTimer_, __LINE__)(name)
+#else
+#define STAGE_TIMER(name) ((void)0)
+#endif
+
 namespace Grid {
 
 template<typename T>
@@ -6,6 +17,7 @@ void Octree<T>::buildRender(RenderBuffer_<T>& buffer) {
     // TIME_FUNCTION;
     buffer.clear();
     if (root_ == INVALID_IDX) return;
+    serviceOptimizeRequest();
     buffer.nodes.emplace_back();
     buffer.points.reserve(size);
 
@@ -46,7 +58,22 @@ void Octree<T>::buildRenderNodeAt(uint32_t nodeIndex, RenderBuffer_<T>& buffer, 
     rnode.originalNode = nodeIndex;
     
     rnode.firstPoint = static_cast<uint32_t>(buffer.points.size());
-    if (isLoaded) {
+    bool servedFromCache = false;
+    if (isLoaded && !node->isDirty()) {
+        auto cacheIt = buffer.mergeCache.find(nodeIndex);
+        if (cacheIt != buffer.mergeCache.end()) {
+            uint32_t live = 0;
+            for (const auto& pt : pointsView(nodeIndex)) {
+                if (pt && pt->isActive() && pt->isVisible()) ++live;
+            }
+            if (live == cacheIt->second.sourceCount) {
+                for (const RenderData& b : cacheIt->second.boxes) buffer.points.push_back(b);
+                rnode.pointCount = static_cast<uint32_t>(cacheIt->second.boxes.size());
+                servedFromCache = true;
+            }
+        }
+    }
+    if (isLoaded && !servedFromCache) {
         const auto pts = pointsView(nodeIndex);
         for (const auto& pt : pts) {
             if (!pt || !pt->isActive() || !pt->isVisible()) continue; 
@@ -59,6 +86,7 @@ void Octree<T>::buildRenderNodeAt(uint32_t nodeIndex, RenderBuffer_<T>& buffer, 
             
             rd.objectId = pt->objectId;
             rd.extent = EXTENT_UNIT;
+            rd.pinned = pt->isStatic() ? 1u : 0u;
             rd.shape = pt->shape;
 
             const bool settled = pt->isSettled();
@@ -69,22 +97,14 @@ void Octree<T>::buildRenderNodeAt(uint32_t nodeIndex, RenderBuffer_<T>& buffer, 
         }
     }
 
-    const uint32_t rawCount = static_cast<uint32_t>(buffer.points.size()) - rnode.firstPoint;
-    uint32_t reuseSig = 0;
-    for (uint32_t i = 0; i < rawCount; ++i) {
-        const uint32_t bits = buffer.points[rnode.firstPoint + i].extent
-                                & (EXTENT_STATIC_BIT | EXTENT_REUSE_BIT);
-        reuseSig ^= (bits >> 30) + 0x9e3779b9u + (reuseSig << 6) + (reuseSig >> 2);
-    }
-
-    auto cacheIt = buffer.mergeCache.find(nodeIndex);
-    const bool cacheUsable = !node->isDirty() && cacheIt != buffer.mergeCache.end()
-                             && cacheIt->second.sourceCount == rawCount;
-    if (cacheUsable) {
-        buffer.points.resize(rnode.firstPoint);
-        for (const RenderData& b : cacheIt->second.boxes) buffer.points.push_back(b);
-        rnode.pointCount = static_cast<uint32_t>(cacheIt->second.boxes.size());
-    } else {
+    if (!servedFromCache) {
+        const uint32_t rawCount = static_cast<uint32_t>(buffer.points.size()) - rnode.firstPoint;
+        uint32_t reuseSig = 0;
+        for (uint32_t i = 0; i < rawCount; ++i) {
+            const uint32_t bits = buffer.points[rnode.firstPoint + i].extent
+                                    & (EXTENT_STATIC_BIT | EXTENT_REUSE_BIT);
+            reuseSig ^= (bits >> 30) + 0x9e3779b9u + (reuseSig << 6) + (reuseSig >> 2);
+        }
         rnode.pointCount = mergeLeafPoints(buffer, rnode.firstPoint);
         MergeCacheEntry entry;
         entry.sourceCount = rawCount;
@@ -156,7 +176,7 @@ static bool slabMatches(const MergeLattice& lattice, const std::vector<RenderDat
             if (it == lattice.end() || it->second.claimedBy != INVALID_IDX) return false;
             const RenderData& p = pts[first + it->second.src];
             if (!p.isUnitVoxel() || p.materialIdx != seed.materialIdx || p.objectId != seed.objectId
-                || !p.color.isApprox(seed.color)) return false;
+                || p.pinned != seed.pinned || !p.color.isApprox(seed.color)) return false;
             if (extentIsStatic(p.extent) != extentIsStatic(seed.extent)
                     || extentIsReusable(p.extent) != extentIsReusable(seed.extent)) return false;
         }
@@ -545,20 +565,7 @@ static void mortonSortIndices(const std::vector<size_t>& indices, const Vec3& bo
 
 ///@brief Fingerprint of a built point set, used to decide if the cache is stale
 static uint64_t hashRenderPoints(const void* data, size_t bytes) {
-    // TIME_FUNCTION;
-    uint64_t h = 1469598103934665603ull;
-    const uint64_t* words = static_cast<const uint64_t*>(data);
-    const size_t nWords = bytes / sizeof(uint64_t);
-    for (size_t i = 0; i < nWords; ++i) {
-        h ^= words[i];
-        h *= 1099511628211ull;
-    }
-    const uint8_t* tail = static_cast<const uint8_t*>(data) + nWords * sizeof(uint64_t);
-    for (size_t i = 0; i < bytes % sizeof(uint64_t); ++i) {
-        h ^= tail[i];
-        h *= 1099511628211ull;
-    }
-    return h;
+    return hashBytes64(data, bytes);
 }
 
 struct EmissiveCell {
@@ -717,8 +724,16 @@ struct SceneCache {
     int emissiveCount = 0;
     uint64_t pointHash = 0;
     uint64_t materialHash = 0;
+    ///@brief Identity of gpuPoints (contents + ordering), never 0; the GpuContext residency keys use it
+    uint64_t key = 0;
     bool sorted = false;
+    bool expanded = false;
+    bool lightsByPower = false;
     bool valid = false;
+    uint32_t staticCount = 0;
+    uint64_t staticHash = 0;
+    std::vector<uint32_t> staticLights;
+    bool staticRebuilt = false;
 };
 
 ///@brief Rebuilds the cached point set only when the tree contents changed
@@ -726,10 +741,11 @@ struct SceneCache {
 ///@param wantSort Morton-order the points (PBR paths) or keep tree order (fast path)
 ///@param expandByRadius Grow bounds by each point's half size (fast/VCT paths)
 ///@param cache Cache to fill or reuse
+///@param lightsByPower Order gpuLights brightest first
 ///@return true when the cache was rebuilt, false when the previous one was reused
 template<typename BufferT>
 static bool refreshSceneCache(const BufferT& buffer, bool wantSort, bool expandByRadius,
-                              SceneCache& cache) {
+                              SceneCache& cache, bool lightsByPower = false) {
     //TIME_FUNCTION;
     const size_t pointBytes = buffer.points.size() * sizeof(buffer.points[0]);
     const uint64_t pHash = buffer.points.empty() ? 0
@@ -738,8 +754,10 @@ static bool refreshSceneCache(const BufferT& buffer, bool wantSort, bool expandB
     const uint64_t mHash = buffer.materials.empty() ? 0
                          : hashRenderPoints(buffer.materials.data(), matBytes);
 
-    if (cache.valid && cache.pointHash == pHash && cache.materialHash == mHash
-        && cache.sorted == wantSort) {
+    const bool sameFlags = cache.valid && cache.sorted == wantSort && cache.expanded == expandByRadius
+                           && cache.lightsByPower == lightsByPower;
+    if (sameFlags && cache.pointHash == pHash && cache.materialHash == mHash) {
+        cache.staticRebuilt = false;
         return false;
     }
 
@@ -748,48 +766,94 @@ static bool refreshSceneCache(const BufferT& buffer, bool wantSort, bool expandB
         if (n.lodPoint != -1) isLodPoint[n.lodPoint] = true;
     }
 
-    Vec3 globalMin = Vec3::Constant(std::numeric_limits<float>::max());
-    Vec3 globalMax = Vec3::Constant(std::numeric_limits<float>::lowest());
+    Vec3 allMin = Vec3::Constant(std::numeric_limits<float>::max());
+    Vec3 allMax = Vec3::Constant(std::numeric_limits<float>::lowest());
+    Vec3 staticMin = allMin;
+    Vec3 staticMax = allMax;
 
-    std::vector<size_t> validIndices;
-    validIndices.reserve(buffer.points.size());
+    std::vector<size_t> staticIdx;
+    std::vector<size_t> dynIdx;
+    staticIdx.reserve(buffer.points.size());
+    uint64_t sHash = 1469598103934665603ull;
     for (size_t i = 0; i < buffer.points.size(); ++i) {
         if (isLodPoint[i]) continue;
         const auto& p = buffer.points[i];
-        validIndices.push_back(i);
-        if (expandByRadius) {
-            globalMin = globalMin.cwiseMin(p.boundsMin());
-            globalMax = globalMax.cwiseMax(p.boundsMax());
+        const Vec3 lo = expandByRadius ? p.boundsMin() : p.position;
+        const Vec3 hi = expandByRadius ? p.boundsMax() : p.position;
+        allMin = allMin.cwiseMin(lo);
+        allMax = allMax.cwiseMax(hi);
+        if (p.pinned) {
+            staticIdx.push_back(i);
+            staticMin = staticMin.cwiseMin(lo);
+            staticMax = staticMax.cwiseMax(hi);
+            sHash += hashBytes64(&p, sizeof(p)) | 1ull;
         } else {
-            globalMin = globalMin.cwiseMin(p.position);
-            globalMax = globalMax.cwiseMax(p.position);
+            dynIdx.push_back(i);
         }
     }
-    if (globalMin.x() > globalMax.x()) {
-        globalMin.setZero();
-        globalMax.setOnes();
+    if (allMin.x() > allMax.x()) {
+        allMin.setZero();
+        allMax.setOnes();
     }
+    const Vec3 globalMin = staticIdx.empty() ? allMin : staticMin;
+    const Vec3 globalMax = staticIdx.empty() ? allMax : staticMax;
+    if (sHash == 0) sHash = 1;
 
-    cache.gpuPoints.clear();
-    cache.gpuLights.clear();
-    cache.gpuPoints.reserve(validIndices.size());
-
-    if (wantSort) {
-        std::vector<PointSort> sortedPoints;
-        mortonSortIndices(validIndices, globalMin, globalMax,
-                          [&](size_t idx) { return buffer.points[idx].position; },
-                          sortedPoints);
-        for (const auto& sp : sortedPoints) {
-            const auto& p = buffer.points[sp.idx];
-            cache.gpuPoints.push_back(toGPURenderData(p));
+    auto build = [&](const std::vector<size_t>& idx, std::vector<GPURenderData>& out,
+                     std::vector<uint32_t>& lights) {
+        out.clear();
+        out.reserve(idx.size());
+        if (wantSort) {
+            std::vector<PointSort> sortedPoints;
+            mortonSortIndices(idx, globalMin, globalMax,
+                              [&](size_t i) { return buffer.points[i].position; },
+                              sortedPoints);
+            for (const auto& sp : sortedPoints) out.push_back(toGPURenderData(buffer.points[sp.idx]));
+        } else {
+            for (const size_t i : idx) out.push_back(toGPURenderData(buffer.points[i]));
         }
+        mergeEmissiveProxies(out, buffer.materials, lights);
+    };
+
+    const bool staticChanged = !sameFlags || cache.staticHash != sHash || cache.materialHash != mHash
+                               || cache.staticCount > cache.gpuPoints.size();
+    cache.staticRebuilt = staticChanged;
+    if (staticChanged) {
+        build(staticIdx, cache.gpuPoints, cache.staticLights);
+        cache.staticCount = static_cast<uint32_t>(cache.gpuPoints.size());
+        cache.staticHash = sHash;
     } else {
-        for (const size_t idx : validIndices) {
-            const auto& p = buffer.points[idx];
-            cache.gpuPoints.push_back(toGPURenderData(p));
-        }
+        cache.gpuPoints.resize(cache.staticCount);
     }
-    mergeEmissiveProxies(cache.gpuPoints, buffer.materials, cache.gpuLights);
+
+    std::vector<GPURenderData> dynPoints;
+    std::vector<uint32_t> dynLights;
+    build(dynIdx, dynPoints, dynLights);
+    cache.gpuPoints.insert(cache.gpuPoints.end(), dynPoints.begin(), dynPoints.end());
+    cache.gpuLights = cache.staticLights;
+    for (uint32_t li : dynLights) cache.gpuLights.push_back(li + cache.staticCount);
+
+    if (lightsByPower) {
+        struct LightRef { float power; uint32_t idx; };
+        std::vector<LightRef> lightRefs;
+        lightRefs.reserve(cache.gpuLights.size());
+        for (uint32_t li : cache.gpuLights) {
+            const GPURenderData& p = cache.gpuPoints[li];
+            Vec3 ext = unpackExtent(p.extent);
+            float s2 = p.size * p.size;
+            float fxy = ext.x() * ext.y(), fyz = ext.y() * ext.z(), fxz = ext.x() * ext.z();
+            float faceCells = std::max(fxy, std::max(fyz, fxz));
+            Vec3 emit = unpackRGB9E5(buffer.materials[p.materialIdx].chromaticity);
+            float cr = float(p.color & 0xFFu) / 255.0f;
+            float cg = float((p.color >> 8) & 0xFFu) / 255.0f;
+            float cb = float((p.color >> 16) & 0xFFu) / 255.0f;
+            float lum = 0.2126f * emit.x() * cr + 0.7152f * emit.y() * cg + 0.0722f * emit.z() * cb;
+            lightRefs.push_back({lum * s2 * faceCells, li});
+        }
+        std::stable_sort(lightRefs.begin(), lightRefs.end(),
+                         [](const LightRef& a, const LightRef& b) { return a.power > b.power; });
+        for (size_t k = 0; k < lightRefs.size(); ++k) cache.gpuLights[k] = lightRefs[k].idx;
+    }
 
     cache.emissiveCount = static_cast<int>(cache.gpuLights.size());
     if (cache.gpuPoints.empty()) cache.gpuPoints.push_back(GPURenderData{});
@@ -800,6 +864,11 @@ static bool refreshSceneCache(const BufferT& buffer, bool wantSort, bool expandB
     cache.pointHash = pHash;
     cache.materialHash = mHash;
     cache.sorted = wantSort;
+    cache.expanded = expandByRadius;
+    cache.lightsByPower = lightsByPower;
+    cache.key = pHash ^ (mHash * 0x9E3779B97F4A7C15ull) ^ (wantSort ? 0x1ull : 0x0ull)
+              ^ (expandByRadius ? 0x2ull : 0x0ull) ^ (lightsByPower ? 0x4ull : 0x0ull);
+    if (cache.key == 0) cache.key = 1;
     cache.valid = true;
     return true;
 }
@@ -1045,11 +1114,8 @@ InFlightFrame Octree<T>::beginRenderFrameVulkan(const Camera& cam, int height, i
         uploadFogVolumes(ctx, camData, fogVolumes_);
         ctx.updateCommonBuffers(outSize, camData);
         ctx.updateSkyboxBuffer(skyData);
-        if (sceneChanged || !ctx.pbrPointsResident) {
-            ctx.updateLightBuffer(gpuLights);
-            ctx.updatePBRBuffers(gpuPoints);
-            ctx.pbrPointsResident = true;
-        }
+        ctx.updateLightBuffer(gpuLights);
+        ctx.updatePBRBuffers(gpuPoints, tl_scene.key, tl_scene.staticCount, tl_scene.staticHash);
     }
 
     if (canAccumulate) {
@@ -1145,7 +1211,7 @@ InFlightFrame Octree<T>::beginFastRenderFrameVulkan(const Camera& cam, int heigh
     vkCtx.updateSellmeierBuffer(*sellLUT, SELL_LUT_WAVELENGTHS, sellRows);
 
     thread_local SceneCache tl_fastScene;
-    const bool sceneChanged = refreshSceneCache(tl_buffer, false, true, tl_fastScene);
+    refreshSceneCache(tl_buffer, false, true, tl_fastScene);
     const std::vector<GPURenderData>& gpuPoints = tl_fastScene.gpuPoints;
     const std::vector<uint32_t>& gpuLights = tl_fastScene.gpuLights;
     const int emissiveCount = tl_fastScene.emissiveCount;
@@ -1173,15 +1239,13 @@ InFlightFrame Octree<T>::beginFastRenderFrameVulkan(const Camera& cam, int heigh
     // vkCtx.awaitAllFastFrames();
     vkCtx.updateCommonBuffers(outSize, camData);
     vkCtx.updateSkyboxBuffer(skyData);
-    if (sceneChanged || !vkCtx.fastPointsResident) {
-        vkCtx.updateLightBuffer(gpuLights);
-        vkCtx.updateFastBuffers(gpuPoints);
-        vkCtx.fastPointsResident = true;
-    }
+    vkCtx.updateLightBuffer(gpuLights);
+    vkCtx.updateFastBuffers(gpuPoints, tl_fastScene.key);
 
     {
         Vec3 keyLight = (-cam.direction.normalized());
-        vkCtx.vctBuildVolume(vkCtx.fastPointBuffer, (uint32_t)gpuPoints.size(), vctMin, vctMax, keyLight, true);
+        vkCtx.vctBuildVolume(vkCtx.fastPointBuffer, (uint32_t)gpuPoints.size(), vctMin, vctMax, keyLight, true,
+                             tl_fastScene.key);
     }
     
     // frfv.stop();
@@ -1254,44 +1318,14 @@ InFlightFrame Octree<T>::beginBlendedRenderFrameVulkan(const Camera& cam, int he
         ctx.updateSellmeierBuffer(*sellLUT, SELL_LUT_WAVELENGTHS, sellRows);
     }
 
-    std::vector<bool> isLodPoint(tl_buffer.points.size(), false);
-    for(const auto& n : tl_buffer.nodes) {
-        if(n.lodPoint != -1) isLodPoint[n.lodPoint] = true;
-    }
-
-    Vec3 globalMin = Vec3::Constant(std::numeric_limits<float>::max());
-    Vec3 globalMax = Vec3::Constant(std::numeric_limits<float>::lowest());
-    
-    std::vector<size_t> validIndices;
-    validIndices.reserve(tl_buffer.points.size());
-    for(size_t i = 0; i < tl_buffer.points.size(); ++i) {
-        if(isLodPoint[i]) continue;
-        validIndices.push_back(i);
-        globalMin = globalMin.cwiseMin(tl_buffer.points[i].position);
-        globalMax = globalMax.cwiseMax(tl_buffer.points[i].position);
-    }
-    
-    std::vector<PointSort> sortedPoints;
-    mortonSortIndices(validIndices, globalMin, globalMax,
-                      [&](size_t idx) { return tl_buffer.points[idx].position; },
-                      sortedPoints);
-
-    std::vector<GPURenderData> gpuPBRPoints;
-    gpuPBRPoints.reserve(sortedPoints.size());
-    std::vector<uint32_t> gpuLights;
-
-    for(const auto& sp : sortedPoints) {
-        const auto& p = tl_buffer.points[sp.idx];
-        gpuPBRPoints.push_back(toGPURenderData(p));
-    }
-
-    mergeEmissiveProxies(gpuPBRPoints, tl_buffer.materials, gpuLights);
-    std::vector<GPURenderData> gpuFastPoints = gpuPBRPoints;
-
-    int emissiveCount = gpuLights.size();
-    if(gpuPBRPoints.empty()) gpuPBRPoints.push_back(GPURenderData{});
-    if(gpuFastPoints.empty()) gpuFastPoints.push_back(GPURenderData{});
-    if(gpuLights.empty()) gpuLights.push_back(0);
+    thread_local SceneCache tl_scene;
+    refreshSceneCache(tl_buffer, true, false, tl_scene);
+    const std::vector<GPURenderData>& gpuPBRPoints = tl_scene.gpuPoints;
+    const std::vector<GPURenderData>& gpuFastPoints = tl_scene.gpuPoints;
+    const std::vector<uint32_t>& gpuLights = tl_scene.gpuLights;
+    const int emissiveCount = tl_scene.emissiveCount;
+    const Vec3 globalMin = tl_scene.boundsMin;
+    const Vec3 globalMax = tl_scene.boundsMax;
 
     float aspect = static_cast<float>(width) / height;
     float fovRad = cam.fovRad();
@@ -1324,7 +1358,7 @@ InFlightFrame Octree<T>::beginBlendedRenderFrameVulkan(const Camera& cam, int he
         ctx.updateCommonBuffers(pbrOutSize, pbrCamData);
         ctx.updateSkyboxBuffer(skyData);
         ctx.updateLightBuffer(gpuLights);
-        ctx.updatePBRBuffers(gpuPBRPoints);
+        ctx.updatePBRBuffers(gpuPBRPoints, tl_scene.key, tl_scene.staticCount, tl_scene.staticHash);
     }
 
     runWavefrontTilesMultiGPU(lowW, lowH, pbrCamData, samplesPerPixel, maxBounces, 0, pixFloats, pbrOutSize);
@@ -1342,12 +1376,12 @@ InFlightFrame Octree<T>::beginBlendedRenderFrameVulkan(const Camera& cam, int he
 
     size_t fastOutSize = width * height * 5 * sizeof(float);
     vkCtx.updateCommonBuffers(fastOutSize, fastCamData);
-    vkCtx.updateFastBuffers(gpuFastPoints);
+    vkCtx.bindFastPointsToPBR();
 
     {
         Vec3 keyLight = (-cam.direction.normalized());
-        vkCtx.vctBuildVolume(vkCtx.fastPointBuffer, (uint32_t)gpuFastPoints.size(),
-                             globalMin, globalMax, keyLight, true);
+        vkCtx.vctBuildVolume(vkCtx.pbrPointBuffer, (uint32_t)gpuFastPoints.size(),
+                             globalMin, globalMax, keyLight, true, tl_scene.key);
     }
 
     fastCamData.tileOffsetX = 0;
@@ -1400,62 +1434,13 @@ InFlightFrame Octree<T>::beginGameStyleRenderFrame(const Camera& cam, int height
         ctx.updateSellmeierBuffer(*sellLUT, SELL_LUT_WAVELENGTHS, sellRows);
     }
 
-    std::vector<bool> isLodPoint(tl_buffer.points.size(), false);
-    for(const auto& n : tl_buffer.nodes) {
-        if(n.lodPoint != -1) isLodPoint[n.lodPoint] = true;
-    }
-
-    Vec3 globalMin = Vec3::Constant(std::numeric_limits<float>::max());
-    Vec3 globalMax = Vec3::Constant(std::numeric_limits<float>::lowest());
-
-    std::vector<size_t> validIndices;
-    validIndices.reserve(tl_buffer.points.size());
-    for(size_t i = 0; i < tl_buffer.points.size(); ++i) {
-        if(isLodPoint[i]) continue;
-        validIndices.push_back(i);
-        globalMin = globalMin.cwiseMin(tl_buffer.points[i].position);
-        globalMax = globalMax.cwiseMax(tl_buffer.points[i].position);
-    }
-
-    std::vector<PointSort> sortedPoints;
-    mortonSortIndices(validIndices, globalMin, globalMax,
-                      [&](size_t idx) { return tl_buffer.points[idx].position; },
-                      sortedPoints);
-    std::vector<GPURenderData> gpuFastPoints;
-    gpuFastPoints.reserve(sortedPoints.size());
-
-    for(const auto& sp : sortedPoints) {
-        const auto& p = tl_buffer.points[sp.idx];
-
-        gpuFastPoints.push_back(toGPURenderData(p));
-    }
-
-    std::vector<uint32_t> gpuLights;
-    mergeEmissiveProxies(gpuFastPoints, tl_buffer.materials, gpuLights);
-
-    struct LightRef { float power; uint32_t idx; };
-    std::vector<LightRef> lightRefs;
-    lightRefs.reserve(gpuLights.size());
-    for (uint32_t li : gpuLights) {
-        const GPURenderData& p = gpuFastPoints[li];
-        Vec3 ext = unpackExtent(p.extent);
-        float s2 = p.size * p.size;
-        float fxy = ext.x() * ext.y(), fyz = ext.y() * ext.z(), fxz = ext.x() * ext.z();
-        float faceCells = std::max(fxy, std::max(fyz, fxz));
-        Vec3 emit = unpackRGB9E5(tl_buffer.materials[p.materialIdx].chromaticity);
-        float cr = float(p.color & 0xFFu) / 255.0f;
-        float cg = float((p.color >> 8) & 0xFFu) / 255.0f;
-        float cb = float((p.color >> 16) & 0xFFu) / 255.0f;
-        float lum = 0.2126f * emit.x() * cr + 0.7152f * emit.y() * cg + 0.0722f * emit.z() * cb;
-        lightRefs.push_back({lum * s2 * faceCells, li});
-    }
-    std::sort(lightRefs.begin(), lightRefs.end(),
-              [](const LightRef& a, const LightRef& b) { return a.power > b.power; });
-    for (size_t k = 0; k < lightRefs.size(); ++k) gpuLights[k] = lightRefs[k].idx;
-
-    int emissiveCount = (int)gpuLights.size();
-    if(gpuFastPoints.empty()) gpuFastPoints.push_back(GPURenderData{});
-    if(gpuLights.empty()) gpuLights.push_back(0);
+    thread_local SceneCache tl_scene;
+    refreshSceneCache(tl_buffer, true, false, tl_scene, true);
+    const std::vector<GPURenderData>& gpuFastPoints = tl_scene.gpuPoints;
+    const std::vector<uint32_t>& gpuLights = tl_scene.gpuLights;
+    const int emissiveCount = tl_scene.emissiveCount;
+    const Vec3 globalMin = tl_scene.boundsMin;
+    const Vec3 globalMax = tl_scene.boundsMax;
     
     float aspect = static_cast<float>(width) / height;
     float fovRad = cam.fovRad();
@@ -1479,14 +1464,13 @@ InFlightFrame Octree<T>::beginGameStyleRenderFrame(const Camera& cam, int height
     size_t fastOutSize = size_t(width) * size_t(height) * 5 * sizeof(float);
     vkCtx.updateCommonBuffers(fastOutSize, fastCamData);
     vkCtx.updateLightBuffer(gpuLights);
-    vkCtx.updateFastBuffers(gpuFastPoints);
+    vkCtx.updateFastBuffers(gpuFastPoints, tl_scene.key);
 
     {
         Vec3 keyLight = (-cam.direction.normalized());
         vkCtx.vctBuildVolume(vkCtx.fastPointBuffer, (uint32_t)gpuFastPoints.size(),
-                             globalMin, globalMax, keyLight, true);
+                             globalMin, globalMax, keyLight, true, tl_scene.key);
     }
-
 
     fastCamData.tileOffsetX = 0;
     fastCamData.tileOffsetY = 0;
@@ -1547,7 +1531,10 @@ InFlightFrame Octree<T>::beginSuperBlendedRenderFrameVulkan(const Camera& cam, i
     updateStreaming(cam);
     // optimize();
     thread_local RenderBuffer tl_buffer;
-    buildRender(tl_buffer);
+    {
+        STAGE_TIMER("superBlended.buildRender");
+        buildRender(tl_buffer);
+    }
 
     gpuFleet.init();
 
@@ -1561,65 +1548,18 @@ InFlightFrame Octree<T>::beginSuperBlendedRenderFrameVulkan(const Camera& cam, i
         ctx.updateSellmeierBuffer(*sellLUT, SELL_LUT_WAVELENGTHS, sellRows);
     }
 
-    std::vector<bool> isLodPoint(tl_buffer.points.size(), false);
-    for(const auto& n : tl_buffer.nodes) {
-        if(n.lodPoint != -1) isLodPoint[n.lodPoint] = true;
+    thread_local SceneCache tl_scene;
+    {
+        STAGE_TIMER("superBlended.sceneCache");
+        refreshSceneCache(tl_buffer, true, false, tl_scene, true);
     }
+    const std::vector<GPURenderData>& gpuPBRPoints = tl_scene.gpuPoints;
+    const std::vector<GPURenderData>& gpuFastPoints = tl_scene.gpuPoints;
+    const std::vector<uint32_t>& gpuLights = tl_scene.gpuLights;
+    const int emissiveCount = tl_scene.emissiveCount;
+    const Vec3 globalMin = tl_scene.boundsMin;
+    const Vec3 globalMax = tl_scene.boundsMax;
 
-    Vec3 globalMin = Vec3::Constant(std::numeric_limits<float>::max());
-    Vec3 globalMax = Vec3::Constant(std::numeric_limits<float>::lowest());
-
-    std::vector<size_t> validIndices;
-    validIndices.reserve(tl_buffer.points.size());
-    for(size_t i = 0; i < tl_buffer.points.size(); ++i) {
-        if(isLodPoint[i]) continue;
-        validIndices.push_back(i);
-        globalMin = globalMin.cwiseMin(tl_buffer.points[i].position);
-        globalMax = globalMax.cwiseMax(tl_buffer.points[i].position);
-    }
-
-    std::vector<PointSort> sortedPoints;
-    mortonSortIndices(validIndices, globalMin, globalMax,
-                      [&](size_t idx) { return tl_buffer.points[idx].position; },
-                      sortedPoints);
-
-    std::vector<GPURenderData> gpuPBRPoints;
-    gpuPBRPoints.reserve(sortedPoints.size());
-
-    for(const auto& sp : sortedPoints) {
-        const auto& p = tl_buffer.points[sp.idx];
-
-        gpuPBRPoints.push_back(toGPURenderData(p));
-    }
-
-    std::vector<uint32_t> gpuLights;
-    mergeEmissiveProxies(gpuPBRPoints, tl_buffer.materials, gpuLights);
-    std::vector<GPURenderData> gpuFastPoints = gpuPBRPoints;
-
-    struct LightRef { float power; uint32_t idx; };
-    std::vector<LightRef> lightRefs;
-    lightRefs.reserve(gpuLights.size());
-    for (uint32_t li : gpuLights) {
-        const GPURenderData& p = gpuPBRPoints[li];
-        Vec3 ext = unpackExtent(p.extent);
-        float s2 = p.size * p.size;
-        float fxy = ext.x() * ext.y(), fyz = ext.y() * ext.z(), fxz = ext.x() * ext.z();
-        float faceCells = std::max(fxy, std::max(fyz, fxz));
-        Vec3 emit = unpackRGB9E5(tl_buffer.materials[p.materialIdx].chromaticity);
-        float cr = float(p.color & 0xFFu) / 255.0f;
-        float cg = float((p.color >> 8) & 0xFFu) / 255.0f;
-        float cb = float((p.color >> 16) & 0xFFu) / 255.0f;
-        float lum = 0.2126f * emit.x() * cr + 0.7152f * emit.y() * cg + 0.0722f * emit.z() * cb;
-        lightRefs.push_back({lum * s2 * faceCells, li});
-    }
-    std::sort(lightRefs.begin(), lightRefs.end(),
-              [](const LightRef& a, const LightRef& b) { return a.power > b.power; });
-    for (size_t k = 0; k < lightRefs.size(); ++k) gpuLights[k] = lightRefs[k].idx;
-
-    int emissiveCount = (int)gpuLights.size();
-    if(gpuPBRPoints.empty()) gpuPBRPoints.push_back(GPURenderData{});
-    if(gpuFastPoints.empty()) gpuFastPoints.push_back(GPURenderData{});
-    if(gpuLights.empty()) gpuLights.push_back(0);
 
     float aspect = static_cast<float>(width) / height;
     float fovRad = cam.fovRad();
@@ -1645,24 +1585,35 @@ InFlightFrame Octree<T>::beginSuperBlendedRenderFrameVulkan(const Camera& cam, i
     size_t fastOutSize = size_t(width) * size_t(height) * 5 * sizeof(float);
     vkCtx.updateCommonBuffers(fastOutSize, fastCamData);
     vkCtx.updateLightBuffer(gpuLights);
-    vkCtx.updateFastBuffers(gpuFastPoints);
+    {
+        // one point buffer and one acceleration structure serve the guide and the PT pass
+        STAGE_TIMER("superBlended.uploadAndAS");
+        vkCtx.updatePBRBuffers(gpuPBRPoints, tl_scene.key, tl_scene.staticCount, tl_scene.staticHash);
+        vkCtx.bindFastPointsToPBR();
+    }
 
     {
+        STAGE_TIMER("superBlended.vct");
         Vec3 keyLight = (-cam.direction.normalized());
-        vkCtx.vctBuildVolume(vkCtx.fastPointBuffer, (uint32_t)gpuFastPoints.size(),
-                             globalMin, globalMax, keyLight, true);
+        vkCtx.vctBuildVolume(vkCtx.pbrPointBuffer, (uint32_t)gpuFastPoints.size(),
+                             globalMin, globalMax, keyLight, true, tl_scene.key);
     }
 
     fastCamData.tileOffsetX = 0;
     fastCamData.tileOffsetY = 0;
     vkCtx.updateCameraData(fastCamData);
     const uint32_t guideSlot = vkCtx.submitFastFullFrame(width, height, fastOutSize);
-    vkCtx.awaitFastFullFrame(guideSlot);
-
-    std::vector<float> guide(size_t(width) * size_t(height) * 5);
     {
-        const float* raw = vkCtx.readbackSlot(guideSlot);
-        if (raw) memcpy(guide.data(), raw, fastOutSize);
+        STAGE_TIMER("superBlended.guideFrame");
+        vkCtx.awaitFastFullFrame(guideSlot);
+    }
+
+    vkCtx.retainFastGBuffer(fastOutSize);
+    const float* guide = vkCtx.readbackSlot(guideSlot);
+    std::vector<float> guideZero;
+    if (!guide) {
+        guideZero.assign(size_t(width) * size_t(height) * 5, 0.0f);
+        guide = guideZero.data();
     }
 
     int minS = std::clamp(minSamplesPerPixel, 1, samplesPerPixel);
@@ -1672,6 +1623,7 @@ InFlightFrame Octree<T>::beginSuperBlendedRenderFrameVulkan(const Camera& cam, i
     float invScaleX = float(width)  / float(lowW);
     float invScaleY = float(height) / float(lowH);
 
+    #pragma omp parallel for schedule(static)
     for (int ly = 0; ly < lowH; ++ly) {
         int y0 = (int)(ly * invScaleY);
         int y1 = std::min(height, std::max(y0 + 1, (int)((ly + 1) * invScaleY)));
@@ -1771,7 +1723,7 @@ InFlightFrame Octree<T>::beginSuperBlendedRenderFrameVulkan(const Camera& cam, i
             ctx.updateSkyboxBuffer(skyData);
             ctx.updateLightBuffer(gpuLights);
         }
-        ctx.updatePBRBuffers(gpuPBRPoints);
+        ctx.updatePBRBuffers(gpuPBRPoints, tl_scene.key, tl_scene.staticCount, tl_scene.staticHash);
         ctx.uploadToBuffer(ctx.adaptiveBuffer, adaptiveSeed.data(), adaptiveSeed.size() * sizeof(float));
         ctx.uploadToBuffer(ctx.outBuffer, pixelSeed.data(), pixelSeed.size() * sizeof(float));
     }
@@ -1784,8 +1736,12 @@ InFlightFrame Octree<T>::beginSuperBlendedRenderFrameVulkan(const Camera& cam, i
         vkCtx.dispatchDDGIUpdate(uint32_t(DDGI_PROBES_X * DDGI_PROBES_Y * DDGI_PROBES_Z));
     }
 
-    runWavefrontTilesMultiGPU(lowW, lowH, pbrCamData, samplesPerPixel, maxBounces, 1, pixFloats, pbrOutSize, true);
+    {
+        STAGE_TIMER("superBlended.pathTrace");
+        runWavefrontTilesMultiGPU(lowW, lowH, pbrCamData, samplesPerPixel, maxBounces, 1, pixFloats, pbrOutSize, true);
+    }
 
+    STAGE_TIMER("superBlended.denoiseBlend");
     if (!vkCtx.submitSVGF(lowW, lowH, samplesPerPixel, pbrCamData, false)) {
         vkCtx.dispatchSmoothPasses(lowW, lowH, samplesPerPixel, 2, false);
     }
@@ -1793,7 +1749,7 @@ InFlightFrame Octree<T>::beginSuperBlendedRenderFrameVulkan(const Camera& cam, i
     vkCtx.copyBuffer(vkCtx.device, vkCtx.outBuffer, vkCtx.lowResOutBuffer, pbrOutSize);
 
     vkCtx.updateCommonBuffers(fastOutSize, fastCamData);
-    vkCtx.uploadToBuffer(vkCtx.outBuffer, guide.data(), fastOutSize);
+    vkCtx.copyBuffer(vkCtx.device, vkCtx.fastGBuffer, vkCtx.outBuffer, fastOutSize);
 
     vkCtx.dispatchBlend(width, height, lowW, lowH, ptScale, 1, true);
 

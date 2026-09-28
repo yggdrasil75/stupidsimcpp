@@ -21,8 +21,10 @@ template<typename T>
 struct PhysRelocation_ {
     std::shared_ptr<NodeData_<T>> node;
     Vec3 target;
-    uint32_t start;
-    int depth;
+    uint32_t holder = INVALID_IDX;
+    uint32_t start = INVALID_IDX;
+    int startDepth = 0;
+    bool inPlace = false;
 };
 
 template<typename T>
@@ -58,7 +60,9 @@ void Octree<T>::collectStaticVoxels(const std::vector<std::vector<PhysicsMateria
         for (const auto& pt : pointsView(cur)) {
             if (!pt || !pt->isActive()) continue;
             const PhysicsMaterial_* m = physMatOf(pt, fastMats, fastMats.size());
-            bool solid = !m || m->type == BodyType::STATIC || m->type == BodyType::KINEMATIC || pt->isStatic();
+            // a node whose material cannot be resolved is not simulated; it must not turn
+            // into an invisible wall for everything else either
+            bool solid = pt->isStatic() || (m && (m->type == BodyType::STATIC || m->type == BodyType::KINEMATIC));
             if (!solid) continue;
             const Shape& sh = pt->shape;
             out.push_back(pt->position.x());
@@ -115,7 +119,16 @@ void Octree<T>::gatherDynamicNodes(const std::vector<std::vector<PhysicsMaterial
         activePhysicsNodes_[w++] = activePhysicsNodes_[i];
         if (!sp->isActive() || sp->isStatic()) continue;
         const PhysicsMaterial_* m = physMatOf(sp, fastMats, fastMats.size());
-        if (!m) continue;
+        if (!m) {
+            // stays in the tree (and on screen) but cannot move: say so once
+            static bool warned = false;
+            if (!warned) {
+                std::cerr << "[physics] node with object " << sp->objectId << " material " << sp->physMatIdx
+                          << " has no physics material; it will not be simulated\n";
+                warned = true;
+            }
+            continue;
+        }
         if (m->type == BodyType::FLUID || m->type == BodyType::RIGID || m->type == BodyType::SOFT) dyn.push_back(sp);
     }
     activePhysicsNodes_.resize(w);
@@ -213,13 +226,17 @@ void Octree<T>::packPhysicsBonds(const std::vector<std::vector<PhysicsMaterial_>
                                  const std::vector<std::shared_ptr<NodeData>>& dyn,
                                  PhysFrameInput& in, std::vector<uint32_t>& ibondIds) {
     const uint32_t N = (uint32_t)dyn.size();
-    std::unordered_map<NodeData*, uint32_t> index;
-    index.reserve(N);
+    // point id -> index in dyn, so bond endpoints resolve without a locked byId lookup
+    uint32_t maxId = 0;
+    for (const auto& n : dyn) {
+        if (n->id != INVALID_IDX) maxId = std::max(maxId, n->id);
+    }
+    std::vector<uint32_t> idToDyn(size_t(maxId) + 1, INVALID_IDX);
     for (uint32_t i = 0; i < N; ++i) {
-        index[dyn[i].get()] = i;
+        if (dyn[i]->id != INVALID_IDX) idToDyn[dyn[i]->id] = i;
     }
 
-    std::vector<std::vector<PhysXBondGpu>> xPer(N);
+    std::vector<std::pair<uint32_t, PhysXBondGpu>> xTmp;
     for (uint32_t i = 0; i < N; ++i) {
         const auto& n = dyn[i];
         const PhysicsMaterial_* m = physMatOf(n, fastMats, fastMats.size());
@@ -233,19 +250,26 @@ void Octree<T>::packPhysicsBonds(const std::vector<std::vector<PhysicsMaterial_>
                 continue;
             }
             uint32_t otherId = bond.other(self);
-            auto other = store_.points.byId(otherId);
+            uint32_t j = (otherId <= maxId) ? idToDyn[otherId] : INVALID_IDX;
+            std::shared_ptr<NodeData> outside;
+            const NodeData* other = nullptr;
+            if (j != INVALID_IDX) {
+                other = dyn[j].get();
+            } else {
+                outside = store_.points.byId(otherId);
+                other = outside.get();
+            }
             if (!other || !other->isActive()) {
                 bid = next;
                 continue;
             }
-            auto it = index.find(other.get());
             float k = (bond.stiffnessOverride > 0.0f) ? bond.stiffnessOverride : m->stiffness;
-            bool intra = it != index.end() && other->objectId == n->objectId && !bond.toAnchor && !bond.isFiber;
+            bool intra = j != INVALID_IDX && other->objectId == n->objectId && !bond.toAnchor && !bond.isFiber;
             if (intra) {
                 if (self < otherId) {
                     PhysIBondGpu ib;
                     ib.a = i;
-                    ib.b = it->second;
+                    ib.b = j;
                     ib.rest = bond.restLength;
                     ib.tension = bond.strength;
                     ib.compression = bond.strength * m->breakCompressionScale;
@@ -267,8 +291,8 @@ void Octree<T>::packPhysicsBonds(const std::vector<std::vector<PhysicsMaterial_>
                 if (bond.isFiber) in.objs[slot].fiberBonds++;
                 else in.objs[slot].jointBonds++;
             }
-            if (it != index.end()) {
-                xb.other = it->second;
+            if (j != INVALID_IDX) {
+                xb.other = j;
                 xb.isFixed = 0u;
             } else {
                 xb.isFixed = 1u;
@@ -276,17 +300,17 @@ void Octree<T>::packPhysicsBonds(const std::vector<std::vector<PhysicsMaterial_>
                 xb.fixedPos[1] = other->position.y();
                 xb.fixedPos[2] = other->position.z();
             }
-            xPer[i].push_back(xb);
+            xTmp.emplace_back(i, xb);
             bid = next;
         }
     }
 
-    in.xoff.resize(N + 1);
-    in.xoff[0] = 0;
-    for (uint32_t i = 0; i < N; ++i) {
-        in.xoff[i + 1] = in.xoff[i] + (uint32_t)xPer[i].size();
-        in.xbonds.insert(in.xbonds.end(), xPer[i].begin(), xPer[i].end());
-    }
+    // CSR by particle: bonds were appended in particle order, so a prefix count places them
+    in.xoff.assign(N + 1, 0);
+    for (const auto& e : xTmp) in.xoff[e.first + 1]++;
+    for (uint32_t i = 0; i < N; ++i) in.xoff[i + 1] += in.xoff[i];
+    in.xbonds.resize(xTmp.size());
+    for (size_t e = 0; e < xTmp.size(); ++e) in.xbonds[e] = xTmp[e].second;
 }
 
 template<typename T>
@@ -342,9 +366,11 @@ void Octree<T>::writeBackPhysics(const std::vector<std::shared_ptr<NodeData>>& d
                                  const std::vector<float>& outPos, const std::vector<float>& outVel) {
     const uint32_t N = (uint32_t)dyn.size();
     const float sleep2 = 1e-6f;
-    std::vector<PhysRelocation_<T>> relocs;
-    relocs.reserve(N);
+    std::vector<PhysRelocation_<T>> relocs(N);
+
+    #pragma omp parallel for schedule(static)
     for (uint32_t i = 0; i < N; ++i) {
+        thread_local std::vector<uint32_t> path;
         const auto& n = dyn[i];
         Vec3 v(outVel[i * 4], outVel[i * 4 + 1], outVel[i * 4 + 2]);
         Vec3 p(outPos[i * 4], outPos[i * 4 + 1], outPos[i * 4 + 2]);
@@ -352,40 +378,53 @@ void Octree<T>::writeBackPhysics(const std::vector<std::shared_ptr<NodeData>>& d
         n->physics.velocity = v;
         n->setSettled(v.squaredNorm() < sleep2);
         if (!p.allFinite()) continue;
-        // a rotated primitive changes its bounds even when its centre stayed put
         if (p == n->physics.lastTreePos && !n->isShape()) continue;
-        std::vector<Vec3> span = {n->physics.lastTreePos, p};
-        int depth = 0;
-        uint32_t start = getHighestCommonNode(span, root_, depth);
-        if (start == INVALID_IDX) {
-            start = root_;
-            depth = 0;
-        }
-        relocs.push_back({n, p, start, depth});
-    }
-    std::sort(relocs.begin(), relocs.end(), [](const PhysRelocation_<T>& a, const PhysRelocation_<T>& b) {
-        return a.start < b.start;
-    });
-
-    size_t g = 0;
-    while (g < relocs.size()) {
-        size_t gEnd = g;
-        while (gEnd < relocs.size() && relocs[gEnd].start == relocs[g].start) ++gEnd;
-        #pragma omp parallel for schedule(dynamic, 16)
-        for (size_t i = g; i < gEnd; ++i) {
-            auto& rc = relocs[i];
-            auto pd = rc.node;
-            if (!removeRecursive(rc.start, pd->getCubeBounds(), pd)) removeRecursive(root_, pd->getCubeBounds(), pd);
-            pd->position = rc.target;
-            bool inserted = insertRecursive(rc.start, pd, rc.depth);
-            if (!inserted) inserted = insertRecursive(root_, pd, 0);
-            if (!inserted) {
-                #pragma omp atomic
-                size--;
+        PhysRelocation_<T>& rc = relocs[i];
+        rc.node = n;
+        rc.target = p;
+        rc.holder = findHolder(n, n->physics.lastTreePos, n->shape.aabb(n->physics.lastTreePos, n->size), &path);
+        const BoundingBox cube = n->shape.aabb(p, n->size);
+        if (rc.holder != INVALID_IDX) {
+            const OctreeNode* hn = nodeAt(rc.holder);
+            rc.inPlace = hn && boxContainsBox(hn->bounds(), cube);
+            if (rc.inPlace && !hn->isLeaf()) {
+                uint8_t oct = getOctant(p, hn->center);
+                if (hn->hasChild(oct) && boxContainsBox(createChildBounds(hn, oct), cube)) rc.inPlace = false;
             }
-            pd->physics.lastTreePos = rc.target;
         }
-        g = gEnd;
+        if (!rc.inPlace) {
+            rc.start = root_;
+            rc.startDepth = 0;
+            for (int d = (int)path.size() - 1; d >= 0; --d) {
+                const OctreeNode* pn = nodeAt(path[d]);
+                if (pn && boxContainsBox(pn->bounds(), cube)) {
+                    rc.start = path[d];
+                    rc.startDepth = d;
+                    break;
+                }
+            }
+        }
+    }
+
+    for (auto& rc : relocs) {
+        if (!rc.node || !rc.inPlace) continue;
+        rc.node->position = rc.target;
+        rc.node->physics.lastTreePos = rc.target;
+        OctreeNode* hn = nodeAt(rc.holder);
+        hn->lodIdx = INVALID_IDX;
+        hn->setDirty(true);
+    }
+    for (auto& rc : relocs) {
+        if (!rc.node || rc.inPlace) continue;
+        const auto& pd = rc.node;
+        if (rc.holder == INVALID_IDX || !removeFromNode(rc.holder, pd)) {
+            removeRecursive(root_, pd->getCubeBounds(), pd);
+        }
+        pd->position = rc.target;
+        pd->physics.lastTreePos = rc.target;
+        bool inserted = insertRecursive(rc.start, pd, rc.startDepth);
+        if (!inserted && rc.start != root_) inserted = insertRecursive(root_, pd, 0);
+        if (!inserted) size--;
     }
 }
 
@@ -508,6 +547,7 @@ template<typename T>
 void Octree<T>::multiStepPhysics(float dt, int steps) {
     TIME_FUNCTION;
     if (root_ == INVALID_IDX || dt <= 0.0f || steps < 1) return;
+    serviceOptimizeRequest();
 
     std::vector<std::vector<PhysicsMaterial_>> fastMats;
     buildPhysicsMaterialTable(fastMats);
@@ -575,9 +615,9 @@ void Octree<T>::multiStepPhysics(float dt, int steps) {
         breakBond(ibondIds[b]);
     }
     applyCutters(dyn, fastMats, fractured);
-    propagateCracks(tensionSeeds, fractured);
+    propagateCracks(tensionSeeds, fractured, dyn);
     for (int objId : fractured) {
-        resolveFracture(objId, fastMats, fastMats.size());
+        resolveFracture(objId, fastMats, fastMats.size(), dyn);
     }
 
     if (pointPoolFragmentation() > 3.0f) store_.points.compact();
@@ -600,7 +640,17 @@ static constexpr size_t MAX_CRACKS_PER_OBJECT = 8;
 static constexpr size_t MAX_CRACK_FRONT = 128;
 
 template<typename T>
-void Octree<T>::propagateCracks(const std::vector<uint32_t>& seeds, std::unordered_set<int>& fractured) {
+static void nodesOfObject(const std::vector<std::shared_ptr<NodeData_<T>>>& dyn, int objectId,
+                          std::vector<std::shared_ptr<NodeData_<T>>>& out) {
+    out.clear();
+    for (const auto& n : dyn) {
+        if (n->objectId == objectId && n->isActive()) out.push_back(n);
+    }
+}
+
+template<typename T>
+void Octree<T>::propagateCracks(const std::vector<uint32_t>& seeds, std::unordered_set<int>& fractured,
+                                const std::vector<std::shared_ptr<NodeData>>& dyn) {
     TIME_FUNCTION;
     for (uint32_t bid : seeds) {
         const Bond_<T>& bond = store_.bonds.arena[bid];
@@ -632,57 +682,70 @@ void Octree<T>::propagateCracks(const std::vector<uint32_t>& seeds, std::unorder
         cracks.push_back(c);
     }
 
+    std::vector<std::shared_ptr<NodeData>> nodes;
     for (auto it = physCracks_.begin(); it != physCracks_.end(); ) {
         int objectId = it->first;
         std::vector<PhysCrack_>& cracks = it->second;
-        std::vector<std::shared_ptr<NodeData>> nodes;
-        collectNodesByObjectId(objectId, nodes);
+        nodesOfObject(dyn, objectId, nodes);
+
+        float maxSize = 0.0f;
+        for (const auto& n : nodes) maxSize = std::max(maxSize, n->size);
+        const float cell = std::max(1.7f * maxSize, 1e-4f);
+        auto cellOf = [&](const Vec3& p) {
+            return std::array<int64_t, 3>{(int64_t)std::floor(p.x() / cell),
+                                          (int64_t)std::floor(p.y() / cell),
+                                          (int64_t)std::floor(p.z() / cell)};
+        };
+        std::unordered_map<std::array<int64_t, 3>, std::vector<uint32_t>, Vec3fHash> bins;
+        bins.reserve(nodes.size());
+        for (uint32_t k = 0; k < nodes.size(); ++k) bins[cellOf(nodes[k]->position)].push_back(k);
+        std::vector<uint32_t> stamp(nodes.size(), 0);
+        uint32_t pass = 0;
+
         for (auto& c : cracks) {
             std::vector<Vec3> next;
             for (int round = 0; round < 3 && !c.front.empty(); ++round) {
                 if (c.front.size() > MAX_CRACK_FRONT) c.front.resize(MAX_CRACK_FRONT);
-                Vec3 lo = c.front.front();
-                Vec3 hi = lo;
-                for (const Vec3& f : c.front) {
-                    lo = lo.cwiseMin(f);
-                    hi = hi.cwiseMax(f);
-                }
                 next.clear();
-                for (const auto& n : nodes) {
-                    float reach = 1.7f * n->size;
-                    if ((n->position.array() < lo.array() - reach).any()) continue;
-                    if ((n->position.array() > hi.array() + reach).any()) continue;
-                    bool near = false;
-                    for (const Vec3& f : c.front) {
-                        if ((n->position - f).squaredNorm() <= reach * reach) {
-                            near = true;
-                            break;
+                ++pass;
+                for (const Vec3& f : c.front) {
+                    const std::array<int64_t, 3> fc = cellOf(f);
+                    for (int dz = -1; dz <= 1; ++dz)
+                    for (int dy = -1; dy <= 1; ++dy)
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        auto bit = bins.find({fc[0] + dx, fc[1] + dy, fc[2] + dz});
+                        if (bit == bins.end()) continue;
+                        for (uint32_t k : bit->second) {
+                            if (stamp[k] == pass) continue;
+                            const auto& n = nodes[k];
+                            float reach = 1.7f * n->size;
+                            if ((n->position - f).squaredNorm() > reach * reach) continue;
+                            stamp[k] = pass;
+                            float sideA = c.normal.dot(n->position - c.origin);
+                            uint32_t selfId = n->id;
+                            for (uint32_t bid = n->physics.bondHead; bid != INVALID_IDX; ) {
+                                Bond_<T>& bond = store_.bonds.arena[bid];
+                                uint32_t nextBid = bond.nextFor(selfId);
+                                if (!bond.live || bond.broken || bond.toAnchor || bond.isFiber) {
+                                    bid = nextBid;
+                                    continue;
+                                }
+                                auto other = store_.points.byId(bond.other(selfId));
+                                if (!other || other->objectId != objectId) {
+                                    bid = nextBid;
+                                    continue;
+                                }
+                                float sideB = c.normal.dot(other->position - c.origin);
+                                bool crosses = (sideA <= 0.0f) != (sideB <= 0.0f);
+                                bool close = std::abs(sideA) < 1.2f * n->size && std::abs(sideB) < 1.2f * n->size;
+                                if (crosses && close) {
+                                    next.push_back(0.5f * (n->position + other->position));
+                                    breakBond(bid);
+                                    fractured.insert(objectId);
+                                }
+                                bid = nextBid;
+                            }
                         }
-                    }
-                    if (!near) continue;
-                    float sideA = c.normal.dot(n->position - c.origin);
-                    uint32_t selfId = n->id;
-                    for (uint32_t bid = n->physics.bondHead; bid != INVALID_IDX; ) {
-                        Bond_<T>& bond = store_.bonds.arena[bid];
-                        uint32_t nextBid = bond.nextFor(selfId);
-                        if (!bond.live || bond.broken || bond.toAnchor || bond.isFiber) {
-                            bid = nextBid;
-                            continue;
-                        }
-                        auto other = store_.points.byId(bond.other(selfId));
-                        if (!other || other->objectId != objectId) {
-                            bid = nextBid;
-                            continue;
-                        }
-                        float sideB = c.normal.dot(other->position - c.origin);
-                        bool crosses = (sideA <= 0.0f) != (sideB <= 0.0f);
-                        bool close = std::abs(sideA) < 1.2f * n->size && std::abs(sideB) < 1.2f * n->size;
-                        if (crosses && close) {
-                            next.push_back(0.5f * (n->position + other->position));
-                            breakBond(bid);
-                            fractured.insert(objectId);
-                        }
-                        bid = nextBid;
                     }
                 }
                 c.front = next;
@@ -699,11 +762,12 @@ void Octree<T>::propagateCracks(const std::vector<uint32_t>& seeds, std::unorder
 
 template<typename T>
 void Octree<T>::resolveFracture(int objectId,
-        const std::vector<std::vector<PhysicsMaterial_>>& fastMats, size_t fastMatsSize) {
+        const std::vector<std::vector<PhysicsMaterial_>>& fastMats, size_t fastMatsSize,
+        const std::vector<std::shared_ptr<NodeData>>& dyn) {
     TIME_FUNCTION;
 
     std::vector<std::shared_ptr<NodeData>> nodes;
-    collectNodesByObjectId(objectId, nodes);
+    nodesOfObject(dyn, objectId, nodes);
     if (nodes.size() < 2) return;
 
     std::unordered_map<uint32_t, uint32_t> component;
@@ -819,7 +883,7 @@ template<typename T>
 void Octree<T>::reassignFragment(const std::vector<std::shared_ptr<NodeData>>& frag, int sourceObjectId) {
     auto src = getObject(sourceObjectId);
     auto dst = getOrCreateObject(-1);
-    if (!dst) return;
+    if (!dst || dst == src) return;
 
     if (src) {
         s_lock srcLock(src->objMutex);

@@ -34,6 +34,10 @@ void main() {
     float vl = length(v);
     if (vl > vmax) v *= vmax / vl;
     if (any(isnan(v)) || any(isinf(v))) v = vec3(0.0);
+    if (any(isnan(x1)) || any(isinf(x1))) {
+        x1 = x0;
+        v = vec3(0.0);
+    }
     velTmp[i] = vec4(v, 0.0);
     pos[i].xyz = x1;
 }
