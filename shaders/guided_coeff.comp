@@ -39,7 +39,8 @@ vec3 guideAtLow(int lx, int ly) {
 }
 
 vec3 normalAtLow(int lx, int ly) {
-    int gi = fullIndexAtLow(lx, ly) * GBUF_STRIDE;
+    int gi = (ly * pc.lowW + lx) * GBUF_STRIDE;
+    if (gi + GBUF_STRIDE > gbuf.length()) return vec3(0.0);
     return vec3(gbuf[gi + 3], gbuf[gi + 4], gbuf[gi + 5]);
 }
 

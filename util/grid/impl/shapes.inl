@@ -67,7 +67,6 @@ static inline Vec3 unpackExtent(uint32_t e) {
                 static_cast<float>(((e >> 20) & 0x3FFu) + 1u));
 }
 
-
 struct Ray {
     Vec3 origin;
     Vec3 dir;
@@ -145,12 +144,9 @@ static inline Eigen::Quaternionf unpackQuat(uint32_t p) {
 ///       BOX ignores every field. OBB: half = half extents in the local frame.
 ///       CAPSULE: half.x = radius, half.y = half segment length, axis = rot * +Y.
 struct Shape {
-    ///@brief Local to world rotation
     Eigen::Quaternionf rot{1.0f, 0.0f, 0.0f, 0.0f};
-    ///@brief Half extents (OBB) or radius / half length (CAPSULE)
     Vec3 half{0.0f, 0.0f, 0.0f};
     ShapeType type = ShapeType::BOX;
-    ///@brief Keeps the byte image deterministic so the render cache hash is stable
     uint8_t pad_[3] = {0, 0, 0};
 
     ///@brief Builds an oriented box
@@ -469,13 +465,9 @@ private:
 
 ///@brief Trailing 16 bytes of GPURenderData. Layout matches shapes.glsl.
 struct GPUShapeWords {
-    ///@brief packQuat() of the rotation, unused for BOX
     uint32_t rot = 0u;
-    ///@brief Capsule radius
     float a = 0.0f;
-    ///@brief Capsule half length
     float b = 0.0f;
-    ///@brief ShapeType as integer
     uint32_t type = 0u;
 };
 
@@ -658,16 +650,21 @@ static inline void greedyBoxes(std::vector<Cell> cells, Fn&& fn) {
 namespace detail {
     template<typename T, typename = void>
     struct has_member_merge : std::false_type {};
+
     template<typename T>
     struct has_member_merge<T, std::void_t<decltype(T::merge(std::declval<const T&>(), std::declval<const T&>()))>>
         : std::true_type {};
+
     template<typename T, typename = void>
     struct has_adl_merge : std::false_type {};
+
     template<typename T>
     struct has_adl_merge<T, std::void_t<decltype(merge(std::declval<const T&>(), std::declval<const T&>()))>>
         : std::true_type {};
+        
     template<typename T, typename = void>
     struct has_eq : std::false_type {};
+
     template<typename T>
     struct has_eq<T, std::void_t<decltype(std::declval<const T&>() == std::declval<const T&>())>>
         : std::true_type {};

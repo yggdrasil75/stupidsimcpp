@@ -28,7 +28,10 @@ layout(std430, binding = 3) readonly buffer CoeffBuf { float coeff[]; };
 layout(std430, binding = 4) readonly buffer GBuf { float gbuf[]; };
 
 vec3 gbufNormalFull(int px, int py) {
-    int gi = (py * pc.width + px) * GBUF_STRIDE;
+    int lx = clamp(int((float(px) + 0.5) * float(pc.lowW) / float(pc.width)),  0, pc.lowW - 1);
+    int ly = clamp(int((float(py) + 0.5) * float(pc.lowH) / float(pc.height)), 0, pc.lowH - 1);
+    int gi = (ly * pc.lowW + lx) * GBUF_STRIDE;
+    if (gi + GBUF_STRIDE > gbuf.length()) return vec3(0.0);
     return vec3(gbuf[gi + 3], gbuf[gi + 4], gbuf[gi + 5]);
 }
 
