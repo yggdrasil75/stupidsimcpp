@@ -18,6 +18,9 @@ constexpr int Dim = 3;
 
 static constexpr uint8_t ACTIVE_BIT = 1 << 0;
 static constexpr uint8_t VISIBLE_BIT = 1 << 1;
+static constexpr uint8_t MOVED_BIT = 1 << 2;
+static constexpr uint8_t IDLE_BIT = 1 << 3;
+static constexpr uint8_t AUTOSTATIC_BIT = 1 << 4;
 static constexpr uint8_t STATIC_BIT = 1 << 7;
 
 static constexpr uint8_t LEAF_BIT = 1 << 0;
@@ -843,7 +846,6 @@ struct NodeData_ {
     std::atomic<uint8_t> flags;
     std::atomic<uint8_t> settledFrames;
     PhysicsState_<T> physics;
-    ///@brief BOX for a plain voxel; OBB / CAPSULE make this one point stand in for many cells
     Shape shape;
 
     NodeData_(const T& data, const Vec3& pos, bool visible, const Eigen::Vector4f& color, float size = 0.01f,
@@ -891,6 +893,15 @@ struct NodeData_ {
     bool isStatic() const {
         return flags.load(std::memory_order_relaxed) & STATIC_BIT;
     }
+    bool isMoved() const {
+        return flags.load(std::memory_order_relaxed) & MOVED_BIT;
+    }
+    bool isIdle() const {
+        return flags.load(std::memory_order_relaxed) & IDLE_BIT;
+    }
+    bool isAutoStatic() const {
+        return flags.load(std::memory_order_relaxed) & AUTOSTATIC_BIT;
+    }
     bool isActiveAndVisible() const {
         return (flags.load(std::memory_order_relaxed) & (ACTIVE_BIT | VISIBLE_BIT)) != (ACTIVE_BIT | VISIBLE_BIT);
     }
@@ -910,7 +921,19 @@ struct NodeData_ {
     }
     void setStatic(bool v) {
         if (v) flags.fetch_or(STATIC_BIT, std::memory_order_relaxed);
-        else flags.fetch_and(~STATIC_BIT, std::memory_order_relaxed);
+        else flags.fetch_and(~(STATIC_BIT | AUTOSTATIC_BIT), std::memory_order_relaxed);
+    }
+    void setMoved(bool v) {
+        if (v) flags.fetch_or(MOVED_BIT, std::memory_order_relaxed);
+        else flags.fetch_and(~MOVED_BIT, std::memory_order_relaxed);
+    }
+    void setIdle(bool v) {
+        if (v) flags.fetch_or(IDLE_BIT, std::memory_order_relaxed);
+        else flags.fetch_and(~IDLE_BIT, std::memory_order_relaxed);
+    }
+    void setAutoStatic(bool v) {
+        if (v) flags.fetch_or(STATIC_BIT | AUTOSTATIC_BIT, std::memory_order_relaxed);
+        else flags.fetch_and(~(STATIC_BIT | AUTOSTATIC_BIT), std::memory_order_relaxed);
     }
     void setSettled(bool asleep) {
         if (!asleep) {
@@ -927,10 +950,10 @@ struct NodeData_ {
     }
 
     bool isShape() const {
-        return !shape.isBox();
+        return !shape.isUnitCube();
     }
 
-    ///@brief World AABB of the point: the cube for BOX, the shape's bounds otherwise
+    ///@brief World AABB of the point
     BoundingBox getCubeBounds() const {
         return shape.aabb(position, size);
     }
@@ -948,7 +971,7 @@ struct NodeData_ {
 
     ///@brief Number of size-sized cells this point represents
     size_t cellCount() const {
-        return isShape() ? shape.cellCount(position, size) : 1;
+        return shape.cellCount(position, size);
     }
 };
 

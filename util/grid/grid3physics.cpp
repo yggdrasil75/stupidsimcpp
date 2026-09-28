@@ -69,19 +69,20 @@ void Octree<T>::collectStaticVoxels(const std::vector<std::vector<PhysicsMateria
             out.push_back(pt->position.y());
             out.push_back(pt->position.z());
             out.push_back(pt->size);
-            uint32_t rot = sh.isBox() ? 0u : packQuat(sh.rot);
+            uint32_t rot = packQuat(sh.rot);
             uint32_t ty = static_cast<uint32_t>(sh.type);
             float rotf = 0.0f;
             float tyf = 0.0f;
             std::memcpy(&rotf, &rot, 4);
             std::memcpy(&tyf, &ty, 4);
+            const Vec3 hw = sh.halfWorld(pt->size);
             out.push_back(rotf);
-            out.push_back(sh.type == ShapeType::CAPSULE ? sh.half.x() : 0.0f);
-            out.push_back(sh.type == ShapeType::CAPSULE ? sh.half.y() : 0.0f);
+            out.push_back(sh.isCapsule() ? sh.half.x() : 0.0f);
+            out.push_back(sh.isCapsule() ? sh.half.y() : 0.0f);
             out.push_back(tyf);
-            out.push_back(sh.type == ShapeType::OBB ? sh.half.x() : 0.0f);
-            out.push_back(sh.type == ShapeType::OBB ? sh.half.y() : 0.0f);
-            out.push_back(sh.type == ShapeType::OBB ? sh.half.z() : 0.0f);
+            out.push_back(sh.isCapsule() ? 0.0f : hw.x());
+            out.push_back(sh.isCapsule() ? 0.0f : hw.y());
+            out.push_back(sh.isCapsule() ? 0.0f : hw.z());
             out.push_back(0.0f);
             minSize = std::min(minSize, pt->size);
         }
@@ -378,7 +379,7 @@ void Octree<T>::writeBackPhysics(const std::vector<std::shared_ptr<NodeData>>& d
         n->physics.velocity = v;
         n->setSettled(v.squaredNorm() < sleep2);
         if (!p.allFinite()) continue;
-        if (p == n->physics.lastTreePos && !n->isShape()) continue;
+        if (p == n->physics.lastTreePos && (!n->isShape() || n->shape.isSphere())) continue;
         PhysRelocation_<T>& rc = relocs[i];
         rc.node = n;
         rc.target = p;
@@ -410,6 +411,7 @@ void Octree<T>::writeBackPhysics(const std::vector<std::shared_ptr<NodeData>>& d
         if (!rc.node || !rc.inPlace) continue;
         rc.node->position = rc.target;
         rc.node->physics.lastTreePos = rc.target;
+        rc.node->setMoved(true);
         OctreeNode* hn = nodeAt(rc.holder);
         hn->lodIdx = INVALID_IDX;
         hn->setDirty(true);
@@ -422,6 +424,7 @@ void Octree<T>::writeBackPhysics(const std::vector<std::shared_ptr<NodeData>>& d
         }
         pd->position = rc.target;
         pd->physics.lastTreePos = rc.target;
+        pd->setMoved(true);
         bool inserted = insertRecursive(rc.start, pd, rc.startDepth);
         if (!inserted && rc.start != root_) inserted = insertRecursive(root_, pd, 0);
         if (!inserted) size--;

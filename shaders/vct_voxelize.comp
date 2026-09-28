@@ -62,6 +62,7 @@ void main() {
 
     vec3 bmin = ptBoundsMin(pt);
     vec3 bmax = ptBoundsMax(pt);
+    const bool exact = primIsAxisAligned(pt);
 
     ivec3 cmin = ivec3(floor((bmin - vp.volMin) * vp.invVoxelSize));
     ivec3 cmax = ivec3(floor((bmax - vp.volMin) * vp.invVoxelSize));
@@ -74,7 +75,7 @@ void main() {
         for (int y = cmin.y; y <= cmax.y; ++y) {
             for (int x = cmin.x; x <= cmax.x; ++x) {
                 ivec3 c = ivec3(x, y, z);
-                if (pt.shapeType != SHAPE_BOX) {
+                if (!exact) {
                     vec3 wc = vp.volMin + (vec3(c) + 0.5) * vp.voxelSize;
                     if (primSdf(wc, pt) > 0.5 * vp.voxelSize) continue;
                 }

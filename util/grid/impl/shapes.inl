@@ -84,9 +84,8 @@ struct Ray {
 
 ///@brief Geometry a grid point can take beyond a single cube
 enum class ShapeType : uint8_t {
-    BOX = 0,
-    OBB = 1,
-    CAPSULE = 2
+    OBB = 0,
+    CAPSULE = 1
 };
 
 ///@brief Integer lattice coordinate
@@ -102,6 +101,7 @@ static inline int64_t cellRound(float v) {
 ///@return Packed representation matching unpackQuat in shapes.glsl
 static inline uint32_t packQuat(const Eigen::Quaternionf& qin) {
     Eigen::Quaternionf q = qin.normalized();
+    if (std::abs(std::abs(q.w()) - 1.0f) < 1e-6f) return 0u;
     float c[4] = {q.x(), q.y(), q.z(), q.w()};
     int big = 0;
     for (int i = 1; i < 4; ++i) {
@@ -125,6 +125,7 @@ static inline uint32_t packQuat(const Eigen::Quaternionf& qin) {
 ///@param p Packed quaternion
 ///@return Unit quaternion
 static inline Eigen::Quaternionf unpackQuat(uint32_t p) {
+    if (p == 0u) return Eigen::Quaternionf::Identity();
     int big = static_cast<int>(p & 3u);
     float c[4];
     float sum = 0.0f;
@@ -145,19 +146,36 @@ static inline Eigen::Quaternionf unpackQuat(uint32_t p) {
 ///       CAPSULE: half.x = radius, half.y = half segment length, axis = rot * +Y.
 struct Shape {
     Eigen::Quaternionf rot{1.0f, 0.0f, 0.0f, 0.0f};
-    Vec3 half{0.0f, 0.0f, 0.0f};
-    ShapeType type = ShapeType::BOX;
+    Vec3 half{0.5f, 0.5f, 0.5f};
+    ShapeType type = ShapeType::OBB;
     uint8_t pad_[3] = {0, 0, 0};
 
     ///@brief Builds an oriented box
     ///@param q Local to world rotation
-    ///@param halfExtents Half extents in the local frame
-    static Shape obb(const Eigen::Quaternionf& q, const Vec3& halfExtents) {
+    ///@param halfCells Half extents in cells
+    static Shape obb(const Eigen::Quaternionf& q, const Vec3& halfCells) {
         Shape s;
         s.type = ShapeType::OBB;
         s.rot = q.normalized();
-        s.half = halfExtents;
+        s.half = halfCells;
         return s;
+    }
+
+    ///@brief Builds an oriented box from world half extents
+    ///@param q Local to world rotation
+    ///@param halfWorld Half extents in world units
+    ///@param size Voxel size the box is measured in
+    static Shape obbWorld(const Eigen::Quaternionf& q, const Vec3& halfWorld, float size) {
+        return obb(q, halfWorld / std::max(size, 1e-12f));
+    }
+
+    ///@brief Axis-aligned box of whole cells
+    ///@param nx Cells along x
+    ///@param ny Cells along y
+    ///@param nz Cells along z
+    static Shape box(uint32_t nx, uint32_t ny, uint32_t nz) {
+        return obb(Eigen::Quaternionf::Identity(),
+                   Vec3(0.5f * float(std::max(nx, 1u)), 0.5f * float(std::max(ny, 1u)), 0.5f * float(std::max(nz, 1u))));
     }
 
     ///@brief Builds a capsule around the local Y axis
@@ -170,6 +188,12 @@ struct Shape {
         s.rot = q.normalized();
         s.half = Vec3(radius, halfLength, 0.0f);
         return s;
+    }
+
+    ///@brief Sphere as a zero-length capsule
+    ///@param radius Sphere radius
+    static Shape sphere(float radius) {
+        return capsule(Eigen::Quaternionf::Identity(), radius, 0.0f);
     }
 
     ///@brief Builds a capsule between two world space segment endpoints
@@ -186,8 +210,46 @@ struct Shape {
         return capsule(q, radius, 0.5f * len);
     }
 
-    bool isBox() const {
-        return type == ShapeType::BOX;
+    bool isCapsule() const {
+        return type == ShapeType::CAPSULE;
+    }
+
+    ///@brief Capsule with no segment
+    bool isSphere() const {
+        return type == ShapeType::CAPSULE && half.y() <= 0.0f;
+    }
+
+    ///@brief Box whose local frame is the world frame
+    bool isAxisAlignedBox() const {
+        return type == ShapeType::OBB && identityRot();
+    }
+
+    ///@brief A single plain voxel: axis-aligned, one cell on every axis
+    bool isUnitCube() const {
+        return isAxisAlignedBox() && (half - Vec3::Constant(0.5f)).cwiseAbs().maxCoeff() < LATTICE_EPS;
+    }
+
+    ///@brief Cells the box spans on each axis (1 for capsules)
+    Vec3 cellSpan() const {
+        if (type != ShapeType::OBB) return Vec3::Ones();
+        return Vec3(float(std::max<int64_t>(1, cellRound(2.0f * half.x()))),
+                    float(std::max<int64_t>(1, cellRound(2.0f * half.y()))),
+                    float(std::max<int64_t>(1, cellRound(2.0f * half.z()))));
+    }
+
+    ///@brief World half extents of the box
+    ///@param size Voxel size
+    Vec3 halfWorld(float size) const {
+        return type == ShapeType::OBB ? Vec3(half * size) : half;
+    }
+
+    ///@brief The same shape for a voxel of a different size. Boxes are in cells and keep
+    ///       their cell count; capsules are in world units and are scaled.
+    ///@param scale New size divided by old size
+    Shape rescaled(float scale) const {
+        Shape s = *this;
+        if (type == ShapeType::CAPSULE) s.half *= scale;
+        return s;
     }
 
     ///@brief True when the rotation is (up to sign) the identity
@@ -225,29 +287,21 @@ struct Shape {
     ///@brief Signed distance from a world point
     ///@param p World point
     ///@param c Shape centre
-    ///@param size Voxel size, used by BOX
+    ///@param size Voxel size
     float sdf(const Vec3& p, const Vec3& c, float size) const {
-        switch (type) {
-            case ShapeType::OBB: {
-                Vec3 q = toLocal(p, c).cwiseAbs() - half;
-                return q.cwiseMax(0.0f).norm() + std::min(q.maxCoeff(), 0.0f);
-            }
-            case ShapeType::CAPSULE: {
-                Vec3 l = toLocal(p, c);
-                l.y() -= std::clamp(l.y(), -half.y(), half.y());
-                return l.norm() - half.x();
-            }
-            default: {
-                Vec3 q = (p - c).cwiseAbs() - Vec3::Constant(0.5f * size);
-                return q.cwiseMax(0.0f).norm() + std::min(q.maxCoeff(), 0.0f);
-            }
+        if (type == ShapeType::CAPSULE) {
+            Vec3 l = toLocal(p, c);
+            l.y() -= std::clamp(l.y(), -half.y(), half.y());
+            return l.norm() - half.x();
         }
+        Vec3 q = (identityRot() ? Vec3(p - c) : toLocal(p, c)).cwiseAbs() - half * size;
+        return q.cwiseMax(0.0f).norm() + std::min(q.maxCoeff(), 0.0f);
     }
 
     ///@brief Whether a world point is inside the shape
     ///@param p World point
     ///@param c Shape centre
-    ///@param size Voxel size, used by BOX
+    ///@param size Voxel size
     ///@param tol Extra distance still counted as inside
     bool contains(const Vec3& p, const Vec3& c, float size, float tol = 0.0f) const {
         return sdf(p, c, size) <= tol;
@@ -255,44 +309,33 @@ struct Shape {
 
     ///@brief World axis-aligned bounds
     ///@param c Shape centre
-    ///@param size Voxel size, used by BOX
+    ///@param size Voxel size
     BoundingBox aabb(const Vec3& c, float size) const {
-        switch (type) {
-            case ShapeType::OBB: {
-                Vec3 r = rot.toRotationMatrix().cwiseAbs() * half;
-                return {c - r, c + r};
-            }
-            case ShapeType::CAPSULE: {
-                Vec3 e = axis() * half.y();
-                Vec3 r = e.cwiseAbs() + Vec3::Constant(half.x());
-                return {c - r, c + r};
-            }
-            default: {
-                Vec3 h = Vec3::Constant(0.5f * size);
-                return {c - h, c + h};
-            }
+        if (type == ShapeType::CAPSULE) {
+            Vec3 e = axis() * half.y();
+            Vec3 r = e.cwiseAbs() + Vec3::Constant(half.x());
+            return {c - r, c + r};
         }
+        Vec3 h = half * size;
+        Vec3 r = identityRot() ? h : Vec3(rot.toRotationMatrix().cwiseAbs() * h);
+        return {c - r, c + r};
     }
 
     ///@brief Enclosed volume in world units
-    ///@param size Voxel size, used by BOX
+    ///@param size Voxel size
     float volume(float size) const {
-        switch (type) {
-            case ShapeType::OBB:
-                return 8.0f * half.x() * half.y() * half.z();
-            case ShapeType::CAPSULE: {
-                const float r = half.x();
-                return static_cast<float>(M_PI) * r * r * (2.0f * half.y() + 4.0f / 3.0f * r);
-            }
-            default:
-                return size * size * size;
+        if (type == ShapeType::CAPSULE) {
+            const float r = half.x();
+            return static_cast<float>(M_PI) * r * r * (2.0f * half.y() + 4.0f / 3.0f * r);
         }
+        Vec3 h = half * size;
+        return 8.0f * h.x() * h.y() * h.z();
     }
 
     ///@brief Ray hit against the shape
     ///@param ray Query ray
     ///@param c Shape centre
-    ///@param size Voxel size, used by BOX
+    ///@param size Voxel size
     ///@param t Receives the entry distance, or the exit distance when the origin is inside
     ///@param normal Receives the surface normal at t, flipped to face the ray when inside
     ///@param tExit Optionally receives the exit distance
@@ -311,14 +354,15 @@ struct Shape {
                 if (inside) n = -n;
             }
         } else {
-            Vec3 h = isBox() ? Vec3::Constant(0.5f * size) : half;
-            Vec3 o = isBox() ? Vec3(ray.origin - c) : toLocal(ray.origin, c);
-            Vec3 d = isBox() ? ray.dir : Vec3(rot.conjugate() * ray.dir);
+            const bool aligned = identityRot();
+            Vec3 h = half * size;
+            Vec3 o = aligned ? Vec3(ray.origin - c) : toLocal(ray.origin, c);
+            Vec3 d = aligned ? ray.dir : Vec3(rot.conjugate() * ray.dir);
             ok = raySlab(o, d, h, tIn, tOut, n);
             if (ok) {
                 bool inside = tIn < 0.0f;
                 t = inside ? tOut : tIn;
-                if (!isBox()) n = rot * n;
+                if (!aligned) n = rot * n;
             }
         }
         if (tExit) *tExit = ok ? tOut : 0.0f;
@@ -335,16 +379,20 @@ struct Shape {
     template<typename Fn>
     void forEachCell(const Vec3& c, float cell, Fn&& fn) const {
         if (cell <= 0.0f) return;
-        if (isBox()) {
+        if (isSphere() && half.x() <= 0.5f * cell * (1.0f + LATTICE_EPS)) {
             fn(c);
             return;
         }
-        if (type == ShapeType::OBB && identityRot()) {
-            Vec3 origin = c - half + Vec3::Constant(0.5f * cell);
-            Vec3 cnt = half * 2.0f / cell;
-            int64_t nx = std::max<int64_t>(1, cellRound(cnt.x()));
-            int64_t ny = std::max<int64_t>(1, cellRound(cnt.y()));
-            int64_t nz = std::max<int64_t>(1, cellRound(cnt.z()));
+        if (isAxisAlignedBox()) {
+            Vec3 cnt = cellSpan();
+            int64_t nx = int64_t(cnt.x());
+            int64_t ny = int64_t(cnt.y());
+            int64_t nz = int64_t(cnt.z());
+            if (nx == 1 && ny == 1 && nz == 1) {
+                fn(c);
+                return;
+            }
+            Vec3 origin = c - cnt * (0.5f * cell) + Vec3::Constant(0.5f * cell);
             for (int64_t z = 0; z < nz; ++z) {
                 for (int64_t y = 0; y < ny; ++y) {
                     for (int64_t x = 0; x < nx; ++x) {
@@ -473,20 +521,15 @@ struct GPUShapeWords {
 
 ///@brief Converts a Shape into its GPU words. OBB half extents travel as cell counts in extent.
 ///@param s Shape to pack
-///@param size Voxel size the OBB counts are relative to
 ///@param extent Extent word to rewrite for OBB, flag bits preserved
-static inline GPUShapeWords packShapeWords(const Shape& s, float size, uint32_t& extent) {
+static inline GPUShapeWords packShapeWords(const Shape& s, uint32_t& extent) {
     GPUShapeWords w;
     w.type = static_cast<uint32_t>(s.type);
-    if (s.isBox()) return w;
     w.rot = packQuat(s.rot);
     if (s.type == ShapeType::OBB) {
-        Vec3 cnt = s.half * 2.0f / std::max(size, 1e-12f);
+        Vec3 cnt = s.cellSpan();
         uint32_t flags = extent & (EXTENT_STATIC_BIT | EXTENT_REUSE_BIT);
-        uint32_t nx = uint32_t(std::max<int64_t>(1, cellRound(cnt.x())));
-        uint32_t ny = uint32_t(std::max<int64_t>(1, cellRound(cnt.y())));
-        uint32_t nz = uint32_t(std::max<int64_t>(1, cellRound(cnt.z())));
-        extent = packExtent(nx, ny, nz) | flags;
+        extent = packExtent(uint32_t(cnt.x()), uint32_t(cnt.y()), uint32_t(cnt.z())) | flags;
     } else {
         w.a = s.half.x();
         w.b = s.half.y();
@@ -594,7 +637,7 @@ static inline bool fitBoxExact(const std::vector<Vec3>& pts, float cell, Shape& 
         if (!seen.emplace(c, 1).second) return false;
     }
     outCenter = (lo + hi) * 0.5f;
-    out = Shape::obb(Eigen::Quaternionf::Identity(), cnt * (0.5f * cell));
+    out = Shape::box(uint32_t(cnt.x()), uint32_t(cnt.y()), uint32_t(cnt.z()));
     return true;
 }
 

@@ -194,8 +194,12 @@ int main(int argc, char** argv) {
 
     oct.setObjectFracture(OID::BONE_A, 1e9f, 1.0f, 1);
     oct.setObjectFracture(OID::BONE_B, 1e9f, 1.0f, 1);
-    for (auto& wp : oct.getWeakNodesByObjectId(OID::BONE_A))
-        if (auto sp = wp.lock()) { sp->physics.velocity.setZero(); sp->setStatic(true); }
+    for (auto& wp : oct.getWeakNodesByObjectId(OID::BONE_A)) {
+        if (auto sp = wp.lock()) {
+            sp->physics.velocity.setZero();
+            sp->setStatic(true);
+        }
+    }
 
     auto muscleObj = oct.getOrCreateObject(OID::BONE_B);
     std::vector<NodePtr> aNodes, bNodes;

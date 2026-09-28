@@ -193,6 +193,7 @@ private:
             readVal(in, pt->physics.density);
             readVal(in, pt->physics.pressure);
             readVal(in, pt->shape);
+            sanitizeShape(pt->shape);
             pt->physics.bondsBuilt = false;
             pts.push_back(pt);
         }
@@ -2076,6 +2077,7 @@ public:
         Eigen::Vector4f color4(color.x(), color.y(), color.z(), std::clamp(1.0f - transmission, 0.0f, 1.0f));
 
         auto pointData = std::make_shared<NodeData>(data, pos, visible, color4, size, active, objectId, rIdx, pIdx, bType == BodyType::STATIC);
+        applyBodyShape(*pointData, bType);
         
         Vec3 relPos = pos - obj->centerPosition;
         {
@@ -2097,6 +2099,21 @@ public:
         return false;
     }
     
+    ///@brief Fluid voxels are spheres (zero-length capsules) so they render as droplets; every
+    ///       other body type keeps the shape the point already has
+    ///@param node Point to reshape
+    ///@param bType Body type the point is being given
+    static void applyBodyShape(NodeData& node, BodyType bType) {
+        if (bType == BodyType::FLUID && !node.isShape()) node.shape = Shape::sphere(0.5f * node.size);
+    }
+
+    ///@brief Replaces an unusable shape read from disk with a plain voxel
+    static void sanitizeShape(Shape& sh) {
+        if (sh.type != ShapeType::OBB && sh.type != ShapeType::CAPSULE) sh = Shape{};
+        if (sh.type == ShapeType::OBB && sh.half.minCoeff() <= 0.0f) sh = Shape{};
+        if (sh.type == ShapeType::CAPSULE && sh.half.x() <= 0.0f) sh = Shape{};
+    }
+
     ///@brief Creates a bond in the central arena and links it into both endpoints
     uint32_t createBond(const std::shared_ptr<NodeData>& a, const std::shared_ptr<NodeData>& b,
                         float restLen, float strength, bool toAnchor = false,
@@ -2459,6 +2476,7 @@ public:
             readVal(in, pmat);
             Shape shape;
             readVal(in, shape);
+            sanitizeShape(shape);
 
             uint32_t rIdx = getOrAddRenderMaterial(rmat);
             uint16_t pIdx = obj->getOrAddPhysicsMaterial(pmat);
@@ -2471,6 +2489,7 @@ public:
             auto pointData = std::make_shared<NodeData>(
                 T{}, worldPos, visible, color, size, active, assignedId, rIdx, pIdx, staticb);
             pointData->shape = shape;
+            applyBodyShape(*pointData, pmat.type);
             {
                 u_lock lock(obj->objMutex);
                 obj->relativeVoxels.push_back({relPos, pointData->halfExtent()});
@@ -2662,7 +2681,7 @@ public:
                         BodyType bType = BodyType::STATIC, float massPerVoxel = 1.0f, float voxel = -1.0f,
                         float roughness = 1.0f, float metallic = 0.0f, float transmission = 0.0f) {
         if (voxel <= 0.0f) voxel = minVoxelSize_;
-        if (shape.isBox()) return -1;
+        if (shape.isUnitCube()) return -1;
         auto obj = getOrCreateObject(objectId);
         int id = obj->id;
         float mass = massPerVoxel * static_cast<float>(std::max<size_t>(1, shape.cellCount(center, voxel)));
@@ -2710,7 +2729,8 @@ public:
                   int objectId = -1, BodyType bType = BodyType::STATIC, float massPerVoxel = 1.0f,
                   float roughness = 1.0f, float metallic = 0.0f, float transmission = 0.0f) {
         if (halfExtents.minCoeff() <= 0.0f) return -1;
-        return insertPrimitive(center, Shape::obb(rot, halfExtents), color, objectId, bType, massPerVoxel, voxel,
+        if (voxel <= 0.0f) voxel = minVoxelSize_;
+        return insertPrimitive(center, Shape::obbWorld(rot, halfExtents, voxel), color, objectId, bType, massPerVoxel, voxel,
                                roughness, metallic, transmission);
     }
 
@@ -2734,6 +2754,7 @@ public:
         removeRecursive(root_, old, node);
         insertRecursive(root_, node, 0);
         node->physics.lastTreePos = center;
+        node->setMoved(true);
         if (auto obj = getObject(node->objectId)) {
             u_lock lock(obj->objMutex);
             for (auto& rv : obj->relativeVoxels) {
@@ -2964,6 +2985,7 @@ public:
         for (auto& n : nodes) {
             Vec3 offset = n->position - pivot;
             n->position = pivot + (rotation * offset);
+            n->setMoved(true);
         }
 
         BoundingBox newBounds = getNodesBounds(nodes);
@@ -3021,6 +3043,7 @@ public:
                 auto childNode = std::make_shared<NodeData>(*n);
                 childNode->position = newPos;
                 childNode->size = newSize;
+                childNode->shape = n->shape.rescaled(0.5f);
 
                 if (insertRecursive(oldStart, childNode, oldDepth)) {
                     added++;
@@ -3090,6 +3113,7 @@ public:
 
             Eigen::Vector4f color4(color.x(), color.y(), color.z(), std::clamp(1.0f - transmission, 0.0f, 1.0f));
             auto pointData = std::make_shared<NodeData>(data, pos, visible, color4, size, active, objectId, rIdx, pIdx, bType == BodyType::STATIC);
+            applyBodyShape(*pointData, bType);
             
             Vec3 relPos = pos - obj->centerPosition;
             {
@@ -3415,6 +3439,8 @@ public:
             n->physMatIdx = newIdx;
             n->setStatic(newType == BodyType::STATIC);
             n->setSettled(false);
+            n->setIdle(false);
+            applyBodyShape(*n, newType);
         }
         physicsCollidersDirty_.store(true);
     }
@@ -3474,6 +3500,7 @@ public:
         
         pointData->data = newData;
         pointData->position = newPos;
+        pointData->setMoved(true);
         pointData->setVisible(newVisible);
         
         if (newColor != Vec3(1.0f, 1.0f, 1.0f)) {
@@ -3509,6 +3536,7 @@ public:
 
         removeRecursive(root_, pointData->getCubeBounds(), pointData);
         pointData->position = newPos;
+        pointData->setMoved(true);
 
         if (insertRecursive(root_, pointData, 0)) {
             return true;
@@ -3524,6 +3552,7 @@ public:
 
             removeRecursive(root_, pointData->getCubeBounds(), pointData);
             pointData->position = newPos;
+            pointData->setMoved(true);
 
             if (insertRecursive(root_, pointData, 0)) {
                 return;
@@ -3543,6 +3572,7 @@ public:
             auto newPointData = std::make_shared<NodeData>(*pointData);
             newPointData->position = newPos;
             newPointData->data = newData;
+            newPointData->setMoved(true);
             
             if (!insertRecursive(root_, newPointData, 0)) {
                 size--;
@@ -3999,8 +4029,8 @@ public:
     void reassignFragment(const std::vector<std::shared_ptr<NodeData>>& frag, int sourceObjectId);
 
     ///@brief Merges blobs of idle voxels (static, settled, unbonded) into one primitive each:
-    ///       a capsule when one covers the blob exactly, else a box (a bigger voxel when cubic,
-    ///       an axis-aligned OBB otherwise), else the largest boxes a greedy carve finds.
+    ///       a capsule when one covers the blob exactly, else an axis-aligned box of whole
+    ///       cells, else the largest boxes a greedy carve finds.
     ///       Every replacement voxelises back to exactly the cells it replaced, see explodeShape.
     ///@return Number of voxels removed by merging
     size_t mergeIdleShapes() {
@@ -4021,9 +4051,8 @@ public:
     }
 
 private:
-    ///@brief Off by default: the worker thread's timed optimize() is not synchronised with
-    ///       physics or rendering, and merging moves points. Call mergeIdleShapes() yourself.
-    bool autoMergeShapes_ = false;
+    ///@brief optimize() merges idle static voxels into primitives
+    bool autoMergeShapes_ = true;
     size_t minMergeCells_ = 8;
     float minVoxelSize_ = 0.01f;
 
@@ -4053,24 +4082,24 @@ private:
     ///@param shape Primitive geometry
     ///@return False, with nothing changed, when the primitive cannot be placed in the tree
     bool replaceWithPrimitive(const std::vector<std::shared_ptr<NodeData>>& voxels, const Vec3& center,
-                              float size, const Shape& shape) {
+                              float cell, const Shape& shape) {
         auto prim = std::make_shared<NodeData>(*voxels[0]);
         prim->id = INVALID_IDX;
         prim->position = center;
-        prim->size = size;
+        prim->size = cell;
         prim->shape = shape;
         prim->physics.bondHead = INVALID_IDX;
         for (size_t i = 1; i < voxels.size(); ++i) {
             prim->data = mergePayload<T>(prim->data, voxels[i]->data);
         }
         if (!insertRecursive(root_, prim, 0)) return false;
-        size++;
+        this->size++;
         if (auto obj = getObject(prim->objectId)) {
             u_lock lock(obj->objMutex);
             obj->relativeVoxels.push_back({center - obj->centerPosition, prim->halfExtent()});
         }
         for (const auto& v : voxels) {
-            if (removeRecursive(root_, v->getCubeBounds(), v)) size--;
+            if (removeRecursive(root_, v->getCubeBounds(), v)) this->size--;
         }
         return true;
     }
@@ -4088,12 +4117,15 @@ private:
         // (position modulo cell, quantised to LATTICE_EPS) is part of the group key
         using GroupKey = std::tuple<int, int, uint32_t, uint16_t, float, float, float, float, float, bool, Cell>;
         std::map<GroupKey, std::vector<std::shared_ptr<NodeData>>> groups;
+        const int64_t phaseBuckets = int64_t(std::llround(1.0f / (2.0f * LATTICE_EPS)));
+        auto phaseOf = [&](float r) {
+            float frac = r - std::floor(r);
+            return int64_t(std::llround(frac / (2.0f * LATTICE_EPS))) % phaseBuckets;
+        };
         for (auto& pt : pts) {
             if (!isIdleVoxel(pt)) continue;
             Vec3 r = pt->position / pt->size;
-            Vec3 frac = r - r.array().round().matrix();
-            Cell phase{cellRound(frac.x() / (2.0f * LATTICE_EPS)), cellRound(frac.y() / (2.0f * LATTICE_EPS)),
-                       cellRound(frac.z() / (2.0f * LATTICE_EPS))};
+            Cell phase{phaseOf(r.x()), phaseOf(r.y()), phaseOf(r.z())};
             groups[GroupKey{pt->objectId, pt->subObjectId, pt->renderMatIdx, pt->physMatIdx, pt->size,
                             pt->color.x(), pt->color.y(), pt->color.z(), pt->color.w(), pt->isVisible(), phase}].push_back(pt);
         }
@@ -4102,12 +4134,13 @@ private:
         for (auto& [key, group] : groups) {
             if (group.size() < 2) continue;
             const float cell = group[0]->size;
+            const Vec3 anchor = group[0]->position;
             std::unordered_map<Cell, uint32_t, Vec3i64Hash> lattice;
             lattice.reserve(group.size() * 2);
             std::vector<Cell> coords(group.size());
             std::vector<char> onLattice(group.size(), 0);
             for (uint32_t i = 0; i < group.size(); ++i) {
-                Vec3 r = group[i]->position / cell;
+                Vec3 r = (group[i]->position - anchor) / cell;
                 coords[i] = {cellRound(r.x()), cellRound(r.y()), cellRound(r.z())};
                 if (lattice.emplace(coords[i], i).second) {
                     onLattice[i] = 1;
@@ -4158,15 +4191,7 @@ private:
                     return c;
                 };
                 auto emitBox = [&](const std::vector<uint32_t>& ids, const Shape& box, const Vec3& center) {
-                    Vec3 cnt = box.half * 2.0f / cell;
-                    int64_t nx = cellRound(cnt.x());
-                    bool cubic = nx == cellRound(cnt.y()) && nx == cellRound(cnt.z());
-                    bool ok = false;
-                    if (cubic) {
-                        ok = replaceWithPrimitive(voxelsOf(ids), center, cell * float(nx), Shape{});
-                    } else {
-                        ok = replaceWithPrimitive(voxelsOf(ids), center, cell, box);
-                    }
+                    bool ok = replaceWithPrimitive(voxelsOf(ids), center, cell, box);
                     if (ok) removed += ids.size() - 1;
                     return ok;
                 };
@@ -4212,8 +4237,51 @@ public:
         if (optimizeRequested_.exchange(false, std::memory_order_relaxed)) optimize();
     }
 
+    ///@brief Static/dynamic bookkeeping from the per-point moved flags. A point that has not
+    ///       moved across two consecutive optimize() passes is made static; any movement in an
+    ///       object drops the whole object out of static. Static points are the ones the
+    ///       aggressive passes (primitive merging, reuse-eligible lighting) may touch.
+    ///@return Number of points whose static flag changed
+    size_t refreshStaticFlags() {
+        if (root_ == INVALID_IDX) return 0;
+        std::vector<std::shared_ptr<NodeData>> pts;
+        collectSubtreePoints(root_, pts);
+        std::unordered_map<int, bool> objectMoved;
+        for (const auto& pt : pts) {
+            if (!pt || pt->objectId < 0) continue;
+            objectMoved[pt->objectId] = objectMoved[pt->objectId] || pt->isMoved();
+        }
+        size_t changed = 0;
+        for (const auto& pt : pts) {
+            if (!pt) continue;
+            bool moved = pt->isMoved();
+            if (pt->objectId >= 0) moved = objectMoved[pt->objectId];
+            pt->setMoved(false);
+            if (moved) {
+                pt->setIdle(false);
+                if (pt->isAutoStatic()) {
+                    pt->setAutoStatic(false);
+                    pt->setSettled(false);
+                    ++changed;
+                }
+                continue;
+            }
+            if (!pt->isIdle()) {
+                pt->setIdle(true);
+                continue;
+            }
+            if (pt->isStatic()) continue;
+            pt->setAutoStatic(true);
+            pt->physics.velocity.setZero();
+            ++changed;
+        }
+        if (changed) physicsCollidersDirty_.store(true);
+        return changed;
+    }
+
     void optimize() {
         if (root_ != INVALID_IDX) {
+            refreshStaticFlags();
             if (autoMergeShapes_) mergeIdleShapes();
             optimizeRecursive(root_);
             generateLODs();
@@ -4222,11 +4290,74 @@ public:
         if (bondArenaFragmentation() > 1.5f) compactBonds();
     }
 
+    ///@brief How well the point set is compacted: how many primitives stand in for how many
+    ///       cells, and which of them the static / moved bookkeeping has classified
+    struct CompactionStats {
+        size_t points = 0;
+        size_t unitCubes = 0;
+        size_t spheres = 0;
+        size_t boxes = 0;
+        size_t capsules = 0;
+        size_t cellsInBoxes = 0;
+        size_t cellsInCapsules = 0;
+        size_t cells = 0;
+        size_t staticPoints = 0;
+        size_t autoStaticPoints = 0;
+        size_t movedPoints = 0;
+        size_t idlePoints = 0;
+        size_t mergeCandidates = 0;
+
+        double ratio() const {
+            return points > 0 ? double(cells) / double(points) : 0.0;
+        }
+    };
+
+    ///@brief Walks every loaded point and tallies its shape and flags
+    CompactionStats compactionStats() const {
+        CompactionStats st;
+        if (root_ == INVALID_IDX) return st;
+        std::vector<uint32_t> stack{root_};
+        while (!stack.empty()) {
+            uint32_t idx = stack.back();
+            stack.pop_back();
+            const OctreeNode* node = nodeAt(idx);
+            if (!node || !node->isLoaded()) continue;
+            for (const auto& pt : pointsView(idx)) {
+                if (!pt || !pt->isActive()) continue;
+                st.points++;
+                const size_t n = pt->cellCount();
+                st.cells += n;
+                if (pt->shape.isUnitCube()) {
+                    st.unitCubes++;
+                } else if (pt->shape.isSphere()) {
+                    st.spheres++;
+                } else if (pt->shape.isCapsule()) {
+                    st.capsules++;
+                    st.cellsInCapsules += n;
+                } else {
+                    st.boxes++;
+                    st.cellsInBoxes += n;
+                }
+                if (pt->isStatic()) st.staticPoints++;
+                if (pt->isAutoStatic()) st.autoStaticPoints++;
+                if (pt->isMoved()) st.movedPoints++;
+                if (pt->isIdle()) st.idlePoints++;
+                if (isIdleVoxel(pt)) st.mergeCandidates++;
+            }
+            if (node->isLeaf()) continue;
+            for (int i = 0; i < 8; ++i) {
+                if (node->hasChild(i)) stack.push_back(node->firstChild + i);
+            }
+        }
+        return st;
+    }
+
     void printStats(std::ostream& os = std::cout) const {
         if (root_ == INVALID_IDX) {
             os << "[Octree Stats] Tree is null/empty." << std::endl;
             return;
         }
+        const CompactionStats cs = compactionStats();
 
         size_t totalNodes = 0;
         size_t leafNodes = 0;
@@ -4271,6 +4402,18 @@ public:
         os << "Memory (Approx):\n";
         os << "  Node Structure    : " << (nodeMem / 1024.0) << " KB\n";
         os << "  Point Data        : " << (dataMem / 1024.0) << " KB\n";
+        os << "Compaction:\n";
+        os << "  Cells Represented : " << cs.cells << "\n";
+        os << "  Cells / Point     : " << cs.ratio() << "\n";
+        os << "  Unit Cubes        : " << cs.unitCubes << "\n";
+        os << "  Spheres           : " << cs.spheres << "\n";
+        os << "  Boxes             : " << cs.boxes << " (" << cs.cellsInBoxes << " cells)\n";
+        os << "  Capsules          : " << cs.capsules << " (" << cs.cellsInCapsules << " cells)\n";
+        os << "  Merge Candidates  : " << cs.mergeCandidates << "\n";
+        os << "Motion:\n";
+        os << "  Static            : " << cs.staticPoints << " (" << cs.autoStaticPoints << " auto)\n";
+        os << "  Moved Since Opt   : " << cs.movedPoints << "\n";
+        os << "  Idle One Pass     : " << cs.idlePoints << "\n";
         os << "========================================\n" << std::defaultfloat;
     }
 

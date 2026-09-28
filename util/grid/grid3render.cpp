@@ -261,10 +261,8 @@ uint32_t Octree<T>::mergeLeafPoints(RenderBuffer_<T>& buffer, uint32_t first) {
         }
 
         RenderData box = seed;
-        box.extent = packExtent(static_cast<uint32_t>(ex), static_cast<uint32_t>(ey),
-                                static_cast<uint32_t>(ez));
-        box.extent = extentSetStatic(box.extent, extentIsStatic(seed.extent));
-        box.extent = extentSetReusable(box.extent, extentIsReusable(seed.extent));
+        box.shape = Shape::box(static_cast<uint32_t>(ex), static_cast<uint32_t>(ey), static_cast<uint32_t>(ez));
+        box.position = seed.position + Vec3(float(ex - 1), float(ey - 1), float(ez - 1)) * (0.5f * cell);
         merged.push_back(box);
     }
 
@@ -689,6 +687,7 @@ static int mergeEmissiveProxies(std::vector<GPURenderData>& points,
         packed = extentSetStatic(packed, extentIsStatic(seed.extent));
         packed = extentSetReusable(packed, extentIsReusable(seed.extent));
         points[seedPtIdx].extent = packed;
+        points[seedPtIdx].position = seed.position + Vec3(float(ex - 1), float(ey - 1), float(ez - 1)) * (0.5f * cellSize);
         outLights.push_back(seedPtIdx);
     }
 

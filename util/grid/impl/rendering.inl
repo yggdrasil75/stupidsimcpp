@@ -36,23 +36,20 @@ struct RenderData {
     Shape shape;
 
     bool isShape() const {
-        return !shape.isBox();
+        return !shape.isUnitCube();
     }
 
     const Vec3 boundsMin() const {
-        if (isShape()) return shape.aabb(position, size).first;
-        return (position - Vec3::Constant(0.5f * size));
+        return shape.aabb(position, size).first;
     }
 
     const Vec3 boundsMax() const {
-        if (isShape()) return shape.aabb(position, size).second;
-        return (position + Vec3::Constant(0.5f * size)
-                + Vec3::Constant(size).cwiseProduct(unpackExtent(extent) - Vec3::Ones()));
+        return shape.aabb(position, size).second;
     }
 
     ///@brief A single plain voxel, eligible for lattice merging
     bool isUnitVoxel() const {
-        return !isShape() && (extent & ~(EXTENT_STATIC_BIT | EXTENT_REUSE_BIT)) == EXTENT_UNIT;
+        return shape.isUnitCube();
     }
 
     bool isMerged() const {
@@ -146,32 +143,33 @@ struct alignas(16) GPURenderData {
 ///@brief Converts a render point to its GPU layout, packing the shape and rewriting extent for OBBs
 static inline GPURenderData toGPURenderData(const RenderData& p) {
     GPURenderData g{p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId, p.extent, {}};
-    g.shape = packShapeWords(p.shape, p.size, g.extent);
+    g.shape = packShapeWords(p.shape, g.extent);
     return g;
+}
+
+///@brief Shape of a GPU point, inverse of toGPURenderData
+static inline Shape gpuPointShape(const GPURenderData& p) {
+    Shape s;
+    s.rot = unpackQuat(p.shape.rot);
+    if (p.shape.type == static_cast<uint32_t>(ShapeType::CAPSULE)) {
+        s.type = ShapeType::CAPSULE;
+        s.half = Vec3(p.shape.a, p.shape.b, 0.0f);
+    } else {
+        s.type = ShapeType::OBB;
+        s.half = unpackExtent(p.extent) * 0.5f;
+    }
+    return s;
 }
 
 ///@brief A single plain voxel in GPU layout
 static inline bool gpuIsUnitVoxel(const GPURenderData& p) {
-    return p.shape.type == 0u && (p.extent & ~(EXTENT_STATIC_BIT | EXTENT_REUSE_BIT)) == EXTENT_UNIT;
+    return p.shape.type == static_cast<uint32_t>(ShapeType::OBB) && p.shape.rot == 0u
+        && (p.extent & ~(EXTENT_STATIC_BIT | EXTENT_REUSE_BIT)) == EXTENT_UNIT;
 }
 
 ///@brief World AABB of a GPU point, mirrors ptBoundsMin/Max in shapes.glsl
 static inline BoundingBox gpuPointAABB(const GPURenderData& p) {
-    const float hs = p.size * 0.5f;
-    if (p.shape.type == 0u) {
-        Vec3 run = Vec3::Constant(p.size).cwiseProduct(unpackExtent(p.extent) - Vec3::Ones());
-        return {p.position - Vec3::Constant(hs), p.position + Vec3::Constant(hs) + run};
-    }
-    Shape s;
-    s.rot = unpackQuat(p.shape.rot);
-    if (p.shape.type == 1u) {
-        s.type = ShapeType::OBB;
-        s.half = unpackExtent(p.extent) * hs;
-    } else {
-        s.type = ShapeType::CAPSULE;
-        s.half = Vec3(p.shape.a, p.shape.b, 0.0f);
-    }
-    return s.aabb(p.position, p.size);
+    return gpuPointShape(p).aabb(p.position, p.size);
 }
 
 struct alignas(16) GPUCameraData {

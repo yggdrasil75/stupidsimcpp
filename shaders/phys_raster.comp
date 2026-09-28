@@ -22,10 +22,11 @@ void main() {
     pt.b = s1.z;
     pt.shapeType = floatBitsToUint(s1.w);
     pt.extent = 0u;
-    if (pt.shapeType == SHAPE_OBB) {
+    if (pt.shapeType != SHAPE_CAPSULE) {
         uvec3 cnt = max(uvec3(round(s2.xyz * 2.0 / pt.size)), uvec3(1u));
         pt.extent = (cnt.x - 1u) | ((cnt.y - 1u) << 10) | ((cnt.z - 1u) << 20);
     }
+    const bool exact = primIsAxisAligned(pt);
     vec3 bmin = ptBoundsMin(pt);
     vec3 bmax = ptBoundsMax(pt);
     ivec3 lo = occCoord(bmin + 1e-5);
@@ -36,7 +37,7 @@ void main() {
     for (int z = lo.z; z <= hi.z; ++z) {
         for (int y = lo.y; y <= hi.y; ++y) {
             for (int x = lo.x; x <= hi.x; ++x) {
-                if (pt.shapeType != SHAPE_BOX) {
+                if (!exact) {
                     vec3 wc = pc.gridLo + (vec3(x, y, z) + 0.5) * pc.occCell;
                     if (primSdf(wc, pt) > tol) continue;
                 }

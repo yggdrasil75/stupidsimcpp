@@ -2,9 +2,6 @@
 #define SHAPES_GLSL
 
 ///@brief One render point. Layout matches GPURenderData in rendering.inl.
-///       shapeType 0: run of `extent` cubes of `size` starting at position
-///       shapeType 1: oriented box, half extents = size * unpackExtent(extent) / 2
-///       shapeType 2: capsule, radius a, half length b, axis = rot * +Y
 struct GPURenderData {
     vec3 position;
     float size;
@@ -18,9 +15,8 @@ struct GPURenderData {
     uint shapeType;
 };
 
-const uint SHAPE_BOX = 0u;
-const uint SHAPE_OBB = 1u;
-const uint SHAPE_CAPSULE = 2u;
+const uint SHAPE_OBB = 0u;
+const uint SHAPE_CAPSULE = 1u;
 
 const uint EXTENT_STATIC_BIT = 1u << 30;
 const uint EXTENT_REUSE_BIT  = 1u << 31;
@@ -38,8 +34,8 @@ vec3 unpackExtent(uint e) {
     return vec3(float((e & 0x3FFu) + 1u), float(((e >> 10) & 0x3FFu) + 1u), float(((e >> 20) & 0x3FFu) + 1u));
 }
 
-///@brief Inverse of packQuat in shapes.inl, returns (x, y, z, w)
 vec4 unpackQuat(uint p) {
+    if (p == 0u) return vec4(0.0, 0.0, 0.0, 1.0);
     uint big = p & 3u;
     float c[4];
     float sum = 0.0;
@@ -71,27 +67,29 @@ vec3 shapeHalf(GPURenderData p) {
     return unpackExtent(p.extent) * (0.5 * p.size);
 }
 
-///@brief Half diagonal of the world AABB of an OBB or capsule
+bool primIsAxisAligned(GPURenderData p) {
+    return p.shapeType != SHAPE_CAPSULE && p.rot == 0u;
+}
+
 vec3 shapeAabbRadius(GPURenderData p) {
-    vec4 q = unpackQuat(p.rot);
     if (p.shapeType == SHAPE_CAPSULE) {
-        vec3 e = quatRotate(q, vec3(0.0, p.b, 0.0));
+        vec3 e = quatRotate(unpackQuat(p.rot), vec3(0.0, p.b, 0.0));
         return abs(e) + vec3(p.a);
     }
     vec3 h = shapeHalf(p);
+    if (p.rot == 0u) return h;
+    vec4 q = unpackQuat(p.rot);
     return abs(quatRotate(q, vec3(h.x, 0.0, 0.0)))
          + abs(quatRotate(q, vec3(0.0, h.y, 0.0)))
          + abs(quatRotate(q, vec3(0.0, 0.0, h.z)));
 }
 
 vec3 ptBoundsMin(GPURenderData p) {
-    if (p.shapeType != SHAPE_BOX) return p.position - shapeAabbRadius(p);
-    return p.position - p.size * 0.5;
+    return p.position - shapeAabbRadius(p);
 }
 
 vec3 ptBoundsMax(GPURenderData p) {
-    if (p.shapeType != SHAPE_BOX) return p.position + shapeAabbRadius(p);
-    return p.position + p.size * 0.5 + p.size * (unpackExtent(p.extent) - vec3(1.0));
+    return p.position + shapeAabbRadius(p);
 }
 
 ///@brief Slab test against a box centred on the origin
@@ -188,18 +186,16 @@ bool rayPrimIntersect(vec3 ro, vec3 rd, GPURenderData pt, out float t, out vec3 
         l.y -= clamp(l.y, -pt.b, pt.b);
         n = quatRotate(q, normalize(l));
         if (inside) n = -n;
-    } else if (pt.shapeType == SHAPE_OBB) {
+    } else if (pt.rot == 0u) {
+        if (!slabBox(ro - pt.position, rd, shapeHalf(pt), tIn, tOut, n)) return false;
+        t = (tIn < 0.0) ? tOut : tIn;
+    } else {
         vec4 q = unpackQuat(pt.rot);
         vec3 o = quatInvRotate(q, ro - pt.position);
         vec3 d = quatInvRotate(q, rd);
         if (!slabBox(o, d, shapeHalf(pt), tIn, tOut, n)) return false;
         t = (tIn < 0.0) ? tOut : tIn;
         n = quatRotate(q, n);
-    } else {
-        vec3 c = (ptBoundsMin(pt) + ptBoundsMax(pt)) * 0.5;
-        vec3 h = (ptBoundsMax(pt) - ptBoundsMin(pt)) * 0.5;
-        if (!slabBox(ro - c, rd, h, tIn, tOut, n)) return false;
-        t = (tIn < 0.0) ? tOut : tIn;
     }
     tExit = tOut;
     normal = n;
@@ -209,11 +205,7 @@ bool rayPrimIntersect(vec3 ro, vec3 rd, GPURenderData pt, out float t, out vec3 
 ///@brief Entry and exit distances only
 bool rayPrimInterval(vec3 ro, vec3 rd, GPURenderData pt, out float tIn, out float tOut) {
     vec3 n;
-    if (pt.shapeType == SHAPE_BOX) {
-        vec3 c = (ptBoundsMin(pt) + ptBoundsMax(pt)) * 0.5;
-        vec3 h = (ptBoundsMax(pt) - ptBoundsMin(pt)) * 0.5;
-        return slabBox(ro - c, rd, h, tIn, tOut, n);
-    }
+    if (primIsAxisAligned(pt)) return slabBox(ro - pt.position, rd, shapeHalf(pt), tIn, tOut, n);
     vec4 q = unpackQuat(pt.rot);
     vec3 o = quatInvRotate(q, ro - pt.position);
     vec3 d = quatInvRotate(q, rd);
@@ -228,13 +220,8 @@ float primSdf(vec3 p, GPURenderData pt) {
         l.y -= clamp(l.y, -pt.b, pt.b);
         return length(l) - pt.a;
     }
-    vec3 q;
-    if (pt.shapeType == SHAPE_OBB) {
-        q = abs(quatInvRotate(unpackQuat(pt.rot), p - pt.position)) - shapeHalf(pt);
-    } else {
-        vec3 c = (ptBoundsMin(pt) + ptBoundsMax(pt)) * 0.5;
-        q = abs(p - c) - (ptBoundsMax(pt) - ptBoundsMin(pt)) * 0.5;
-    }
+    vec3 l = (pt.rot == 0u) ? (p - pt.position) : quatInvRotate(unpackQuat(pt.rot), p - pt.position);
+    vec3 q = abs(l) - shapeHalf(pt);
     return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
 }
 #endif

@@ -477,10 +477,6 @@ int main() {
     };
     auto roomEntryFrame = [&](int r) -> int { return framesPerLeg * (1 + r * LEGS_PER_ROOM); };
 
-    auto roveRed = octree.getWeakNodesByObjectId(OID::ROVE_RED);
-    auto roveBlue = octree.getWeakNodesByObjectId(OID::ROVE_BLUE);
-    auto roveGreen = octree.getWeakNodesByObjectId(OID::ROVE_GREEN);
-
     Vec3 roveRedHome (-2.0f, roomCenterY(R_ROVING),   3.0f);
     Vec3 roveBlueHome( 2.0f, roomCenterY(R_ROVING),   3.0f);
     Vec3 roveGreenHome(2.5f, roomCenterY(R_COMBINED), 3.2f);
@@ -495,12 +491,14 @@ int main() {
     bool havePending = false;
     int globalFrame = 0;
 
-    auto moveOrb = [&](std::vector<std::weak_ptr<Grid::Octree<int>::NodeData>>& orb, Vec3& cur, const Vec3& target) {
+    // the orb's points are fetched every time because optimize() may have merged them
+    auto moveOrb = [&](int oid, Vec3& cur, const Vec3& target) {
         Vec3 delta = target - cur;
-        if (delta.norm() > 1e-4f) {
-            for (auto& wp : orb) if (auto sp = wp.lock()) octree.move(sp->position, sp->position + delta);
-            cur = target;
+        if (delta.norm() <= 1e-4f) return;
+        for (auto& wp : octree.getWeakNodesByObjectId(oid)) {
+            if (auto sp = wp.lock()) octree.move(sp->position, sp->position + delta);
         }
+        cur = target;
     };
 
     for (int leg = 0; leg < totalLegs; ++leg) {
@@ -508,6 +506,8 @@ int main() {
         const WayPoint& B = path[leg + 1];
         int room = legRoom(leg);
         std::cout << "Leg " << leg << " (room " << room << ")" << std::endl;
+        octree.optimize();
+        octree.printStats();
 
         for (int f = 0; f < framesPerLeg; ++f, ++globalFrame) {
             float t = (float)f / (float)framesPerLeg;
@@ -564,15 +564,15 @@ int main() {
             {
                 float cy = roomCenterY(R_ROVING);
                 float a = globalFrame * 0.08f, R = 2.6f;
-                moveOrb(roveRed, roveRedCur, Vec3(R * std::cos(a), cy + R * std::sin(a), 3.0f));
-                moveOrb(roveBlue, roveBlueCur, Vec3(R * std::cos(a + 3.1416f), cy + R * std::sin(a + 3.1416f), 3.0f));
+                moveOrb(OID::ROVE_RED, roveRedCur, Vec3(R * std::cos(a), cy + R * std::sin(a), 3.0f));
+                moveOrb(OID::ROVE_BLUE, roveBlueCur, Vec3(R * std::cos(a + 3.1416f), cy + R * std::sin(a + 3.1416f), 3.0f));
             }
 
             {
                 float cy = roomCenterY(R_COMBINED);
                 float a = globalFrame * 0.10f, R = 2.8f;
-                moveOrb(roveGreen, roveGreenCur, Vec3(R * std::cos(a), cy + R * std::sin(a), 3.2f));
-                for (auto& wp : roveGreen)
+                moveOrb(OID::ROVE_GREEN, roveGreenCur, Vec3(R * std::cos(a), cy + R * std::sin(a), 3.2f));
+                for (auto& wp : octree.getWeakNodesByObjectId(OID::ROVE_GREEN))
                     if (auto sp = wp.lock()) octree.setEmittance(sp->position, Vec3(0.1f, 1.0f, 0.2f) * 7.0f, 0.02f);
             }
 
