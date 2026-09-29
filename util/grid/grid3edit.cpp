@@ -51,7 +51,6 @@ template<typename T>
 bool Octree<T>::removeVoxelAtPixel(const Camera& cam, int px, int py, int width, int height) {
     RayHit hit;
     if (!raycastFromCamera(cam, px, py, width, height, hit)) return false;
-    if (hit.node->isShape()) return remove(hit.hitPoint - hit.normal * (0.5f * hit.node->size), hit.node->size * 0.25f);
     return remove(hit.node->position, hit.node->size * 0.25f);
 }
 

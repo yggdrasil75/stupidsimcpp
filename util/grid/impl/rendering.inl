@@ -7,24 +7,6 @@
 
 namespace Grid {
 
-///@brief FNV-1a over 64-bit words, used to fingerprint buffers before uploading them.
-///       Pass a previous result as seed to hash several pieces into one value.
-static inline uint64_t hashBytes64(const void* data, size_t bytes, uint64_t seed = 1469598103934665603ull) {
-    uint64_t h = seed;
-    const uint64_t* words = static_cast<const uint64_t*>(data);
-    const size_t nWords = bytes / sizeof(uint64_t);
-    for (size_t i = 0; i < nWords; ++i) {
-        h ^= words[i];
-        h *= 1099511628211ull;
-    }
-    const uint8_t* tail = static_cast<const uint8_t*>(data) + nWords * sizeof(uint64_t);
-    for (size_t i = 0; i < bytes % sizeof(uint64_t); ++i) {
-        h ^= tail[i];
-        h *= 1099511628211ull;
-    }
-    return h;
-}
-
 struct RenderData {
     Vec3 position;
     float size;
@@ -32,29 +14,17 @@ struct RenderData {
     uint32_t materialIdx;
     int objectId;
     uint32_t extent = EXTENT_UNIT;
-    uint32_t pinned = 0;
-    Shape shape;
-
-    bool isShape() const {
-        return !shape.isUnitCube();
-    }
 
     const Vec3 boundsMin() const {
-        return shape.aabb(position, size).first;
+        return (position - Vec3::Constant(0.5f * size));
     }
 
     const Vec3 boundsMax() const {
-        return shape.aabb(position, size).second;
+        return (position + Vec3::Constant(0.5f * size)
+                + Vec3::Constant(size).cwiseProduct(unpackExtent(extent) - Vec3::Ones()));
     }
 
-    ///@brief A single plain voxel, eligible for lattice merging
-    bool isUnitVoxel() const {
-        return shape.isUnitCube();
-    }
-
-    bool isMerged() const {
-        return !isUnitVoxel();
-    }
+    bool isMerged() const { return (extent & ~(EXTENT_STATIC_BIT | EXTENT_REUSE_BIT)) != EXTENT_UNIT; }
 };
 
 template<typename T>
@@ -137,40 +107,7 @@ struct alignas(16) GPURenderData {
     uint32_t materialIdx;
     int objectId;
     uint32_t extent = EXTENT_UNIT;
-    GPUShapeWords shape;
 };
-
-///@brief Converts a render point to its GPU layout, packing the shape and rewriting extent for OBBs
-static inline GPURenderData toGPURenderData(const RenderData& p) {
-    GPURenderData g{p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId, p.extent, {}};
-    g.shape = packShapeWords(p.shape, g.extent);
-    return g;
-}
-
-///@brief Shape of a GPU point, inverse of toGPURenderData
-static inline Shape gpuPointShape(const GPURenderData& p) {
-    Shape s;
-    s.rot = unpackQuat(p.shape.rot);
-    if (p.shape.type == static_cast<uint32_t>(ShapeType::CAPSULE)) {
-        s.type = ShapeType::CAPSULE;
-        s.half = Vec3(p.shape.a, p.shape.b, 0.0f);
-    } else {
-        s.type = ShapeType::OBB;
-        s.half = unpackExtent(p.extent) * 0.5f;
-    }
-    return s;
-}
-
-///@brief A single plain voxel in GPU layout
-static inline bool gpuIsUnitVoxel(const GPURenderData& p) {
-    return p.shape.type == static_cast<uint32_t>(ShapeType::OBB) && p.shape.rot == 0u
-        && (p.extent & ~(EXTENT_STATIC_BIT | EXTENT_REUSE_BIT)) == EXTENT_UNIT;
-}
-
-///@brief World AABB of a GPU point, mirrors ptBoundsMin/Max in shapes.glsl
-static inline BoundingBox gpuPointAABB(const GPURenderData& p) {
-    return gpuPointShape(p).aabb(p.position, p.size);
-}
 
 struct alignas(16) GPUCameraData {
     Vec3 origin;
@@ -517,16 +454,8 @@ struct GpuContext {
 
     bool initialized = false;
     bool blasTopologyValid = false;
-    uint64_t residentFastKey = 0;
-    uint64_t residentPBRKey = 0;
-    uint64_t residentPBRPrefixHash = 0;
-    uint64_t lastBlasKey = 0;
-    uint64_t vctResidentKey = 0;
-    uint64_t residentMaterialHash = 0;
-    uint64_t residentSellmeierHash = 0;
-    uint64_t residentSkyboxHash = 0;
-    uint64_t residentLightHash = 0;
-    uint64_t residentFogHash = 0;
+    bool pbrPointsResident = false;
+    bool fastPointsResident = false;
     bool postPassInFlight = false;
     bool outMemCoherent = true;
     bool outStagingCoherent = true;
@@ -1129,15 +1058,12 @@ struct GpuContext {
         vkInvalidateMappedMemoryRanges(device, 1, &range);
     }
 
-    void uploadToBuffer(VkBuffer dst, const void* src, uint32_t size, VkDeviceSize dstOffset = 0) {
+    void uploadToBuffer(VkBuffer dst, const void* src, uint32_t size) {
         if (!src || size == 0) return;
         ensureXferStaging(size);
         memcpy(xferStagingMapped, src, size);
         flushXferStaging(size);
-        executeSingleTimeCommands([&](VkCommandBuffer cmd) {
-            VkBufferCopy region{0, dstOffset, size};
-            vkCmdCopyBuffer(cmd, xferStagingBuffer, dst, 1, &region);
-        });
+        copyBuffer(device, xferStagingBuffer, dst, size);
     }
 
     void downloadFromBuffer(VkBuffer src, void* dst, uint32_t size) {
@@ -1148,17 +1074,8 @@ struct GpuContext {
         memcpy(dst, xferStagingMapped, size);
     }
 
-    ///@param resident When given, holds the hash of what the buffer already contains; an
-    ///       upload of identical bytes is skipped and the hash is updated after a real upload.
     void updateDeviceLocalBuffer(VkBuffer& buffer, VkDeviceMemory& memory, uint32_t& currentCap, 
-                                 const void* data, uint32_t dataSize, uint32_t allocSize, VkBufferUsageFlags usage,
-                                 uint64_t* resident = nullptr) {
-        if (resident && data && dataSize > 0) {
-            uint64_t h = hashBytes64(data, dataSize) ^ (uint64_t(dataSize) * 0x9E3779B97F4A7C15ull);
-            if (h == 0) h = 1;
-            if (buffer && allocSize <= currentCap && *resident == h) return;
-            *resident = h;
-        }
+                                 const void* data, uint32_t dataSize, uint32_t allocSize, VkBufferUsageFlags usage) {
         if (allocSize > currentCap) {
             if (buffer) {
                 vkDestroyBuffer(device, buffer, nullptr);
@@ -1288,14 +1205,12 @@ struct GpuContext {
     }
 
     void buildHardwareAccelerationStructures(const std::vector<GPURenderData>& points, int orderingTag = 0,
-                                             VkBuffer srcPointBuffer = VK_NULL_HANDLE, uint64_t key = 0) {
+                                             VkBuffer srcPointBuffer = VK_NULL_HANDLE) {
         if (points.empty()) return;
-        if (key != 0 && key == lastBlasKey && blasTopologyValid) return;
-        lastBlasKey = key;
 
         const uint32_t numPrimitives = static_cast<uint32_t>(points.size());
         bool doFullBuild = (!blasTopologyValid) || (numPrimitives != lastBlasPrimCount)
-                        || (orderingTag != lastBlasOrderingTag) || framesSinceFullBuild >= 16;
+                        || (orderingTag != lastBlasOrderingTag);
 
         uint32_t aabbSize = numPrimitives * sizeof(VkAabbPositionsKHR);
         const bool gpuFill = (srcPointBuffer != VK_NULL_HANDLE);
@@ -1319,7 +1234,11 @@ struct GpuContext {
         if (!gpuFill) {
             std::vector<VkAabbPositionsKHR> aabbs(numPrimitives);
             for (uint32_t i = 0; i < numPrimitives; ++i) {
-                const auto [lo, hi] = gpuPointAABB(points[i]);
+                const float halfSize = points[i].size * 0.5f;
+                const Vec3 lo = points[i].position - Vec3::Constant(halfSize);
+                const Vec3 hi = points[i].position + Vec3::Constant(halfSize)
+                    + Vec3::Constant(points[i].size).cwiseProduct(
+                        unpackExtent(points[i].extent) - Vec3::Ones());
                 aabbs[i].minX = lo.x();
                 aabbs[i].minY = lo.y();
                 aabbs[i].minZ = lo.z();
@@ -1590,7 +1509,7 @@ struct GpuContext {
         size_t dataSize = vols.size() * sizeof(GPUFogVolume);
         updateDeviceLocalBuffer(fogBuffer, fogMem, currentFogCap,
                                 vols.empty() ? nullptr : vols.data(), dataSize, allocSize,
-                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &residentFogHash);
+                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     }
 
     void updateLightBuffer(const std::vector<uint32_t>& lights) {
@@ -1598,7 +1517,7 @@ struct GpuContext {
         size_t dataSize = lights.size() * sizeof(uint32_t);
         updateDeviceLocalBuffer(lightBuffer, lightMem, currentLightCap, 
                                 lights.empty() ? nullptr : lights.data(), dataSize, allocSize, 
-                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &residentLightHash);
+                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     }
     
     void updateMaterialBuffer(const std::vector<GPUMaterial>& materials) {
@@ -1606,7 +1525,7 @@ struct GpuContext {
         size_t dataSize = materials.size() * sizeof(GPUMaterial);
         updateDeviceLocalBuffer(materialBuffer, materialMem, currentMaterialCap, 
                                 materials.empty() ? nullptr : materials.data(), dataSize, allocSize, 
-                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &residentMaterialHash);
+                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     }
 
     void updateSellmeierBuffer(const std::vector<float>& lut, uint32_t width, uint32_t rows) {
@@ -1616,7 +1535,7 @@ struct GpuContext {
         size_t allocSize = std::max((size_t)256, dataSize);
         updateDeviceLocalBuffer(sellmeierBuffer, sellmeierMem, currentSellmeierCap,
                                 lut.empty() ? nullptr : lut.data(), dataSize, allocSize,
-                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &residentSellmeierHash);
+                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     }
 
     void updateCommonBuffers(size_t outSize, GPUCameraData& camData) {
@@ -1723,23 +1642,18 @@ struct GpuContext {
         size_t dataSize = skyData.size() * sizeof(Eigen::Vector4f);
         updateDeviceLocalBuffer(skyboxBuffer, skyboxMem, currentSkyboxCap, 
                                 skyData.empty() ? nullptr : skyData.data(), dataSize, allocSize, 
-                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &residentSkyboxHash);
+                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     }
 
-    ///@param key SceneCache key of points; when it matches what is resident the upload is
-    ///       skipped and only the descriptors are refreshed (0 = always upload)
-    void updateFastBuffers(const std::vector<GPURenderData>& points, uint64_t key = 0) {
+    void updateFastBuffers(const std::vector<GPURenderData>& points) {
         size_t allocSize = std::max((size_t)256, points.size() * sizeof(GPURenderData));
         size_t dataSize = points.size() * sizeof(GPURenderData);
         
-        if (key == 0 || key != residentFastKey || !fastPointBuffer) {
-            updateDeviceLocalBuffer(fastPointBuffer, fastPointMem, currentFastPointsCap, 
-                                    points.empty() ? nullptr : points.data(), dataSize, allocSize, 
-                                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-            residentFastKey = key;
-        }
+        updateDeviceLocalBuffer(fastPointBuffer, fastPointMem, currentFastPointsCap, 
+                                points.empty() ? nullptr : points.data(), dataSize, allocSize, 
+                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
-        buildHardwareAccelerationStructures(points, 1, fastPointBuffer, key);
+        buildHardwareAccelerationStructures(points, 1, fastPointBuffer);
 
         VkDescriptorBufferInfo bInfos[8] = { 
             {nodeBuffer, 0, VK_WHOLE_SIZE}, 
@@ -1766,62 +1680,15 @@ struct GpuContext {
         vctWriteFastDescriptors();
     }
 
-    ///@brief Points the fast pipeline at the PBR point buffer instead of its own copy. The
-    ///       blended paths render both from the same point set, so one upload and one
-    ///       acceleration structure serve both.
-    void bindFastPointsToPBR() {
-        VkDescriptorBufferInfo bInfos[8] = { 
-            {nodeBuffer, 0, VK_WHOLE_SIZE}, 
-            {pbrPointBuffer, 0, VK_WHOLE_SIZE}, 
-            {outBuffer, 0, VK_WHOLE_SIZE}, 
-            {uboBuffer, 0, VK_WHOLE_SIZE},
-            {skyboxBuffer, 0, VK_WHOLE_SIZE},
-            {lightBuffer, 0, VK_WHOLE_SIZE},
-            {adaptiveBuffer, 0, VK_WHOLE_SIZE},
-            {materialBuffer, 0, VK_WHOLE_SIZE}
-        };
-        VkWriteDescriptorSet writes[8] = {};
-        for(int i=0; i<8; i++) {
-            writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[i].dstSet = fastDescSet;
-            writes[i].dstBinding = (i >= 6) ? i + 1 : i;
-            writes[i].descriptorCount = 1;
-            writes[i].descriptorType = (i==3) ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            writes[i].pBufferInfo = &bInfos[i];
-        }
-        vkUpdateDescriptorSets(device, 8, writes, 0, nullptr);
-        // the fast copy no longer matches what the set reads
-        residentFastKey = 0;
-        vctWriteFastDescriptors();
-    }
-
-    ///@param key See updateFastBuffers
-    ///@param prefixCount Leading points that are the static part of the scene
-    ///@param prefixHash Identity of that prefix; when it is what the buffer already holds
-    ///       only the points after it are uploaded
-    void updatePBRBuffers(const std::vector<GPURenderData>& points, uint64_t key = 0,
-                          uint32_t prefixCount = 0, uint64_t prefixHash = 0) {
+    void updatePBRBuffers(const std::vector<GPURenderData>& points) {
         size_t allocSize = std::max((size_t)256, points.size() * sizeof(GPURenderData));
         size_t dataSize = points.size() * sizeof(GPURenderData);
         
-        if (key == 0 || key != residentPBRKey || !pbrPointBuffer) {
-            const bool tailOnly = prefixHash != 0 && prefixHash == residentPBRPrefixHash
-                                  && prefixCount <= points.size() && pbrPointBuffer
-                                  && allocSize <= currentPBRPointsCap;
-            if (tailOnly) {
-                uploadToBuffer(pbrPointBuffer, points.data() + prefixCount,
-                               uint32_t((points.size() - prefixCount) * sizeof(GPURenderData)),
-                               VkDeviceSize(prefixCount) * sizeof(GPURenderData));
-            } else {
-                updateDeviceLocalBuffer(pbrPointBuffer, pbrPointMem, currentPBRPointsCap, 
-                                        points.empty() ? nullptr : points.data(), dataSize, allocSize, 
-                                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-            }
-            residentPBRKey = key;
-            residentPBRPrefixHash = prefixHash;
-        }
+        updateDeviceLocalBuffer(pbrPointBuffer, pbrPointMem, currentPBRPointsCap, 
+                                points.empty() ? nullptr : points.data(), dataSize, allocSize, 
+                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
-        buildHardwareAccelerationStructures(points, 2, pbrPointBuffer, key);
+        buildHardwareAccelerationStructures(points, 2);
 
         VkDescriptorBufferInfo bInfos[8] = { 
             {nodeBuffer, 0, VK_WHOLE_SIZE}, 
@@ -2274,11 +2141,11 @@ struct GpuContext {
 
         if (postSlotInFlight[postSlot] && postFenceRing[postSlot] != VK_NULL_HANDLE) {
             vkWaitForFences(device, 1, &postFenceRing[postSlot], VK_TRUE, UINT64_MAX);
+            vkResetFences(device, 1, &postFenceRing[postSlot]);
         } else if (postFenceRing[postSlot] == VK_NULL_HANDLE) {
             VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
             vkCreateFence(device, &fenceInfo, nullptr, &postFenceRing[postSlot]);
         }
-        vkResetFences(device, 1, &postFenceRing[postSlot]);
         vkQueueSubmit(queue, 1, &submitInfo, postFenceRing[postSlot]);
         postSlotInFlight[postSlot] = true;
         postPassInFlight = true;
@@ -2646,7 +2513,6 @@ void dispatchWavefront(int tileW, int tileH, int maxBounces, int samplesPerPixel
         VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         vkBeginCommandBuffer(cmd, &bi);
-        wfBarrier(cmd);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                                 wfPipelineLayout, 0, 1, &wfDescSet, 0, nullptr);
 

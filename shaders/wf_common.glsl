@@ -19,7 +19,25 @@ struct GPUMaterial {
     uint albedo;
 };
 
-#include "shapes.glsl"
+struct GPURenderData {
+    vec3 position;
+    float size;
+    uint color;
+    uint materialIdx;
+    int  objectId;
+    uint extent;
+};
+
+vec3 unpackExtent(uint e) {
+    return vec3(float((e & 0x3FFu) + 1u), float(((e >> 10) & 0x3FFu) + 1u), float(((e >> 20) & 0x3FFu) + 1u));
+}
+
+const uint EXTENT_STATIC_BIT = 1u << 30;
+const uint EXTENT_REUSE_BIT  = 1u << 31;
+bool extentIsStatic(uint e) { return (e & EXTENT_STATIC_BIT) != 0u; }
+bool extentIsReusable(uint e) { return (e & EXTENT_REUSE_BIT) != 0u; }
+vec3 ptBoundsMin(GPURenderData p) { return p.position - p.size * 0.5; }
+vec3 ptBoundsMax(GPURenderData p) { return p.position + p.size * 0.5 + p.size * (unpackExtent(p.extent) - vec3(1.0)); }
 
 
 struct PathHot {
@@ -814,11 +832,35 @@ void vaUpdateBsdf(uint slot, float moment) {
 
 bool rayCubeIntersect(vec3 ro, vec3 rd, vec3 invD, GPURenderData pt,
                       out float t, out vec3 normal, out vec3 hitPoint, out float tExit) {
-    if (!rayPrimIntersect(ro, rd, pt, t, normal, tExit)) {
+    vec3 bMin = ptBoundsMin(pt);
+    vec3 bMax = ptBoundsMax(pt);
+    vec3 t0 = (bMin - ro) * invD;
+    vec3 t1 = (bMax - ro) * invD;
+    vec3 tmin3 = min(t0, t1);
+    vec3 tmax3 = max(t0, t1);
+    float tMin = max(max(tmin3.x, tmin3.y), tmin3.z);
+    float tMax = min(min(tmax3.x, tmax3.y), tmax3.z);
+    tExit = tMax;
+    if (tMax < max(0.0, tMin)) {
+        t = 0.0;
+        normal = vec3(0.0);
         hitPoint = ro;
         return false;
     }
+    bool inside = tMin < 0.0;
+    t = inside ? tMax : tMin;
     hitPoint = ro + rd * t;
+
+    vec3 sgn = vec3(rd.x < 0.0 ? 1.0 : -1.0,
+                    rd.y < 0.0 ? 1.0 : -1.0,
+                    rd.z < 0.0 ? 1.0 : -1.0);
+    vec3 slab = inside ? tmax3 : tmin3;
+    float key = inside ? tMax : tMin;
+    vec3 mask;
+    if (key == slab.x) mask = vec3(1.0, 0.0, 0.0);
+    else if (key == slab.y) mask = vec3(0.0, 1.0, 0.0);
+    else mask = vec3(0.0, 0.0, 1.0);
+    normal = (inside ? -sgn : sgn) * mask;
     return true;
 }
 
@@ -831,8 +873,13 @@ int voxelTraverse(vec3 ro, vec3 rd, vec3 invD, float maxDist,
         if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionAABBEXT) {
             int ptIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
             GPURenderData cand = points[ptIdx];
-            float tMin, tMax;
-            if (!rayPrimInterval(ro, rd, cand, tMin, tMax)) continue;
+            vec3 t0 = (ptBoundsMin(cand) - ro) * invD;
+            vec3 t1 = (ptBoundsMax(cand) - ro) * invD;
+            vec3 tmin3 = min(t0, t1);
+            vec3 tmax3 = max(t0, t1);
+            float tMin = max(max(tmin3.x, tmin3.y), tmin3.z);
+            float tMax = min(min(tmax3.x, tmax3.y), tmax3.z);
+            if (tMax < max(0.0f, tMin)) continue;
             float t = (tMin < 0.0f) ? tMax : tMin;
             if (t >= 0.0f && t < tBest) {
                 rayQueryGenerateIntersectionEXT(rq, t);
@@ -881,8 +928,13 @@ vec3 shadowTransmit(vec3 ro, vec3 rd, vec3 invD, float maxDist, int lightPtIdx) 
             int ptIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
             if (ptIdx == lightPtIdx) continue;
             GPURenderData pt = points[ptIdx];
-            float tEntry, tExit;
-            if (rayPrimInterval(ro, rd, pt, tEntry, tExit) && tEntry <= maxDist) {
+            vec3 t0 = (ptBoundsMin(pt) - ro) * invD;
+            vec3 t1 = (ptBoundsMax(pt) - ro) * invD;
+            vec3 tmin3 = min(t0, t1);
+            vec3 tmax3 = max(t0, t1);
+            float tEntry = max(max(tmin3.x, tmin3.y), tmin3.z);
+            float tExit  = min(min(tmax3.x, tmax3.y), tmax3.z);
+            if (tExit >= max(0.0f, tEntry) && tEntry <= maxDist) {
                 GPUMaterial tMat = materials[pt.materialIdx];
                 float r, m;
                 uint sellRow;

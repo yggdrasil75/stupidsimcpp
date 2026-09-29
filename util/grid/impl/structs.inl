@@ -10,7 +10,6 @@
 #include <shared_mutex>
 #include <unordered_map>
 #include <deque>
-#include "shapes.inl"
 
 namespace Grid{
 
@@ -18,9 +17,6 @@ constexpr int Dim = 3;
 
 static constexpr uint8_t ACTIVE_BIT = 1 << 0;
 static constexpr uint8_t VISIBLE_BIT = 1 << 1;
-static constexpr uint8_t MOVED_BIT = 1 << 2;
-static constexpr uint8_t IDLE_BIT = 1 << 3;
-static constexpr uint8_t AUTOSTATIC_BIT = 1 << 4;
 static constexpr uint8_t STATIC_BIT = 1 << 7;
 
 static constexpr uint8_t LEAF_BIT = 1 << 0;
@@ -31,8 +27,6 @@ static constexpr uint8_t SAVEDQUEUED = 1 << 4;
 static constexpr uint8_t KEEPLOADED_BIT = 1 << 5;
 
 static constexpr uint8_t OBJ_ALLOW_PARTIAL_UNLOAD_BIT = 1 << 0;
-///@brief Object voxels carve a kerf through the dynamic voxels they overlap instead of shoving them
-static constexpr uint8_t OBJ_CUTTER_BIT = 1 << 1;
 
 static constexpr uint8_t REUSE_SETTLE_FRAMES = 3;
 static constexpr float REUSE_MAX_TRANSMISSION = 0.05f;
@@ -59,6 +53,8 @@ static constexpr float SELL_LMAX = 0.720f; // um
 
 template<typename> struct is_shared_ptr : std::false_type {};
 template<typename T> struct is_shared_ptr<std::shared_ptr<T>> : std::true_type {};
+using Vec3 = Eigen::Vector3f;
+using BoundingBox = std::pair<Vec3, Vec3>;
 using u_lock = std::unique_lock<std::shared_mutex>;
 using s_lock = std::shared_lock<std::shared_mutex>;
 namespace fs = std::filesystem;
@@ -79,6 +75,18 @@ enum class SplitPolicy : uint8_t {
     KEEP_OID = 1,
     SHED_STATIC = 2,
     DISSOLVE = 3
+};
+
+struct Vec3i64Hash {
+    std::size_t operator()(const std::array<int64_t, 3>& v) const {
+        return (std::size_t)((v[0] * 73856093) ^ (v[1] * 19349663) ^ (v[2] * 83492791));
+    }
+};
+
+struct Vec3fHash {
+    std::size_t operator()(const std::array<int64_t, 3>& v) const {
+        return (std::size_t)((v[0] * 73856093) ^ (v[1] * 19349663) ^ (v[2] * 83492791));
+    }
 };
 
 static inline uint32_t packRGB9E5(const Vec3& c) {
@@ -126,6 +134,37 @@ static inline uint32_t packRGBA8(const Eigen::Vector4f& c) {
     return r | (g << 8) | (b << 16) | (a << 24);
 }
 
+static constexpr uint32_t EXTENT_UNIT = 0u; // 1,1,1 packed; fields store count-1
+static constexpr float LATTICE_EPS = 1e-3f; // cell fractions; merge only near-exact grid points
+static constexpr uint32_t EXTENT_MAX  = 1024u;
+static constexpr uint32_t EXTENT_STATIC_BIT = 1u << 30;
+static constexpr uint32_t EXTENT_REUSE_BIT  = 1u << 31;
+
+static inline bool extentIsStatic(uint32_t e) {
+    return (e & EXTENT_STATIC_BIT) != 0u;
+}
+static inline uint32_t extentSetStatic(uint32_t e, bool v) {
+    return v ? (e | EXTENT_STATIC_BIT) : (e & ~EXTENT_STATIC_BIT);
+}
+static inline bool extentIsReusable(uint32_t e) {
+    return (e & EXTENT_REUSE_BIT) != 0u;
+}
+static inline uint32_t extentSetReusable(uint32_t e, bool v) {
+    return v ? (e | EXTENT_REUSE_BIT) : (e & ~EXTENT_REUSE_BIT);
+}
+
+///@brief Packs a per-axis cell count into three 10-bit fields
+///@param ex Cell span along x, clamped to [1, EXTENT_MAX]
+///@param ey Cell span along y
+///@param ez Cell span along z
+///@return Packed extent, x in bits 0-9, y in 10-19, z in 20-29
+static inline uint32_t packExtent(uint32_t ex, uint32_t ey, uint32_t ez) {
+    uint32_t x = std::clamp(ex, 1u, EXTENT_MAX) - 1u;
+    uint32_t y = std::clamp(ey, 1u, EXTENT_MAX) - 1u;
+    uint32_t z = std::clamp(ez, 1u, EXTENT_MAX) - 1u;
+    return x | (y << 10) | (z << 20);
+}
+
 static inline uint32_t quantizeNormal(const Vec3& n) {
     uint32_t major = 0;
     Vec3 a = n.cwiseAbs();
@@ -142,6 +181,15 @@ static inline uint32_t worldCacheKey(int64_t cx, int64_t cy, int64_t cz, uint32_
     h ^= nb * 0x9e3779b9u;
     h ^= h >> 16;
     return h == WC_INVALID_KEY ? 1u : h;
+}
+
+///@brief Expands a packed extent into per-axis cell counts
+///@param e Packed extent as produced by packExtent
+///@return Cell spans as floats, each at least 1.0f
+static inline Vec3 unpackExtent(uint32_t e) {
+    return Vec3(static_cast<float>((e         & 0x3FFu) + 1u),
+                static_cast<float>(((e >> 10) & 0x3FFu) + 1u),
+                static_cast<float>(((e >> 20) & 0x3FFu) + 1u));
 }
 
 static inline uint32_t packMaterialProps(float roughness, float metallic, uint32_t sellmeierRow) {
@@ -217,16 +265,6 @@ struct Bond_ {
     uint32_t nextFor(uint32_t self) const { return self == idA ? nextA : nextB; }
 };
 
-///@brief A crack plane running through a rigid object. Seeded by a bond that
-///       broke in tension, it advances each frame through the bonds that
-///       cross its plane near the current front until it exits the object.
-struct PhysCrack_ {
-    Vec3 origin{0.0f, 0.0f, 0.0f};
-    Vec3 normal{0.0f, 0.0f, 1.0f};
-    std::vector<Vec3> front;
-    int idleFrames = 0;
-};
-
 template<typename T>
 struct PhysicsState_ {
     Vec3 velocity{0.0f, 0.0f, 0.0f};
@@ -237,49 +275,6 @@ struct PhysicsState_ {
     uint32_t bondHead = INVALID_IDX;
     bool bondsBuilt = false;
 };
-
-
-using v3half = Eigen::Matrix<Eigen::half, 3, 1>;
-static constexpr float SELL_LAMBDA_R = 0.610f;
-static constexpr float SELL_LAMBDA_G = 0.550f;
-static constexpr float SELL_LAMBDA_B = 0.465f;
-
-static inline float sellmeierN(const v3half& B, const v3half& C, float lambdaUm) {
-    float l2 = lambdaUm * lambdaUm;
-    float n2 = 1.0f;
-    for (int j = 0; j < 3; ++j) {
-        float Bj = static_cast<float>(B[j]);
-        float Cj = static_cast<float>(C[j]);
-        float denom = l2 - Cj;
-        if (std::abs(denom) > 1e-8f) n2 += Bj * l2 / denom;
-    }
-    return std::sqrt(std::max(1.0f, n2));
-}
-
-static inline void sellmeierFromConstant(float n, v3half& B, v3half& C) {
-    float n2 = n * n;
-
-    if (n >= 1.0f) {
-        float n2_minus_1 = n2 - 1.0f;
-        float c1 = 0.0106f; 
-        float c2 = 100.0f;  
-        float b1 = n2_minus_1 / 1.030788f;
-        float b2 = b1 * 0.2f; 
-
-        B = v3half(Eigen::half(b1), Eigen::half(b2), Eigen::half(0.0f));
-        C = v3half(Eigen::half(c1), Eigen::half(c2), Eigen::half(0.0f));
-
-    } else {
-        n2 = std::max(0.00001f, n2); 
-        float c1 = 0.0f;
-        float c2 = -0.1f;
-        float b1 = 0.611792f * n2 - 1.0f;
-        float b2 = 0.5f * n2;
-
-        B = v3half(Eigen::half(b1), Eigen::half(b2), Eigen::half(0.0f));
-        C = v3half(Eigen::half(c1), Eigen::half(c2), Eigen::half(0.0f));
-    }
-}
 
 struct SPHKernels {
     float h, h2, h3, h4, h6, h9;
@@ -417,6 +412,48 @@ struct SPHKernels {
         return -12.0f * spline_k / h2 * (1.0f - q) * (1.0f - 2.0f*q) / q;
     }
 };
+
+using v3half = Eigen::Matrix<Eigen::half, 3, 1>;
+static constexpr float SELL_LAMBDA_R = 0.610f;
+static constexpr float SELL_LAMBDA_G = 0.550f;
+static constexpr float SELL_LAMBDA_B = 0.465f;
+
+static inline float sellmeierN(const v3half& B, const v3half& C, float lambdaUm) {
+    float l2 = lambdaUm * lambdaUm;
+    float n2 = 1.0f;
+    for (int j = 0; j < 3; ++j) {
+        float Bj = static_cast<float>(B[j]);
+        float Cj = static_cast<float>(C[j]);
+        float denom = l2 - Cj;
+        if (std::abs(denom) > 1e-8f) n2 += Bj * l2 / denom;
+    }
+    return std::sqrt(std::max(1.0f, n2));
+}
+
+static inline void sellmeierFromConstant(float n, v3half& B, v3half& C) {
+    float n2 = n * n;
+
+    if (n >= 1.0f) {
+        float n2_minus_1 = n2 - 1.0f;
+        float c1 = 0.0106f; 
+        float c2 = 100.0f;  
+        float b1 = n2_minus_1 / 1.030788f;
+        float b2 = b1 * 0.2f; 
+
+        B = v3half(Eigen::half(b1), Eigen::half(b2), Eigen::half(0.0f));
+        C = v3half(Eigen::half(c1), Eigen::half(c2), Eigen::half(0.0f));
+
+    } else {
+        n2 = std::max(0.00001f, n2); 
+        float c1 = 0.0f;
+        float c2 = -0.1f;
+        float b1 = 0.611792f * n2 - 1.0f;
+        float b2 = 0.5f * n2;
+
+        B = v3half(Eigen::half(b1), Eigen::half(b2), Eigen::half(0.0f));
+        C = v3half(Eigen::half(c1), Eigen::half(c2), Eigen::half(0.0f));
+    }
+}
 
 struct alignas(16) GPUMaterial {
     uint32_t chromaticity; //RBG9E5
@@ -611,10 +648,7 @@ struct PhysicsMaterial_ {
     float stiffness  = 4000.0f;
     float breakForce = 60.0f;
     float damping    = 0.4f;
-    ///@brief Tangential velocity fraction removed per substep while touching a solid
-    float friction = 0.3f;
-    ///@brief Normal velocity fraction returned on solid impact
-    float restitution = 0.0f;
+    ///TODO: restitution, density
 
     float breakCompressionScale = 4.0f;
     float breakTorque = 0.0f;
@@ -624,7 +658,6 @@ struct PhysicsMaterial_ {
     bool operator==(const PhysicsMaterial_& o) const {
         return type == o.type && mass == o.mass && stiffness == o.stiffness &&
                breakForce == o.breakForce && damping == o.damping &&
-               friction == o.friction && restitution == o.restitution &&
                breakCompressionScale == o.breakCompressionScale &&
                breakTorque == o.breakTorque && fatigue == o.fatigue &&
                minFragmentVoxels == o.minFragmentVoxels;
@@ -659,8 +692,6 @@ struct PMatHash {
 
 struct VoxelRel {
     Vec3 relPos;
-    ///@brief Largest half extent of the point's AABB, so the object bounds cover whole voxels
-    float half = 0.0f;
 };
 
 ///@brief Full per-voxel material spec used by detailed primitive insertion.
@@ -748,15 +779,6 @@ struct GridObject_ {
 
     bool isPartialUnloadAllowed() const {
         return objectFlags & OBJ_ALLOW_PARTIAL_UNLOAD_BIT;
-    }
-
-    bool isCutter() const {
-        return objectFlags & OBJ_CUTTER_BIT;
-    }
-
-    void setCutter(bool v) {
-        if (v) objectFlags |= OBJ_CUTTER_BIT;
-        else objectFlags &= ~OBJ_CUTTER_BIT;
     }
     void setPartialUnloadAllowed(bool v) {
         if (v) objectFlags |= OBJ_ALLOW_PARTIAL_UNLOAD_BIT;
@@ -846,7 +868,6 @@ struct NodeData_ {
     std::atomic<uint8_t> flags;
     std::atomic<uint8_t> settledFrames;
     PhysicsState_<T> physics;
-    Shape shape;
 
     NodeData_(const T& data, const Vec3& pos, bool visible, const Eigen::Vector4f& color, float size = 0.01f,
                 bool active = true, int objectId = -1, uint32_t rIdx = 0, uint16_t pIdx = 0, bool staticbit = 0) 
@@ -863,8 +884,7 @@ struct NodeData_ {
     NodeData_(const NodeData_& other) : data(other.data), position(other.position), objectId(other.objectId),
             subObjectId(other.subObjectId), size(other.size), color(other.color), renderMatIdx(other.renderMatIdx),
             physMatIdx(other.physMatIdx), flags(other.flags.load(std::memory_order_relaxed)),
-            settledFrames(other.settledFrames.load(std::memory_order_relaxed)), physics(other.physics),
-            shape(other.shape) {}
+            settledFrames(other.settledFrames.load(std::memory_order_relaxed)), physics(other.physics) {}
 
     NodeData_& operator=(const NodeData_& other) {
         if (this != &other) {
@@ -877,7 +897,6 @@ struct NodeData_ {
             renderMatIdx = other.renderMatIdx;
             physMatIdx = other.physMatIdx;
             physics = other.physics;
-            shape = other.shape;
             flags.store(other.flags.load(std::memory_order_relaxed), std::memory_order_relaxed);
             settledFrames.store(other.settledFrames.load(std::memory_order_relaxed), std::memory_order_relaxed);
         }
@@ -892,15 +911,6 @@ struct NodeData_ {
     }
     bool isStatic() const {
         return flags.load(std::memory_order_relaxed) & STATIC_BIT;
-    }
-    bool isMoved() const {
-        return flags.load(std::memory_order_relaxed) & MOVED_BIT;
-    }
-    bool isIdle() const {
-        return flags.load(std::memory_order_relaxed) & IDLE_BIT;
-    }
-    bool isAutoStatic() const {
-        return flags.load(std::memory_order_relaxed) & AUTOSTATIC_BIT;
     }
     bool isActiveAndVisible() const {
         return (flags.load(std::memory_order_relaxed) & (ACTIVE_BIT | VISIBLE_BIT)) != (ACTIVE_BIT | VISIBLE_BIT);
@@ -921,19 +931,7 @@ struct NodeData_ {
     }
     void setStatic(bool v) {
         if (v) flags.fetch_or(STATIC_BIT, std::memory_order_relaxed);
-        else flags.fetch_and(~(STATIC_BIT | AUTOSTATIC_BIT), std::memory_order_relaxed);
-    }
-    void setMoved(bool v) {
-        if (v) flags.fetch_or(MOVED_BIT, std::memory_order_relaxed);
-        else flags.fetch_and(~MOVED_BIT, std::memory_order_relaxed);
-    }
-    void setIdle(bool v) {
-        if (v) flags.fetch_or(IDLE_BIT, std::memory_order_relaxed);
-        else flags.fetch_and(~IDLE_BIT, std::memory_order_relaxed);
-    }
-    void setAutoStatic(bool v) {
-        if (v) flags.fetch_or(STATIC_BIT | AUTOSTATIC_BIT, std::memory_order_relaxed);
-        else flags.fetch_and(~(STATIC_BIT | AUTOSTATIC_BIT), std::memory_order_relaxed);
+        else flags.fetch_and(~STATIC_BIT, std::memory_order_relaxed);
     }
     void setSettled(bool asleep) {
         if (!asleep) {
@@ -948,30 +946,10 @@ struct NodeData_ {
         float sizeh = size * 0.5f;
         return Vec3(sizeh, sizeh, sizeh);
     }
-
-    bool isShape() const {
-        return !shape.isUnitCube();
-    }
-
-    ///@brief World AABB of the point
+    
     BoundingBox getCubeBounds() const {
-        return shape.aabb(position, size);
-    }
-
-    ///@brief Largest half extent of the world AABB
-    float halfExtent() const {
-        BoundingBox b = getCubeBounds();
-        return (b.second - b.first).maxCoeff() * 0.5f;
-    }
-
-    ///@brief Volume in world units; a shape counts as all the cells it stands in for
-    float volume() const {
-        return shape.volume(size);
-    }
-
-    ///@brief Number of size-sized cells this point represents
-    size_t cellCount() const {
-        return shape.cellCount(position, size);
+        Vec3 halfSize = getHalfSize();
+        return {position - halfSize, position + halfSize};
     }
 };
 
@@ -1307,12 +1285,6 @@ struct PointStore {
             b.capacity = 1;
             return blockIdx;
         }
-        // spare slots left by an earlier move or erase take the point without relocating
-        if (b.count < b.capacity && static_cast<size_t>(b.offset) + b.capacity <= pool.size()) {
-            pool[b.offset + b.count] = pt;
-            b.count++;
-            return blockIdx;
-        }
         if (b.offset + b.count == pool.size()) {
             pool.push_back(pt);
             b.count++;
@@ -1326,12 +1298,10 @@ struct PointStore {
         existing.push_back(pt);
 
         uint32_t newOffset = static_cast<uint32_t>(pool.size());
-        uint32_t capacity = static_cast<uint32_t>(existing.size()) + static_cast<uint32_t>(existing.size() / 2) + 2;
         pool.insert(pool.end(), existing.begin(), existing.end());
-        pool.resize(static_cast<size_t>(newOffset) + capacity);
         b.offset = newOffset;
         b.count = static_cast<uint32_t>(existing.size());
-        b.capacity = capacity;
+        b.capacity = b.count;
         return blockIdx;
     }
 
@@ -1353,26 +1323,6 @@ struct PointStore {
             freeBlocks.push_back(blockIdx);
         }
         return allocLocked(pts);
-    }
-
-    ///@brief Removes one point from a block in place, keeping the order of the rest.
-    ///       Its id stays registered: the point is on its way into another block.
-    ///@return False if the point was not in the block
-    bool erase(uint32_t blockIdx, const NodeData_<T>* pt) {
-        u_lock lock(mutex);
-        if (blockIdx == INVALID_IDX || blockIdx >= blocks.size()) return false;
-        Block& b = blocks[blockIdx];
-        if (static_cast<size_t>(b.offset) + b.count > pool.size()) return false;
-        auto* first = pool.data() + b.offset;
-        auto* last = first + b.count;
-        for (auto* it = first; it != last; ++it) {
-            if (it->get() != pt) continue;
-            std::move(it + 1, last, it);
-            (last - 1)->reset();
-            b.count--;
-            return true;
-        }
-        return false;
     }
 
     void release(uint32_t blockIdx) {
@@ -1663,6 +1613,20 @@ struct RayHit_ {
     Vec3 hitPoint;
 };
     
+struct Ray {
+    Vec3 origin;
+    Vec3 dir;
+    Vec3 invDir;
+    uint8_t sign[3];
+    uint8_t signMask;
+    Ray(const Vec3& orig, const Vec3& dir) : origin(orig), dir(dir) {
+        invDir = dir.cwiseInverse();
+        sign[0] = (invDir[0] < 0);
+        sign[1] = (invDir[1] < 0);
+        sign[2] = (invDir[2] < 0);
+        signMask = (sign[0] | sign[1] << 1 | sign[2] << 2);
+    }
+};
 
 struct ProgressiveAccum {
     bool valid = false;
@@ -1677,5 +1641,22 @@ struct ProgressiveAccum {
     uint64_t sceneEpoch = ~0ull;
 };
 
+struct SolidNb {
+    Vec3 pos;
+    float size;
+};
+
+template<typename T>
+struct PhysicsFrameContext_ {
+    std::vector<std::vector<PhysicsMaterial_>> fastMats;
+    size_t fastMatsSize = 0;
+    std::vector<std::shared_ptr<NodeData_<T>>> sphNodes;
+    std::vector<std::shared_ptr<NodeData_<T>>> rigidNodes;
+    std::unordered_map<std::array<int64_t,3>, std::vector<SolidNb>, Vec3i64Hash> solidCells;
+    Vec3 domLo;
+    Vec3 domHi;
+    float solidCellSize = 0.0f;
+    bool valid = false;
+};
 
 }

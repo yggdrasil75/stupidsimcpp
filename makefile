@@ -44,8 +44,8 @@ CHAR_LDFLAGS = -ltbb
 # Source files
 # SRC := $(SRC_DIR)/ptest.cpp
 # SRC := $(SRC_DIR)/naturetest.cpp
-#SRC := $(SRC_DIR)/physicsroom.cpp
-SRC := $(SRC_DIR)/materialtestv2.cpp
+SRC := $(SRC_DIR)/physicsroom.cpp
+# SRC := $(SRC_DIR)/materialtestv2.cpp
 SUPPORT_SRC := $(IMGUI_DIR)/imgui.cpp $(IMGUI_DIR)/imgui_demo.cpp $(IMGUI_DIR)/imgui_draw.cpp $(IMGUI_DIR)/imgui_tables.cpp $(IMGUI_DIR)/imgui_widgets.cpp
 SUPPORT_SRC += $(IMGUI_DIR)/backends/imgui_impl_glfw.cpp $(IMGUI_DIR)/backends/imgui_impl_opengl3.cpp
 SUPPORT_SRC += $(SRC_DIR)/stb_image.cpp
@@ -69,8 +69,6 @@ SHADER_SRCS += $(SHADER_DIR)/wf_init.comp $(SHADER_DIR)/wf_args.comp $(SHADER_DI
 SHADER_SRCS += $(SHADER_DIR)/vct_mip.comp $(SHADER_DIR)/vct_voxelize.comp $(SHADER_DIR)/guided_coeff.comp $(SHADER_DIR)/aabb_build.comp
 SHADER_SRCS += $(SHADER_DIR)/ddgi_update.comp
 SHADER_SRCS += $(SHADER_DIR)/svgf_reproject.comp $(SHADER_DIR)/svgf_moments.comp
-PHYS_SHADERS := raster predict scan scatter lambda delta xbond apply strain sm_reduce sm_apply bounce finalize xsph
-SHADER_SRCS += $(addprefix $(SHADER_DIR)/phys_,$(addsuffix .comp,$(PHYS_SHADERS)))
 SHADER_SPVS := $(patsubst $(SHADER_DIR)/%.comp,$(BIN_DIR)/%.spv,$(SHADER_SRCS))
 
 $(shell mkdir -p $(OBJ_DIR))
@@ -96,15 +94,9 @@ $(OBJ_DIR)/%.o: $(GRID_DIR)/%.cpp
 all: $(EXE) $(EDITOR_EXE) $(CHARACTER_EXE) $(SHADER_SPVS)
 	@echo "Build complete for $(UNAME_S)"
 
-$(BIN_DIR)/wf_init.spv $(BIN_DIR)/wf_args.spv $(BIN_DIR)/wf_extend.spv $(BIN_DIR)/wf_shade.spv $(BIN_DIR)/wf_shadow.spv $(BIN_DIR)/wf_finalize.spv $(BIN_DIR)/ddgi_update.spv $(BIN_DIR)/fast_raytrace_hw.spv $(BIN_DIR)/aabb_build.spv $(BIN_DIR)/vct_voxelize.spv: $(SHADER_DIR)/shapes.glsl
+$(BIN_DIR)/wf_init.spv $(BIN_DIR)/wf_args.spv $(BIN_DIR)/wf_extend.spv $(BIN_DIR)/wf_shade.spv $(BIN_DIR)/wf_shadow.spv $(BIN_DIR)/wf_finalize.spv $(BIN_DIR)/ddgi_update.spv: $(SHADER_DIR)/wf_common.glsl $(SHADER_DIR)/vct_cone.glsl
 
 $(BIN_DIR)/smooth.spv $(BIN_DIR)/svgf_reproject.spv $(BIN_DIR)/svgf_moments.spv: $(SHADER_DIR)/svgf_common.glsl
-
-$(addprefix $(BIN_DIR)/phys_,$(addsuffix .spv,$(PHYS_SHADERS))): $(SHADER_DIR)/phys_common.glsl $(SHADER_DIR)/shapes.glsl
-
-$(BIN_DIR)/phys_%.spv: $(SHADER_DIR)/phys_%.comp
-	@echo "Compiling shader $< -> $@"
-	glslc --target-env=vulkan1.2 $< -o $@
 
 $(BIN_DIR)/%.spv: $(SHADER_DIR)/%.comp
 	@echo "Compiling shader $< -> $@"
