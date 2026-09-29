@@ -85,6 +85,145 @@ struct InFlightFrame {
     uint32_t postSlot = 0;
 };
 
+struct alignas(16) GPURenderData {
+    Vec3 position;
+    float size;
+    uint32_t color;
+    uint32_t materialIdx;
+    int objectId;
+    uint32_t extent = EXTENT_UNIT;
+};
+
+struct alignas(16) GPUBrickHeader {
+    int32_t bx;
+    int32_t by;
+    int32_t bz;
+    uint32_t objectId;
+    uint32_t matWordOffset;
+    uint32_t occWordOffset;
+    uint32_t paletteOffset;
+    uint32_t voxelCount;
+    float originX;          // object lattice origin; brick min = origin + key * 8 * voxelSize
+    float originY;
+    float originZ;
+    uint32_t pad;
+};
+
+struct alignas(16) GPUPaletteEntry {
+    uint32_t colorRGBA8;
+    uint32_t renderMatIdx;
+    uint32_t physMatIdx;
+    uint32_t pad;
+};
+
+struct GPUAabb {
+    float minX;
+    float minY;
+    float minZ;
+    float maxX;
+    float maxY;
+    float maxZ;
+};
+
+struct BrickGPUData {
+    float voxelSize = 0.0f;
+    std::vector<GPUBrickHeader> headers;
+    std::vector<uint32_t> matWords;
+    std::vector<uint32_t> occWords;
+    std::vector<GPUPaletteEntry> palette;
+    std::vector<GPUAabb> aabbs;
+    ///@brief objectId -> (first header index, brick count)
+    std::unordered_map<int, std::pair<uint32_t, uint32_t>> objectBrickRange;
+
+    size_t bytes() const {
+        return headers.size() * sizeof(GPUBrickHeader)
+             + matWords.size() * sizeof(uint32_t)
+             + occWords.size() * sizeof(uint32_t)
+             + palette.size() * sizeof(GPUPaletteEntry)
+             + aabbs.size() * sizeof(GPUAabb);
+    }
+};
+
+inline void brickWriteWords(const Brick& b, uint32_t* matOut, uint32_t* occOut) {
+    std::memcpy(matOut, b.mat.data(), BRICK_VOXELS);
+    for (uint32_t w = 0; w < BRICK_OCC_WORDS; ++w) {
+        occOut[w * 2] = static_cast<uint32_t>(b.occ[w] & 0xFFFFFFFFull);
+        occOut[w * 2 + 1] = static_cast<uint32_t>(b.occ[w] >> 32);
+    }
+}
+
+inline BrickGPUData brickFlatten(const BrickWorld& world) {
+    BrickGPUData g;
+    g.voxelSize = world.voxelSize;
+    const size_t brickCount = world.totalBricks();
+    g.headers.reserve(brickCount);
+    g.aabbs.reserve(brickCount);
+    g.matWords.resize(brickCount * BRICK_MAT_WORDS);
+    g.occWords.resize(brickCount * BRICK_OCC_WORDS * 2);
+
+    std::vector<int> ids;
+    ids.reserve(world.objects.size());
+    for (const auto& kv : world.objects) ids.push_back(kv.first);
+    std::sort(ids.begin(), ids.end());
+
+    for (int id : ids) {
+        const BrickObject& obj = world.objects.at(id);
+        uint32_t palOff = static_cast<uint32_t>(g.palette.size());
+        for (const PaletteEntry& p : obj.palette) {
+            g.palette.push_back(GPUPaletteEntry{p.colorRGBA8, p.renderMatIdx, p.physMatIdx, 0});
+        }
+
+        uint32_t first = static_cast<uint32_t>(g.headers.size());
+        for (const Brick& b : obj.bricks) {
+            uint32_t i = static_cast<uint32_t>(g.headers.size());
+            GPUBrickHeader h;
+            h.bx = b.key.x;
+            h.by = b.key.y;
+            h.bz = b.key.z;
+            h.objectId = static_cast<uint32_t>(obj.objectId);
+            h.matWordOffset = i * BRICK_MAT_WORDS;
+            h.occWordOffset = i * BRICK_OCC_WORDS * 2;
+            h.paletteOffset = palOff;
+            h.voxelCount = b.count;
+            h.originX = obj.origin.x();
+            h.originY = obj.origin.y();
+            h.originZ = obj.origin.z();
+            h.pad = 0;
+            g.headers.push_back(h);
+            brickWriteWords(b, &g.matWords[h.matWordOffset], &g.occWords[h.occWordOffset]);
+
+            Vec3 lo = obj.brickMin(b.key);
+            Vec3 hi = obj.brickMax(b.key);
+            g.aabbs.push_back(GPUAabb{lo.x(), lo.y(), lo.z(), hi.x(), hi.y(), hi.z()});
+        }
+        g.objectBrickRange[id] = {first, static_cast<uint32_t>(obj.bricks.size())};
+    }
+    return g;
+}
+
+///@brief Re-flatten only dirty bricks into an existing BrickGPUData (brick set must be unchanged).
+///@return Header indices that were rewritten, for a partial upload.
+inline std::vector<uint32_t> brickFlattenDirty(BrickWorld& world, BrickGPUData& g) {
+    std::vector<uint32_t> touched;
+    for (auto& kv : world.objects) {
+        auto rit = g.objectBrickRange.find(kv.first);
+        if (rit == g.objectBrickRange.end()) continue;
+        BrickObject& obj = kv.second;
+        const uint32_t first = rit->second.first;
+        const uint32_t count = std::min<uint32_t>(rit->second.second, static_cast<uint32_t>(obj.bricks.size()));
+        for (uint32_t i = 0; i < count; ++i) {
+            Brick& b = obj.bricks[i];
+            if (!b.dirty) continue;
+            GPUBrickHeader& h = g.headers[first + i];
+            h.voxelCount = b.count;
+            brickWriteWords(b, &g.matWords[h.matWordOffset], &g.occWords[h.occWordOffset]);
+            b.dirty = false;
+            touched.push_back(first + i);
+        }
+    }
+    return touched;
+}
+
 #ifdef VULKAN_SUPPORT
 static PFN_vkGetAccelerationStructureBuildSizesKHR pfn_vkGetAccelerationStructureBuildSizesKHR = nullptr;
 static PFN_vkCreateAccelerationStructureKHR pfn_vkCreateAccelerationStructureKHR = nullptr;
@@ -99,15 +238,6 @@ static constexpr uint32_t WF_COUNTER_SIZE = 16 * sizeof(uint32_t);
 static constexpr VkDeviceSize WF_OFF_EXTEND_ARGS = 16;
 static constexpr VkDeviceSize WF_OFF_SHADE_ARGS  = 32;
 static constexpr VkDeviceSize WF_OFF_SHADOW_ARGS = 48;
-
-struct alignas(16) GPURenderData {
-    Vec3 position;
-    float size;
-    uint32_t color;
-    uint32_t materialIdx;
-    int objectId;
-    uint32_t extent = EXTENT_UNIT;
-};
 
 struct alignas(16) GPUCameraData {
     Vec3 origin;
@@ -738,8 +868,8 @@ struct GpuContext {
         vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
 
         VkDescriptorPoolSize poolSizes[] = { 
-            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 128},
-            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 12},
+            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 160},
+            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 24},
             {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 6},
             {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 64},
             {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4}
@@ -750,7 +880,7 @@ struct GpuContext {
         poolCreateInfo.maxSets = 48;
         vkCreateDescriptorPool(device, &poolCreateInfo, nullptr, &descriptorPool);
 
-        VkDescriptorSetLayoutBinding bindings[11] = {};
+        VkDescriptorSetLayoutBinding bindings[16] = {};
         for(int i=0; i<6; i++) {
             bindings[i].binding = i;
             bindings[i].descriptorType = i==3 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -784,11 +914,20 @@ struct GpuContext {
         bindings[10].descriptorCount = 1;
         bindings[10].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
-        VkDescriptorSetLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        layoutInfo.bindingCount = 11;
-        layoutInfo.pBindings = bindings;
+        // brick world (fast pipeline only): headers, mat words, occupancy, palette, params
+        for (int i = 11; i < 16; i++) {
+            bindings[i].binding = i;
+            bindings[i].descriptorType = i == 15 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            bindings[i].descriptorCount = 1;
+            bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        }
 
+        VkDescriptorSetLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        layoutInfo.bindingCount = 16;
+        layoutInfo.pBindings = bindings;
         vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &fastDescLayout);
+
+        layoutInfo.bindingCount = 11;
         vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &pbrDescLayout);
 
         VkDescriptorSetLayoutBinding smBindings[7] = {};
@@ -1399,20 +1538,35 @@ struct GpuContext {
             descASInfo.accelerationStructureCount = 1;
             descASInfo.pAccelerationStructures = &tlas;
 
-            VkWriteDescriptorSet asWrites[2] = {};
-            for (int i = 0; i < 2; i++) {
-                asWrites[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                asWrites[i].pNext = &descASInfo;
-                asWrites[i].dstSet = (i == 0) ? fastDescSet : pbrDescSet;
-                asWrites[i].dstBinding = 6;
-                asWrites[i].descriptorCount = 1;
-                asWrites[i].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-            }
-            vkUpdateDescriptorSets(device, 2, asWrites, 0, nullptr);
+            // the fast set gets the brick TLAS in writeFastDescriptors
+            VkWriteDescriptorSet asWrite{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            asWrite.pNext = &descASInfo;
+            asWrite.dstSet = pbrDescSet;
+            asWrite.dstBinding = 6;
+            asWrite.descriptorCount = 1;
+            asWrite.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+            vkUpdateDescriptorSets(device, 1, &asWrite, 0, nullptr);
             framesSinceFullBuild = 0;
         } else {
             framesSinceFullBuild++;
         }
+    }
+
+    VkQueryPool fastQueryPool[FRAME_SLOTS] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+
+    ///@brief Records the GPU execution time of the fast dispatch that ran in `slot` under
+    ///       "fastDispatch (GPU)" in FunctionTimer. Unlike the CPU timers this excludes fence
+    ///       waits and readback, so it separates GPU-bound from stall-bound frames.
+    void recordFastGpuTime(uint32_t slot) {
+        if (slot >= FRAME_SLOTS || !fastQueryPool[slot]) return;
+        uint64_t timestamps[2] = {0, 0};
+        VkResult res = vkGetQueryPoolResults(device, fastQueryPool[slot], 0, 2, sizeof(timestamps), timestamps,
+                                             sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+        if (res != VK_SUCCESS) return;
+        VkPhysicalDeviceProperties props;
+        vkGetPhysicalDeviceProperties(primaryDevice, &props);
+        double seconds = static_cast<double>(timestamps[1] - timestamps[0]) * props.limits.timestampPeriod * 1e-9;
+        FunctionTimer::recordTiming("fastDispatch (GPU)", seconds);
     }
 
     ///@brief Records and submits the fast pipeline over the whole frame, no wait.
@@ -1429,16 +1583,28 @@ struct GpuContext {
         }
         vkResetFences(device, 1, &frameFence[slot]);
 
+        if (!fastQueryPool[slot]) {
+            VkQueryPoolCreateInfo queryInfo{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+            queryInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+            queryInfo.queryCount = 2;
+            vkCreateQueryPool(device, &queryInfo, nullptr, &fastQueryPool[slot]);
+        }
+
+        writeFastDescriptors();
+
         VkCommandBuffer cmd = frameCmd[slot];
         vkResetCommandBuffer(cmd, 0);
 
         VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         vkBeginCommandBuffer(cmd, &beginInfo);
+        vkCmdResetQueryPool(cmd, fastQueryPool[slot], 0, 2);
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, fastQueryPool[slot], 0);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, fastPipeline);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, fastPipelineLayout,
                                 0, 1, &fastDescSet, 0, nullptr);
         vkCmdDispatch(cmd, (width + 7) / 8, (height + 7) / 8, 1);
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, fastQueryPool[slot], 1);
 
         VkBufferMemoryBarrier toXfer{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
         toXfer.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
@@ -1645,39 +1811,14 @@ struct GpuContext {
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     }
 
-    void updateFastBuffers(const std::vector<GPURenderData>& points) {
+    ///@brief The fast pipeline's point array only feeds light sampling (emissiveIndices);
+    ///       geometry comes from the brick buffers, so no acceleration structure is built here.
+    void updateEmissiveProxyBuffer(const std::vector<GPURenderData>& points) {
         size_t allocSize = std::max((size_t)256, points.size() * sizeof(GPURenderData));
         size_t dataSize = points.size() * sizeof(GPURenderData);
-        
-        updateDeviceLocalBuffer(fastPointBuffer, fastPointMem, currentFastPointsCap, 
-                                points.empty() ? nullptr : points.data(), dataSize, allocSize, 
+        updateDeviceLocalBuffer(fastPointBuffer, fastPointMem, currentFastPointsCap,
+                                points.empty() ? nullptr : points.data(), dataSize, allocSize,
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-
-        buildHardwareAccelerationStructures(points, 1, fastPointBuffer);
-
-        VkDescriptorBufferInfo bInfos[8] = { 
-            {nodeBuffer, 0, VK_WHOLE_SIZE}, 
-            {fastPointBuffer, 0, VK_WHOLE_SIZE}, 
-            {outBuffer, 0, VK_WHOLE_SIZE}, 
-            {uboBuffer, 0, VK_WHOLE_SIZE},
-            {skyboxBuffer, 0, VK_WHOLE_SIZE},
-            {lightBuffer, 0, VK_WHOLE_SIZE},
-            {adaptiveBuffer, 0, VK_WHOLE_SIZE},
-            {materialBuffer, 0, VK_WHOLE_SIZE}
-        };
-        int updateCount = 8;
-        VkWriteDescriptorSet writes[8] = {};
-        for(int i=0; i<updateCount; i++) {
-            writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[i].dstSet = fastDescSet;
-            writes[i].dstBinding = (i >= 6) ? i + 1 : i; // 6 is handled by AS update
-            writes[i].descriptorCount = 1;
-            writes[i].descriptorType = (i==3) ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            writes[i].pBufferInfo = &bInfos[i];
-        }
-        vkUpdateDescriptorSets(device, updateCount, writes, 0, nullptr);
-
-        vctWriteFastDescriptors();
     }
 
     void updatePBRBuffers(const std::vector<GPURenderData>& points) {
@@ -2657,8 +2798,10 @@ int tileTarget() const {
 }
 
 #include "vct_host.inl"
+#include "brick_gpu.inl"
 
 };
+
 inline GpuContext vkCtx;
 
 struct GpuFleet {

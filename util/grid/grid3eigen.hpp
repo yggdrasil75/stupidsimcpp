@@ -477,13 +477,19 @@ private:
                     }
                     if (n) n->setLoadQueued(false);
                 }
-                if (justLoaded) ensureLOD(idx);
+                if (justLoaded) {
+                    ensureLOD(idx);
+                    bricksDirty_ = true;
+                }
             });
         } else {
             {
                 u_lock nlock(store_.stripe(idx));
                 OctreeNode* n = nodeAt(idx);
-                if (n && !n->isLoaded()) loadRegion(idx);
+                if (n && !n->isLoaded()) {
+                    loadRegion(idx);
+                    bricksDirty_ = true;
+                }
                 if (n) n->setLoadQueued(false);
             }
             if (nodeAt(idx)->isLoaded()) ensureLOD(idx);
@@ -700,6 +706,32 @@ public:
         return store_.points.byId(id);
     }
 
+    ///@brief Visit every active point in every loaded node (depth-first from root).
+    ///       fn receives `const NodeData&`.  Read-only; no locking beyond the point store's own.
+    template <typename Fn>
+    void forEachActivePoint(Fn&& fn) const {
+        if (root_ == INVALID_IDX) return;
+        std::vector<uint32_t> stack;
+        stack.push_back(root_);
+        while (!stack.empty()) {
+            uint32_t idx = stack.back();
+            stack.pop_back();
+            const OctreeNode* n = store_.ptr(idx);
+            if (!n) continue;
+            if (n->isLoaded()) {
+                const auto pts = pointsView(idx);
+                for (const auto& pt : pts) {
+                    if (!pt || !pt->isActive()) continue;
+                    fn(*pt);
+                }
+            }
+            if (!n->isLeaf() && n->firstChild != INVALID_IDX) {
+                for (int i = 0; i < 8; ++i)
+                    if (n->hasChild(i)) stack.push_back(n->firstChild + i);
+            }
+        }
+    }
+
     ///@brief Look up an existing GridObject or allocate a new one if missing
     ///@param id The target object ID, -1 generates an auto incremented new ID
     ///@return Shared pointer to the designated GridObject
@@ -727,6 +759,7 @@ public:
     ///@param objectId The target object ID
     ///@return True if successfully removed at least some related components
     bool removeObject(int objectId) {
+        bricksDirty_ = true;
         std::vector<std::shared_ptr<NodeData>> nodes;
         uint32_t startNode = collectNodesByObjectId(objectId, nodes);
         if (nodes.empty()) return false;
@@ -1388,6 +1421,7 @@ private:
     ///@brief Brute force destructive wipe of all components cascading down from a block
     ///@param node Element marked for termination
     void clearNode(uint32_t idx) {
+        bricksDirty_ = true;
         OctreeNode* node = nodeAt(idx);
         if (!node) return;
 
@@ -1980,6 +2014,7 @@ public:
         if (!pos.allFinite() || !nodeAt(root_)->contains(pos)) {
             return false;
         }
+        bricksDirty_ = true;
         auto obj = getOrCreateObject(objectId);
         RenderMaterial rmat(emittance, roughness, metallic, ior, absorp);
         uint32_t rIdx = renderMaterials_.getOrAdd(rmat);
@@ -2303,6 +2338,7 @@ public:
     ///@brief Rebuilds an object from a stream, re-centered at placeAt.
     ///@param newObjectId Target id, or -1 to auto-assign.
     int deserializeObject(std::ifstream& in, const Vec3& placeAt, int newObjectId = -1) {
+        bricksDirty_ = true;
         uint32_t omagic = 0;
         readVal(in, omagic);
         if (omagic != 0x6f626a31) {
@@ -2698,6 +2734,7 @@ public:
     }
 
     bool rotateObject(int objectId, const Eigen::Matrix3f& rotation, const Vec3& pivot) {
+        bricksDirty_ = true;
         if (root_ == INVALID_IDX) return false;
         std::vector<std::shared_ptr<NodeData>> nodes;
         collectNodesByObjectId(objectId, nodes);
@@ -2747,6 +2784,7 @@ public:
     }
 
     bool subdivideObject(int objectId) {
+        bricksDirty_ = true;
         if (root_ == INVALID_IDX) return false;
         std::vector<std::shared_ptr<NodeData>> nodes;
         int oldDepth = 0;
@@ -2781,6 +2819,7 @@ public:
     }
 
     bool smoothObject(int objectId) {
+        bricksDirty_ = true;
         if (!subdivideObject(objectId)) return false;
 
         std::vector<std::shared_ptr<NodeData>> nodes;
@@ -3008,6 +3047,7 @@ public:
     }
 
     bool remove(const Vec3& pos, float tolerance = EPSILON) {
+        bricksDirty_ = true;
         auto pt = find(pos, -2, tolerance);
         if (!pt) return false;
         if (removeRecursive(root_, pt->getCubeBounds(), pt)) {
@@ -3075,6 +3115,7 @@ public:
     }
 
     void queuedupdate(const Vec3 pos, const T newData) {
+        bricksDirty_ = true;
         enqueueTask([this, pos, newData]() {
             uint32_t node = root_;
             auto pointData = findwNode(pos, node, -2);
@@ -3132,6 +3173,7 @@ public:
     }
 
     bool move(const Vec3& pos, const Vec3& newPos) {
+        bricksDirty_ = true;
         auto pointData = find(pos);
         if (!pointData) return false;
 
@@ -3146,6 +3188,7 @@ public:
     }
 
     void queuedmove(const Vec3 pos, const Vec3 newPos) {
+        bricksDirty_ = true;
         enqueueTask([this, pos, newPos]() {
             auto pointData = find(pos);
             if (!pointData) return;
@@ -3162,6 +3205,7 @@ public:
     }
 
     void queuedupdate(const Vec3 pos, const Vec3 newPos, const T newData) {
+        bricksDirty_ = true;
         enqueueTask([this, pos, newPos, newData]() {
             auto pointData = find(pos);
             if (!pointData) return;
@@ -3534,6 +3578,70 @@ public:
     frame endGameStyleRenderFrame(InFlightFrame& pending);
 
     frame fastRenderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat = frame::colormap::RGB);
+
+    ///@brief Rebuild the brick world from the octree and upload it in full. Runs
+    void rebuildBricks(float voxelSize = 0.0f);
+    void markBricksDirty() { bricksDirty_ = true; }
+    void brickSetVoxel(int objectId, const Vec3& worldPos, uint8_t paletteIdx);
+    const BrickWorld& brickWorld() const { return brickWorld_; }
+    BrickConvertStats lastBrickStats() const { return brickStats_; }
+
+private:
+    BrickWorld brickWorld_;
+    BrickGPUData brickGpu_;
+    BrickConvertStats brickStats_;
+    ///@brief Emissive voxels of the brick world as light proxies, in the point-array format
+    std::vector<GPURenderData> brickLightPoints_;
+    std::vector<uint32_t> brickLightIndices_;
+    bool bricksDirty_ = true;
+    bool bricksUploaded_ = false;
+
+    ///@brief Full rebuild or partial upload as needed; returns the bounds of all bricks
+    void ensureBricksUploaded(Vec3& boundsMin, Vec3& boundsMax);
+    ///@brief ensureBricksUploaded + materials, brick light proxies and the radiance volume.
+    ///       Used by the fast and gamestyle frames, which have no other light list.
+    void prepareBrickFrame(const Camera& cam, int& emissiveCount);
+    void rebuildBrickLights();
+
+    BrickWorld buildBrickWorld(float voxelSize, BrickConvertStats* statsOut = nullptr) const {
+        auto enumerate = [&](auto&& sink) {
+            forEachActivePoint([&](const NodeData& pt) {
+                if (!pt.isVisible()) return;
+                sink(VoxelSource{pt.position, pt.size, packRGBA8(pt.color),
+                                 pt.renderMatIdx, pt.physMatIdx, pt.objectId});
+            });
+        };
+        BrickWorld world;
+        world.voxelSize = (voxelSize > 0.0f) ? voxelSize : brickInferPitch(enumerate);
+        BrickConvertStats st = brickConvert(world, enumerate);
+        if (statsOut) *statsOut = st;
+        return world;
+    }
+
+    ///@brief Keep the brick world in sync with a voxel that physics moved from oldPos to
+    ///       its current position. Cheap; the GPU copy is refreshed on the next brick frame.
+    void brickMoveVoxel(const NodeData& node, const Vec3& oldPos) {
+        if (!bricksUploaded_ || bricksDirty_) return;
+        auto it = brickWorld_.objects.find(node.objectId);
+        if (it == brickWorld_.objects.end()) {
+            bricksDirty_ = true;
+            return;
+        }
+        BrickObject& obj = it->second;
+        const uint32_t color = packRGBA8(node.color);
+        VoxelSource v{oldPos, node.size, color, node.renderMatIdx, node.physMatIdx, node.objectId};
+        brickRasterizeVoxel(brickWorld_, obj, v, BRICK_EMPTY, nullptr);
+        if (!node.isActive() || !node.isVisible()) return;
+
+        size_t brickCountBefore = obj.bricks.size();
+        v.position = node.position;
+        uint8_t pal = obj.paletteIndex(PaletteEntry{color, node.renderMatIdx, node.physMatIdx, 0});
+        brickRasterizeVoxel(brickWorld_, obj, v, pal, nullptr);
+        // a new brick changes the BLAS primitive set, which needs a full rebuild
+        if (obj.bricks.size() != brickCountBefore) bricksDirty_ = true;
+    }
+
+public:
 
     ///@brief Records and submits a fast frame, returning without waiting
     ///@return Handle to pass to endFastRenderFrameVulkan

@@ -529,6 +529,7 @@ int main() {
     // writer.drain();
     // FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
 
+
     {
         ScopedFunctionTimer meh("Fast section");
         Grid::InFlightFrame inflight;

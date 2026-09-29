@@ -1134,63 +1134,27 @@ frame Octree<T>::renderFrameVulkan(const Camera& cam, int height, int width, fra
 template<typename T>
 InFlightFrame Octree<T>::beginFastRenderFrameVulkan(const Camera& cam, int height, int width, frame::colormap colorformat) {
     TIME_FUNCTION;
-    // ScopedFunctionTimer frfv("fast render frame vulkan startup");
     updateStreaming(cam);
-    // optimize();
-    thread_local RenderBuffer tl_buffer;
-    buildRender(tl_buffer);
-    
     vkCtx.init();
-    
-    const std::vector<GPUMaterial>* gpuMaterials = nullptr;
-    const std::vector<float>* sellLUT = nullptr;
-    size_t sellRows = 0;
-    renderMaterials_.retrieveGPUMaterials(buildGPUMaterialCache, gpuMaterials, sellLUT, sellRows);
-    vkCtx.updateMaterialBuffer(*gpuMaterials);
-    vkCtx.updateSellmeierBuffer(*sellLUT, SELL_LUT_WAVELENGTHS, sellRows);
-
-    thread_local SceneCache tl_fastScene;
-    const bool sceneChanged = refreshSceneCache(tl_buffer, false, true, tl_fastScene);
-    const std::vector<GPURenderData>& gpuPoints = tl_fastScene.gpuPoints;
-    const std::vector<uint32_t>& gpuLights = tl_fastScene.gpuLights;
-    const int emissiveCount = tl_fastScene.emissiveCount;
-    const Vec3 vctMin = tl_fastScene.boundsMin;
-    const Vec3 vctMax = tl_fastScene.boundsMax;
+    int emissiveCount = 0;
+    prepareBrickFrame(cam, emissiveCount);
 
     size_t skyW, skyH;
     const std::vector<Eigen::Vector4f>& skyData = getCachedSkyData(skyW, skyH);
-
     float aspect = static_cast<float>(width) / height;
-    float fovRad = cam.fovRad();
-    float tanHalfFov = tan(fovRad * 0.5f);
+    float tanHalfFov = tan(cam.fovRad() * 0.5f);
     float invFogRange = 1.0f / std::max(0.001f, maxDistance_ - lodMinDistance_);
-
     Vec3 camBasisRight_, camBasisUp_, camBasisFwd_;
     cam.orthonormalBasis(camBasisRight_, camBasisUp_, camBasisFwd_);
     GPUCameraData camData = {
         cam.origin, lodMinDistance_, camBasisFwd_, invLodf, camBasisUp_, 0.1f, camBasisRight_, maxDistance_,
         skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
-        width, height, 1, 1, invFogRange, frameCounter_++, (int)skyW, (int)skyH, 0, 1, 0, 
-        0, (uint32_t)gpuPoints.size(), 0, 0, emissiveCount, 1
+        width, height, 1, 1, invFogRange, frameCounter_++, (int)skyW, (int)skyH, 0, 1, 0,
+        0, (uint32_t)brickLightPoints_.size(), 0, 0, emissiveCount, 1
     };
-
     size_t outSize = width * height * 5 * sizeof(float);
-    // vkCtx.awaitAllFastFrames();
     vkCtx.updateCommonBuffers(outSize, camData);
     vkCtx.updateSkyboxBuffer(skyData);
-    if (sceneChanged || !vkCtx.fastPointsResident) {
-        vkCtx.updateLightBuffer(gpuLights);
-        vkCtx.updateFastBuffers(gpuPoints);
-        vkCtx.fastPointsResident = true;
-    }
-
-    {
-        Vec3 keyLight = (-cam.direction.normalized());
-        vkCtx.vctBuildVolume(vkCtx.fastPointBuffer, (uint32_t)gpuPoints.size(), vctMin, vctMax, keyLight, true);
-    }
-    
-    // frfv.stop();
-    const uint32_t slot = vkCtx.submitFastFullFrame(width, height, outSize);
 
     InFlightFrame pending;
     pending.width = width;
@@ -1198,7 +1162,7 @@ InFlightFrame Octree<T>::beginFastRenderFrameVulkan(const Camera& cam, int heigh
     pending.outSize = outSize;
     pending.colorformat = colorformat;
     pending.pending = true;
-    pending.slot = slot;
+    pending.slot = vkCtx.submitFastFullFrame(width, height, outSize);
     return pending;
 }
 
@@ -1208,6 +1172,7 @@ frame Octree<T>::endFastRenderFrameVulkan(InFlightFrame& pending) {
     if (!pending.pending) return frame();
 
     vkCtx.awaitFastFullFrame(pending.slot);
+    vkCtx.recordFastGpuTime(pending.slot);
     pending.pending = false;
 
     const int width = pending.width;
@@ -1349,12 +1314,13 @@ InFlightFrame Octree<T>::beginBlendedRenderFrameVulkan(const Camera& cam, int he
 
     size_t fastOutSize = width * height * 5 * sizeof(float);
     vkCtx.updateCommonBuffers(fastOutSize, fastCamData);
-    vkCtx.updateFastBuffers(gpuFastPoints);
+    vkCtx.updateEmissiveProxyBuffer(gpuFastPoints);
 
     {
+        Vec3 brickMin, brickMax;
+        ensureBricksUploaded(brickMin, brickMax);
         Vec3 keyLight = (-cam.direction.normalized());
-        vkCtx.vctBuildVolume(vkCtx.fastPointBuffer, (uint32_t)gpuFastPoints.size(),
-                             globalMin, globalMax, keyLight, true);
+        vkCtx.vctBuildVolumeBricks(brickMin, brickMax, keyLight, true);
     }
 
     fastCamData.tileOffsetX = 0;
@@ -1387,71 +1353,20 @@ frame Octree<T>::blendedRenderFrameVulkan(const Camera& cam, int height, int wid
     return endBlendedRenderFrameVulkan(pending);
 }
 
-template<typename T>
-InFlightFrame Octree<T>::beginGameStyleRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat) {
-    TIME_FUNCTION;
-    updateStreaming(cam);
-    // optimize();
-    thread_local RenderBuffer tl_buffer;
-    buildRender(tl_buffer);
-
-    gpuFleet.init();
-
-    const std::vector<GPUMaterial>* gpuMaterials = nullptr;
-    const std::vector<float>* sellLUT = nullptr;
-    size_t sellRows = 0;
-    renderMaterials_.retrieveGPUMaterials(buildGPUMaterialCache, gpuMaterials, sellLUT, sellRows);
-    for (size_t g = 0; g < gpuFleet.count(); ++g) {
-        auto& ctx = gpuFleet.ctx(g);
-        ctx.updateMaterialBuffer(*gpuMaterials);
-        ctx.updateSellmeierBuffer(*sellLUT, SELL_LUT_WAVELENGTHS, sellRows);
-    }
-
-    std::vector<bool> isLodPoint(tl_buffer.points.size(), false);
-    for(const auto& n : tl_buffer.nodes) {
-        if(n.lodPoint != -1) isLodPoint[n.lodPoint] = true;
-    }
-
-    Vec3 globalMin = Vec3::Constant(std::numeric_limits<float>::max());
-    Vec3 globalMax = Vec3::Constant(std::numeric_limits<float>::lowest());
-
-    std::vector<size_t> validIndices;
-    validIndices.reserve(tl_buffer.points.size());
-    for(size_t i = 0; i < tl_buffer.points.size(); ++i) {
-        if(isLodPoint[i]) continue;
-        validIndices.push_back(i);
-        globalMin = globalMin.cwiseMin(tl_buffer.points[i].position);
-        globalMax = globalMax.cwiseMax(tl_buffer.points[i].position);
-    }
-
-    std::vector<PointSort> sortedPoints;
-    mortonSortIndices(validIndices, globalMin, globalMax,
-                      [&](size_t idx) { return tl_buffer.points[idx].position; },
-                      sortedPoints);
-    std::vector<GPURenderData> gpuFastPoints;
-    gpuFastPoints.reserve(sortedPoints.size());
-
-    for(const auto& sp : sortedPoints) {
-        const auto& p = tl_buffer.points[sp.idx];
-
-        gpuFastPoints.push_back({
-            p.position, p.size, packRGBA8(p.color), p.materialIdx, p.objectId, p.extent
-        });
-    }
-
-    std::vector<uint32_t> gpuLights;
-    mergeEmissiveProxies(gpuFastPoints, tl_buffer.materials, gpuLights);
-
+///@brief Order emissive proxy indices by radiant power so pickLight's best-first scan works
+static void sortLightsByPower(const std::vector<GPURenderData>& points,
+                              const std::vector<RenderMaterial>& materials,
+                              std::vector<uint32_t>& lights) {
     struct LightRef { float power; uint32_t idx; };
     std::vector<LightRef> lightRefs;
-    lightRefs.reserve(gpuLights.size());
-    for (uint32_t li : gpuLights) {
-        const GPURenderData& p = gpuFastPoints[li];
+    lightRefs.reserve(lights.size());
+    for (uint32_t li : lights) {
+        const GPURenderData& p = points[li];
         Vec3 ext = unpackExtent(p.extent);
         float s2 = p.size * p.size;
         float fxy = ext.x() * ext.y(), fyz = ext.y() * ext.z(), fxz = ext.x() * ext.z();
         float faceCells = std::max(fxy, std::max(fyz, fxz));
-        Vec3 emit = unpackRGB9E5(tl_buffer.materials[p.materialIdx].chromaticity);
+        Vec3 emit = unpackRGB9E5(materials[p.materialIdx].chromaticity);
         float cr = float(p.color & 0xFFu) / 255.0f;
         float cg = float((p.color >> 8) & 0xFFu) / 255.0f;
         float cb = float((p.color >> 16) & 0xFFu) / 255.0f;
@@ -1460,47 +1375,35 @@ InFlightFrame Octree<T>::beginGameStyleRenderFrame(const Camera& cam, int height
     }
     std::sort(lightRefs.begin(), lightRefs.end(),
               [](const LightRef& a, const LightRef& b) { return a.power > b.power; });
-    for (size_t k = 0; k < lightRefs.size(); ++k) gpuLights[k] = lightRefs[k].idx;
+    for (size_t k = 0; k < lightRefs.size(); ++k) lights[k] = lightRefs[k].idx;
+}
 
-    int emissiveCount = (int)gpuLights.size();
-    if(gpuFastPoints.empty()) gpuFastPoints.push_back(GPURenderData{});
-    if(gpuLights.empty()) gpuLights.push_back(0);
-    
+template<typename T>
+InFlightFrame Octree<T>::beginGameStyleRenderFrame(const Camera& cam, int height, int width, frame::colormap colorformat) {
+    TIME_FUNCTION;
+    updateStreaming(cam);
+    gpuFleet.init();
+    int emissiveCount = 0;
+    prepareBrickFrame(cam, emissiveCount);
+
     float aspect = static_cast<float>(width) / height;
-    float fovRad = cam.fovRad();
-    float tanHalfFov = tan(fovRad * 0.5f);
+    float tanHalfFov = tan(cam.fovRad() * 0.5f);
     float invFogRange = 1.0f / std::max(0.001f, maxDistance_ - lodMinDistance_);
-
     size_t skyW, skyH;
     const std::vector<Eigen::Vector4f>& skyData = getCachedSkyData(skyW, skyH);
     vkCtx.awaitAllFastFrames();
     vkCtx.updateSkyboxBuffer(skyData);
-
     Vec3 camBasisRight_, camBasisUp_, camBasisFwd_;
     cam.orthonormalBasis(camBasisRight_, camBasisUp_, camBasisFwd_);
     GPUCameraData fastCamData = {
         cam.origin, lodMinDistance_, camBasisFwd_, invLodf, camBasisUp_, 0.1f, camBasisRight_, maxDistance_,
         skylight_, tanHalfFov * aspect, backgroundColor_, tanHalfFov,
         width, height, 1, 1, invFogRange, frameCounter_++, (int)skyW, (int)skyH, 0, 1, 2,
-        0, (uint32_t)gpuFastPoints.size(), 0, 0, emissiveCount, 1
+        0, (uint32_t)brickLightPoints_.size(), 0, 0, emissiveCount, 1
     };
-
     size_t fastOutSize = size_t(width) * size_t(height) * 5 * sizeof(float);
     vkCtx.updateCommonBuffers(fastOutSize, fastCamData);
-    vkCtx.updateLightBuffer(gpuLights);
-    vkCtx.updateFastBuffers(gpuFastPoints);
-
-    {
-        Vec3 keyLight = (-cam.direction.normalized());
-        vkCtx.vctBuildVolume(vkCtx.fastPointBuffer, (uint32_t)gpuFastPoints.size(),
-                             globalMin, globalMax, keyLight, true);
-    }
-
-
-    fastCamData.tileOffsetX = 0;
-    fastCamData.tileOffsetY = 0;
     vkCtx.updateCameraData(fastCamData);
-    const uint32_t slot = vkCtx.submitFastFullFrame(width, height, fastOutSize);
 
     InFlightFrame pending;
     pending.width = width;
@@ -1508,7 +1411,7 @@ InFlightFrame Octree<T>::beginGameStyleRenderFrame(const Camera& cam, int height
     pending.outSize = fastOutSize;
     pending.colorformat = colorformat;
     pending.pending = true;
-    pending.slot = slot;
+    pending.slot = vkCtx.submitFastFullFrame(width, height, fastOutSize);
     return pending;
 }
 
@@ -1518,6 +1421,7 @@ frame Octree<T>::endGameStyleRenderFrame(InFlightFrame& pending) {
     if (!pending.pending) return frame();
 
     vkCtx.awaitFastFullFrame(pending.slot);
+    vkCtx.recordFastGpuTime(pending.slot);
     pending.pending = false;
 
     const int width = pending.width;
@@ -1656,12 +1560,13 @@ InFlightFrame Octree<T>::beginSuperBlendedRenderFrameVulkan(const Camera& cam, i
     size_t fastOutSize = size_t(width) * size_t(height) * 5 * sizeof(float);
     vkCtx.updateCommonBuffers(fastOutSize, fastCamData);
     vkCtx.updateLightBuffer(gpuLights);
-    vkCtx.updateFastBuffers(gpuFastPoints);
+    vkCtx.updateEmissiveProxyBuffer(gpuFastPoints);
 
     {
+        Vec3 brickMin, brickMax;
+        ensureBricksUploaded(brickMin, brickMax);
         Vec3 keyLight = (-cam.direction.normalized());
-        vkCtx.vctBuildVolume(vkCtx.fastPointBuffer, (uint32_t)gpuFastPoints.size(),
-                             globalMin, globalMax, keyLight, true);
+        vkCtx.vctBuildVolumeBricks(brickMin, brickMax, keyLight, true);
     }
 
     fastCamData.tileOffsetX = 0;
@@ -1831,6 +1736,107 @@ frame Octree<T>::superBlendedRenderFrameVulkan(const Camera& cam, int height, in
     InFlightFrame pending = beginSuperBlendedRenderFrameVulkan(cam, height, width, ptScale, colorformat,
                                 samplesPerPixel, maxBounces, globalIllumination, useLod, minSamplesPerPixel);
     return endSuperBlendedRenderFrameVulkan(pending);
+}
+
+
+// =====================================================================================
+// Brick geometry source
+// =====================================================================================
+template<typename T>
+void Octree<T>::rebuildBricks(float voxelSize) {
+    TIME_FUNCTION;
+    brickWorld_ = buildBrickWorld(voxelSize, &brickStats_);
+    brickGpu_ = brickFlatten(brickWorld_);
+    vkCtx.init();
+    vkCtx.uploadBricksFull(brickGpu_);
+    for (auto& kv : brickWorld_.objects) {
+        for (auto& b : kv.second.bricks) b.dirty = false;
+    }
+    rebuildBrickLights();
+    bricksDirty_ = false;
+    bricksUploaded_ = true;
+}
+
+template<typename T>
+void Octree<T>::brickSetVoxel(int objectId, const Vec3& worldPos, uint8_t paletteIdx) {
+    if (!bricksUploaded_) return;
+    auto it = brickWorld_.objects.find(objectId);
+    if (it == brickWorld_.objects.end()) return;
+    Eigen::Vector3i c = it->second.toLattice(worldPos);
+    size_t brickCountBefore = it->second.bricks.size();
+    it->second.setVoxel(c.x(), c.y(), c.z(), paletteIdx);
+    // a new brick changes the BLAS primitive set, which needs a full rebuild
+    if (it->second.bricks.size() != brickCountBefore) bricksDirty_ = true;
+}
+
+///@brief Expand the emissive voxels of the brick world into the point-array format so the
+///       fast shader's light sampling (pickLight / emissiveIndices) is unchanged.
+template<typename T>
+void Octree<T>::rebuildBrickLights() {
+    std::vector<RenderMaterial> materials;
+    {
+        s_lock matLock(renderMaterials_.mutex);
+        materials = renderMaterials_.materials;
+    }
+    brickLightPoints_.clear();
+    brickLightIndices_.clear();
+    brickExpand(brickWorld_, [&](const VoxelSource& v) {
+        if (v.renderMatIdx >= materials.size()) return;
+        if (materials[v.renderMatIdx].chromaticity == 0u) return;
+        brickLightPoints_.push_back({v.position, v.size, v.colorRGBA8, v.renderMatIdx, v.objectId, EXTENT_UNIT});
+    });
+    mergeEmissiveProxies(brickLightPoints_, materials, brickLightIndices_);
+    sortLightsByPower(brickLightPoints_, materials, brickLightIndices_);
+}
+
+template<typename T>
+void Octree<T>::ensureBricksUploaded(Vec3& boundsMin, Vec3& boundsMax) {
+    TIME_FUNCTION;
+    if (bricksDirty_ || !bricksUploaded_) {
+        rebuildBricks(0.0f);
+    } else {
+        std::vector<uint32_t> touched = brickFlattenDirty(brickWorld_, brickGpu_);
+        if (!touched.empty()) {
+            vkCtx.uploadBricksDirty(brickGpu_, touched);
+            rebuildBrickLights();
+        }
+    }
+
+    boundsMin = Vec3::Constant(std::numeric_limits<float>::max());
+    boundsMax = Vec3::Constant(std::numeric_limits<float>::lowest());
+    for (const GPUAabb& a : brickGpu_.aabbs) {
+        boundsMin = boundsMin.cwiseMin(Vec3(a.minX, a.minY, a.minZ));
+        boundsMax = boundsMax.cwiseMax(Vec3(a.maxX, a.maxY, a.maxZ));
+    }
+    if (brickGpu_.aabbs.empty()) {
+        boundsMin = Vec3::Zero();
+        boundsMax = Vec3::Ones();
+    }
+}
+
+template<typename T>
+void Octree<T>::prepareBrickFrame(const Camera& cam, int& emissiveCount) {
+    Vec3 boundsMin, boundsMax;
+    ensureBricksUploaded(boundsMin, boundsMax);
+
+    const std::vector<GPUMaterial>* gpuMaterials = nullptr;
+    const std::vector<float>* sellLUT = nullptr;
+    size_t sellRows = 0;
+    renderMaterials_.retrieveGPUMaterials(buildGPUMaterialCache, gpuMaterials, sellLUT, sellRows);
+    vkCtx.updateMaterialBuffer(*gpuMaterials);
+    vkCtx.updateSellmeierBuffer(*sellLUT, SELL_LUT_WAVELENGTHS, sellRows);
+
+    // the shader indexes these buffers unconditionally, so keep one dummy entry when empty
+    emissiveCount = (int)brickLightIndices_.size();
+    std::vector<GPURenderData> lightPoints = brickLightPoints_;
+    std::vector<uint32_t> lightIndices = brickLightIndices_;
+    if (lightPoints.empty()) lightPoints.push_back(GPURenderData{});
+    if (lightIndices.empty()) lightIndices.push_back(0);
+    vkCtx.updateEmissiveProxyBuffer(lightPoints);
+    vkCtx.updateLightBuffer(lightIndices);
+
+    Vec3 keyLight = (-cam.direction.normalized());
+    vkCtx.vctBuildVolumeBricks(boundsMin, boundsMax, keyLight, true);
 }
 
 }

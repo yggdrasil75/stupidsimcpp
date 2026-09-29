@@ -507,6 +507,7 @@ void Octree<T>::endPhysicsFrame(PhysicsFrameContext& ctx) {
         }
         g = gEnd;
     }
+    for (const auto& rc : relocs) brickMoveVoxel(*rc.node, rc.oldKeyPos);
     _tRelocate.stop();
 
     if (pointPoolFragmentation() > 3.0f) store_.points.compact();
@@ -745,6 +746,7 @@ void Octree<T>::stepRigidLattice(
         }
         g = gEnd;
     }
+    for (const auto& rc : rrelocs) brickMoveVoxel(*moves[rc.idx].node, moves[rc.idx].oldPos);
     _tRRelocate.stop();
 
     if (!fracturedObjects.empty()) {
@@ -900,6 +902,7 @@ void Octree<T>::reassignFragment(const std::vector<std::shared_ptr<NodeData>>& f
     }
 
     for (const auto& n : frag) n->objectId = dst->id;
+    bricksDirty_ = true;   // voxels changed object, which changes brick grouping
 }
 
 }

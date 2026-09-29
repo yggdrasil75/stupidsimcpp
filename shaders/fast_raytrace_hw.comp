@@ -87,6 +87,8 @@ layout(binding = 10) uniform VoxelParams {
     vec3 lightDir;   float vctEnabled;
 } vp;
 
+#include "brick_common.glsl"
+
 vec3 worldToVoxelUV(vec3 p) { return (p - vp.volMin) / vp.volExtent; }
 
 vec4 sampleVoxelCone(vec3 worldPos, float diameter) {
@@ -247,6 +249,7 @@ struct HitData {
     float t;
     float tExit;
     vec3 normal;
+    GPURenderData pt;
 };
 
 int budgetFromAlpha(float a) {
@@ -255,70 +258,77 @@ int budgetFromAlpha(float a) {
     return clamp(b, 1, MAX_HITS);
 }
 
+
+GPURenderData brickHitPoint(BrickHit h) {
+    GPURenderData p;
+    p.position = brickVoxelCenter(h.brick, h.cell);
+    p.size = bp.voxelSize;
+    p.color = palette[h.pal].colorRGBA8;
+    p.materialIdx = palette[h.pal].renderMatIdx;
+    p.objectId = int(h.objectId);
+    p.extent = 0u;
+    return p;
+}
+
+HitData hitFromBrick(BrickHit h) {
+    HitData d;
+    d.id = int(h.brick);
+    d.t = h.t;
+    d.tExit = h.tExit;
+    d.normal = h.normal;
+    d.pt = brickHitPoint(h);
+    return d;
+}
+
 bool nearestVoxel(Ray ray, out HitData hit) {
+    BrickHit h;
+    if (!brickTrace(ray.origin, ray.dir, ray.invDir, cam.maxDist, -1, h)) return false;
+    hit = hitFromBrick(h);
+    return true;
+}
+
+// Insert every occupied voxel with tFirst < t < maxT into hits[1..budget), sorted by t.
+// hits[0] must already hold the nearest hit. Returns the new hit count.
+int collectBrickHits(Ray ray, float tFirst, float maxT, int skipObjId, int budget,
+                     inout HitData hits[MAX_HITS], int hitCount) {
     rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, tlas, gl_RayFlagsNoneEXT, 0xFF, ray.origin, 0.0, ray.dir, cam.maxDist);
-    float tBest = cam.maxDist;
-    int bestIdx = -1;
-    float bestExit = 0.0;
-    vec3 bestN = vec3(0.0);
+    rayQueryInitializeEXT(rq, tlas, gl_RayFlagsNoneEXT, 0xFF, ray.origin, 0.0, ray.dir, maxT);
     while (rayQueryProceedEXT(rq)) {
         if (rayQueryGetIntersectionTypeEXT(rq, false) != gl_RayQueryCandidateIntersectionAABBEXT) continue;
-        int ptIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
-        float t, tExit;
-        vec3 n;
-        if (!rayCubeIntersect(ray, points[ptIdx], t, tExit, n)) continue;
-        if (t < 0.0 || t >= tBest) continue;
-        tBest = t;
-        bestIdx = ptIdx;
-        bestExit = tExit;
-        bestN = n;
+        uint b = uint(rayQueryGetIntersectionPrimitiveIndexEXT(rq, false));
+        if (int(bricks[b].objectId) == skipObjId) continue;
+        float tIn, tOut;
+        if (!brickBounds(b, ray.origin, ray.invDir, tIn, tOut)) continue;
+        if (hitCount >= budget && tIn >= hits[budget - 1].t) continue;
+
+        BrickDDA dda;
+        brickDDAStart(b, ray.origin, ray.dir, ray.invDir, max(tIn, 0.0), dda);
+        BrickHit h;
+        while (brickDDANext(b, dda, min(tOut, maxT), h)) {
+            if (h.t <= tFirst) continue;
+            if (hitCount >= budget && h.t >= hits[budget - 1].t) break;
+            int slot = min(hitCount, budget - 1);
+            while (slot > 1 && hits[slot - 1].t > h.t) {
+                hits[slot] = hits[slot - 1];
+                slot--;
+            }
+            hits[slot] = hitFromBrick(h);
+            if (hitCount < budget) hitCount++;
+        }
     }
-    if (bestIdx < 0) return false;
-    hit.id = bestIdx;
-    hit.t = tBest;
-    hit.tExit = bestExit;
-    hit.normal = bestN;
-    return true;
+    return hitCount;
 }
 
 int voxelTraverse(Ray ray, out HitData hits[MAX_HITS]) {
     HitData first;
     if (!nearestVoxel(ray, first)) return 0;
 
-    float nearAlpha = unpackRGBA8(points[first.id].color).a;
-    int budget = budgetFromAlpha(nearAlpha);
-
+    int budget = budgetFromAlpha(unpackRGBA8(first.pt.color).a);
     hits[0] = first;
     if (budget <= 1) return 1;
-
-    rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, tlas, gl_RayFlagsNoneEXT, 0xFF, ray.origin, 0.0, ray.dir, cam.maxDist);
-
-    int hitCount = 1;
-    while (rayQueryProceedEXT(rq)) {
-        if (rayQueryGetIntersectionTypeEXT(rq, false) != gl_RayQueryCandidateIntersectionAABBEXT) continue;
-        int ptIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
-        if (ptIdx == first.id) continue;
-        float t, tExit;
-        vec3 n;
-        if (!rayCubeIntersect(ray, points[ptIdx], t, tExit, n)) continue;
-        if (t < first.t || t > cam.maxDist) continue;
-        if (hitCount >= budget && t >= hits[budget - 1].t) continue;
-        int slot = min(hitCount, budget - 1);
-        while (slot > 1 && hits[slot - 1].t > t) {
-            hits[slot] = hits[slot - 1];
-            slot--;
-        }
-        hits[slot].id = ptIdx;
-        hits[slot].t = t;
-        hits[slot].tExit = tExit;
-        hits[slot].normal = n;
-        if (hitCount < budget) hitCount++;
-    }
-
-    return hitCount;
+    return collectBrickHits(ray, first.t, cam.maxDist, -1, budget, hits, 1);
 }
+
 
 void unpackFastMaterial(uint m, out float roughness, out float metallic) {
     roughness = float(m & 0xFF) / 255.0;
@@ -360,16 +370,19 @@ float lightVisibility(vec3 origin, vec3 dir, float maxT, int lightObjId) {
     rayQueryInitializeEXT(rq, tlas, gl_RayFlagsNoneEXT, 0xFF, origin, 0.0, dir, maxT);
     float vis = 1.0;
     while (rayQueryProceedEXT(rq)) {
-        if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionAABBEXT) {
-            int ptIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
-            GPURenderData pt = points[ptIdx];
-            if (pt.objectId == lightObjId) continue;               // the light itself
-            if (materials[pt.materialIdx].chromaticity != 0u) continue; // other emitters don't occlude
-            float t, tExit; vec3 n;
-            if (rayCubeIntersect(sray, pt, t, tExit, n) && t > 0.0 && t < maxT) {
-                vis *= 1.0 - unpackRGBA8(pt.color).a;              // alpha transmittance
-                if (vis < 0.02) return 0.0;
-            }
+        if (rayQueryGetIntersectionTypeEXT(rq, false) != gl_RayQueryCandidateIntersectionAABBEXT) continue;
+        uint b = uint(rayQueryGetIntersectionPrimitiveIndexEXT(rq, false));
+        if (int(bricks[b].objectId) == lightObjId) continue;               // the light itself
+        float tIn, tOut;
+        if (!brickBounds(b, origin, sray.invDir, tIn, tOut)) continue;
+        BrickDDA dda;
+        brickDDAStart(b, origin, dir, sray.invDir, max(tIn, 0.0), dda);
+        BrickHit h;
+        while (brickDDANext(b, dda, min(tOut, maxT), h)) {
+            if (h.t <= 0.0) continue;
+            if (materials[palette[h.pal].renderMatIdx].chromaticity != 0u) continue; // other emitters don't occlude
+            vis *= 1.0 - brickPaletteColor(h.pal).a;                        // alpha transmittance
+            if (vis < 0.02) return 0.0;
         }
     }
     return vis;
@@ -393,75 +406,32 @@ const float OPAQUE_CUTOFF = 0.5;
 const float FOG_CUTOFF    = 0.02;
 
 bool nearestHit(vec3 origin, vec3 dir, float maxT, int skipObjId,
-                out float tOut, out vec3 nOut, out int idxOut, out vec3 tintOut) {
+                out float tOut, out vec3 nOut, out GPURenderData ptOut, out vec3 tintOut) {
     Ray ray = makeRay(origin, dir);
-    rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, tlas, gl_RayFlagsNoneEXT, 0xFF, origin, 0.0, dir, maxT);
-
-    int   hitIdx[MAX_HITS];
-    float hitT[MAX_HITS];
-    vec3  hitN[MAX_HITS];
-    int   count = 0;
-
-    int   nearIdx = -1;
-    float nearT = maxT;
-    vec3  nearN = vec3(0.0);
-    while (rayQueryProceedEXT(rq)) {
-        if (rayQueryGetIntersectionTypeEXT(rq, false) != gl_RayQueryCandidateIntersectionAABBEXT) continue;
-        int ptIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
-        GPURenderData pt = points[ptIdx];
-        if (pt.objectId == skipObjId) continue;
-        float t, tExit; vec3 n;
-        if (!rayCubeIntersect(ray, pt, t, tExit, n)) continue;
-        if (t <= 1e-4 || t >= nearT) continue;
-        nearT = t;
-        nearIdx = ptIdx;
-        nearN = n;
+    BrickHit near;
+    if (!brickTrace(origin, dir, ray.invDir, maxT, skipObjId, near) || near.t <= 1e-4) {
+        tintOut = vec3(1.0);
+        tOut = maxT;
+        return false;
     }
-    if (nearIdx < 0) { tintOut = vec3(1.0); tOut = maxT; return false; }
 
-    float nearAlpha = unpackRGBA8(points[nearIdx].color).a;
-    int budget = budgetFromAlpha(nearAlpha);
-
-    hitIdx[0] = nearIdx; hitT[0] = nearT; hitN[0] = nearN;
-    count = 1;
-
-    if (budget > 1) {
-        rayQueryEXT rq2;
-        rayQueryInitializeEXT(rq2, tlas, gl_RayFlagsNoneEXT, 0xFF, origin, 0.0, dir, maxT);
-        while (rayQueryProceedEXT(rq2)) {
-            if (rayQueryGetIntersectionTypeEXT(rq2, false) != gl_RayQueryCandidateIntersectionAABBEXT) continue;
-            int ptIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq2, false);
-            if (ptIdx == nearIdx) continue;
-            GPURenderData pt = points[ptIdx];
-            if (pt.objectId == skipObjId) continue;
-            float t, tExit; vec3 n;
-            if (!rayCubeIntersect(ray, pt, t, tExit, n)) continue;
-            if (t < nearT || t >= maxT) continue;
-            if (count >= budget && t >= hitT[budget - 1]) continue;
-            int slot = min(count, budget - 1);
-            while (slot > 1 && hitT[slot - 1] > t) {
-                hitT[slot] = hitT[slot - 1];
-                hitIdx[slot] = hitIdx[slot - 1];
-                hitN[slot] = hitN[slot - 1];
-                slot--;
-            }
-            hitIdx[slot] = ptIdx; hitT[slot] = t; hitN[slot] = n;
-            if (count < budget) count++;
-        }
-    }
+    HitData hits[MAX_HITS];
+    hits[0] = hitFromBrick(near);
+    int count = 1;
+    int budget = budgetFromAlpha(unpackRGBA8(hits[0].pt.color).a);
+    if (budget > 1) count = collectBrickHits(ray, near.t, maxT, skipObjId, budget, hits, 1);
 
     tintOut = vec3(1.0);
     for (int i = 0; i < count; i++) {
-        vec4 alb = unpackRGBA8(points[hitIdx[i]].color);
+        vec4 alb = unpackRGBA8(hits[i].pt.color);
         if (alb.a < FOG_CUTOFF) continue;
         if (alb.a >= OPAQUE_CUTOFF) {
-            tOut = hitT[i]; nOut = hitN[i]; idxOut = hitIdx[i];
+            tOut = hits[i].t; nOut = hits[i].normal; ptOut = hits[i].pt;
             return true;
         }
         tintOut *= mix(vec3(1.0), alb.rgb, alb.a);
         if (max(tintOut.r, max(tintOut.g, tintOut.b)) < 0.02) {
-            tOut = hitT[i]; nOut = hitN[i]; idxOut = hitIdx[i];
+            tOut = hits[i].t; nOut = hits[i].normal; ptOut = hits[i].pt;
             return true;
         }
     }
@@ -471,11 +441,10 @@ bool nearestHit(vec3 origin, vec3 dir, float maxT, int skipObjId,
 }
 
 vec3 secondaryRadiance(vec3 origin, vec3 dir, int skipObjId) {
-    float t; vec3 n; int idx; vec3 tint;
-    if (!nearestHit(origin, dir, cam.maxDist, skipObjId, t, n, idx, tint)) {
+    float t; vec3 n; GPURenderData pt; vec3 tint;
+    if (!nearestHit(origin, dir, cam.maxDist, skipObjId, t, n, pt, tint)) {
         return tint * sampleSkybox(dir);
     }
-    GPURenderData pt = points[idx];
     vec4 alb = unpackRGBA8(pt.color);
     GPUMaterial m = materials[pt.materialIdx];
     if (m.chromaticity != 0u) {
@@ -546,7 +515,7 @@ void main() {
     for (int i = 0; i < hitCount; i++) {
         if (accumAlpha >= 0.99) break;
         
-        GPURenderData hitData = points[hits[i].id];
+        GPURenderData hitData = hits[i].pt;
         
         vec4 albedo = unpackRGBA8(hitData.color);
         float alpha = albedo.a;

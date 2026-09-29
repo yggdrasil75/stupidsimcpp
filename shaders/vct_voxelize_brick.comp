@@ -1,0 +1,124 @@
+#version 450
+layout(local_size_x = 64) in;
+
+// Radiance-volume voxelizer for brick geometry. One invocation per brick voxel;
+// output and radiance model are identical to vct_voxelize.comp.
+
+#define BRICK_DIM 8
+#define BRICK_VOXELS 512
+
+struct GPUBrickHeader {
+    int bx;
+    int by;
+    int bz;
+    uint objectId;
+    uint matWordOffset;
+    uint occWordOffset;
+    uint paletteOffset;
+    uint voxelCount;
+    float originX;
+    float originY;
+    float originZ;
+    uint pad;
+};
+
+struct GPUPaletteEntry {
+    uint colorRGBA8;
+    uint renderMatIdx;
+    uint physMatIdx;
+    uint pad;
+};
+
+struct GPUMaterial {
+    uint chromaticity;
+    uint materialProps;
+    uint absorption;
+    uint albedo;
+};
+
+layout(std430, binding = 0) readonly buffer BrickHeaders { GPUBrickHeader bricks[]; };
+layout(std430, binding = 1) readonly buffer BrickMats { uint brickMatWords[]; };
+layout(std430, binding = 2) readonly buffer BrickOcc { uint brickOccWords[]; };
+layout(std430, binding = 3) readonly buffer BrickPalette { GPUPaletteEntry palette[]; };
+layout(std430, binding = 4) readonly buffer MaterialBuffer { GPUMaterial materials[]; };
+layout(binding = 5, rgba16f) uniform image3D voxelVolume;
+layout(binding = 6) uniform VoxelParams {
+    vec3 volMin;
+    float voxelSize;
+    vec3 volExtent;
+    float invVoxelSize;
+    ivec3 gridRes;
+    int pointCount;
+    vec3 lightDir;
+    float pad0;
+} vp;
+layout(binding = 7) uniform BrickParams {
+    float voxelSize;
+    uint brickCount;
+    uint pad0;
+    uint pad1;
+} bp;
+
+vec4 unpackRGBA8(uint c) {
+    return vec4(float(c & 0xFFu) / 255.0,
+                float((c >> 8) & 0xFFu) / 255.0,
+                float((c >> 16) & 0xFFu) / 255.0,
+                float((c >> 24) & 0xFFu) / 255.0);
+}
+
+vec3 unpackRGB9E5(uint c) {
+    if (c == 0u) return vec3(0.0);
+    int e = int(c >> 27) - 15;
+    float scale = exp2(float(e - 9));
+    return vec3(float(c & 0x1FFu), float((c >> 9) & 0x1FFu), float((c >> 18) & 0x1FFu)) * scale;
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    uint b = gid / uint(BRICK_VOXELS);
+    if (b >= bp.brickCount) return;
+    int i = int(gid % uint(BRICK_VOXELS));
+
+    uint occ = brickOccWords[bricks[b].occWordOffset + uint(i >> 5)];
+    if (((occ >> uint(i & 31)) & 1u) == 0u) return;
+
+    uint word = brickMatWords[bricks[b].matWordOffset + uint(i >> 2)];
+    uint pal = bricks[b].paletteOffset + ((word >> uint((i & 3) * 8)) & 0xFFu);
+
+    vec4 albedo = unpackRGBA8(palette[pal].colorRGBA8);
+    if (albedo.a <= 0.001) return;
+
+    GPUMaterial mat = materials[palette[pal].renderMatIdx];
+    vec3 emit = unpackRGB9E5(mat.chromaticity);
+    vec3 radiance;
+    if (dot(emit, emit) > 0.0) {
+        radiance = albedo.rgb * emit;
+    } else {
+        float halfLambert = 0.5;
+        radiance = albedo.rgb * (0.35 + 0.65 * halfLambert);
+    }
+
+    ivec3 cell = ivec3(i & 7, (i >> 3) & 7, i >> 6);
+    vec3 origin = vec3(bricks[b].originX, bricks[b].originY, bricks[b].originZ);
+    vec3 bmin = origin + vec3(bricks[b].bx, bricks[b].by, bricks[b].bz) * (bp.voxelSize * float(BRICK_DIM))
+              + vec3(cell) * bp.voxelSize;
+    vec3 bmax = bmin + vec3(bp.voxelSize);
+
+    ivec3 cmin = ivec3(floor((bmin - vp.volMin) * vp.invVoxelSize));
+    ivec3 cmax = ivec3(floor((bmax - vp.volMin) * vp.invVoxelSize));
+    cmin = clamp(cmin, ivec3(0), vp.gridRes - 1);
+    cmax = clamp(cmax, ivec3(0), vp.gridRes - 1);
+
+    vec4 store = vec4(radiance * albedo.a, albedo.a);
+    for (int z = cmin.z; z <= cmax.z; ++z) {
+        for (int y = cmin.y; y <= cmax.y; ++y) {
+            for (int x = cmin.x; x <= cmax.x; ++x) {
+                ivec3 c = ivec3(x, y, z);
+                vec4 prev = imageLoad(voxelVolume, c);
+                if (store.a >= prev.a) {
+                    imageStore(voxelVolume, c, store);
+                }
+            }
+        }
+    }
+}

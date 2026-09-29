@@ -10,6 +10,8 @@
 #include <shared_mutex>
 #include <unordered_map>
 #include <deque>
+#include <cstring>
+#include <limits>
 
 namespace Grid{
 
@@ -1658,5 +1660,405 @@ struct PhysicsFrameContext_ {
     float solidCellSize = 0.0f;
     bool valid = false;
 };
+
+constexpr int BRICK_DIM = 8;
+constexpr int BRICK_VOXELS = BRICK_DIM * BRICK_DIM * BRICK_DIM;
+constexpr uint32_t BRICK_OCC_WORDS = BRICK_VOXELS / 64;
+constexpr uint32_t BRICK_MAT_WORDS = BRICK_VOXELS / 4;
+constexpr uint8_t BRICK_EMPTY = 0;
+constexpr uint32_t BRICK_PALETTE_MAX = 255;
+
+struct BrickKey {
+    int32_t x = 0;
+    int32_t y = 0;
+    int32_t z = 0;
+
+    bool operator==(const BrickKey& o) const {
+        return x == o.x && y == o.y && z == o.z;
+    }
+};
+
+struct BrickKeyHash {
+    size_t operator()(const BrickKey& k) const {
+        uint64_t h = static_cast<uint64_t>(static_cast<uint32_t>(k.x)) * 73856093ull;
+        h ^= static_cast<uint64_t>(static_cast<uint32_t>(k.y)) * 19349663ull;
+        h ^= static_cast<uint64_t>(static_cast<uint32_t>(k.z)) * 83492791ull;
+        return static_cast<size_t>(h ^ (h >> 29));
+    }
+};
+
+///@brief One entry of an object's material palette. Voxels store a uint8 index into this.
+struct PaletteEntry {
+    uint32_t colorRGBA8 = 0;
+    uint32_t renderMatIdx = 0;
+    uint16_t physMatIdx = 0;
+    uint16_t pad = 0;
+
+    bool operator==(const PaletteEntry& o) const {
+        return colorRGBA8 == o.colorRGBA8 && renderMatIdx == o.renderMatIdx && physMatIdx == o.physMatIdx;
+    }
+};
+
+struct PaletteEntryHash {
+    size_t operator()(const PaletteEntry& p) const {
+        uint64_t h = p.colorRGBA8;
+        h = h * 0x9E3779B97F4A7C15ull ^ p.renderMatIdx;
+        h = h * 0x9E3779B97F4A7C15ull ^ p.physMatIdx;
+        return static_cast<size_t>(h ^ (h >> 31));
+    }
+};
+
+///@brief 8^3 dense block. Voxel (lx, ly, lz) lives at linear index lx + ly*8 + lz*64.
+struct Brick {
+    BrickKey key;
+    std::array<uint8_t, BRICK_VOXELS> mat{};
+    std::array<uint64_t, BRICK_OCC_WORDS> occ{};
+    uint32_t count = 0;
+    bool dirty = true;
+
+    static constexpr int idx(int lx, int ly, int lz) {
+        return lx + ly * BRICK_DIM + lz * BRICK_DIM * BRICK_DIM;
+    }
+
+    bool get(int lx, int ly, int lz) const {
+        int i = idx(lx, ly, lz);
+        return (occ[i >> 6] >> (i & 63)) & 1ull;
+    }
+
+    uint8_t matAt(int lx, int ly, int lz) const {
+        return mat[idx(lx, ly, lz)];
+    }
+
+    ///@return True if the voxel changed
+    bool set(int lx, int ly, int lz, uint8_t palIdx) {
+        int i = idx(lx, ly, lz);
+        uint64_t bit = 1ull << (i & 63);
+        bool was = (occ[i >> 6] & bit) != 0;
+        if (palIdx == BRICK_EMPTY) {
+            if (!was) return false;
+            occ[i >> 6] &= ~bit;
+            mat[i] = BRICK_EMPTY;
+            --count;
+            dirty = true;
+            return true;
+        }
+        if (was && mat[i] == palIdx) return false;
+        if (!was) {
+            occ[i >> 6] |= bit;
+            ++count;
+        }
+        mat[i] = palIdx;
+        dirty = true;
+        return true;
+    }
+
+    bool empty() const {
+        return count == 0;
+    }
+};
+
+///@brief All bricks belonging to one objectId, sharing one palette.
+struct BrickObject {
+    int objectId = -1;
+    float voxelSize = 0.08f;
+    Vec3 origin = Vec3::Zero();
+    bool originSet = false;
+    std::vector<PaletteEntry> palette;
+    std::unordered_map<PaletteEntry, uint8_t, PaletteEntryHash> paletteLookup;
+    std::vector<Brick> bricks;
+    std::unordered_map<BrickKey, uint32_t, BrickKeyHash> lookup;
+    BrickKey keyMin{INT32_MAX, INT32_MAX, INT32_MAX};
+    BrickKey keyMax{INT32_MIN, INT32_MIN, INT32_MIN};
+    uint64_t voxelCount = 0;
+    uint32_t paletteOverflowHits = 0;
+
+    BrickObject() {
+        palette.push_back(PaletteEntry{});
+    }
+
+    ///@brief Get or create a palette index. Past 255 entries the nearest existing entry is used.
+    uint8_t paletteIndex(const PaletteEntry& e) {
+        auto it = paletteLookup.find(e);
+        if (it != paletteLookup.end()) return it->second;
+        if (palette.size() <= BRICK_PALETTE_MAX) {
+            uint8_t idx = static_cast<uint8_t>(palette.size());
+            palette.push_back(e);
+            paletteLookup.emplace(e, idx);
+            return idx;
+        }
+        ++paletteOverflowHits;
+        uint8_t best = 1;
+        uint64_t bestDist = std::numeric_limits<uint64_t>::max();
+        for (size_t i = 1; i < palette.size(); ++i) {
+            const PaletteEntry& p = palette[i];
+            uint64_t d = 0;
+            if (p.renderMatIdx != e.renderMatIdx) d += 1ull << 40;
+            if (p.physMatIdx != e.physMatIdx) d += 1ull << 36;
+            for (int c = 0; c < 4; ++c) {
+                int a = (p.colorRGBA8 >> (c * 8)) & 0xFF;
+                int b = (e.colorRGBA8 >> (c * 8)) & 0xFF;
+                d += static_cast<uint64_t>((a - b) * (a - b));
+            }
+            if (d < bestDist) {
+                bestDist = d;
+                best = static_cast<uint8_t>(i);
+            }
+        }
+        return best;
+    }
+
+    static int32_t floorDiv(int32_t v) {
+        if (v >= 0) return v / BRICK_DIM;
+        return -((-v + BRICK_DIM - 1) / BRICK_DIM);
+    }
+
+    ///@brief Align the lattice to a voxel: its min corner lands on a cell boundary
+    void setOriginFrom(const Vec3& position, float size) {
+        Vec3 minCorner = position - Vec3::Constant(0.5f * size);
+        for (int a = 0; a < 3; ++a) {
+            origin[a] = minCorner[a] - std::round(minCorner[a] / voxelSize) * voxelSize;
+        }
+        originSet = true;
+    }
+
+    Eigen::Vector3i toLattice(const Vec3& worldPos) const {
+        Vec3 p = (worldPos - origin) / voxelSize;
+        return Eigen::Vector3i(static_cast<int>(std::floor(p.x())),
+                               static_cast<int>(std::floor(p.y())),
+                               static_cast<int>(std::floor(p.z())));
+    }
+
+    Vec3 latticeMin(const Eigen::Vector3i& v) const {
+        return origin + v.cast<float>() * voxelSize;
+    }
+
+    Vec3 latticeCenter(const Eigen::Vector3i& v) const {
+        return latticeMin(v) + Vec3::Constant(0.5f * voxelSize);
+    }
+
+    Vec3 brickMin(const BrickKey& k) const {
+        Vec3 kf(static_cast<float>(k.x), static_cast<float>(k.y), static_cast<float>(k.z));
+        return origin + kf * (voxelSize * BRICK_DIM);
+    }
+
+    Vec3 brickMax(const BrickKey& k) const {
+        return brickMin(k) + Vec3::Constant(voxelSize * BRICK_DIM);
+    }
+
+    Brick& brickAt(const BrickKey& k) {
+        auto it = lookup.find(k);
+        if (it != lookup.end()) return bricks[it->second];
+        uint32_t idx = static_cast<uint32_t>(bricks.size());
+        bricks.emplace_back();
+        bricks.back().key = k;
+        lookup.emplace(k, idx);
+        extendBounds(k);
+        return bricks.back();
+    }
+
+    const Brick* findBrick(const BrickKey& k) const {
+        auto it = lookup.find(k);
+        if (it == lookup.end()) return nullptr;
+        return &bricks[it->second];
+    }
+
+    ///@brief Set one voxel by integer lattice coordinate. Clearing a voxel never allocates a brick.
+    void setVoxel(int32_t vx, int32_t vy, int32_t vz, uint8_t palIdx) {
+        BrickKey k{floorDiv(vx), floorDiv(vy), floorDiv(vz)};
+        if (palIdx == BRICK_EMPTY && lookup.find(k) == lookup.end()) return;
+        Brick& b = brickAt(k);
+        uint32_t before = b.count;
+        b.set(vx - k.x * BRICK_DIM, vy - k.y * BRICK_DIM, vz - k.z * BRICK_DIM, palIdx);
+        voxelCount += static_cast<int64_t>(b.count) - static_cast<int64_t>(before);
+    }
+
+    bool getVoxel(int32_t vx, int32_t vy, int32_t vz, uint8_t* palOut = nullptr) const {
+        BrickKey k{floorDiv(vx), floorDiv(vy), floorDiv(vz)};
+        const Brick* b = findBrick(k);
+        if (!b) return false;
+        int lx = vx - k.x * BRICK_DIM;
+        int ly = vy - k.y * BRICK_DIM;
+        int lz = vz - k.z * BRICK_DIM;
+        if (!b->get(lx, ly, lz)) return false;
+        if (palOut) *palOut = b->matAt(lx, ly, lz);
+        return true;
+    }
+
+    ///@brief Drop empty bricks, compact the vector and rebuild the lookup
+    void pruneEmpty() {
+        std::vector<Brick> kept;
+        kept.reserve(bricks.size());
+        for (auto& b : bricks) {
+            if (!b.empty()) kept.push_back(std::move(b));
+        }
+        bricks.swap(kept);
+        lookup.clear();
+        keyMin = BrickKey{INT32_MAX, INT32_MAX, INT32_MAX};
+        keyMax = BrickKey{INT32_MIN, INT32_MIN, INT32_MIN};
+        for (uint32_t i = 0; i < bricks.size(); ++i) {
+            lookup.emplace(bricks[i].key, i);
+            extendBounds(bricks[i].key);
+        }
+    }
+
+private:
+    void extendBounds(const BrickKey& k) {
+        keyMin.x = std::min(keyMin.x, k.x);
+        keyMin.y = std::min(keyMin.y, k.y);
+        keyMin.z = std::min(keyMin.z, k.z);
+        keyMax.x = std::max(keyMax.x, k.x);
+        keyMax.y = std::max(keyMax.y, k.y);
+        keyMax.z = std::max(keyMax.z, k.z);
+    }
+};
+
+///@brief Whole scene as bricks on a world-aligned lattice
+struct BrickWorld {
+    float voxelSize = 0.08f;
+    std::unordered_map<int, BrickObject> objects;
+
+    BrickObject& object(int objectId) {
+        auto it = objects.find(objectId);
+        if (it != objects.end()) return it->second;
+        BrickObject& o = objects[objectId];
+        o.objectId = objectId;
+        o.voxelSize = voxelSize;
+        return o;
+    }
+
+    uint64_t totalVoxels() const {
+        uint64_t n = 0;
+        for (const auto& kv : objects) n += kv.second.voxelCount;
+        return n;
+    }
+
+    uint64_t totalBricks() const {
+        uint64_t n = 0;
+        for (const auto& kv : objects) n += kv.second.bricks.size();
+        return n;
+    }
+};
+
+///@brief Minimal description of one source voxel. Filled from NodeData / RenderData.
+struct VoxelSource {
+    Vec3 position;
+    float size;
+    uint32_t colorRGBA8;
+    uint32_t renderMatIdx;
+    uint16_t physMatIdx;
+    int objectId;
+};
+
+struct BrickConvertStats {
+    uint64_t sourceVoxels = 0;
+    uint64_t latticeVoxels = 0;
+    uint64_t bricks = 0;
+    uint64_t objects = 0;
+    uint64_t oversized = 0;
+    uint64_t collisions = 0;
+    uint64_t paletteOverflow = 0;
+};
+
+///@brief Rasterize one voxel into the lattice.
+inline void brickRasterizeVoxel(BrickWorld& world, BrickObject& obj, const VoxelSource& v, uint8_t pal,
+                                BrickConvertStats* stats) {
+    const float pitch = world.voxelSize;
+    if (!obj.originSet) obj.setOriginFrom(v.position, v.size);
+    if (v.size <= pitch * 1.001f) {
+        Eigen::Vector3i c = obj.toLattice(v.position);
+        if (stats && obj.getVoxel(c.x(), c.y(), c.z())) ++stats->collisions;
+        obj.setVoxel(c.x(), c.y(), c.z(), pal);
+        return;
+    }
+
+    if (stats) ++stats->oversized;
+    const float eps = pitch * 1e-3f;
+    Vec3 half = Vec3::Constant(0.5f * v.size - eps);
+    Eigen::Vector3i lo = obj.toLattice(v.position - half);
+    Eigen::Vector3i hi = obj.toLattice(v.position + half);
+    const long halfUnits = std::lround(v.size / pitch);
+
+    for (int z = lo.z(); z <= hi.z(); ++z) {
+        for (int y = lo.y(); y <= hi.y(); ++y) {
+            for (int x = lo.x(); x <= hi.x(); ++x) {
+                Vec3 d = (obj.latticeCenter(Eigen::Vector3i(x, y, z)) - v.position) * (2.0f / pitch);
+                bool inside = true;
+                for (int a = 0; a < 3 && inside; ++a) {
+                    long q = std::lround(d[a]);
+                    if (q < -halfUnits || q >= halfUnits) inside = false;
+                }
+                if (!inside) continue;
+                if (stats && obj.getVoxel(x, y, z)) ++stats->collisions;
+                obj.setVoxel(x, y, z, pal);
+            }
+        }
+    }
+}
+
+inline void brickInsertVoxel(BrickWorld& world, const VoxelSource& v, BrickConvertStats* stats = nullptr) {
+    BrickObject& obj = world.object(v.objectId);
+    uint8_t pal = obj.paletteIndex(PaletteEntry{v.colorRGBA8, v.renderMatIdx, v.physMatIdx, 0});
+    brickRasterizeVoxel(world, obj, v, pal, stats);
+}
+
+///@brief Clear every lattice cell a voxel covers. No-op if its object is unknown.
+inline void brickEraseVoxel(BrickWorld& world, const VoxelSource& v) {
+    auto it = world.objects.find(v.objectId);
+    if (it == world.objects.end()) return;
+    brickRasterizeVoxel(world, it->second, v, BRICK_EMPTY, nullptr);
+}
+
+///@brief Build a BrickWorld from any voxel range.
+///       `enumerate` is called with a sink and must call sink(VoxelSource) once per voxel.
+template <typename Enumerate>
+BrickConvertStats brickConvert(BrickWorld& world, Enumerate&& enumerate) {
+    BrickConvertStats st;
+    enumerate([&](const VoxelSource& v) {
+        ++st.sourceVoxels;
+        brickInsertVoxel(world, v, &st);
+    });
+    for (auto& kv : world.objects) {
+        kv.second.pruneEmpty();
+        st.bricks += kv.second.bricks.size();
+        st.latticeVoxels += kv.second.voxelCount;
+        st.paletteOverflow += kv.second.paletteOverflowHits;
+    }
+    st.objects = world.objects.size();
+    return st;
+}
+
+///@brief Lattice pitch for a voxel set: the smallest voxel size present (rounded to 1e-5)
+template <typename Enumerate>
+float brickInferPitch(Enumerate&& enumerate) {
+    float best = std::numeric_limits<float>::max();
+    enumerate([&](const VoxelSource& v) {
+        if (v.size > 0.0f) best = std::min(best, v.size);
+    });
+    if (best == std::numeric_limits<float>::max()) return 0.08f;
+    return std::round(best * 1e5f) / 1e5f;
+}
+
+///@brief Bricks -> individual voxels, for verification or rebuilding physics state
+template <typename Sink>
+void brickExpand(const BrickWorld& world, Sink&& sink) {
+    for (const auto& kv : world.objects) {
+        const BrickObject& obj = kv.second;
+        for (const Brick& b : obj.bricks) {
+            for (int lz = 0; lz < BRICK_DIM; ++lz) {
+                for (int ly = 0; ly < BRICK_DIM; ++ly) {
+                    for (int lx = 0; lx < BRICK_DIM; ++lx) {
+                        if (!b.get(lx, ly, lz)) continue;
+                        const PaletteEntry& p = obj.palette[b.matAt(lx, ly, lz)];
+                        Eigen::Vector3i v(b.key.x * BRICK_DIM + lx,
+                                          b.key.y * BRICK_DIM + ly,
+                                          b.key.z * BRICK_DIM + lz);
+                        sink(VoxelSource{obj.latticeCenter(v), world.voxelSize, p.colorRGBA8,
+                                         p.renderMatIdx, p.physMatIdx, obj.objectId});
+                    }
+                }
+            }
+        }
+    }
+}
 
 }

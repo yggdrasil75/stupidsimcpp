@@ -17,6 +17,12 @@ VkPipelineLayout     vctVoxPipeLayout = VK_NULL_HANDLE;
 VkPipeline           vctVoxPipe     = VK_NULL_HANDLE;
 VkDescriptorSet      vctVoxSet      = VK_NULL_HANDLE;
 
+VkShaderModule       vctBrickVoxShader   = VK_NULL_HANDLE;
+VkDescriptorSetLayout vctBrickVoxLayout  = VK_NULL_HANDLE;
+VkPipelineLayout     vctBrickVoxPipeLayout = VK_NULL_HANDLE;
+VkPipeline           vctBrickVoxPipe     = VK_NULL_HANDLE;
+VkDescriptorSet      vctBrickVoxSet      = VK_NULL_HANDLE;
+
 VkShaderModule       vctMipShader   = VK_NULL_HANDLE;
 VkDescriptorSetLayout vctMipLayout  = VK_NULL_HANDLE;
 VkPipelineLayout     vctMipPipeLayout = VK_NULL_HANDLE;
@@ -118,6 +124,45 @@ void vctInit() {
     }
 
     {
+        // brick voxelizer: 0 headers, 1 mat words, 2 occupancy, 3 palette, 4 materials,
+        // 5 volume image, 6 VCT params, 7 brick params
+        VkDescriptorSetLayoutBinding b[8]{};
+        for (uint32_t i = 0; i < 5; ++i) {
+            b[i] = {i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        }
+        b[5] = {5, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        b[6] = {6, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        b[7] = {7, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 8, b};
+        vkCreateDescriptorSetLayout(device, &li, nullptr, &vctBrickVoxLayout);
+
+        VkPipelineLayoutCreateInfo pl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        pl.setLayoutCount = 1;
+        pl.pSetLayouts = &vctBrickVoxLayout;
+        vkCreatePipelineLayout(device, &pl, nullptr, &vctBrickVoxPipeLayout);
+
+        vctBrickVoxShader = createShaderModule(device, "./bin/vct_voxelize_brick.spv");
+        if (vctBrickVoxShader) {
+            VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+            ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+            ci.stage.pName = "main";
+            ci.stage.module = vctBrickVoxShader;
+            ci.layout = vctBrickVoxPipeLayout;
+            vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &ci, nullptr, &vctBrickVoxPipe);
+        }
+
+        VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        ai.descriptorPool = descriptorPool;
+        ai.descriptorSetCount = 1;
+        ai.pSetLayouts = &vctBrickVoxLayout;
+        if (vkAllocateDescriptorSets(device, &ai, &vctBrickVoxSet) != VK_SUCCESS) {
+            std::cerr << "[vct] failed to allocate the brick voxelizer descriptor set" << std::endl;
+            vctBrickVoxSet = VK_NULL_HANDLE;
+        }
+    }
+
+    {
         VkDescriptorSetLayoutBinding b[2]{};
         b[0] = {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
         b[1] = {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
@@ -187,6 +232,25 @@ void vctInit() {
         vkUpdateDescriptorSets(device, 2, w, 0, nullptr);
     }
 
+    {
+        VkDescriptorImageInfo imgI{VK_NULL_HANDLE, vctMipViews[0], VK_IMAGE_LAYOUT_GENERAL};
+        VkDescriptorBufferInfo uboI{vctParamBuf, 0, VK_WHOLE_SIZE};
+        VkWriteDescriptorSet w[2]{};
+        w[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        w[0].dstSet = vctBrickVoxSet;
+        w[0].dstBinding = 5;
+        w[0].descriptorCount = 1;
+        w[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        w[0].pImageInfo = &imgI;
+        w[1] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        w[1].dstSet = vctBrickVoxSet;
+        w[1].dstBinding = 6;
+        w[1].descriptorCount = 1;
+        w[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        w[1].pBufferInfo = &uboI;
+        vkUpdateDescriptorSets(device, 2, w, 0, nullptr);
+    }
+
     vctReady = true;
 }
 
@@ -226,10 +290,10 @@ void vctImageBarrier(VkCommandBuffer cmd, VkImageLayout oldL, VkImageLayout newL
     vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &b);
 }
 
-void vctBuildVolume(VkBuffer pointBuf, uint32_t pointCount,
-                    const Vec3& aabbMin, const Vec3& aabbMax,
-                    const Vec3& lightDir, bool enabled) {
-    if (!vctReady) return;
+///@brief Write volume parameters, then clear the volume and open the command buffer.
+///@return False if VCT is disabled or not ready; nothing else needs to happen then.
+bool vctBeginVolume(const Vec3& aabbMin, const Vec3& aabbMax, const Vec3& lightDir, bool enabled) {
+    if (!vctReady) return false;
 
     Vec3 ext = aabbMax - aabbMin;
     for (int i = 0; i < 3; ++i) if (ext[i] <= 1e-6f) ext[i] = 1.0f;
@@ -251,26 +315,7 @@ void vctBuildVolume(VkBuffer pointBuf, uint32_t pointCount,
     memcpy(pdata, &vctParams, sizeof(VCTParams));
     vkUnmapMemory(device, vctParamMem);
 
-    if (!enabled) return;
-
-    {
-        VkDescriptorBufferInfo pI{pointBuf, 0, VK_WHOLE_SIZE};
-        VkDescriptorBufferInfo mI{materialBuffer, 0, VK_WHOLE_SIZE};
-        VkWriteDescriptorSet w[2]{};
-        w[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        w[0].dstSet = vctVoxSet;
-        w[0].dstBinding = 0;
-        w[0].descriptorCount = 1;
-        w[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        w[0].pBufferInfo = &pI;
-        w[1] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        w[1].dstSet = vctVoxSet;
-        w[1].dstBinding = 1;
-        w[1].descriptorCount = 1;
-        w[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        w[1].pBufferInfo = &mI;
-        vkUpdateDescriptorSets(device, 2, w, 0, nullptr);
-    }
+    if (!enabled) return false;
 
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     vkBeginCommandBuffer(commandBuffer, &bi);
@@ -291,11 +336,11 @@ void vctBuildVolume(VkBuffer pointBuf, uint32_t pointCount,
                     VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                     0, vctMipLevels);
 
-    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vctVoxPipe);
-    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                            vctVoxPipeLayout, 0, 1, &vctVoxSet, 0, nullptr);
-    vkCmdDispatch(commandBuffer, (pointCount + 63) / 64, 1, 1);
+    return true;
+}
 
+///@brief Build the mip chain, submit, wait and refresh the sampler descriptors
+void vctEndVolume() {
     uint32_t res = VCT_RES;
     for (uint32_t i = 0; i + 1 < vctMipLevels; ++i) {
         VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
@@ -334,4 +379,76 @@ void vctBuildVolume(VkBuffer pointBuf, uint32_t pointCount,
     vkDestroyFence(device, f, nullptr);
 
     vctWriteFastDescriptors();
+}
+
+///@brief Radiance volume from the per-voxel point array
+void vctBuildVolume(VkBuffer pointBuf, uint32_t pointCount,
+                    const Vec3& aabbMin, const Vec3& aabbMax,
+                    const Vec3& lightDir, bool enabled) {
+    if (!vctBeginVolume(aabbMin, aabbMax, lightDir, enabled)) return;
+
+    {
+        VkDescriptorBufferInfo pI{pointBuf, 0, VK_WHOLE_SIZE};
+        VkDescriptorBufferInfo mI{materialBuffer, 0, VK_WHOLE_SIZE};
+        VkWriteDescriptorSet w[2]{};
+        w[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        w[0].dstSet = vctVoxSet;
+        w[0].dstBinding = 0;
+        w[0].descriptorCount = 1;
+        w[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w[0].pBufferInfo = &pI;
+        w[1] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        w[1].dstSet = vctVoxSet;
+        w[1].dstBinding = 1;
+        w[1].descriptorCount = 1;
+        w[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w[1].pBufferInfo = &mI;
+        vkUpdateDescriptorSets(device, 2, w, 0, nullptr);
+    }
+
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vctVoxPipe);
+    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            vctVoxPipeLayout, 0, 1, &vctVoxSet, 0, nullptr);
+    vkCmdDispatch(commandBuffer, (pointCount + 63) / 64, 1, 1);
+
+    vctEndVolume();
+}
+
+///@brief Radiance volume from the brick buffers (see brick_gpu.inl)
+void vctBuildVolumeBricks(const Vec3& aabbMin, const Vec3& aabbMax, const Vec3& lightDir, bool enabled) {
+    if (!vctBrickVoxPipe || !vctBrickVoxSet || brickCount == 0) enabled = false;
+    if (!vctBeginVolume(aabbMin, aabbMax, lightDir, enabled)) return;
+
+    {
+        const VkBuffer buffers[5] = {
+            brickHeaders.buffer, brickMats.buffer, brickOccs.buffer, brickPalette.buffer, materialBuffer,
+        };
+        VkDescriptorBufferInfo infos[6]{};
+        VkWriteDescriptorSet w[6]{};
+        for (uint32_t i = 0; i < 5; ++i) {
+            infos[i] = {buffers[i], 0, VK_WHOLE_SIZE};
+            w[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            w[i].dstSet = vctBrickVoxSet;
+            w[i].dstBinding = i;
+            w[i].descriptorCount = 1;
+            w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            w[i].pBufferInfo = &infos[i];
+        }
+        infos[5] = {brickParamBuffer, 0, VK_WHOLE_SIZE};
+        w[5] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        w[5].dstSet = vctBrickVoxSet;
+        w[5].dstBinding = 7;
+        w[5].descriptorCount = 1;
+        w[5].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        w[5].pBufferInfo = &infos[5];
+        vkUpdateDescriptorSets(device, 6, w, 0, nullptr);
+    }
+
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vctBrickVoxPipe);
+    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            vctBrickVoxPipeLayout, 0, 1, &vctBrickVoxSet, 0, nullptr);
+    const uint32_t threads = brickCount * BRICK_VOXELS;
+    vkCmdDispatch(commandBuffer, (threads + 63) / 64, 1, 1);
+
+    vctEndVolume();
 }
