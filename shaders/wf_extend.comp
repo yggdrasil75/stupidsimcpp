@@ -42,8 +42,8 @@ void main() {
 
     bool isPrimary = (bounce == 0 && transp == 0 && volum == 0);
     if (isPrimary) {
-        if (hitResult == 1 && hitIndex >= 0 && hitIndex < points.length()) {
-            GPURenderData hd = points[hitIndex];
+        if (hitResult == 1 && hitIndex >= 0) {
+            GPURenderData hd = brickPoint(hitIndex);
             GPUMaterial mData = materials[hd.materialIdx];
             float r, m;
             uint sellRow;
@@ -64,7 +64,7 @@ void main() {
 
     bool scattered = false;
     if (mediumVoxelIdx != -1) {
-        GPURenderData medData = points[mediumVoxelIdx];
+        GPURenderData medData = brickPoint(mediumVoxelIdx);
         GPUMaterial mData = materials[medData.materialIdx];
         float r, m;
         uint sellRow;
@@ -197,7 +197,7 @@ void main() {
         return;
     }
 
-    if (hitIndex < 0 || hitIndex >= points.length()) {
+    if (hitIndex < 0 || uint(hitIndex) >= bp.brickCount * uint(BRICK_VOXELS)) {
         p.i1.w &= ~FLAG_ALIVE;
         pathsHot[slot] = p;
         return;

@@ -345,7 +345,16 @@ struct alignas(16) VCTParams {
 
 struct VCTMipPush {
     int dstRes[3];
-    int pad;
+    int pad0;
+    int dstOffset[3];
+    int pad1;
+};
+
+struct VCTRegionPush {
+    int offset[3];
+    int pad0;
+    int size[3];
+    int pad1;
 };
 
 static uint32_t vctMipCount(uint32_t res) {
@@ -395,7 +404,6 @@ struct GpuContext {
     VkShaderModule wfShadeShader = VK_NULL_HANDLE;
     VkShaderModule wfShadowShader = VK_NULL_HANDLE;
     VkShaderModule wfFinalizeShader = VK_NULL_HANDLE;
-    VkShaderModule aabbBuildShader = VK_NULL_HANDLE;
     VkShaderModule ddgiUpdateShader = VK_NULL_HANDLE;
 
     VkPipelineLayout fastPipelineLayout = VK_NULL_HANDLE;
@@ -404,7 +412,6 @@ struct GpuContext {
     VkPipelineLayout blendPipelineLayout = VK_NULL_HANDLE;
     VkPipelineLayout guidedCoeffPipelineLayout = VK_NULL_HANDLE;
     VkPipelineLayout wfPipelineLayout = VK_NULL_HANDLE;
-    VkPipelineLayout aabbBuildPipeLayout = VK_NULL_HANDLE;
 
     VkPipeline fastPipeline = VK_NULL_HANDLE;
     VkPipeline pbrPipeline = VK_NULL_HANDLE;
@@ -417,7 +424,6 @@ struct GpuContext {
     VkPipeline wfShadePipe = VK_NULL_HANDLE;
     VkPipeline wfShadowPipe = VK_NULL_HANDLE;
     VkPipeline wfFinalizePipe = VK_NULL_HANDLE;
-    VkPipeline aabbBuildPipe = VK_NULL_HANDLE;
     VkPipeline ddgiUpdatePipe = VK_NULL_HANDLE;
 
     VkBuffer fastGBuffer = VK_NULL_HANDLE;
@@ -434,7 +440,6 @@ struct GpuContext {
     VkBuffer accumBuffer = VK_NULL_HANDLE;
     VkBuffer uboBuffer = VK_NULL_HANDLE;
     VkBuffer fastPointBuffer = VK_NULL_HANDLE;
-    VkBuffer pbrPointBuffer = VK_NULL_HANDLE;
     VkBuffer skyboxBuffer = VK_NULL_HANDLE;
     VkBuffer lightBuffer = VK_NULL_HANDLE;
     VkBuffer fogBuffer = VK_NULL_HANDLE;
@@ -443,13 +448,8 @@ struct GpuContext {
     VkBuffer lowResOutBuffer = VK_NULL_HANDLE;
     VkBuffer adaptiveBuffer = VK_NULL_HANDLE;
     VkBuffer materialBuffer = VK_NULL_HANDLE;
-    VkBuffer asScratchBuffer = VK_NULL_HANDLE;
     VkBuffer outStagingBuffer = VK_NULL_HANDLE;
     VkBuffer xferStagingBuffer = VK_NULL_HANDLE;
-    VkBuffer aabbBuffer = VK_NULL_HANDLE;
-    VkBuffer asInstanceBuffer = VK_NULL_HANDLE;
-    VkBuffer blasBuffer = VK_NULL_HANDLE;
-    VkBuffer tlasBuffer = VK_NULL_HANDLE;
     VkBuffer smoothScratchBuffer = VK_NULL_HANDLE;
     VkBuffer sellmeierBuffer = VK_NULL_HANDLE;
     VkBuffer worldCacheBuffer = VK_NULL_HANDLE;
@@ -464,7 +464,6 @@ struct GpuContext {
     VkDescriptorSetLayout blendDescLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout guidedCoeffDescLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout wfDescLayout = VK_NULL_HANDLE;
-    VkDescriptorSetLayout aabbBuildLayout = VK_NULL_HANDLE;
 
     VkDescriptorSet wfDescSet = VK_NULL_HANDLE;
     VkDescriptorSet fastDescSet = VK_NULL_HANDLE;
@@ -472,7 +471,6 @@ struct GpuContext {
     VkDescriptorSet smoothDescSet = VK_NULL_HANDLE;
     VkDescriptorSet blendDescSet = VK_NULL_HANDLE;
     VkDescriptorSet guidedCoeffDescSet = VK_NULL_HANDLE;
-    VkDescriptorSet aabbBuildSet = VK_NULL_HANDLE;
 
     VkDeviceMemory fastGBufferMem = VK_NULL_HANDLE;
     VkDeviceMemory wfPathMem = VK_NULL_HANDLE;
@@ -487,7 +485,6 @@ struct GpuContext {
     VkDeviceMemory outMem = VK_NULL_HANDLE;
     VkDeviceMemory uboMem = VK_NULL_HANDLE;
     VkDeviceMemory fastPointMem = VK_NULL_HANDLE;
-    VkDeviceMemory pbrPointMem = VK_NULL_HANDLE;
     VkDeviceMemory skyboxMem = VK_NULL_HANDLE;
     VkDeviceMemory lightMem = VK_NULL_HANDLE;
     VkDeviceMemory finalOutMem[POST_SLOTS] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
@@ -496,13 +493,8 @@ struct GpuContext {
     VkDeviceMemory adaptiveMem = VK_NULL_HANDLE;
     VkDeviceMemory materialMem = VK_NULL_HANDLE;
     VkDeviceMemory fogMem = VK_NULL_HANDLE;
-    VkDeviceMemory asScratchMem = VK_NULL_HANDLE;
     VkDeviceMemory outStagingMem = VK_NULL_HANDLE;
     VkDeviceMemory xferStagingMem = VK_NULL_HANDLE;
-    VkDeviceMemory aabbMem = VK_NULL_HANDLE;
-    VkDeviceMemory asInstanceMem = VK_NULL_HANDLE;
-    VkDeviceMemory blasMem = VK_NULL_HANDLE;
-    VkDeviceMemory tlasMem = VK_NULL_HANDLE;
     VkDeviceMemory smoothScratchMem = VK_NULL_HANDLE;
     VkDeviceMemory sellmeierMem = VK_NULL_HANDLE;
     VkDeviceMemory worldCacheMem = VK_NULL_HANDLE;
@@ -514,8 +506,6 @@ struct GpuContext {
     
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
     
-    VkAccelerationStructureKHR blas = VK_NULL_HANDLE;
-    VkAccelerationStructureKHR tlas = VK_NULL_HANDLE;
 
     uint32_t currentFastGCap = 0;
     uint32_t currentFastPointsCap = 0;
@@ -524,7 +514,6 @@ struct GpuContext {
     uint32_t currentFogCap = 0;
     uint32_t currentNodesCap = 0;
     uint32_t currentOutCap = 0;
-    uint32_t currentPBRPointsCap = 0;
     uint32_t currentSkyboxCap = 0;
     uint32_t currentLightCap = 0;
     uint32_t currentFinalOutCap[POST_SLOTS] = {0, 0};
@@ -532,7 +521,6 @@ struct GpuContext {
     uint32_t currentLowResOutCap = 0;
     uint32_t currentAdaptiveCap = 0;
     uint32_t currentMaterialCap = 0;
-    uint32_t currentAabbCap = 0;
     uint32_t currentScratchCap = 0;
     uint32_t lastBlasPrimCount = 0;
     uint32_t framesSinceFullBuild = 0;
@@ -591,8 +579,6 @@ struct GpuContext {
     bool outStagingCoherent = true;
     bool xferStagingCoherent = true;
     bool vctReady = false;
-    bool aabbBuildReady = false;
-    bool aabbBufferHostVisible = false;
 
     int lastBlasOrderingTag = -1;
 
@@ -1273,284 +1259,6 @@ struct GpuContext {
         return vkGetBufferDeviceAddress(device, &info);
     }
 
-    void initAabbBuildPipeline() {
-        if (aabbBuildReady) return;
-
-        VkDescriptorSetLayoutBinding b[2]{};
-        b[0] = {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
-        b[1] = {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
-        VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 2, b};
-        vkCreateDescriptorSetLayout(device, &li, nullptr, &aabbBuildLayout);
-
-        VkPushConstantRange pcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t)};
-        VkPipelineLayoutCreateInfo pl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-        pl.setLayoutCount = 1;
-        pl.pSetLayouts = &aabbBuildLayout;
-        pl.pushConstantRangeCount = 1;
-        pl.pPushConstantRanges = &pcr;
-        vkCreatePipelineLayout(device, &pl, nullptr, &aabbBuildPipeLayout);
-
-        aabbBuildShader = createShaderModule(device, "./bin/aabb_build.spv");
-        VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-        ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-        ci.stage.pName = "main";
-        ci.stage.module = aabbBuildShader;
-        ci.layout = aabbBuildPipeLayout;
-        vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &ci, nullptr, &aabbBuildPipe);
-
-        VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-        ai.descriptorPool = descriptorPool;
-        ai.descriptorSetCount = 1;
-        ai.pSetLayouts = &aabbBuildLayout;
-        vkAllocateDescriptorSets(device, &ai, &aabbBuildSet);
-
-        aabbBuildReady = true;
-    }
-
-    ///@brief Records the AABB fill into cmd; the caller submits it with the AS build.
-    void recordAabbBuild(VkCommandBuffer cmd, VkBuffer srcPoints, uint32_t numPrimitives) {
-        initAabbBuildPipeline();
-
-        VkDescriptorBufferInfo bInfos[2] = {
-            {srcPoints,  0, VK_WHOLE_SIZE},
-            {aabbBuffer, 0, VK_WHOLE_SIZE}
-        };
-        VkWriteDescriptorSet writes[2]{};
-        for (int i = 0; i < 2; ++i) {
-            writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[i].dstSet = aabbBuildSet;
-            writes[i].dstBinding = i;
-            writes[i].descriptorCount = 1;
-            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            writes[i].pBufferInfo = &bInfos[i];
-        }
-        vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
-
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, aabbBuildPipe);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, aabbBuildPipeLayout,
-                                0, 1, &aabbBuildSet, 0, nullptr);
-        vkCmdPushConstants(cmd, aabbBuildPipeLayout, VK_SHADER_STAGE_COMPUTE_BIT,
-                           0, sizeof(uint32_t), &numPrimitives);
-        vkCmdDispatch(cmd, (numPrimitives + 63) / 64, 1, 1);
-
-        // AABB writes must land before the AS build reads them.
-        VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                             VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                             0, 1, &barrier, 0, nullptr, 0, nullptr);
-    }
-
-    void buildHardwareAccelerationStructures(const std::vector<GPURenderData>& points, int orderingTag = 0,
-                                             VkBuffer srcPointBuffer = VK_NULL_HANDLE) {
-        if (points.empty()) return;
-
-        const uint32_t numPrimitives = static_cast<uint32_t>(points.size());
-        bool doFullBuild = (!blasTopologyValid) || (numPrimitives != lastBlasPrimCount)
-                        || (orderingTag != lastBlasOrderingTag);
-
-        uint32_t aabbSize = numPrimitives * sizeof(VkAabbPositionsKHR);
-        const bool gpuFill = (srcPointBuffer != VK_NULL_HANDLE);
-        if (aabbSize > currentAabbCap || aabbBufferHostVisible == gpuFill || !aabbBuffer) {
-            if (aabbBuffer) {
-                vkDestroyBuffer(device, aabbBuffer, nullptr);
-                vkFreeMemory(device, aabbMem, nullptr);
-            }
-            VkBufferUsageFlags usage = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
-                                     | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-            VkMemoryPropertyFlags props = gpuFill
-                ? VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
-                : (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-            createBufferWithAddress(device, aabbSize, usage, props, aabbBuffer, aabbMem);
-            currentAabbCap = aabbSize;
-            aabbBufferHostVisible = !gpuFill;
-            blasTopologyValid = false;
-            doFullBuild = true;
-        }
-
-        if (!gpuFill) {
-            std::vector<VkAabbPositionsKHR> aabbs(numPrimitives);
-            for (uint32_t i = 0; i < numPrimitives; ++i) {
-                const float halfSize = points[i].size * 0.5f;
-                const Vec3 lo = points[i].position - Vec3::Constant(halfSize);
-                const Vec3 hi = points[i].position + Vec3::Constant(halfSize)
-                    + Vec3::Constant(points[i].size).cwiseProduct(
-                        unpackExtent(points[i].extent) - Vec3::Ones());
-                aabbs[i].minX = lo.x();
-                aabbs[i].minY = lo.y();
-                aabbs[i].minZ = lo.z();
-                aabbs[i].maxX = hi.x();
-                aabbs[i].maxY = hi.y();
-                aabbs[i].maxZ = hi.z();
-            }
-            void* data;
-            vkMapMemory(device, aabbMem, 0, aabbSize, 0, &data);
-            memcpy(data, aabbs.data(), aabbSize);
-            vkUnmapMemory(device, aabbMem);
-        }
-
-        VkAccelerationStructureGeometryKHR blasGeom{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
-        blasGeom.geometryType = VK_GEOMETRY_TYPE_AABBS_KHR;
-        blasGeom.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
-        blasGeom.geometry.aabbs.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR;
-        blasGeom.geometry.aabbs.data.deviceAddress = getBufferDeviceAddress(aabbBuffer);
-        blasGeom.geometry.aabbs.stride = sizeof(VkAabbPositionsKHR);
-
-        VkAccelerationStructureBuildGeometryInfoKHR blasBuildInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
-        blasBuildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-        blasBuildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
-                            | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
-        blasBuildInfo.mode = doFullBuild ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR
-                                         : VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
-        blasBuildInfo.geometryCount = 1;
-        blasBuildInfo.pGeometries = &blasGeom;
-
-        VkAccelerationStructureBuildSizesInfoKHR blasSizeInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
-        pfn_vkGetAccelerationStructureBuildSizesKHR(device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &blasBuildInfo, &numPrimitives, &blasSizeInfo);
-
-
-        if (doFullBuild) {
-            if (blas) {
-                pfn_vkDestroyAccelerationStructureKHR(device, blas, nullptr);
-                vkDestroyBuffer(device, blasBuffer, nullptr);
-                vkFreeMemory(device, blasMem, nullptr);
-            }
-            createBufferWithAddress(device, blasSizeInfo.accelerationStructureSize, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
-                                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, blasBuffer, blasMem);
-
-            VkAccelerationStructureCreateInfoKHR blasCreateInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
-            blasCreateInfo.buffer = blasBuffer;
-            blasCreateInfo.size = blasSizeInfo.accelerationStructureSize;
-            blasCreateInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-            pfn_vkCreateAccelerationStructureKHR(device, &blasCreateInfo, nullptr, &blas);
-        }
-        blasBuildInfo.srcAccelerationStructure = doFullBuild ? VK_NULL_HANDLE : blas;
-        VkAccelerationStructureDeviceAddressInfoKHR blasAddrInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR};
-        blasAddrInfo.accelerationStructure = blas;
-        VkDeviceAddress blasAddress = pfn_vkGetAccelerationStructureDeviceAddressKHR(device, &blasAddrInfo);
-
-        VkAccelerationStructureInstanceKHR tlasInstance{};
-        tlasInstance.transform = { 1.0f, 0.0f, 0.0f, 0.0f,
-                                   0.0f, 1.0f, 0.0f, 0.0f,
-                                   0.0f, 0.0f, 1.0f, 0.0f };
-        tlasInstance.instanceCustomIndex = 0;
-        tlasInstance.mask = 0xFF;
-        tlasInstance.instanceShaderBindingTableRecordOffset = 0;
-        tlasInstance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
-        tlasInstance.accelerationStructureReference = blasAddress;
-
-        if (asInstanceBuffer) {
-            vkDestroyBuffer(device, asInstanceBuffer, nullptr);
-            vkFreeMemory(device, asInstanceMem, nullptr);
-        }
-        createBufferWithAddress(device, sizeof(VkAccelerationStructureInstanceKHR), 
-                                VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, 
-                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, asInstanceBuffer, asInstanceMem);
-        
-        void* data;
-        vkMapMemory(device, asInstanceMem, 0, sizeof(VkAccelerationStructureInstanceKHR), 0, &data);
-        memcpy(data, &tlasInstance, sizeof(VkAccelerationStructureInstanceKHR));
-        vkUnmapMemory(device, asInstanceMem);
-
-        VkAccelerationStructureGeometryKHR tlasGeom{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
-        tlasGeom.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
-        tlasGeom.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
-        tlasGeom.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
-        tlasGeom.geometry.instances.arrayOfPointers = VK_FALSE;
-        tlasGeom.geometry.instances.data.deviceAddress = getBufferDeviceAddress(asInstanceBuffer);
-
-        VkAccelerationStructureBuildGeometryInfoKHR tlasBuildInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
-        tlasBuildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
-        tlasBuildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
-                            | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
-        tlasBuildInfo.mode = doFullBuild ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR
-                                         : VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
-        tlasBuildInfo.geometryCount = 1;
-        tlasBuildInfo.pGeometries = &tlasGeom;
-
-        uint32_t numInstances = 1;
-        VkAccelerationStructureBuildSizesInfoKHR tlasSizeInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
-        pfn_vkGetAccelerationStructureBuildSizesKHR(device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &tlasBuildInfo, &numInstances, &tlasSizeInfo);
-
-        if (doFullBuild) {
-            if (tlas) {
-                pfn_vkDestroyAccelerationStructureKHR(device, tlas, nullptr);
-                vkDestroyBuffer(device, tlasBuffer, nullptr);
-                vkFreeMemory(device, tlasMem, nullptr);
-            }
-            createBufferWithAddress(device, tlasSizeInfo.accelerationStructureSize, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
-                                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, tlasBuffer, tlasMem);
-
-            VkAccelerationStructureCreateInfoKHR tlasCreateInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
-            tlasCreateInfo.buffer = tlasBuffer;
-            tlasCreateInfo.size = tlasSizeInfo.accelerationStructureSize;
-            tlasCreateInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
-            pfn_vkCreateAccelerationStructureKHR(device, &tlasCreateInfo, nullptr, &tlas);
-        }
-        tlasBuildInfo.srcAccelerationStructure = doFullBuild ? VK_NULL_HANDLE : tlas;
-
-        VkDeviceSize scratchSize = std::max(blasSizeInfo.buildScratchSize, tlasSizeInfo.buildScratchSize);
-        scratchSize = std::max(scratchSize, std::max(blasSizeInfo.updateScratchSize, tlasSizeInfo.updateScratchSize));
-        if (scratchSize > currentScratchCap) {
-            if (asScratchBuffer) {
-                vkDestroyBuffer(device, asScratchBuffer, nullptr);
-                vkFreeMemory(device, asScratchMem, nullptr);
-            }
-            createBufferWithAddress(device, scratchSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, asScratchBuffer, asScratchMem);
-            currentScratchCap = scratchSize;
-        }
-        VkBuffer scratchBuffer = asScratchBuffer;
-
-        executeSingleTimeCommands([&](VkCommandBuffer cmd) {
-            if (gpuFill) recordAabbBuild(cmd, srcPointBuffer, numPrimitives);
-            blasBuildInfo.dstAccelerationStructure = blas;
-            blasBuildInfo.scratchData.deviceAddress = getBufferDeviceAddress(scratchBuffer);
-            VkAccelerationStructureBuildRangeInfoKHR blasOffset{};
-            blasOffset.primitiveCount = numPrimitives;
-            VkAccelerationStructureBuildRangeInfoKHR* pBlasOffset = &blasOffset;
-            
-            pfn_vkCmdBuildAccelerationStructuresKHR(cmd, 1, &blasBuildInfo, &pBlasOffset);
-
-            VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-            barrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
-            barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 
-                                 VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 
-                                 0, 1, &barrier, 0, nullptr, 0, nullptr);
-
-            tlasBuildInfo.dstAccelerationStructure = tlas;
-            tlasBuildInfo.scratchData.deviceAddress = getBufferDeviceAddress(scratchBuffer);
-            VkAccelerationStructureBuildRangeInfoKHR tlasOffset{};
-            tlasOffset.primitiveCount = numInstances;
-            VkAccelerationStructureBuildRangeInfoKHR* pTlasOffset = &tlasOffset;
-
-            pfn_vkCmdBuildAccelerationStructuresKHR(cmd, 1, &tlasBuildInfo, &pTlasOffset);
-        });
-
-        if (doFullBuild) {
-            lastBlasPrimCount = numPrimitives;
-            lastBlasOrderingTag = orderingTag;
-            blasTopologyValid = true;
-            VkWriteDescriptorSetAccelerationStructureKHR descASInfo{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
-            descASInfo.accelerationStructureCount = 1;
-            descASInfo.pAccelerationStructures = &tlas;
-
-            // the fast set gets the brick TLAS in writeFastDescriptors
-            VkWriteDescriptorSet asWrite{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-            asWrite.pNext = &descASInfo;
-            asWrite.dstSet = pbrDescSet;
-            asWrite.dstBinding = 6;
-            asWrite.descriptorCount = 1;
-            asWrite.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-            vkUpdateDescriptorSets(device, 1, &asWrite, 0, nullptr);
-            framesSinceFullBuild = 0;
-        } else {
-            framesSinceFullBuild++;
-        }
-    }
 
     VkQueryPool fastQueryPool[FRAME_SLOTS] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
 
@@ -1598,6 +1306,7 @@ struct GpuContext {
         VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         vkBeginCommandBuffer(cmd, &beginInfo);
+        vctRecordPending(cmd, slot);
         vkCmdResetQueryPool(cmd, fastQueryPool[slot], 0, 2);
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, fastQueryPool[slot], 0);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, fastPipeline);
@@ -1821,57 +1530,6 @@ struct GpuContext {
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     }
 
-    void updatePBRBuffers(const std::vector<GPURenderData>& points) {
-        size_t allocSize = std::max((size_t)256, points.size() * sizeof(GPURenderData));
-        size_t dataSize = points.size() * sizeof(GPURenderData);
-        
-        updateDeviceLocalBuffer(pbrPointBuffer, pbrPointMem, currentPBRPointsCap, 
-                                points.empty() ? nullptr : points.data(), dataSize, allocSize, 
-                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-
-        buildHardwareAccelerationStructures(points, 2);
-
-        VkDescriptorBufferInfo bInfos[8] = { 
-            {nodeBuffer, 0, VK_WHOLE_SIZE}, 
-            {pbrPointBuffer, 0, VK_WHOLE_SIZE}, 
-            {outBuffer, 0, VK_WHOLE_SIZE}, 
-            {uboBuffer, 0, VK_WHOLE_SIZE},
-            {skyboxBuffer, 0, VK_WHOLE_SIZE},
-            {lightBuffer, 0, VK_WHOLE_SIZE},
-            {adaptiveBuffer, 0, VK_WHOLE_SIZE},
-            {materialBuffer, 0, VK_WHOLE_SIZE}
-        };
-        int updateCount = 8;
-        VkWriteDescriptorSet writes[8] = {};
-        for(int i=0; i<updateCount; i++) {
-            writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[i].dstSet = pbrDescSet;
-            writes[i].dstBinding = (i >= 6) ? i + 1 : i;
-            writes[i].descriptorCount = 1;
-            writes[i].descriptorType = (i==3) ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            writes[i].pBufferInfo = &bInfos[i];
-        }
-        vkUpdateDescriptorSets(device, updateCount, writes, 0, nullptr);
-
-        if (vctReady) {
-            VkDescriptorImageInfo si{vctSampler, vctSampleView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-            VkDescriptorBufferInfo bi{vctParamBuf, 0, VK_WHOLE_SIZE};
-            VkWriteDescriptorSet vw[2]{};
-            vw[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-            vw[0].dstSet = pbrDescSet;
-            vw[0].dstBinding = 9;
-            vw[0].descriptorCount = 1;
-            vw[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            vw[0].pImageInfo = &si;
-            vw[1] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-            vw[1].dstSet = pbrDescSet;
-            vw[1].dstBinding = 10;
-            vw[1].descriptorCount = 1;
-            vw[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-            vw[1].pBufferInfo = &bi;
-            vkUpdateDescriptorSets(device, 2, vw, 0, nullptr);
-        }
-    }
 
     void ensureLowResBuffer(uint32_t size) {
         if(size > currentLowResOutCap) {
@@ -2325,8 +1983,9 @@ struct WFPushConstants {
 
 
 void initWavefront() {
-    VkDescriptorSetLayoutBinding b[22] = {};
-    for (int i = 0; i < 22; ++i) {
+    // 0..21 wavefront buffers, 22..26 brick world (headers, mat words, occupancy, palette, params)
+    VkDescriptorSetLayoutBinding b[27] = {};
+    for (int i = 0; i < 27; ++i) {
         b[i].binding = i;
         b[i].descriptorCount = 1;
         b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -2334,9 +1993,10 @@ void initWavefront() {
     }
     b[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     b[5].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+    b[26].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 
     VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    li.bindingCount = 22;
+    li.bindingCount = 27;
     li.pBindings = b;
     vkCreateDescriptorSetLayout(device, &li, nullptr, &wfDescLayout);
 
@@ -2452,15 +2112,29 @@ void ensureDDGIBuffers(uint32_t probeCount) {
     });
 }
 
+uint32_t ddgiProbeCursor = 0;
+
+///@brief Refresh DDGI_PROBES_PER_FRAME probes starting at a rotating cursor; the probes keep
+///       their previous irradiance (hysteresis blend) so a partial pass is a valid state.
 void dispatchDDGIUpdate(uint32_t probeCount) {
     if (!ddgiUpdatePipe || probeCount == 0) return;
+    const uint32_t budget = std::min<uint32_t>(uint32_t(DDGI_PROBES_PER_FRAME), probeCount);
+    const uint32_t first = ddgiProbeCursor % probeCount;
+    ddgiProbeCursor = (ddgiProbeCursor + budget) % probeCount;
     executeSingleTimeCommands([&](VkCommandBuffer cmd) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ddgiUpdatePipe);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                                 wfPipelineLayout, 0, 1, &wfDescSet, 0, nullptr);
-        WFPushConstants pc{0, 0, 0, 0};
+        // a window that wraps past the last probe is issued as two dispatches
+        const uint32_t firstCount = std::min(budget, probeCount - first);
+        WFPushConstants pc{int(first), 0, 0, 0};
         vkCmdPushConstants(cmd, wfPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-        vkCmdDispatch(cmd, probeCount, 1, 1);
+        vkCmdDispatch(cmd, firstCount, 1, 1);
+        if (firstCount < budget) {
+            pc.parity = 0;
+            vkCmdPushConstants(cmd, wfPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+            vkCmdDispatch(cmd, budget - firstCount, 1, 1);
+        }
     });
 }
 
@@ -2488,9 +2162,9 @@ void ensureWavefrontBuffers(uint32_t maxPaths) {
 }
 
 void writeWavefrontDescriptors() {
-    VkDescriptorBufferInfo bi[22] = {};
+    VkDescriptorBufferInfo bi[27] = {};
     bi[0]  = {uboBuffer, 0, VK_WHOLE_SIZE};
-    bi[1]  = {pbrPointBuffer, 0, VK_WHOLE_SIZE};
+    bi[1]  = {fastPointBuffer, 0, VK_WHOLE_SIZE};   // emissive proxies; geometry is the brick world
     bi[2]  = {materialBuffer, 0, VK_WHOLE_SIZE};
     bi[3]  = {skyboxBuffer, 0, VK_WHOLE_SIZE};
     bi[4]  = {lightBuffer, 0, VK_WHOLE_SIZE};
@@ -2510,23 +2184,28 @@ void writeWavefrontDescriptors() {
     bi[19] = {ddgiDepthBuffer ? ddgiDepthBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
     bi[20] = {reservoirBuffer ? reservoirBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
     bi[21] = {gbufferBuffer ? gbufferBuffer : materialBuffer, 0, VK_WHOLE_SIZE};
+    bi[22] = {brickHeaders.buffer, 0, VK_WHOLE_SIZE};
+    bi[23] = {brickMats.buffer, 0, VK_WHOLE_SIZE};
+    bi[24] = {brickOccs.buffer, 0, VK_WHOLE_SIZE};
+    bi[25] = {brickPalette.buffer, 0, VK_WHOLE_SIZE};
+    bi[26] = {brickParamBuffer, 0, VK_WHOLE_SIZE};
 
-    VkWriteDescriptorSet w[22] = {};
+    VkWriteDescriptorSet w[27] = {};
     int n = 0;
-    for (int i = 0; i < 22; ++i) {
+    for (int i = 0; i < 27; ++i) {
         if (i == 5) continue;
         w[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         w[n].dstSet = wfDescSet;
         w[n].dstBinding = i;
         w[n].descriptorCount = 1;
-        w[n].descriptorType = (i == 0) ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
-                                                             : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w[n].descriptorType = (i == 0 || i == 26) ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+                                                  : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         w[n].pBufferInfo = &bi[i];
         ++n;
     }
     VkWriteDescriptorSetAccelerationStructureKHR asInfo{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
     asInfo.accelerationStructureCount = 1;
-    asInfo.pAccelerationStructures = &tlas;
+    asInfo.pAccelerationStructures = &brickTlas;
     w[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     w[n].pNext = &asInfo;
     w[n].dstSet = wfDescSet;

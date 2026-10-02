@@ -44,7 +44,7 @@ void main() {
 
     remainingMaxDist -= t;
 
-    GPURenderData hitData = points[hitIndex];
+    GPURenderData hitData = brickPoint(hitIndex);
     vec3 invD = safe_invDir(dir);
     float tExit;
     vec3 normal;
@@ -132,7 +132,7 @@ void main() {
             float wB = 1.0;
             if (prevPdf > 0.0 && cam.emissiveCount > 0) {
                 vec3 faceN;
-                float area = lightFaceArea(hitData, prevVertex, faceN);
+                float area = lightFaceArea(lightProxyAt(hitPoint, hitData), prevVertex, faceN);
                 float cosAtLight = dot(faceN, -dir);
                 bool sameFace = dot(faceN, normal) > 0.5;
                 float lp = sameFace ? lightPdfW(area, t * t, cosAtLight, cam.emissiveCount) : 0.0;

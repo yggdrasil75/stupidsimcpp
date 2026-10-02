@@ -58,6 +58,13 @@ layout(binding = 7) uniform BrickParams {
     uint pad0;
     uint pad1;
 } bp;
+///@brief Indices of the bricks to voxelize; a partial update lists only the bricks that
+///       touch the region that was cleared.
+layout(std430, binding = 8) readonly buffer BrickList { uint brickList[]; };
+
+layout(push_constant) uniform Push {
+    uint listCount;
+} pc;
 
 vec4 unpackRGBA8(uint c) {
     return vec4(float(c & 0xFFu) / 255.0,
@@ -75,7 +82,9 @@ vec3 unpackRGB9E5(uint c) {
 
 void main() {
     uint gid = gl_GlobalInvocationID.x;
-    uint b = gid / uint(BRICK_VOXELS);
+    uint listIdx = gid / uint(BRICK_VOXELS);
+    if (listIdx >= pc.listCount) return;
+    uint b = brickList[listIdx];
     if (b >= bp.brickCount) return;
     int i = int(gid % uint(BRICK_VOXELS));
 

@@ -44,6 +44,8 @@ static constexpr int DDGI_RAYS_PER_PROBE = 1024;
 static constexpr int DDGI_PROBES_X = 16;
 static constexpr int DDGI_PROBES_Y = 8;
 static constexpr int DDGI_PROBES_Z = 16;
+///@brief Probes refreshed per frame, round-robin over the grid (2048 probes -> full pass in 8 frames)
+static constexpr int DDGI_PROBES_PER_FRAME = 256;
 static constexpr float DDGI_HYSTERESIS = 0.80f;
 static constexpr float DDGI_DEPTH_SHARPNESS = 50.0f;
 static constexpr float DDGI_NORMAL_BIAS = 0.25f;

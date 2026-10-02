@@ -11,17 +11,38 @@ VkBuffer       vctParamBuf   = VK_NULL_HANDLE;
 VkDeviceMemory vctParamMem   = VK_NULL_HANDLE;
 VCTParams      vctParams{};
 
-VkShaderModule       vctVoxShader   = VK_NULL_HANDLE;
-VkDescriptorSetLayout vctVoxLayout  = VK_NULL_HANDLE;
-VkPipelineLayout     vctVoxPipeLayout = VK_NULL_HANDLE;
-VkPipeline           vctVoxPipe     = VK_NULL_HANDLE;
-VkDescriptorSet      vctVoxSet      = VK_NULL_HANDLE;
-
 VkShaderModule       vctBrickVoxShader   = VK_NULL_HANDLE;
 VkDescriptorSetLayout vctBrickVoxLayout  = VK_NULL_HANDLE;
 VkPipelineLayout     vctBrickVoxPipeLayout = VK_NULL_HANDLE;
 VkPipeline           vctBrickVoxPipe     = VK_NULL_HANDLE;
 VkDescriptorSet      vctBrickVoxSet      = VK_NULL_HANDLE;
+
+VkShaderModule       vctClearShader   = VK_NULL_HANDLE;
+VkDescriptorSetLayout vctClearLayout  = VK_NULL_HANDLE;
+VkPipelineLayout     vctClearPipeLayout = VK_NULL_HANDLE;
+VkPipeline           vctClearPipe     = VK_NULL_HANDLE;
+VkDescriptorSet      vctClearSet      = VK_NULL_HANDLE;
+
+///@brief Bricks to voxelize this build (full build: every brick); one per frame slot so a
+///       frame still in flight never sees the next frame's list
+VkBuffer       vctBrickListBuf[FRAME_SLOTS] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+VkDeviceMemory vctBrickListMem[FRAME_SLOTS] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+uint32_t       vctBrickListCap[FRAME_SLOTS] = {0, 0};
+
+///@brief The volume currently on the GPU: valid contents, and the bounds they were built for
+bool vctHasContents = false;
+Vec3 vctBuiltMin = Vec3::Zero();
+Vec3 vctBuiltExtent = Vec3::Zero();
+
+///@brief Work queued by vctBuildVolumeBricks, recorded into the next fast frame's command
+///       buffer by vctRecordPending so the volume build never waits on its own fence.
+struct VCTPending {
+    bool active = false;
+    bool full = false;
+    Eigen::Vector3i regionMin = Eigen::Vector3i::Zero();
+    Eigen::Vector3i regionSize = Eigen::Vector3i::Zero();
+    std::vector<uint32_t> list;
+} vctPending;
 
 VkShaderModule       vctMipShader   = VK_NULL_HANDLE;
 VkDescriptorSetLayout vctMipLayout  = VK_NULL_HANDLE;
@@ -94,51 +115,56 @@ void vctInit() {
                  vctParamBuf, vctParamMem);
 
     {
-        VkDescriptorSetLayoutBinding b[4]{};
-        b[0] = {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
-        b[1] = {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
-        b[2] = {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,  1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
-        b[3] = {3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
-        VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 4, b};
-        vkCreateDescriptorSetLayout(device, &li, nullptr, &vctVoxLayout);
+        VkDescriptorSetLayoutBinding b{0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 1, &b};
+        vkCreateDescriptorSetLayout(device, &li, nullptr, &vctClearLayout);
 
+        VkPushConstantRange pcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(VCTRegionPush)};
         VkPipelineLayoutCreateInfo pl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         pl.setLayoutCount = 1;
-        pl.pSetLayouts = &vctVoxLayout;
-        vkCreatePipelineLayout(device, &pl, nullptr, &vctVoxPipeLayout);
+        pl.pSetLayouts = &vctClearLayout;
+        pl.pushConstantRangeCount = 1;
+        pl.pPushConstantRanges = &pcr;
+        vkCreatePipelineLayout(device, &pl, nullptr, &vctClearPipeLayout);
 
-        vctVoxShader = createShaderModule(device, "./bin/vct_voxelize.spv");
-        VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-        ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-        ci.stage.pName = "main";
-        ci.stage.module = vctVoxShader;
-        ci.layout = vctVoxPipeLayout;
-        vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &ci, nullptr, &vctVoxPipe);
+        vctClearShader = createShaderModule(device, "./bin/vct_clear_region.spv");
+        if (vctClearShader) {
+            VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+            ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+            ci.stage.pName = "main";
+            ci.stage.module = vctClearShader;
+            ci.layout = vctClearPipeLayout;
+            vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &ci, nullptr, &vctClearPipe);
+        }
 
         VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
         ai.descriptorPool = descriptorPool;
         ai.descriptorSetCount = 1;
-        ai.pSetLayouts = &vctVoxLayout;
-        vkAllocateDescriptorSets(device, &ai, &vctVoxSet);
+        ai.pSetLayouts = &vctClearLayout;
+        vkAllocateDescriptorSets(device, &ai, &vctClearSet);
     }
 
     {
         // brick voxelizer: 0 headers, 1 mat words, 2 occupancy, 3 palette, 4 materials,
-        // 5 volume image, 6 VCT params, 7 brick params
-        VkDescriptorSetLayoutBinding b[8]{};
+        // 5 volume image, 6 VCT params, 7 brick params, 8 brick index list
+        VkDescriptorSetLayoutBinding b[9]{};
         for (uint32_t i = 0; i < 5; ++i) {
             b[i] = {i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
         }
         b[5] = {5, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
         b[6] = {6, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
         b[7] = {7, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
-        VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 8, b};
+        b[8] = {8, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 9, b};
         vkCreateDescriptorSetLayout(device, &li, nullptr, &vctBrickVoxLayout);
 
+        VkPushConstantRange pcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t)};
         VkPipelineLayoutCreateInfo pl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         pl.setLayoutCount = 1;
         pl.pSetLayouts = &vctBrickVoxLayout;
+        pl.pushConstantRangeCount = 1;
+        pl.pPushConstantRanges = &pcr;
         vkCreatePipelineLayout(device, &pl, nullptr, &vctBrickVoxPipeLayout);
 
         vctBrickVoxShader = createShaderModule(device, "./bin/vct_voxelize_brick.spv");
@@ -215,21 +241,13 @@ void vctInit() {
 
     {
         VkDescriptorImageInfo imgI{VK_NULL_HANDLE, vctMipViews[0], VK_IMAGE_LAYOUT_GENERAL};
-        VkDescriptorBufferInfo uboI{vctParamBuf, 0, VK_WHOLE_SIZE};
-        VkWriteDescriptorSet w[2]{};
-        w[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        w[0].dstSet = vctVoxSet;
-        w[0].dstBinding = 2;
-        w[0].descriptorCount = 1;
-        w[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        w[0].pImageInfo = &imgI;
-        w[1] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        w[1].dstSet = vctVoxSet;
-        w[1].dstBinding = 3;
-        w[1].descriptorCount = 1;
-        w[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        w[1].pBufferInfo = &uboI;
-        vkUpdateDescriptorSets(device, 2, w, 0, nullptr);
+        VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        w.dstSet = vctClearSet;
+        w.dstBinding = 0;
+        w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        w.pImageInfo = &imgI;
+        vkUpdateDescriptorSets(device, 1, &w, 0, nullptr);
     }
 
     {
@@ -290,16 +308,49 @@ void vctImageBarrier(VkCommandBuffer cmd, VkImageLayout oldL, VkImageLayout newL
     vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &b);
 }
 
-///@brief Write volume parameters, then clear the volume and open the command buffer.
-///@return False if VCT is disabled or not ready; nothing else needs to happen then.
-bool vctBeginVolume(const Vec3& aabbMin, const Vec3& aabbMax, const Vec3& lightDir, bool enabled) {
-    if (!vctReady) return false;
+///@brief Mip level 0 cell range covered by a world-space box (clamped to the grid)
+void vctCellRange(const Vec3& lo, const Vec3& hi, Eigen::Vector3i& cmin, Eigen::Vector3i& cmax) const {
+    for (int a = 0; a < 3; ++a) {
+        cmin[a] = std::clamp(int(std::floor((lo[a] - vctParams.volMin[a]) * vctParams.invVoxelSize)), 0, int(VCT_RES) - 1);
+        cmax[a] = std::clamp(int(std::floor((hi[a] - vctParams.volMin[a]) * vctParams.invVoxelSize)), 0, int(VCT_RES) - 1);
+    }
+}
+
+void vctUploadBrickList(uint32_t slot, const std::vector<uint32_t>& list) {
+    const VkDeviceSize bytes = std::max<VkDeviceSize>(list.size() * sizeof(uint32_t), sizeof(uint32_t));
+    if (bytes > vctBrickListCap[slot]) {
+        destroyBuffer(device, vctBrickListBuf[slot], vctBrickListMem[slot]);
+        createBuffer(device, primaryDevice, bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                     vctBrickListBuf[slot], vctBrickListMem[slot]);
+        vctBrickListCap[slot] = uint32_t(bytes);
+    }
+    if (list.empty()) return;
+    void* p;
+    vkMapMemory(device, vctBrickListMem[slot], 0, bytes, 0, &p);
+    memcpy(p, list.data(), list.size() * sizeof(uint32_t));
+    vkUnmapMemory(device, vctBrickListMem[slot]);
+}
+
+///@brief Queue a radiance volume update from the brick buffers.
+///       Full build when the bounds changed or the volume has no contents yet; otherwise only
+///       the region covered by `dirtyBricks` is cleared and re-voxelized (with every brick
+///       that touches that region, since a volume cell can hold contributions from several
+///       bricks) and only that region's mip chain is rebuilt. Nothing is queued when
+///       nothing changed. The work is recorded by vctRecordPending inside the next fast frame.
+void vctBuildVolumeBricks(const Vec3& aabbMin, const Vec3& aabbMax, const Vec3& lightDir, bool enabled,
+                          const BrickGPUData& bricks, bool bricksRebuilt, const std::vector<uint32_t>& dirtyBricks) {
+    if (!vctReady) return;
+    if (!vctBrickVoxPipe || !vctBrickVoxSet || !vctClearPipe || brickCount == 0) enabled = false;
 
     Vec3 ext = aabbMax - aabbMin;
     for (int i = 0; i < 3; ++i) if (ext[i] <= 1e-6f) ext[i] = 1.0f;
     Vec3 pad = ext * 0.02f;
     Vec3 vmin = aabbMin - pad;
     Vec3 vext = ext + pad * 2.0f;
+
+    const bool boundsChanged = !vctHasContents || (vmin - vctBuiltMin).cwiseAbs().maxCoeff() > 1e-5f
+                            || (vext - vctBuiltExtent).cwiseAbs().maxCoeff() > 1e-5f;
 
     vctParams.volMin = vmin;
     vctParams.volExtent = vext;
@@ -315,140 +366,150 @@ bool vctBeginVolume(const Vec3& aabbMin, const Vec3& aabbMax, const Vec3& lightD
     memcpy(pdata, &vctParams, sizeof(VCTParams));
     vkUnmapMemory(device, vctParamMem);
 
-    if (!enabled) return false;
+    if (!enabled) return;
 
-    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    vkBeginCommandBuffer(commandBuffer, &bi);
+    if (boundsChanged || bricksRebuilt) {
+        vctPending.list.resize(brickCount);
+        for (uint32_t i = 0; i < brickCount; ++i) vctPending.list[i] = i;
+        vctPending.active = true;
+        vctPending.full = true;
+        vctBuiltMin = vmin;
+        vctBuiltExtent = vext;
+        return;
+    }
+    if (dirtyBricks.empty()) return;
 
-    vctImageBarrier(commandBuffer, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-                    0, VK_ACCESS_TRANSFER_WRITE_BIT,
-                    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                    0, vctMipLevels);
+    // region: cells covered by the dirty bricks, grown by one cell so a voxel straddling
+    // the boundary is re-evaluated on both sides
+    Eigen::Vector3i rmin = Eigen::Vector3i::Constant(int(VCT_RES));
+    Eigen::Vector3i rmax = Eigen::Vector3i::Constant(-1);
+    for (uint32_t i : dirtyBricks) {
+        const GPUAabb& a = bricks.aabbs[i];
+        Eigen::Vector3i cmin, cmax;
+        vctCellRange(Vec3(a.minX, a.minY, a.minZ), Vec3(a.maxX, a.maxY, a.maxZ), cmin, cmax);
+        rmin = rmin.cwiseMin(cmin);
+        rmax = rmax.cwiseMax(cmax);
+    }
+    rmin = (rmin - Eigen::Vector3i::Ones()).cwiseMax(Eigen::Vector3i::Zero());
+    rmax = (rmax + Eigen::Vector3i::Ones()).cwiseMin(Eigen::Vector3i::Constant(int(VCT_RES) - 1));
 
-    VkClearColorValue clr{};
-
-    clr.float32[0]=clr.float32[1]=clr.float32[2]=clr.float32[3]=0.0f;
-    VkImageSubresourceRange all{ VK_IMAGE_ASPECT_COLOR_BIT, 0, vctMipLevels, 0, 1 };
-    vkCmdClearColorImage(commandBuffer, vctImage, VK_IMAGE_LAYOUT_GENERAL, &clr, 1, &all);
-
-    vctImageBarrier(commandBuffer, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
-                    VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT,
-                    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                    0, vctMipLevels);
-
-    return true;
+    std::vector<uint32_t>& touching = vctPending.list;
+    touching.clear();
+    touching.reserve(dirtyBricks.size() * 4);
+    for (uint32_t i = 0; i < brickCount; ++i) {
+        const GPUAabb& a = bricks.aabbs[i];
+        Eigen::Vector3i cmin, cmax;
+        vctCellRange(Vec3(a.minX, a.minY, a.minZ), Vec3(a.maxX, a.maxY, a.maxZ), cmin, cmax);
+        if ((cmax.array() < rmin.array()).any() || (cmin.array() > rmax.array()).any()) continue;
+        touching.push_back(i);
+    }
+    vctPending.active = true;
+    vctPending.full = false;
+    vctPending.regionMin = rmin;
+    vctPending.regionSize = rmax - rmin + Eigen::Vector3i::Ones();
 }
 
-///@brief Build the mip chain, submit, wait and refresh the sampler descriptors
-void vctEndVolume() {
+void vctWriteBrickVoxDescriptors(uint32_t slot) {
+    const VkBuffer buffers[5] = {
+        brickHeaders.buffer, brickMats.buffer, brickOccs.buffer, brickPalette.buffer, materialBuffer,
+    };
+    VkDescriptorBufferInfo infos[7]{};
+    VkWriteDescriptorSet w[7]{};
+    for (uint32_t i = 0; i < 5; ++i) {
+        infos[i] = {buffers[i], 0, VK_WHOLE_SIZE};
+        w[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        w[i].dstSet = vctBrickVoxSet;
+        w[i].dstBinding = i;
+        w[i].descriptorCount = 1;
+        w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w[i].pBufferInfo = &infos[i];
+    }
+    infos[5] = {brickParamBuffer, 0, VK_WHOLE_SIZE};
+    w[5] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    w[5].dstSet = vctBrickVoxSet;
+    w[5].dstBinding = 7;
+    w[5].descriptorCount = 1;
+    w[5].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    w[5].pBufferInfo = &infos[5];
+    infos[6] = {vctBrickListBuf[slot], 0, VK_WHOLE_SIZE};
+    w[6] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    w[6].dstSet = vctBrickVoxSet;
+    w[6].dstBinding = 8;
+    w[6].descriptorCount = 1;
+    w[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w[6].pBufferInfo = &infos[6];
+    vkUpdateDescriptorSets(device, 7, w, 0, nullptr);
+}
+
+///@brief Record the queued volume update into the frame slot's command buffer, before the
+///       pass that samples it. The slot's fence guarantees its list buffer is free.
+void vctRecordPending(VkCommandBuffer cmd, uint32_t slot) {
+    if (!vctPending.active) return;
+    vctPending.active = false;
+    vctUploadBrickList(slot, vctPending.list);
+    vctWriteBrickVoxDescriptors(slot);
+    const uint32_t listCount = uint32_t(vctPending.list.size());
+
+    const VkImageLayout from = vctHasContents ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
+    vctImageBarrier(cmd, from, VK_IMAGE_LAYOUT_GENERAL,
+                    VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    0, vctMipLevels);
+
+    Eigen::Vector3i regionMin = vctPending.regionMin;
+    Eigen::Vector3i regionSize = vctPending.regionSize;
+    if (vctPending.full) {
+        VkClearColorValue clr{};
+        VkImageSubresourceRange all{VK_IMAGE_ASPECT_COLOR_BIT, 0, vctMipLevels, 0, 1};
+        vkCmdClearColorImage(cmd, vctImage, VK_IMAGE_LAYOUT_GENERAL, &clr, 1, &all);
+        regionMin = Eigen::Vector3i::Zero();
+        regionSize = Eigen::Vector3i::Constant(int(VCT_RES));
+    } else {
+        VCTRegionPush pc{{regionMin.x(), regionMin.y(), regionMin.z()}, 0,
+                         {regionSize.x(), regionSize.y(), regionSize.z()}, 0};
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, vctClearPipe);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, vctClearPipeLayout, 0, 1, &vctClearSet, 0, nullptr);
+        vkCmdPushConstants(cmd, vctClearPipeLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, (regionSize.x() + 3) / 4, (regionSize.y() + 3) / 4, (regionSize.z() + 3) / 4);
+    }
+
+    VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, vctBrickVoxPipe);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, vctBrickVoxPipeLayout, 0, 1, &vctBrickVoxSet, 0, nullptr);
+    vkCmdPushConstants(cmd, vctBrickVoxPipeLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t), &listCount);
+    const uint32_t threads = listCount * BRICK_VOXELS;
+    vkCmdDispatch(cmd, (threads + 63) / 64, 1, 1);
+
+    // mip chain over the region only; each level halves the region's cell range
     uint32_t res = VCT_RES;
+    Eigen::Vector3i lo = regionMin;
+    Eigen::Vector3i hi = regionMin + regionSize - Eigen::Vector3i::Ones();
     for (uint32_t i = 0; i + 1 < vctMipLevels; ++i) {
-        VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
         mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        vkCmdPipelineBarrier(commandBuffer,
-                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                              0, 1, &mb, 0, nullptr, 0, nullptr);
 
         uint32_t dstRes = std::max(1u, res >> 1);
-        VCTMipPush pc{ {int(dstRes), int(dstRes), int(dstRes)}, 0 };
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vctMipPipe);
-        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                vctMipPipeLayout, 0, 1, &vctMipSets[i], 0, nullptr);
-        vkCmdPushConstants(commandBuffer, vctMipPipeLayout, VK_SHADER_STAGE_COMPUTE_BIT,
-                           0, sizeof(VCTMipPush), &pc);
-        vkCmdDispatch(commandBuffer, (dstRes + 3) / 4, (dstRes + 3) / 4, (dstRes + 3) / 4);
+        lo = lo / 2;
+        hi = hi / 2;
+        Eigen::Vector3i size = hi - lo + Eigen::Vector3i::Ones();
+        VCTMipPush pc{{int(dstRes), int(dstRes), int(dstRes)}, 0, {lo.x(), lo.y(), lo.z()}, 0};
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, vctMipPipe);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, vctMipPipeLayout, 0, 1, &vctMipSets[i], 0, nullptr);
+        vkCmdPushConstants(cmd, vctMipPipeLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(VCTMipPush), &pc);
+        vkCmdDispatch(cmd, (size.x() + 3) / 4, (size.y() + 3) / 4, (size.z() + 3) / 4);
         res = dstRes;
     }
 
-    vctImageBarrier(commandBuffer, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    vctImageBarrier(cmd, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                     VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                     0, vctMipLevels);
-
-    vkEndCommandBuffer(commandBuffer);
-
-    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    si.commandBufferCount = 1;
-    si.pCommandBuffers = &commandBuffer;
-    VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-    VkFence f;
-    vkCreateFence(device, &fi, nullptr, &f);
-    vkQueueSubmit(queue, 1, &si, f);
-    vkWaitForFences(device, 1, &f, VK_TRUE, UINT64_MAX);
-    vkDestroyFence(device, f, nullptr);
-
-    vctWriteFastDescriptors();
-}
-
-///@brief Radiance volume from the per-voxel point array
-void vctBuildVolume(VkBuffer pointBuf, uint32_t pointCount,
-                    const Vec3& aabbMin, const Vec3& aabbMax,
-                    const Vec3& lightDir, bool enabled) {
-    if (!vctBeginVolume(aabbMin, aabbMax, lightDir, enabled)) return;
-
-    {
-        VkDescriptorBufferInfo pI{pointBuf, 0, VK_WHOLE_SIZE};
-        VkDescriptorBufferInfo mI{materialBuffer, 0, VK_WHOLE_SIZE};
-        VkWriteDescriptorSet w[2]{};
-        w[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        w[0].dstSet = vctVoxSet;
-        w[0].dstBinding = 0;
-        w[0].descriptorCount = 1;
-        w[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        w[0].pBufferInfo = &pI;
-        w[1] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        w[1].dstSet = vctVoxSet;
-        w[1].dstBinding = 1;
-        w[1].descriptorCount = 1;
-        w[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        w[1].pBufferInfo = &mI;
-        vkUpdateDescriptorSets(device, 2, w, 0, nullptr);
-    }
-
-    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vctVoxPipe);
-    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                            vctVoxPipeLayout, 0, 1, &vctVoxSet, 0, nullptr);
-    vkCmdDispatch(commandBuffer, (pointCount + 63) / 64, 1, 1);
-
-    vctEndVolume();
-}
-
-///@brief Radiance volume from the brick buffers (see brick_gpu.inl)
-void vctBuildVolumeBricks(const Vec3& aabbMin, const Vec3& aabbMax, const Vec3& lightDir, bool enabled) {
-    if (!vctBrickVoxPipe || !vctBrickVoxSet || brickCount == 0) enabled = false;
-    if (!vctBeginVolume(aabbMin, aabbMax, lightDir, enabled)) return;
-
-    {
-        const VkBuffer buffers[5] = {
-            brickHeaders.buffer, brickMats.buffer, brickOccs.buffer, brickPalette.buffer, materialBuffer,
-        };
-        VkDescriptorBufferInfo infos[6]{};
-        VkWriteDescriptorSet w[6]{};
-        for (uint32_t i = 0; i < 5; ++i) {
-            infos[i] = {buffers[i], 0, VK_WHOLE_SIZE};
-            w[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-            w[i].dstSet = vctBrickVoxSet;
-            w[i].dstBinding = i;
-            w[i].descriptorCount = 1;
-            w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            w[i].pBufferInfo = &infos[i];
-        }
-        infos[5] = {brickParamBuffer, 0, VK_WHOLE_SIZE};
-        w[5] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        w[5].dstSet = vctBrickVoxSet;
-        w[5].dstBinding = 7;
-        w[5].descriptorCount = 1;
-        w[5].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        w[5].pBufferInfo = &infos[5];
-        vkUpdateDescriptorSets(device, 6, w, 0, nullptr);
-    }
-
-    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vctBrickVoxPipe);
-    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                            vctBrickVoxPipeLayout, 0, 1, &vctBrickVoxSet, 0, nullptr);
-    const uint32_t threads = brickCount * BRICK_VOXELS;
-    vkCmdDispatch(commandBuffer, (threads + 63) / 64, 1, 1);
-
-    vctEndVolume();
+    vctHasContents = true;
 }

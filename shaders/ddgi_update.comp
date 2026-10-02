@@ -31,7 +31,7 @@ vec3 probeRayDir(int i, int count, mat3 rot) {
 
 
 void main() {
-    int probe = int(gl_WorkGroupID.x);
+    int probe = int(gl_WorkGroupID.x) + pc.parity;   // parity carries the first probe of this window
     int lane = int(gl_LocalInvocationID.x);
     int probeCount = cam.ddgiProbesX * cam.ddgiProbesY * cam.ddgiProbesZ;
     if (probe >= probeCount) return;
@@ -55,11 +55,11 @@ void main() {
         vec3 radiance = vec3(0.0);
         float dist = cam.maxDist;
 
-        if (hitResult != 1 || hitIndex < 0 || hitIndex >= points.length()) {
+        if (hitResult != 1 || hitIndex < 0) {
             radiance = sampleSkybox(dir);
         } else {
             dist = t;
-            GPURenderData hp = points[hitIndex];
+            GPURenderData hp = brickPoint(hitIndex);
             vec4 albedo = unpackRGBA8(hp.color);
             GPUMaterial hm = materials[hp.materialIdx];
 

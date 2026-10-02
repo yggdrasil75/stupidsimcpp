@@ -3595,9 +3595,17 @@ private:
     std::vector<uint32_t> brickLightIndices_;
     bool bricksDirty_ = true;
     bool bricksUploaded_ = false;
+    ///@brief What the last ensureBricksUploaded changed, for the radiance volume update
+    bool brickUploadWasFull_ = false;
+    std::vector<uint32_t> brickUploadTouched_;
 
     ///@brief Full rebuild or partial upload as needed; returns the bounds of all bricks
     void ensureBricksUploaded(Vec3& boundsMin, Vec3& boundsMax);
+    ///@brief Scene setup shared by the wavefront paths: bricks, materials, light proxies on
+    ///       every GPU. Returns whether the geometry changed since the previous frame.
+    bool prepareWavefrontScene(Vec3& boundsMin, Vec3& boundsMax, int& emissiveCount);
+    ///@brief Queue the radiance volume update matching the last ensureBricksUploaded
+    void updateBrickRadianceVolume(const Camera& cam, const Vec3& boundsMin, const Vec3& boundsMax);
     ///@brief ensureBricksUploaded + materials, brick light proxies and the radiance volume.
     ///       Used by the fast and gamestyle frames, which have no other light list.
     void prepareBrickFrame(const Camera& cam, int& emissiveCount);

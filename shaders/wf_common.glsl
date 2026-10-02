@@ -582,6 +582,21 @@ float lightFaceArea(GPURenderData lp, vec3 refPoint, out vec3 nrm) {
     return max(ext[(axis + 1) % 3] * ext[(axis + 2) % 3], 1e-12);
 }
 
+///@brief The light proxy whose slab contains `p`. A BSDF ray hits one lattice cell of a
+///       light; NEE samples the merged proxy, so MIS must weigh both with the proxy's area.
+///       Falls back to `cell` when no proxy contains the point.
+GPURenderData lightProxyAt(vec3 p, GPURenderData cell) {
+    const float eps = cell.size * 0.01;
+    for (int i = 0; i < cam.emissiveCount; ++i) {
+        GPURenderData lp = points[emissiveIndices[i]];
+        if (lp.objectId != cell.objectId) continue;
+        vec3 bMin = ptBoundsMin(lp) - vec3(eps);
+        vec3 bMax = ptBoundsMax(lp) + vec3(eps);
+        if (all(greaterThanEqual(p, bMin)) && all(lessThanEqual(p, bMax))) return lp;
+    }
+    return cell;
+}
+
 float lightPdfW(float area, float distSq, float cosAtLight, int lightCount) {
     if (cosAtLight <= 1e-6 || area <= 0.0 || lightCount <= 0) return 0.0;
     return distSq / (cosAtLight * area * float(lightCount));
@@ -617,6 +632,9 @@ layout(std430, binding = 20) buffer ReservoirBuffer { Reservoir reservoirs[]; };
 
 const int GBUF_STRIDE = 8;
 layout(std430, binding = 21) buffer GBufferBuffer { float gbuf[]; };
+
+#define BRICK_BINDING_BASE 22
+#include "brick_common.glsl"
 
 const float RESTIR_M_CAP = 32.0;
 const int RESTIR_CANDIDATES = 8;
@@ -866,30 +884,10 @@ bool rayCubeIntersect(vec3 ro, vec3 rd, vec3 invD, GPURenderData pt,
 
 int voxelTraverse(vec3 ro, vec3 rd, vec3 invD, float maxDist,
                   out int hitIndex, out float outT) {
-    rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, tlas, gl_RayFlagsNoneEXT, 0xFF, ro, 0.0, rd, maxDist);
-    float tBest = maxDist;
-    while (rayQueryProceedEXT(rq)) {
-        if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionAABBEXT) {
-            int ptIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
-            GPURenderData cand = points[ptIdx];
-            vec3 t0 = (ptBoundsMin(cand) - ro) * invD;
-            vec3 t1 = (ptBoundsMax(cand) - ro) * invD;
-            vec3 tmin3 = min(t0, t1);
-            vec3 tmax3 = max(t0, t1);
-            float tMin = max(max(tmin3.x, tmin3.y), tmin3.z);
-            float tMax = min(min(tmax3.x, tmax3.y), tmax3.z);
-            if (tMax < max(0.0f, tMin)) continue;
-            float t = (tMin < 0.0f) ? tMax : tMin;
-            if (t >= 0.0f && t < tBest) {
-                rayQueryGenerateIntersectionEXT(rq, t);
-                tBest = t;
-            }
-        }
-    }
-    if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionGeneratedEXT) {
-        hitIndex = rayQueryGetIntersectionPrimitiveIndexEXT(rq, true);
-        outT = rayQueryGetIntersectionTEXT(rq, true);
+    BrickHit h;
+    if (brickTrace(ro, rd, invD, maxDist, -1, h)) {
+        hitIndex = brickVoxelId(h.brick, h.cell);
+        outT = h.t;
         return 1;
     }
     hitIndex = -1;
@@ -898,68 +896,63 @@ int voxelTraverse(vec3 ro, vec3 rd, vec3 invD, float maxDist,
 
 int getMediumVoxelAt(vec3 hitPoint, vec3 normal, int targetObjectId, int ignoreIdx) {
     if (targetObjectId == -1) return -1;
-    rayQueryEXT rq;
     vec3 ro = hitPoint - normal * DIST_EPSILON;
+    vec3 invD = safe_invDir(normal);
+    rayQueryEXT rq;
     rayQueryInitializeEXT(rq, tlas, gl_RayFlagsNoneEXT, 0xFF, ro, 0.0, normal, GAP_EPSILON);
-    int foundIdx = -1;
-    float minDist = 1e30;
     while (rayQueryProceedEXT(rq)) {
-        if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionAABBEXT) {
-            int ptIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
-            
-            if (ptIdx != ignoreIdx && points[ptIdx].objectId == targetObjectId) {
-                foundIdx = ptIdx;
+        if (rayQueryGetIntersectionTypeEXT(rq, false) != gl_RayQueryCandidateIntersectionAABBEXT) continue;
+        uint b = uint(rayQueryGetIntersectionPrimitiveIndexEXT(rq, false));
+        if (int(bricks[b].objectId) != targetObjectId) continue;
+        float tIn, tOut;
+        if (!brickBounds(b, ro, invD, tIn, tOut)) continue;
+        BrickDDA dda;
+        brickDDAStart(b, ro, normal, invD, max(tIn, 0.0), dda);
+        BrickHit h;
+        while (brickDDANext(b, dda, min(tOut, GAP_EPSILON), h)) {
+            int id = brickVoxelId(h.brick, h.cell);
+            if (id != ignoreIdx) return id;
+        }
+    }
+    return -1;
+}
+
+vec3 shadowTransmit(vec3 ro, vec3 rd, vec3 invD, float maxDist, int lightPtIdx) {
+    vec3 transmittance = vec3(1.0);
+    if (cam.invFogRange > 0.0) transmittance *= exp(-vec3(cam.invFogRange) * maxDist);
+    int lightObjId = (lightPtIdx >= 0 && lightPtIdx < points.length()) ? points[lightPtIdx].objectId : -1;
+
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, tlas, gl_RayFlagsNoneEXT, 0xFF, ro, 0.0f, rd, maxDist);
+    float tBest = maxDist;
+    while (rayQueryProceedEXT(rq)) {
+        if (rayQueryGetIntersectionTypeEXT(rq, false) != gl_RayQueryCandidateIntersectionAABBEXT) continue;
+        uint b = uint(rayQueryGetIntersectionPrimitiveIndexEXT(rq, false));
+        if (int(bricks[b].objectId) == lightObjId) continue;
+        float tIn, tOut;
+        if (!brickBounds(b, ro, invD, tIn, tOut)) continue;
+        if (tIn >= tBest) continue;
+        BrickDDA dda;
+        brickDDAStart(b, ro, rd, invD, max(tIn, 0.0), dda);
+        BrickHit h;
+        while (brickDDANext(b, dda, min(tOut, tBest), h)) {
+            GPUMaterial tMat = materials[palette[h.pal].renderMatIdx];
+            if (tMat.chromaticity != 0u) continue;
+            float ptTransmission = 1.0 - brickPaletteColor(h.pal).a;
+            if (ptTransmission > 0.01) {
+                vec3 absColor = unpackRGB9E5(tMat.absorption);
+                float thickness = max(0.0, min(maxDist, h.tExit) - max(0.0, h.t));
+                transmittance *= exp(-absColor * thickness);
+            } else if (h.t < tBest) {
+                rayQueryGenerateIntersectionEXT(rq, h.t);
+                tBest = h.t;
                 break;
             }
         }
     }
-    return foundIdx;
-}
-
-vec3 shadowTransmit(vec3 ro, vec3 rd, vec3 invD, float maxDist, int lightPtIdx) {
-    rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, tlas, gl_RayFlagsNoneEXT, 0xFF, ro, 0.0f, rd, maxDist);
-    float tBest = maxDist;
-    vec3 transmittance = vec3(1.0);
-    if (cam.invFogRange > 0.0) transmittance *= exp(-vec3(cam.invFogRange) * maxDist);
-
-    while (rayQueryProceedEXT(rq)) {
-        if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionAABBEXT) {
-            int ptIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
-            if (ptIdx == lightPtIdx) continue;
-            GPURenderData pt = points[ptIdx];
-            vec3 t0 = (ptBoundsMin(pt) - ro) * invD;
-            vec3 t1 = (ptBoundsMax(pt) - ro) * invD;
-            vec3 tmin3 = min(t0, t1);
-            vec3 tmax3 = max(t0, t1);
-            float tEntry = max(max(tmin3.x, tmin3.y), tmin3.z);
-            float tExit  = min(min(tmax3.x, tmax3.y), tmax3.z);
-            if (tExit >= max(0.0f, tEntry) && tEntry <= maxDist) {
-                GPUMaterial tMat = materials[pt.materialIdx];
-                float r, m;
-                uint sellRow;
-                unpackMaterial(tMat.materialProps, r, m, sellRow);
-                vec4 albColor = unpackRGBA8(pt.color);
-                float ptOpacity = albColor.a;
-                float ptTransmission = 1.0 - ptOpacity;
-                if (ptTransmission > 0.01) {
-                    vec3 absColor = unpackRGB9E5(tMat.absorption);
-                    float actualTEntry = max(0.0, tEntry);
-                    float actualTExit  = min(maxDist, tExit);
-                    float thickness = max(0.0, actualTExit - actualTEntry);
-                    transmittance *= exp(-absColor * thickness);
-                } else {
-                    float tHit = tEntry < 0.0 ? tExit : tEntry;
-                    if (tHit >= 0.0 && tHit < tBest) {
-                        rayQueryGenerateIntersectionEXT(rq, tHit);
-                        tBest = tHit;
-                    }
-                }
-            }
-        }
-    }
-    if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionGeneratedEXT)
+    if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionGeneratedEXT) {
         return vec3(0.0);
+    }
     return transmittance;
 }
 
